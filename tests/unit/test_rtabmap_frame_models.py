@@ -16,6 +16,7 @@ ros_stubs.install()
 from pepin_bringup import rtabmap_frame  # noqa: E402
 from std_msgs.msg import String  # noqa: E402
 
+from pepin.flags import load_knobs, with_knobs  # noqa: E402
 from pepin.global_descriptor import (  # noqa: E402
     NULL_TAG,
     PLACE_TOPIC,
@@ -204,7 +205,7 @@ def test_a_database_that_could_abort_rtabmap_keeps_the_words(
 
 
 def test_the_new_flags_are_declared_with_their_kinds() -> None:
-    flags = rtabmap_frame.FLAGS
+    flags = with_knobs(rtabmap_frame.FLAGS, load_knobs("rtabmap_frame"))
     assert flags.flag("registration_backend").choices == ("service", "local", "auto")
     assert flags.flag("registration_backend").env == "PEPIN_REGISTRATION_BACKEND"
     assert flags["registration_timeout_s"] == 1.0 and flags["xfeat_top_k"] == 2048

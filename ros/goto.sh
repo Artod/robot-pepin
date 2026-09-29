@@ -8,24 +8,17 @@
 #   ros/goto.sh NAME             drive to a remembered place: the graph's book (/places, latched)
 #                                first, the map file's coordinates second and with a warning
 #   ros/goto.sh places           list both books, each entry saying which one it came from
-#   ros/goto.sh seed X Y [YAW]   after placing the robot by hand: tell AMCL where it is
+#   ros/goto.sh seed X Y [YAW]   after placing the robot by hand: tell RTAB-Map where it is
 #   ros/goto.sh cancel           cancel every goal on the board's navigators; it prints what came
 #                                of it within 30 s (ros/stop.sh is the hard stop that also brakes)
-#   ros/goto.sh where            pose, scan-to-map fit and the pose's own sigma right now
-#   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
+#   ros/goto.sh where            the pose right now (map -> base_link, from the goal server)
 # Before a goal is sent, goto prints its preflight, one line per check, and any REFUSED stops the
 # drive with the reading behind it:
-#   preflight sources    ok       lidar fresh 9.9 Hz, camera fresh 4.8 Hz, graph fresh 1.0 Hz
-#   preflight certainty  ok       judged by sigma: the pose is known to 0.06 m / 1.2 deg
-#   preflight agreement  ok       the lidar is holding the pose (fresh 9.9 Hz): matched here
-# The certainty is the FUSION's uncertainty (/localization/sigma), not the lidar's fit: on a
-# camera-only drive the fit is 0.00 because no lidar scan scores the pose, and the old rule
-# cancelled healthy drives on it. Without a lidar the third check is the pose graph: it must
-# recognise the room and sit within 0.10 m of the tracker.
+#   preflight frame      ok       map -> base_link 42 ms old
+#   preflight placement  ok       ...RTAB-Map's start recognised the loaded map (or was seeded)
 # Every run is taped ONCE, by the board's run recorder: the numbered tape
 # 0249_<utc>Z_<place>.jsonl, opened on the goal's word — scans, odometry, the tracked pose, the
-# commands, the costmap, the EKF and IMU, the ToF, the camera's measurements (meas) and the
-# tracker's account of each update (srcs), with the camera clip beside it; goto names it in its
+# commands, the costmap, the EKF and IMU, the ToF, with the camera clip beside it; goto names it in its
 # log and fetches it here. Until 2026-09-14 this script also started a second recorder in the
 # container (ros/tools/session_logger.py) which re-deserialised the same 10 Hz lidar stream for
 # 15 % of a core; the numbered tape now carries everything it carried.
@@ -69,26 +62,15 @@ fi
 MAP=$(ssh "root@$BOARD" "grep -oE 'PEPIN_MAP=.*' /etc/default/pepin-ros" | cut -d= -f2)
 PLACES="/maps/$(basename "${MAP:-places}" .yaml).places.yaml"  # one book of places per map
 case "${1:-}" in
-  # The tracker's own service, and only where a tracker runs: under PEPIN_LOCALIZER=rtabmap
-  # nothing serves /where_am_i and the pose lives in TF, which the goal server's socket already
-  # composes and answers on — so the question is forwarded there rather than timing out.
-  where)
-    if pepin_localizer_is_tracker; then
-      ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /where_am_i"
-    else
-      echo "no tracker under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: asking the goal server instead (its pose comes from map -> base_link)"
-      "$(dirname "$0")/go.sh" where
-    fi
-    exit ;;
+  # The pose lives in TF (map -> base_link), which the goal server's socket composes and answers on.
+  where) "$(dirname "$0")/go.sh" where; exit ;;
   # The header promised this for weeks while the case fell through to "drive to a place called
   # cancel" (2026-09-14 11:20: the cart went on butting a table for a minute after the "cancel").
   cancel) ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 25 python3 /tools/goto_ros.py cancel"; exit ;;
-  # A whole-map search is the TRACKER's recovery and has no counterpart in the other role: there
-  # RTAB-Map recognises the room by itself and a refusal must say so rather than hang on a service
-  # nobody serves.
+  # A whole-map search was the board tracker's recovery (tag alt/tracker-2026-09-22): RTAB-Map
+  # recognises the room by itself, so the refusal says so rather than hang on a missing service.
   relocalize)
-    pepin_localizer_is_tracker || { echo "no tracker under PEPIN_LOCALIZER=$PEPIN_LOCALIZER: RTAB-Map recognises the room by itself; drive the cart where it can see more of it"; exit 2; }
-    ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh python3 /tools/call.py /relocalize 90"; exit ;;
+    echo "no whole-map search in this stack: RTAB-Map recognises the room by itself; drive the cart where it can see more of it, or seed it (ros/goto.sh seed X Y YAW)"; exit 2 ;;
   # A place lives in RTAB-Map's GRAPH now: the client asks the laptop's places node over the bridge
   # (/places/mark, answered on /places/marked) and the book is written on the LAPTOP, beside the
   # graph database it hangs on (ros/maps/rtabmap.places.json) — a node id means nothing without the

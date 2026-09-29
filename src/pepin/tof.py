@@ -2,9 +2,9 @@
 
 The lidar sees one horizontal slice of the world; the three VL53L1X
 sensors look where it cannot (low, in front). This module is the driver side:
-the stream client and where each sensor sits (:class:`TofMount`). The stop
-rule built on the ranges lives in :mod:`pepin.safety`. Localisation never
-uses them.
+the stream client and where each sensor sits (:class:`TofMount`). Stopping on
+the ranges is Nav2's job (the costmaps' ToF layers, ros/params/nav2_params.yaml).
+Localisation never uses them.
 """
 
 from __future__ import annotations

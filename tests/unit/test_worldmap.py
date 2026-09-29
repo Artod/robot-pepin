@@ -560,9 +560,8 @@ def test_the_occupancy_message_fields_are_what_ros_expects() -> None:
     assert fields.data[col + row * fields.width] == FREE
 
 
-def test_the_slice_is_the_tracker_map_the_relocalizer_builds_from_a_message() -> None:
-    """``grid_from_msg`` in the node turns the three values into log-odds; the slice hands the
-    tracker the same grid without a round trip through ROS."""
+def test_the_slice_converts_to_a_log_odds_grid_on_the_same_lattice() -> None:
+    """The slice hands a scan matcher its log-odds grid without a round trip through ROS."""
     view = room().lidar_slice()
     grid = view.to_log_odds()
     assert grid.spec.resolution_m == 0.05

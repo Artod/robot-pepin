@@ -66,11 +66,25 @@ markers = [
     "serial: asserts on wall-clock time, flaky under parallel load; the pre-push hook runs these alone, after the parallel run",
 ]
 
+# The pre-push floor (.githooks/pre-push, --cov=src/pepin) measures this project's code: the
+# vendored upstream source is excluded here as it is from ruff and mypy.
+[tool.coverage.run]
+omit = ["src/pepin/vendor/*"]
+
 [tool.mypy]
 python_version = "3.12"
 # The ROS nodes are type-checked too: a node that referenced a field deleted in a refactor
 # only failed on the robot (2026-09-08), and mypy sees that without rclpy being installed.
-files = ["src/pepin", "ros/pepin_bringup/pepin_bringup", "ros/tools", "ros/xfeat", "ros/replay", "ros/sim"]
+files = [
+    "src/pepin",
+    "ros/pepin_bringup/pepin_bringup",
+    "ros/tools",
+    "ros/xfeat",
+    "ros/replay",
+    "ros/sim",
+    "scripts/timesync.py",
+    "scripts/extrinsics.py",
+]
 strict = true
 ignore_missing_imports = true
 # a launch file is launch_ros glue, as those of ros/pepin_bringup/launch (not checked either)
@@ -83,14 +97,12 @@ module = [
     "pepin_bringup.*",
     "bag_to_tape",
     "base_bridge",
-    "bench_global_search",
     "call",
     "draw_snapshot",
     "export_world",
     "goto_ros",
     "load_map",
     "npz_to_map",
-    "relocalizer",
     "scan_latency",
     "score",
     "session_logger",

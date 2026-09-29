@@ -4,14 +4,11 @@
 #   ros/mode.sh sensors            lidar, base bridge, Foxglove — nothing that localises
 #   ros/mode.sh slam_toolbox       + slam_toolbox: build a map while driving (ros/teleop.sh),
 #                                  to SAVE and navigate on later — it cannot drive on it
-#   ros/mode.sh nav [MAP.yaml]     + Nav2 with the tracker, which owns map -> odom and adopts the
-#                                  map RTAB-Map's graph publishes (MAP.yaml only names the places
-#                                  book and the pgm a map_server:=true boot would serve)
+#   ros/mode.sh nav [MAP.yaml]     + Nav2 on the map RTAB-Map's graph publishes, whose
+#                                  map -> odom it also owns (MAP.yaml only names the places book
+#                                  and the pgm a map_server:=true boot would serve)
 # Leaving slam_toolbox saves the map being built as /maps/autosave_<time> first: slam_toolbox holds
 # it in memory only, and a restart would throw away the drive that produced it.
-# Every mode here writes PEPIN_SLAM=false, which is the default and the only arrangement that
-# ships: the retired frame owner (slam_frame instead of the tracker) is CLAUDE.md rule 19's way
-# back and is turned on by hand in /etc/default/pepin-ros, never by this script.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -37,16 +34,16 @@ if [ "$MODE" = nav ]; then
     ssh "root@$BOARD" "test -f /root/pepin-ros$MAP" || { echo "no such map on the board: $MAP (save one with ros/savemap.sh first)"; exit 1; }
 fi
 T0=$(date +%s)
-already_nav=$(ssh "root@$BOARD" "grep -c 'PEPIN_NAV=true' /etc/default/pepin-ros 2>/dev/null; grep -c 'PEPIN_SLAM=true' /etc/default/pepin-ros 2>/dev/null; docker ps --format '{{.Names}}' | grep -c '^pepin-ros\$'" | tr '\n' ' ')
-# "1 0 1": Nav2 is up on a saved map and nothing is mapping — the only state a live swap fits.
-if [ "$MODE" = nav ] && [ "$already_nav" = "1 0 1 " ]; then
+already_nav=$(ssh "root@$BOARD" "grep -c 'PEPIN_NAV=true' /etc/default/pepin-ros 2>/dev/null; docker ps --format '{{.Names}}' | grep -c '^pepin-ros\$'" | tr '\n' ' ')
+# "1 1": Nav2 is up on a saved map — the only state a live swap fits.
+if [ "$MODE" = nav ] && [ "$already_nav" = "1 1 " ]; then
     # Nav2 is already up: swap the map under it (about 5 s) instead of restarting the stack (about 60 s).
-    ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG|RECORDER)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=false\\nPEPIN_SLAM_TOOLBOX=%s\\nPEPIN_MAP=%s\\n' $NAV $TOOLBOX '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros"
+    ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|RECORDER)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM_TOOLBOX=%s\\nPEPIN_MAP=%s\\n' $NAV $TOOLBOX '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros"
     ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh timeout 60 python3 /tools/load_map.py '$MAP'" || exit 1
     echo "map swapped in $(( $(date +%s) - T0 )) s, no restart"
     exit 0
 fi
-ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|BRIDGE|BRIDGE_CONFIG|RECORDER)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM=false\\nPEPIN_SLAM_TOOLBOX=%s\\nPEPIN_MAP=%s\\n' $NAV $TOOLBOX '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros; systemctl restart pepin-ros"
+ssh "root@$BOARD" "{ grep -E '^PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|RECORDER)=' /etc/default/pepin-ros 2>/dev/null; printf 'PEPIN_NAV=%s\\nPEPIN_SLAM_TOOLBOX=%s\\nPEPIN_MAP=%s\\n' $NAV $TOOLBOX '$MAP'; } > /etc/default/pepin-ros.new && mv /etc/default/pepin-ros.new /etc/default/pepin-ros; systemctl restart pepin-ros"
 echo -n "mode $MODE requested; restarting the stack..."
 READY=$([ "$MODE" = slam_toolbox ] && echo 'slam_toolbox\\]: Activating' || { [ "$MODE" = nav ] && echo 'lifecycle_manager_navigation.*Managed nodes are active' || echo 'lifecycle_manager_sensors.*Managed nodes are active'; })
 for i in $(seq 1 60); do

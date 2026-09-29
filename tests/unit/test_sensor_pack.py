@@ -35,6 +35,7 @@ from pepin_bringup.sensor_pack import (  # noqa: E402
     xy_cloud,
 )
 
+from pepin.flags import load_knobs  # noqa: E402
 from pepin.global_descriptor import (  # noqa: E402
     NULL_TAG,
     PLACE_TOPIC,
@@ -560,7 +561,7 @@ def test_the_retry_is_a_flag_and_off_it_drops_the_member_at_once(build: Build) -
 def test_the_flags_are_the_eight_the_report_line_prints(build: Build) -> None:
     node = build()
     assert FLAGS.flag("global_descriptor").env == "PEPIN_GLOBAL_DESCRIPTOR"
-    assert FLAGS["pair_periods"] == PAIR_PERIODS
+    assert load_knobs("sensor_pack")["pair_periods"] == PAIR_PERIODS
     node._report()
 
 

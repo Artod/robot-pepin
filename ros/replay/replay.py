@@ -10,7 +10,7 @@ METHOD (inside a throwaway container of the board's image, started by ros/replay
     2. each drive's bag prepared once (ros/replay/prepare.py; cached by bag, stand and version);
     3. costmap_replay (ros/replay/engine) steps the stock nav2_costmap_2d local and global
        costmaps through it at their live update rates in bag time, parameters from
-       ros/params/nav2_params.yaml + nav2_map_from_laptop.yaml, then ``--params`` files, then
+       ros/params/nav2_params.yaml, then ``--params`` files, then
        ``--set`` values, then the stand's own override (update_frequency 0: this program is the
        loop);
     4. ros/replay/score.py turns the snapshots into the drive's row.
@@ -70,7 +70,7 @@ def in_container(arg: str) -> Path:
         ) from None
 
 
-BASE_FILES = ("nav2_params.yaml", "nav2_map_from_laptop.yaml")
+BASE_FILES = ("nav2_params.yaml",)
 TREE = "pepin_nav_to_pose.xml"
 COSTMAPS = {"local": "local_costmap", "global": "global_costmap"}
 ENGINE = CACHE / "install" / "pepin_replay" / "lib" / "pepin_replay" / "costmap_replay"

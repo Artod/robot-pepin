@@ -120,26 +120,24 @@ def goto() -> Any:
 
 
 @pytest.mark.slow
-def test_the_cancel_goes_out_before_the_note_and_the_tape(goto: Any) -> None:
-    """The order IS the safety: whatever else fails, the board is told to stop first."""
-    nav, tape = FakeNavigator(), FakeTape()
+def test_the_cancel_goes_out_before_the_note_and_the_tape(goto: Any, capsys: Any) -> None:
+    """The order IS the safety: whatever else fails, the board is told to stop first, and the
+    note creates nothing on a context SIGINT may already have torn down."""
+    nav, tape = DeadNavigator(), FakeTape()
     goto.interrupted(nav, tape)
     assert nav.calls[0] == "cancel", nav.calls
     assert tape.closed == 1
-    assert any("/pepin/note" in c for c in nav.calls), "the operator still gets the words"
-    assert nav.calls.index("cancel") < min(
-        i for i, c in enumerate(nav.calls) if "create_publisher" in c
-    ), "the note must never run before the cancel again"
+    assert "create_publisher" not in nav.calls, "the note prints; it publishes nothing"
+    assert "interrupted by the operator" in capsys.readouterr().out, "the operator gets the words"
 
 
-def test_a_note_that_cannot_publish_does_not_swallow_the_cancel(goto: Any) -> None:
-    """2026-09-17 exactly: the note's publisher raises. The cancel still went out first, and the
-    tape's stop word is still sent."""
-    nav, tape = DeadNavigator(), FakeTape(raises=True)
+def test_a_tape_that_cannot_close_does_not_swallow_the_words(goto: Any, capsys: Any) -> None:
+    """2026-09-17's lesson in its present shape: a step that raises costs itself and nothing
+    else."""
+    nav, tape = FakeNavigator(), FakeTape(raises=True)
     goto.interrupted(nav, tape)
-    assert nav.calls[0] == "cancel"
-    assert tape.closed == 1, "a failed note must not cost the recorder its stop word"
-    assert "create_publisher" in nav.calls
+    assert nav.calls[0] == "cancel" and tape.closed == 1
+    assert "interrupted by the operator" in capsys.readouterr().out
 
 
 def test_a_cancel_that_fails_says_so_loudly(goto: Any, capsys: Any) -> None:
@@ -150,17 +148,6 @@ def test_a_cancel_that_fails_says_so_loudly(goto: Any, capsys: Any) -> None:
     out = capsys.readouterr().out
     assert "cancel NOT sent" in out and "ros/stop.sh" in out
     assert tape.closed == 1
-
-
-@pytest.mark.slow
-def test_the_note_publisher_is_made_once_and_kept_on_the_node(goto: Any) -> None:
-    """The interrupt path creates nothing it can avoid creating: the publisher is made on the first
-    note of the drive and reused after that."""
-    nav = FakeNavigator()
-    goto.note(nav, "first")
-    goto.note(nav, "second")
-    assert [c for c in nav.calls if "create_publisher" in c] == ["create_publisher /pepin/note"]
-    assert nav.published == ["first", "second"]
 
 
 def test_guarded_runs_the_next_step_after_a_failure(goto: Any) -> None:

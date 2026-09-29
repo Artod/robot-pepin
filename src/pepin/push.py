@@ -51,7 +51,6 @@ LAUNCH_HALVES: dict[str, tuple[str, ...]] = {
 # Each params file and the halves whose processes read it at start.
 PARAMS_HALVES: dict[str, tuple[str, ...]] = {
     "nav2_params.yaml": ("board", "laptop"),
-    "nav2_map_from_laptop.yaml": ("board", "laptop"),
     "ekf.yaml": ("board",),
     "rosbag_qos.yaml": ("board",),
     "pepin_nav_to_pose.xml": ("board",),

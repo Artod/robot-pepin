@@ -30,7 +30,7 @@ from pepin_bringup.run_recorder import (  # noqa: E402
     RunRecorder,
     feasibility_classes,
 )
-from std_msgs.msg import Header, String  # noqa: E402
+from std_msgs.msg import Header  # noqa: E402
 
 from pepin.mapcache import run_length_decode, run_length_encode  # noqa: E402
 
@@ -127,19 +127,6 @@ def test_nav2_s_own_outcome_is_on_the_tape_per_action(recorder: tuple[RunRecorde
         ("compute_path_to_pose", [6]),
         ("follow_path", [2, 4]),
     ]
-
-
-def test_the_graph_s_own_words_are_taped_like_the_camera_s(
-    recorder: tuple[RunRecorder, Path],
-) -> None:
-    """Until 2026-09-18 only /localization/measurement was taped, so the age the board's gate
-    charged the GRAPH — the one source a camera-only drive runs on — could not be read off a
-    tape at all (scratch/word_age.py)."""
-    rec, tape = recorder
-    rec._on_measurement(String(data='{"source": "graph", "stamp": 100.0}'))
-    taped = records(tape, "meas")
-    assert len(taped) == 1 and json.loads(taped[0]["json"])["source"] == "graph"
-    assert taped[0]["t"] > 0.0, "the arrival time, against which the stamp inside is the age"
 
 
 def test_the_records_stop_with_the_flag(tmp_path: Path) -> None:

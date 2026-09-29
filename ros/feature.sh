@@ -6,8 +6,8 @@
 #                                (needs cpp on; on by default). The IMU is a source of this
 #                                filter, never its switch: `imu off` leaves the EKF running on
 #                                the wheels. Off, the bridge publishes odom -> base_link itself
-#                                and nothing publishes /odometry/filtered, which the relocalizer
-#                                and every recorded drive read
+#                                and nothing publishes /odometry/filtered, which every
+#                                recorded drive reads
 #   ros/feature.sh laser_odom on|off
 #                                the lidar's own scan-to-scan odometry (rf2o, ~100 MB) as a twist
 #                                for the EKF (odom3). On by default. A source of the filter, never

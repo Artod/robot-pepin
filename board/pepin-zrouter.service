@@ -1,5 +1,5 @@
 [Unit]
-Description=Pepin zenoh router: the board's half of the rmw_zenoh transport (PEPIN_RMW=zenoh only)
+Description=Pepin zenoh router: the board's half of the rmw_zenoh transport
 # Deliberately NOT PartOf/BindsTo pepin-ros.service. Every node of the stack is a zenoh PEER
 # that keeps an infinite connect retry to this router, and the router is what carries the link
 # to the laptop; a router that went down and up with every stack restart would take the laptop's
@@ -12,10 +12,7 @@ Before=pepin-ros.service
 StartLimitIntervalSec=0
 
 [Service]
-# PEPIN_RMW=zenoh in /etc/default/pepin-ros is the whole switch; unset (or cyclone) and this
-# unit does nothing at all, so it is safe to leave enabled while the robot runs on CycloneDDS.
 EnvironmentFile=-/etc/default/pepin-ros
-Environment=PEPIN_RMW=zenoh
 Environment=PEPIN_ZIMAGE=pepin-ros:zenoh
 # The router's RUST_LOG: the transport lifecycle and the connector at debug, the rest at info —
 # the 2026-09-23 wake left the link dead for 28 minutes with not one line from either router,
@@ -57,7 +54,7 @@ ExecStartPre=-/usr/bin/docker rm -f pepin-zrouter
 # DIRECTORY at it and the router would refuse to start on a board that has not been synced yet.
 # Delete the mount, or the file, and rmw_zenohd reads its shipped default again — that is the way
 # back (CLAUDE.md rule 19), and it needs no rebuild.
-ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; if [ -f /root/pepin-ros/zenoh/router.json5 ]; then exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" -v /root/pepin-ros/zenoh/router.json5:/zenoh/router.json5:ro -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5 $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd; fi; echo "pepin-zrouter: no /root/pepin-ros/zenoh/router.json5 (ros/sync.sh), starting on the shipped rmw_zenoh default" >&2; exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
+ExecStart=/bin/sh -c 'if [ -f /root/pepin-ros/zenoh/router.json5 ]; then exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" -v /root/pepin-ros/zenoh/router.json5:/zenoh/router.json5:ro -e ZENOH_ROUTER_CONFIG_URI=/zenoh/router.json5 $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd; fi; echo "pepin-zrouter: no /root/pepin-ros/zenoh/router.json5 (ros/sync.sh), starting on the shipped rmw_zenoh default" >&2; exec /usr/bin/docker run --name pepin-zrouter --network host -e RUST_LOG=$PEPIN_ZROUTER_LOG -e "ZENOH_RUNTIME=(rx: (worker_threads: $PEPIN_ZROUTER_RX_WORKERS))" $PEPIN_ZIMAGE /opt/ros/jazzy/lib/rmw_zenoh_cpp/rmw_zenohd'
 # `docker run` returns as soon as the container exists, not when rmw_zenohd is ACCEPTING on
 # 7447 — so Before=pepin-ros.service orders the two starts and nothing more, and the stack's
 # nodes come up against a router that is still binding. Zenoh sessions then form raggedly, and
@@ -68,7 +65,7 @@ ExecStart=/bin/sh -c '[ "$PEPIN_RMW" = zenoh ] || exec sleep infinity; if [ -f /
 # the port answers: 30 s in 0.5 s steps, and a router that never listens fails the unit loudly
 # instead of letting the whole stack start behind it. bash for /dev/tcp — nothing else here
 # opens a socket, and the board already runs bash units (board/reap_ros2_cli.sh).
-ExecStartPost=/bin/bash -c '[ "$PEPIN_RMW" = zenoh ] || exit 0; timeout 30 bash -c "until (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; do sleep 0.5; done" || { echo "pepin-zrouter: nothing is accepting on tcp/127.0.0.1:7447 after 30 s; the stack must not start behind a router that is not listening" >&2; exit 1; }'
+ExecStartPost=/bin/bash -c 'timeout 30 bash -c "until (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; do sleep 0.5; done" || { echo "pepin-zrouter: nothing is accepting on tcp/127.0.0.1:7447 after 30 s; the stack must not start behind a router that is not listening" >&2; exit 1; }'
 ExecStop=-/usr/bin/docker stop -t 5 pepin-zrouter
 Restart=always
 RestartSec=5

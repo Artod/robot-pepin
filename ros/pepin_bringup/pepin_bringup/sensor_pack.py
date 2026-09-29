@@ -134,13 +134,13 @@ node's data: the unpatched core would drop one and abort at the next comparison,
 words (mapping's rehearsal compares nodes too).
 
 THE REPORT LINE says what went into the last snapshot, every source's measured cadence and the
-counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null
-and why); the flags (:data:`FLAGS`, ``ros/flags.sh set sensor_pack <flag> <value>``) are
-``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``, ``tf_retry``, ``global_descriptor``,
-``place_descriptor`` and ``place_timeout_s``. The arrangement of before this node — RTAB-Map on
-its own synchronised triple — is one launch argument away: ``ros/laptop.sh vslam`` passing
-``sensor_pack:=false`` does not start this node and puts ``subscribe_depth`` and ``subscribe_scan``
-back on RTAB-Map.
+counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null and
+why); the flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set sensor_pack
+<flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``, ``tf_retry``,
+``global_descriptor``, ``place_descriptor`` and ``place_timeout_s``. The arrangement of before this
+node — RTAB-Map on its own synchronised triple — is one launch argument away: ``ros/laptop.sh
+vslam`` passing ``sensor_pack:=false`` does not start this node and puts ``subscribe_depth`` and
+``subscribe_scan`` back on RTAB-Map.
 """
 
 from __future__ import annotations
@@ -155,7 +155,7 @@ from rtabmap_msgs.msg import GlobalDescriptor, SensorData
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.global_descriptor import (
     ATTACH_AUTO,
     ATTACH_CHOICES,
@@ -171,8 +171,6 @@ from pepin.localization_service import LocalizationClient, place_dim
 from pepin.place_models import DEFAULT_PLACE_MODEL, place_spec
 from pepin.place_stamp import PlaceStamper, rgb_of
 from pepin.snapshot import (
-    LIVE_PERIODS,
-    PAIR_PERIODS,
     Snapshot,
     SnapshotPacker,
     SnapshotState,
@@ -250,40 +248,6 @@ FLAGS = FlagSet(
         choices=(CAMERA, LIDAR),
     ),
     Flag(
-        "pack_hz",
-        DETECTION_RATE_HZ,
-        description="at most this many snapshots a second of SENSOR time (the stamps' own clock,"
-        " not this laptop's)",
-        why=f"{DETECTION_RATE_HZ} is Rtabmap/DetectionRate in vslam.launch.py's table: RTAB-Map"
-        " creates at most one node a second and throws the rest away after paying for the"
-        " conversion, and one snapshot is 6.5 MB at 1280x720 (2.8 MB of bgr8 plus 3.7 MB of"
-        " 32FC1). Packing at the camera's 8.5 Hz would put 55 MB/s on DDS for seven messages in"
-        " eight that RTAB-Map drops. It is not a node-rate choice: the node rate was already this"
-        " number before the snapshots existed",
-        on_when="raise it only together with Rtabmap/DetectionRate, and watch the laptop's CPU"
-        " and RTAB-Map's own ms per node in its report",
-        off_when="lower it on a laptop that cannot keep up; the cost is a sparser graph",
-        range=(0.1, 15.0),
-    ),
-    Flag(
-        "pair_periods",
-        PAIR_PERIODS,
-        description="how many of its OWN measured periods a source's message may be from the"
-        " snapshot's stamp and still be paired with it (pepin.snapshot)",
-        why=f"{PAIR_PERIODS} is derived, not chosen: the nearest message of a source running at"
-        " period T is at most T/2 from any instant, and one lost message doubles the far side, so"
-        " 1.5 T is the worst case of a source that is live and has missed one. Past it two"
-        " messages in a row are missing. At the measured 9.9 Hz that is 152 ms of patience against"
-        " a healthy 51 ms of offset, which at 0.2 m/s and 17 deg/s is 1.0 cm and 0.86 deg of"
-        " placement inside one node (scratch/pairing_bound.py). Liveness is a different and much"
-        f" looser question, {LIVE_PERIODS} periods, and is not a flag",
-        on_when="raise it where a source is known to stutter and a stale member is better than a"
-        " node without it — a scan 0.3 s off still fixes a wall to 6 cm at walking pace",
-        off_when="lower it to 0.5 to admit only the genuinely nearest message, which is the right"
-        " test while a placement error inside a node is being hunted",
-        range=(0.5, 10.0),
-    ),
-    Flag(
         "tf_retry",
         True,
         description="a member whose transform TF cannot answer for yet does not cost the snapshot:"
@@ -356,24 +320,6 @@ FLAGS = FlagSet(
         off_when="to take the service out of the loop without breaking the one-descriptor"
         " invariant (a sick service, a measurement of the words alone); RTAB-Map then sees"
         " every place as equally likely by descriptor, so the words should be in force",
-    ),
-    Flag(
-        "place_timeout_s",
-        PLACE_TIMEOUT_S,
-        range=(0.05, 0.95),
-        description="the most a snapshot waits for its place vector, from the moment it is packed"
-        " — its wait in the worker's queue included — before it goes out with the null"
-        " descriptor",
-        why=f"{PLACE_TIMEOUT_S}, measured 2026-09-24 from inside a container: /place answers an"
-        " 800x600 picture in 55 ms median, 79 ms p90 while asked once a second"
-        " (scratch/models/endpoint_bench.py, BoQ-DINOv2 on MPS beside RAFT-Stereo), but its first"
-        " answer after two seconds idle takes 200-460 ms and after minutes 1.5 s"
-        " (scratch/models/gpu_idle_probe.py: the laptop swaps, and an idle model's pages go"
-        " first). Half the one-second snapshot period covers the warm answers and most cold ones,"
-        " and a slow answer never holds up the next snapshot",
-        on_when="raise it if the report line counts 'late' or 'no answer' nulls while the service"
-        " is healthy",
-        off_when="lower it when RTAB-Map's own timing shows the snapshots arriving late",
     ),
 )
 
@@ -479,7 +425,9 @@ class SensorPack(Node):
 
     def __init__(self) -> None:
         super().__init__("sensor_pack")
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("sensor_pack")), on_change=self._on_switch
+        )
         self._packer = SnapshotPacker[Any](
             (CAMERA, LIDAR), pair_periods=float(self._switches["pair_periods"])
         )

@@ -19,28 +19,17 @@ import ros_stubs
 ros_stubs.install()
 
 
-@pytest.fixture(autouse=True)
-def _the_tracker_stack() -> Iterator[None]:
-    """Every test in this file describes the arrangement where the BOARD'S TRACKER owns
-    ``map -> odom`` (``PEPIN_LOCALIZER=tracker``), which is what these nodes were written for and
-    what stays reachable. The other role — RTAB-Map on the laptop owning the frame, no tracker
-    anywhere — has its own file, tests/unit/test_one_localiser.py."""
-    with ros_stubs.parameters(localizer="tracker"):
-        yield
-
-
 from pepin_bringup.places import (  # noqa: E402
-    FLAGS,
     GRAPH_TOPIC,
     HERE,
     LIST_LABELS_SERVICE,
     REMOVE_LABEL_SERVICE,
     SET_LABEL_SERVICE,
-    TRACKER_POSE_TOPIC,
     MarkRequest,
     Places,
 )
 
+from pepin.odometry import Pose2D  # noqa: E402
 from pepin.places import (  # noqa: E402
     MARK_TOPIC,
     MARKED_TOPIC,
@@ -49,7 +38,6 @@ from pepin.places import (  # noqa: E402
     load_graph_places,
     save_graph_places,
 )
-from pepin.watch import DRIVE_SIGMA_M  # noqa: E402
 
 Build = Callable[..., Places]
 
@@ -96,14 +84,10 @@ def graph(node: Places, poses: dict[int, tuple[float, float, float]]) -> None:
     )
 
 
-def cart(node: Places, x: float, y: float, yaw_deg: float = 0.0, sigma_m: float = 0.02) -> None:
-    """The board's tracker saying where the cart is and how sharply."""
-    msg = ros_stubs.PoseWithCovarianceStamped()
-    msg.pose.pose = _pose_msg(x, y, yaw_deg)
-    covariance = list(msg.pose.covariance)
-    covariance[0] = covariance[7] = sigma_m * sigma_m
-    msg.pose.covariance = covariance
-    node.subs[TRACKER_POSE_TOPIC][1](msg)
+def cart(node: Places, x: float, y: float, yaw_deg: float = 0.0) -> None:
+    """map -> base_link read just now: where the cart is."""
+    node._cart = Pose2D(x, y, math.radians(yaw_deg))
+    node._cart_at = node._now()
 
 
 def labelled(node: Places, **labels: int) -> None:
@@ -126,11 +110,11 @@ def published(node: Places) -> dict[str, Any]:
 
 
 # ---- the doors -------------------------------------------------------------------------------
-def test_the_node_reads_three_topics_and_writes_two_at_the_names_both_ends_spell(
+def test_the_node_reads_two_topics_and_writes_two_at_the_names_both_ends_spell(
     build: Build,
 ) -> None:
     node = build()
-    assert set(node.subs) == {"/rtabmap/mapGraph", "/tracker_pose", "/places/mark"}
+    assert set(node.subs) == {"/rtabmap/mapGraph", "/places/mark"}
     assert set(node.pubs) == {"/places", "/places/marked"}
     assert (PLACES_TOPIC, MARK_TOPIC, MARKED_TOPIC) == ("/places", "/places/mark", "/places/marked")
     assert node.pubs[PLACES_TOPIC].qos.rest["durability"] == "transient_local", (
@@ -269,22 +253,7 @@ def test_a_mark_is_refused_where_the_board_is_not_talking(build: Build) -> None:
     node = build()
     graph(node, {7: (0.0, 0.0, 0.0)})
     answer = mark(node, "home")
-    assert answer["ok"] is False and TRACKER_POSE_TOPIC in answer["detail"]
-
-
-def test_a_mark_is_refused_on_the_same_bar_a_drive_starts_on(build: Build) -> None:
-    """A place marked while the cart does not know where it stands is a place nobody can drive to
-    afterwards, so the two thresholds are one number."""
-    node = build()
-    graph(node, {7: (0.0, 0.0, 0.0)})
-    cart(node, 1.0, 0.0, sigma_m=DRIVE_SIGMA_M + 0.05)
-    answer = mark(node, "home")
-    assert answer["ok"] is False and "over the 0.25 m a mark needs" in answer["detail"]
-    assert FLAGS["mark_sigma_m"] == DRIVE_SIGMA_M == 0.25
-
-    cart(node, 1.0, 0.0, sigma_m=DRIVE_SIGMA_M - 0.05)
-    labelled(node, home=7)
-    assert mark(node, "home", request_id="tool-2")["ok"] is True
+    assert answer["ok"] is False and "map -> base_link" in answer["detail"]
 
 
 def test_a_mark_rtabmap_took_no_label_for_is_refused_and_says_so(build: Build) -> None:
@@ -340,7 +309,7 @@ def test_publish_places_off_keeps_the_book_and_publishes_nothing(build: Build) -
     assert set(node._places) == {"home"}
 
 
-def test_the_flags_are_the_three_the_report_line_prints(build: Build) -> None:
+def test_the_flags_are_the_two_the_report_line_prints(build: Build) -> None:
     node = build()
     node._report()
     line = node.logger.texts("info")[-1]

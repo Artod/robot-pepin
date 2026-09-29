@@ -212,11 +212,6 @@ answer() {  # the canned reply of the board or the laptop, by what was asked of 
 }
 ssh() { log "ssh $*"; answer "$*"; }
 docker() { log "docker $*"; answer "$*"; }
-# The localiser switch, as ros/lib.sh holds it. FAKE_LOCALIZER drives it: the scripts under test
-# were written for the stack where the board's tracker owns map -> odom, so the fake defaults to
-# that and the rtabmap role is asked for explicitly.
-PEPIN_LOCALIZER="${FAKE_LOCALIZER:-tracker}"
-pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
 """
 
 FAKE_FLAGS = r"""#!/bin/bash
@@ -287,22 +282,19 @@ def test_sensor_sh_parses() -> None:
     assert "systemctl" not in code and "docker restart" not in code, "nor restarts anything"
 
 
-def test_camera_on_sets_the_tracker_s_sources_and_both_costmaps_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """One command, the two ends of the same switch: the camera joins the tracker's sources —
-    as one name, `camera`, since the laptop matches both its scans and sends the pose they
-    measured (pepin.measurements) — and its two layers come up on the local AND the global
-    costmap. The global costmap lives with the planner, which a split stack (PEPIN_SIDE=board)
-    puts on the laptop."""
+def test_camera_on_sets_both_costmaps_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """One command: the camera's two layers come up on the local AND the global costmap. The
+    global costmap lives with the planner, which a split stack (PEPIN_SIDE=board) puts on the
+    laptop."""
     code, out, sent = _sensor(
         tmp_path, "camera", "on", FAKE_SIDE="board", FAKE_SOURCES="lidar", FAKE_LAYERS="false"
     )
     assert code == 0, out
-    assert "flags set relocalizer sources lidar,camera" in sent
     for layer in ("camera_layer", "contact_layer"):
         assert f"{BOARD} ros2 param set {LOCAL} {layer}.enabled true" in sent
         assert f"{LAPTOP} ros2 param set {GLOBAL} {layer}.enabled true" in sent
     assert not [c for c in sent if "lifecycle" in c], "the camera owns no lifecycle node"
-    assert "relocalizer sources lidar -> lidar,camera" in out
+    assert not [c for c in sent if c.startswith("flags set")], "no tracker sources to move"
 
 
 def test_a_whole_stack_keeps_both_costmaps_on_the_board(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -335,7 +327,6 @@ def test_lidar_off_leaves_the_driver_alone_and_hard_off_deactivates_it(tmp_path)
         tmp_path, "lidar", "off", FAKE_SOURCES="lidar,depth,contact", FAKE_LAYERS="true"
     )
     assert not [c for c in soft if "lifecycle" in c], out
-    assert "flags set relocalizer sources depth,contact" in soft
     assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in soft
 
     _, out, hard = _sensor(
@@ -359,15 +350,14 @@ def test_lidar_off_leaves_the_driver_alone_and_hard_off_deactivates_it(tmp_path)
         FAKE_DRIVER="inactive",
     )
     assert f"{BOARD} ros2 lifecycle set /ldlidar_node activate" in back
-    assert "flags set relocalizer sources lidar,depth,contact" in back
     assert "/ldlidar_node inactive -> active" in out
 
 
 def test_hard_is_refused_on_an_on_instead_of_stopping_the_driver_it_just_switched_on(  # type: ignore[no-untyped-def]
     tmp_path,
 ) -> None:
-    """`lidar on --hard` used to put the lidar back into the tracker's sources and into both
-    costmaps and then deactivate the driver: everything told to use a lidar that no longer
+    """`lidar on --hard` used to put the lidar back into both costmaps and then deactivate the
+    driver: everything told to use a lidar that no longer
     publishes. --hard is the deep half of an off; on an `on` the line is refused, and nothing
     at all is applied."""
     code, out, sent = _sensor(
@@ -447,16 +437,8 @@ def test_a_guard_that_could_not_see_refuses_instead_of_reading_it_as_no_goal(  #
 
 
 def test_a_node_that_does_not_answer_is_reported_not_guessed(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """A read that failed must never become a write: the tracker's source list is read-modify-
-    write, and writing it from an empty read would silently drop the other sensor."""
-    code, out, sent = _sensor(tmp_path, "camera", "on", FAKE_SOURCES="none", FAKE_LAYERS="false")
-    assert code == 1, out
-    assert "relocalizer did not answer about its sources" in out
-    # the same refusal covers a tracker that carries no `sources` flag at all, so it names both
-    assert "no sources flag in this build, or the node is down" in out
-    assert not [c for c in sent if c.startswith("flags set")], sent
-    assert [c for c in sent if "param set" in c], "the costmaps still take their half"
-
+    """A read that failed must never become a write: a costmap that did not answer a dump keeps
+    its layers."""
     code, out, sent = _sensor(tmp_path, "camera", "on", FAKE_LAYERS="none")
     assert code == 1 and "did not answer a parameter dump: its layers are unchanged" in out
     assert not [c for c in sent if "param set" in c], sent
@@ -471,25 +453,6 @@ def test_switching_the_camera_on_says_what_it_did_to_the_last_two_drives(tmp_pat
         tmp_path, "camera", "off", FAKE_SOURCES="lidar,depth,contact", FAKE_LAYERS="true"
     )
     assert "stalled two drives" not in off, "an off is the safe direction: no sermon"
-
-
-def test_a_source_this_script_has_not_heard_of_survives_the_other_sensor_s_switch(  # type: ignore[no-untyped-def]
-    tmp_path,
-) -> None:
-    """The source list is read-modify-write, and the script's SOURCE_ORDER is only an order: a
-    name outside it (a source added to pepin.sources before this list hears of it) is carried
-    through, never quietly deleted by a switch of a different sensor."""
-    code, out, sent = _sensor(
-        tmp_path, "camera", "on", FAKE_SOURCES="lidar,sonar,depth", FAKE_LAYERS="false"
-    )
-    assert code == 0, out
-    assert "flags set relocalizer sources lidar,depth,camera,sonar" in sent, sent
-    assert "relocalizer sources lidar,depth,sonar -> lidar,depth,camera,sonar" in out
-    # and the same on the way out: switching the camera off keeps it too
-    _, out, sent = _sensor(
-        tmp_path, "camera", "off", FAKE_SOURCES="lidar,sonar,depth,camera", FAKE_LAYERS="true"
-    )
-    assert "flags set relocalizer sources lidar,depth,sonar" in sent, sent
 
 
 def test_the_navigation_guard_separates_no_goal_from_could_not_see() -> None:
@@ -519,27 +482,9 @@ def test_the_navigation_guard_separates_no_goal_from_could_not_see() -> None:
     assert tool.verdict(False, False, None, 0.0) == "?", "a blind pass never says no"
 
 
-def test_the_scripts_source_order_is_the_rosters_own() -> None:
-    """ros/sensor.sh cannot ask Python for pepin.sources' roster on every run (it is a shell
-    script that must also run against a bare checkout), so it carries the order as a literal.
-    This is the check that keeps the copy honest — the order it prints is the roster's."""
-    from pepin.sources import DEFAULT_SOURCES
-
-    line = next(
-        line
-        for line in (REPO / "ros/sensor.sh").read_text().splitlines()
-        if line.startswith("SOURCE_ORDER=")
-    )
-    order = line.split('"')[1].split()
-    assert order == [s.name for s in DEFAULT_SOURCES], "src/pepin/sources.py owns this order"
-
-
 def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """One picture, and the cheap half of it is free: the tracker's own sources come out of the
-    report line it already prints every 30 s (pepin.flags renders `sources=...` into it), so
-    status asks ROS for nothing but the two costmap dumps and the driver's lifecycle state."""
-    tracker = "[relocalizer-5] [INFO] [1.0] [relocalizer]: tracker: released 42 of 42 scans; "
-    tracker += "watch fit 0.81; flags: rest_lock=on sources=lidar,contact fusion=on"
+    """One picture: status asks ROS for nothing but the two costmap dumps and the driver's
+    lifecycle state; what each camera node last said comes out of its own report line."""
     camera = "[contact_scan-3] [INFO] [2.0] [contact_scan]: contact: 2.9 scans/s published"
     depth = "[depth_stream-2] [INFO] [2.0] [depth_stream]: depth: 3.1 frames/s published"
     code, out, sent = _sensor(
@@ -547,15 +492,13 @@ def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore
         "status",
         FAKE_SIDE="board",
         FAKE_LAYERS="true",
-        FAKE_TRACKER_LINE=tracker,
         FAKE_CAMERA_LINE=camera,
         FAKE_DEPTH_LINE=depth,
     )
     assert code == 0, out
-    assert "tracker sources: lidar,contact" in out
     assert f"costmap {LOCAL}:  lidar_layer=on  camera_layer=on  contact_layer=on" in out
     assert "lidar driver /ldlidar_node: active" in out
-    for line in (tracker, depth, camera):
+    for line in (depth, camera):
         assert line in out, "each node's own word, printed whole"
     assert not [c for c in sent if "param get" in c or "topic echo" in c], sent
     assert [c for c in sent if "param dump" in c and GLOBAL in c and c.startswith(LAPTOP)]
@@ -563,10 +506,9 @@ def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore
 
 
 def test_status_says_so_when_a_node_printed_no_report(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """A missing report line is reported as missing, never as an empty source list."""
+    """A missing report line is reported as missing, never as an empty one."""
     code, out, _ = _sensor(tmp_path, "status", FAKE_LAYERS="true")
     assert code == 0
-    assert "tracker sources: ? (relocalizer printed no report in 90 s" in out
     assert "(nothing)" in out
 
 
@@ -574,35 +516,25 @@ def test_status_says_so_when_a_node_printed_no_report(tmp_path) -> None:  # type
 # One command brings a half back and then checks, in one place, every failure a restart has hidden
 # from us. The fakes below are the two hosts: a board answering over ssh and a laptop answering
 # `docker`, both scripted by environment variables so one test can break one thing at a time.
-TRACKER_LINE = (
-    "[python3-6] [INFO] [1789428031.2] [relocalizer]: tracker: scans 227, matched 133, "
-    "silenced 4155 returns over 133 scans, fit 0.66/0.47/0.83 at the match; "
-    "sources: anchor lidar; watch fit 0.80, last source 0.2 s ago; "
-    "map /map (id 239x215@-18.53,-4.38, 3 adopted, 12 republications ignored, "
-    "last origin moved 0.00 m, 1832 cells changed); "
-    "flags: rest_lock=on sources=lidar,graph map_refresh_s=2.0"
+RECORDER_LINE = (
+    "[python3-6] [INFO] [1789428031.2] [run_recorder]: run recorder ready: tapes in /maps/rec"
+    " (loc from /pose, the goal server's read of map -> base_link); flags: planner_records=on"
 )
 VSLAM_LOG = "\n".join(
     (
-        "[bridge_watch-9] [INFO] [1.0] [bridge_watch]: bridge watch: 10 topics Hz [scan 9.7]; "
-        "flow_watch=on; dead routes 0; board routes without a reader 0",
         "[depth_stream-3] [INFO] [2.0] [depth_stream]: depth: 9.4 frames/s published (282 through "
         "the net, 0 dropped); lidar_anchor on [a 1.71 b +0.004 on 600 pairs], backend remote",
         "[depth_fusion-5] [INFO] [3.0] [depth_fusion]: fusion: 281 frames (9.3/s, 0 dropped, 0 "
         "unpaired), integrate 7 ms; skipped: low fit 0, at bound 0, self-heals 0",
         "[visual_odometry-7] [INFO] [4.0] [visual_odometry]: vo: 9.1 poses/s from rtabmap, 9.1 "
         "published, 0 dropped",
-        "[laptop_localizer-6] [INFO] [5.0] [laptop_localizer]: laptop localizer: 4 candidates "
-        "from 27 scans; tracker fit 0.66; skipped: off 0",
         "[sensor_pack-4] [INFO] [5.5] [sensor_pack]: sensor pack: 1.00 snapshots/s of 54 scans "
         "and 60 camera frames (kind both 27); carrying nothing said yet",
         # The node's own wording, as a LITERAL (ros/pepin_bringup/pepin_bringup/rtabmap_frame.py):
         # the check used to parse "over N infos", which had been gone for a day, and failed a
         # healthy node on it (2026-09-19).
         "[rtabmap_frame-8] [INFO] [6.0] [rtabmap_frame]: rtabmap frame: 118 updates, 0 recognised "
-        "a node, 118 localisations heard, 0 words (0 sent, 0 refused by the gate, 0 candidates, 0 "
-        "without odometry); last word (-11.32, +0.71, +132 deg); fit 1.00 (agrees); flags: "
-        "graph_trust=on",
+        "a node, 118 localisations heard; hypothesis 0.00; flags: start_needs_placement=on",
         # Check 2.11 is INFORMATIONAL: there is no healthy split, so the line is printed as a WARN
         # and the person decides whether a room with that many camera-only cells has furniture in
         # it (pepin_bringup.marks_audit).
@@ -611,13 +543,13 @@ VSLAM_LOG = "\n".join(
     )
 )
 # What ros/tools/map_odom.py prints in the laptop's container once RTAB-Map has corrected the
-# pose, and what the goal server's socket answers where no tracker runs: the two readings checks
-# 1.13 and 1.3 are made of under PEPIN_LOCALIZER=rtabmap.
+# pose, and what the goal server's socket answers: the two readings checks 1.13 and 1.3 are made
+# of.
 MAP_ODOM_LINE = (
     "map -> odom: (-0.412, +2.771) m, -27.8 deg, |shift| 2.801 m, stamped 0.05 s ago: corrected"
 )
 GO_WHERE_LINE = (
-    '{"event": "where", "planner": "hybrid", "pose": "tf", "localizer": "rtabmap",'
+    '{"event": "where", "planner": "hybrid", "pose": "tf",'
     ' "x": -0.25, "y": 2.77, "yaw_deg": 3.0, "age_s": 0.05}'
 )
 
@@ -628,7 +560,7 @@ ssh() {
     log "ssh $*"
     case "$*" in
         *"PEPIN_MAP"*) printf '%s\n' "PEPIN_MAP=${FAKE_MAP-/maps/flat3.yaml}" ;;
-        *"relocalizer"*) printf '%s\n' "${FAKE_TRACKER-$FAKE_TRACKER_DEFAULT}" ;;
+        *"run recorder ready"*) printf '%s\n' "${FAKE_RECORDER-$FAKE_RECORDER_DEFAULT}" ;;
         *Failed*update*rate*) printf '%s\n' "${FAKE_LATE-0}" ;;
         *Extrapolation*) printf '%s\n' "${FAKE_TF_ERRORS-0}" ;;
         *topic_rate.py*) printf '%s\n' "${FAKE_RATE-${*##*topic_rate.py }: 9.1 Hz over 5 s}" ;;
@@ -668,12 +600,6 @@ python3}" ;;
     esac
     return 0
 }
-# The localiser switch, as ros/lib.sh holds it; restart.sh was written for the tracker stack, so
-# the fake defaults to it and the rtabmap role is asked for by name (FAKE_LOCALIZER=rtabmap).
-PEPIN_LOCALIZER="${FAKE_LOCALIZER:-tracker}"
-pepin_localizer_is_tracker() { [ "$PEPIN_LOCALIZER" = tracker ]; }
-# pepin_rmw_is_zenoh is deliberately NOT faked: the real ros/lib.sh has it, and leaving it
-# undefined here is how these tests exercise the bridge-era branches of the checks.
 PLANNER_OK_LINE="planner: OK — path of 9 poses to 0.50 m ahead (GridBased) in 0.1 s"
 """
 
@@ -690,8 +616,6 @@ printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0")$*" in
     board.shcensus) printf '%s\\n' "${FAKE_CENSUS-VERDICT: green — every process accounted for}"
                     [ -z "${FAKE_CENSUS_RED-}" ] || exit 1 ;;
-    goto.shwhere) printf '%s\\n' "${FAKE_WHERE-at (-11.32, 0.71) facing 132 deg, fit 0.66}"
-                  [ -z "${FAKE_WHERE_DOWN-}" ] || exit 1 ;;
     go.shwhere) printf '%s\\n' "${FAKE_GO_WHERE-$FAKE_GO_WHERE_DEFAULT}" ;;
     flags.shdrift*) printf '%s' "${FAKE_DRIFT-}" ;;
     foxglove.shcheck) printf '%s\n' "${FAKE_FOXGLOVE-foxglove: 17 checks, none failed}"
@@ -729,7 +653,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
             # must not sit here for the 90 s a real board is given.
             "PEPIN_RESTART_WAIT_S": "0",
             "PEPIN_RESTART_POLL_S": "0",
-            "FAKE_TRACKER_DEFAULT": TRACKER_LINE,
+            "FAKE_RECORDER_DEFAULT": RECORDER_LINE,
             "FAKE_VSLAM_DEFAULT": VSLAM_LOG,
             "FAKE_MAP_ODOM_DEFAULT": MAP_ODOM_LINE,
             "FAKE_GO_WHERE_DEFAULT": GO_WHERE_LINE,
@@ -758,40 +682,13 @@ def test_muting_what_is_already_muted_writes_nothing(tmp_path) -> None:  # type:
     assert "already so" in out
 
 
-def test_unmuting_the_camera_restores_the_two_scans_the_table_ships(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """The camera's mute is a list flag, not a bool: empty is silence, and an unmute must put
-    back exactly what laptop_localizer's FLAGS table defaults to — the test below holds the two
-    in step."""
-    code, out, sent = _sensor(tmp_path, "unmute", "camera", FAKE_CAMERA_SOURCES="")
-    assert code == 0, out
-    assert "flags set laptop_localizer camera_sources depth,contact" in sent
-    assert "/localization/measurement" in out
-
-
-def test_the_scripts_camera_scans_are_the_localizer_s_own_default() -> None:
-    """ros/sensor.sh cannot ask Python what an unmuted camera is (it is a shell script on the
-    laptop), so the value is written down — and this test fails the day the table moves."""
-    from pepin.flags import load_table
-
-    flags = load_table(REPO / "ros/pepin_bringup/pepin_bringup/laptop_localizer.py")
-    default = ",".join(flags["camera_sources"])
-    assert [
-        line
-        for line in (REPO / "ros/sensor.sh").read_text().splitlines()
-        if line.startswith(f'CAMERA_SCANS="{default}"')
-    ], f"ros/sensor.sh must restore {default}"
-
-
 def test_muting_the_lidar_is_the_consumer_set_no_node_of_ours_publishes_it(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Our own node in the lidar's chain is laser_filters' scan_filter and it has no flag of
     ours; a relay on the board that could drop /scan is refused by CLAUDE.md rule 20. So the
-    mute is the documented pair — the tracker's sources without `lidar`, lidar_layer off on both
-    costmaps — and the driver is left running (`lidar off --hard` is the real absence)."""
-    code, out, sent = _sensor(
-        tmp_path, "mute", "lidar", FAKE_SOURCES="lidar,camera", FAKE_LAYERS="true"
-    )
+    mute is the documented consumer set — lidar_layer off on both costmaps — and the driver is
+    left running (`lidar off --hard` is the real absence)."""
+    code, out, sent = _sensor(tmp_path, "mute", "lidar", FAKE_LAYERS="true")
     assert code == 0, out
-    assert "flags set relocalizer sources camera" in sent
     assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in sent
     assert not [c for c in sent if "lifecycle set" in c], "a mute never stops the driver"
     assert "scan_filter" in out
@@ -812,7 +709,7 @@ def test_status_lists_every_sensor_s_mute_state(tmp_path) -> None:  # type: igno
         tmp_path, "status", FAKE_PUBLISH="False", FAKE_CAMERA_SOURCES="", FAKE_LAYERS="true"
     )
     assert code == 0, out
-    for sensor in ("imu", "odom", "vo", "graph", "camera"):
+    for sensor in ("imu", "odom", "vo"):
         assert f"{sensor}: MUTED" in out, out
 
 
@@ -820,7 +717,7 @@ def test_an_unmuted_stack_says_so_sensor_by_sensor(tmp_path) -> None:  # type: i
     """The other half of the reading: the shipping state is named, not left blank."""
     _, out, _ = _sensor(tmp_path, "status", FAKE_PUBLISH="True", FAKE_LAYERS="true")
     assert "imu: on (base_bridge imu_publish=True)" in out
-    assert "camera: on (laptop_localizer camera_sources=depth,contact)" in out
+    assert "vo: on (visual_odometry vo_publish=True)" in out
 
 
 def test_restart_sh_parses_and_never_drives() -> None:
@@ -1011,14 +908,12 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
     assert first_rate > order[-1], "the board is asked about the laptop's topics after it is up"
     for number in (
         "1.1",
-        "1.2",
         "1.3",
         "1.4",
         "1.5",
         "1.6",
         "1.7",
         "1.8",
-        "2.1",
         "2.8",
         "2.9",
         "3.1",
@@ -1063,20 +958,18 @@ def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_pat
 @pytest.mark.slow
 def test_every_check_runs_even_when_the_first_ones_fail_and_the_run_goes_red(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A check that fails is one line and never the end of the run: the point of the script is
-    the whole picture. The three below are the three that cost us a session each."""
+    the whole picture. The two below are two that cost us a session each."""
     code, out, _ = _restart(
         tmp_path,
         "both",
-        FAKE_TRACKER="",  # the tracker never reported
+        FAKE_GO_WHERE="connection refused",  # the goal server did not answer
         FAKE_TORQUE="arming: torque on",  # the wheels left armed
-        FAKE_VSLAM=VSLAM_LOG.replace("dead routes 0", "DEAD ROUTES 2 [/scan /odom]"),
     )
     assert code == 1, out
-    assert "FAIL 1.2" in out and "no report line" in out
+    assert "FAIL 1.3" in out and "did not answer" in out
     assert "FAIL 1.10" in out and "still armed" in out
-    assert "FAIL 2.1" in out and "DEAD ROUTES 2" in out
     assert "PASS 1.4" in out and "PASS 2.8" in out, "the checks after a failure still ran"
-    assert "red: 3 of " in out
+    assert "red: 2 of " in out
 
 
 @pytest.mark.slow
@@ -1111,24 +1004,6 @@ def test_the_clock_check_passes_the_default_and_warns_where_a_look_is_needed(tmp
 
 
 @pytest.mark.slow
-def test_without_a_tracker_the_checks_move_to_the_edge_the_laptop_owns(tmp_path) -> None:
-    """PEPIN_LOCALIZER=rtabmap: no tracker is launched on the board, so its report line, its
-    /where_am_i and its /map_tracked are not evidence and must not fail the restart. What
-    replaces them is 1.13 — map -> odom read where its publisher is — and a 1.3 that asks the
-    goal server's socket, whose pose is composed from that very edge."""
-    code, out, sent = _restart(tmp_path, "both", FAKE_LOCALIZER="rtabmap", FAKE_TRACKER="")
-    assert code == 0, out
-    assert "WARN 1.2" in out and "none on this board" in out, "a missing tracker is not a failure"
-    assert "PASS 1.3" in out and '"pose": "tf"' in out
-    assert "WARN 1.13" not in out and "PASS 1.13" in out and "corrected" in out
-    assert "/map_tracked" in out and "WARN" in out
-    assert any("map_odom.py" in c for c in sent), "read in the laptop's container, not the board's"
-    assert not any("goto.sh where" in c for c in sent), "nothing asks the tracker's service"
-    # the laptop localizer listens for the tracker's belief: silent by design here, not a fault
-    assert "WARN 2.5  laptop localizer: n/a under PEPIN_LOCALIZER=rtabmap" in out, out
-
-
-@pytest.mark.slow
 def test_the_map_is_asked_for_its_latched_copy_not_a_rate(tmp_path) -> None:
     """RTAB-Map's /map is latched and, while it localises, published once a start: five seconds
     of counting found 0 messages on a board whose static layer held the grid (2026-09-24)."""
@@ -1151,29 +1026,12 @@ def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_pat
     code, out, _ = _restart(
         tmp_path,
         "board",
-        FAKE_LOCALIZER="rtabmap",
         FAKE_MAP_ODOM="map -> odom: (+0.000, +0.000) m, +0.0 deg, |shift| 0.000 m,"
         " stamped 0.04 s ago: identity (nothing has corrected the pose yet)",
         FAKE_MAP_ODOM_BAD="1",
     )
     assert code == 1, out
     assert "FAIL 1.13" in out and "identity" in out and "grace" in out
-
-
-@pytest.mark.slow
-def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """The fault of 2026-09-15 reads as "dead routes 0" on this side: check 2.1 must catch the
-    other half of the watch's line too, or a link that carries nothing passes the restart."""
-    code, out, _ = _restart(
-        tmp_path,
-        "laptop",
-        FAKE_VSLAM=VSLAM_LOG.replace(
-            "board routes without a reader 0",
-            "BOARD ROUTES WITHOUT A READER 13 [/scan /tf]",
-        ),
-    )
-    assert code == 1, out
-    assert "FAIL 2.1" in out and "WITHOUT A READER 13" in out
 
 
 @pytest.mark.slow
@@ -1186,7 +1044,7 @@ def test_the_board_s_own_readerless_routes_fail_the_laptop_check(tmp_path) -> No
         # a log that cannot be read is never counted as zero errors
         ({"FAKE_LATE": "ssh: connect to host: No route"}, "1.4", "could not be read"),
         ({"FAKE_RATE": "/vo: not advertised"}, "1.6", "does not reach the board"),
-        ({"FAKE_WHERE_DOWN": "1"}, "1.3", "did not answer"),
+        ({"FAKE_GO_WHERE": "connection refused"}, "1.3", "did not answer"),
         ({"FAKE_PROCS": "python3"}, "2.6", "no rtabmap process"),
     ],
 )
@@ -1273,14 +1131,10 @@ def test_there_is_one_way_to_stop_a_container_and_it_is_gentle() -> None:
         for verb in ("docker stop", "docker kill", "docker rm -f"):
             if verb not in code:
                 continue
-            assert script in {"lib.sh", "thin.sh"}, (
+            assert script == "lib.sh", (
                 f"ros/{script} runs `{verb}` itself; use pepin_stop_container /"
                 " pepin_remove_container from ros/lib.sh"
             )
-    # thin.sh's one `docker rm -f` is on the BOARD over ssh, after its unit's own gentle ExecStop,
-    # and the container it names is the bridge sidecar — nothing of ours writes a file in it.
-    thin = _uncommented("ros/thin.sh")
-    assert "systemctl disable --now pepin-bridge" in thin and "docker rm -f zenoh-bridge" in thin
 
 
 def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> None:
@@ -1355,14 +1209,14 @@ def test_flags_sh_reaches_the_goal_server_where_the_board_s_side_runs_it(tmp_pat
     the split starts ("No such container"). The side is read from the board once, then the
     parameter goes where the node is; a split still reaches pepin-laptop; the camera nodes are
     pepin-vslam's either way."""
-    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "tf_pose", "true", FAKE_SIDE="")
+    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "pose_topic", "true", FAKE_SIDE="")
     assert code == 0, out
     assert any("PEPIN_SIDE" in c for c in calls), "the board's side is asked"
-    sets = [c for c in calls if "param set /goal_server tf_pose true" in c]
+    sets = [c for c in calls if "param set /goal_server pose_topic true" in c]
     assert len(sets) == 1 and sets[0].startswith("ssh ") and "docker exec pepin-ros" in sets[0]
     assert not [c for c in calls if "pepin-laptop" in c], calls
 
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", FAKE_SIDE="board")
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", FAKE_SIDE="board")
     assert code == 0, out
     assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
 
@@ -1383,7 +1237,7 @@ def test_flags_sh_does_not_read_a_silent_board_as_a_whole_one(tmp_path: Path) ->
     mode = tmp_path / "mode"
     mode.write_text("split\n")
     down = {"FAKE_SSH_DOWN": "1", "PEPIN_MODE_FILE": str(mode)}
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", **down)
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", **down)
     assert code == 0, out
     assert "taken from" in out and "(split)" in out, "the fallback says so"
     assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
@@ -1393,7 +1247,7 @@ def test_flags_sh_does_not_read_a_silent_board_as_a_whole_one(tmp_path: Path) ->
     assert "/goal_server" in dumped, calls
 
     nowhere = {**down, "PEPIN_MODE_FILE": str(tmp_path / "none")}
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "tf_pose", **nowhere)
+    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", **nowhere)
     assert code == 1 and "cannot read the board's side" in out, out
     assert not [c for c in calls if "param get" in c], "nothing is sent to a guessed container"
 

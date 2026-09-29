@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Is anybody correcting the pose: read ``map -> odom`` out of TF and print it on one line.
 
-Under PEPIN_LOCALIZER=rtabmap that edge is the whole contract between the two halves — the
+That edge is the whole contract between the two halves — the
 laptop's RTAB-Map broadcasts it, every consumer composes it with the board's own
 ``odom -> base_link`` — and two things about it are worth asking after a restart, neither of
 which any topic answers:

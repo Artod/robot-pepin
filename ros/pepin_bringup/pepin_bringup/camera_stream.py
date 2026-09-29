@@ -45,12 +45,12 @@ so RTAB-Map knows where the pictures were taken from — the camera's own edge o
 live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on) this side must
 not publish the same edge, and the launch passes the switch off (``ros/laptop.sh vslam --neck``).
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set camera_stream <name> <value>``): ``scale``, live
-(the published picture as a fraction of the camera's own, optics included); ``undistort``, live
-(the picture is straightened by the calibration before it goes out, and its CameraInfo then
-carries no distortion); ``static_camera_tf``, read at start and not live — a static transform
-cannot be withdrawn once sent, so the other value needs a restart. All three are printed in
-every report line.
+The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
+<value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
+included); ``undistort``, live (the picture is straightened by the calibration before it goes out,
+and its CameraInfo then carries no distortion); ``static_camera_tf``, read at start and not live — a
+static transform cannot be withdrawn once sent, so the other value needs a restart. All three are
+printed in every report line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -81,7 +81,7 @@ from tf2_ros import StaticTransformBroadcaster
 
 from pepin.calibration import undistort_optics
 from pepin.camera import CameraConfig, Optics, optics
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.mjpeg import capture_time, parts
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
@@ -115,26 +115,6 @@ CALIBRATION_POLL_S = 2.0
 # other declaration; both are printed in every report line. The range's low end is inclusive
 # and a scale of zero is a picture of no pixels, so _on_switch refuses that one value.
 FLAGS = FlagSet(
-    Flag(
-        "scale",
-        0.5,
-        description="the published picture as a fraction of the camera's own 1280x720, its optics"
-        " scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head"
-        " publishes at its calibration's own size (the size the remap tables were built for, the"
-        " size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and"
-        " refuses any other value with that reason",
-        why="default by design, unmeasured: the half size was chosen when the stream was made"
-        " reliable for RTAB-Map (2026-09-09) and has never been compared with the full one — no"
-        " feature count, no loop closure, no bandwidth measured either way. What is measured is"
-        " the rate: 8.9 fps over the bridge then, 11-11.5 fps in the report lines since. A"
-        " full-size bgr8 frame is 2.7 MB of arithmetic (1280 x 720 x 3), and 640x360 is what the"
-        " depth network resizes to anyway",
-        on_when="raise it towards 1.0 when place recognition or a calibration needs the detail"
-        " and the bridge has the bandwidth to carry it",
-        off_when="lower it when the bridge is the bottleneck: the optics are scaled with the"
-        " picture, so nothing downstream has to be told",
-        range=(0.0, 1.0),
-    ),
     Flag(
         "undistort",
         False,
@@ -224,7 +204,9 @@ class CameraStream(Node):
         self._calibration_checked = 0.0
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("camera_stream")), on_change=self._on_switch
+        )
         rectifier = self._read_calibration()
         self._published = self._published_for(
             self._scale(), self._switches.on("undistort"), rectifier

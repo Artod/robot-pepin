@@ -364,7 +364,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "flags: scale=0.5 undistort=off fold_mask=on static_camera_tf=on" in line
+    assert "flags: undistort=off fold_mask=on static_camera_tf=on scale=0.5" in line
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
 
@@ -629,7 +629,7 @@ def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
     assert "stages: " in line and " ms median/p95" in line
     for stage in ("decode", "split", "rectify", "publish"):
         assert f"{stage} " in line.split("stages: ")[1]
-    assert "flags: scale=1.0 undistort=off fold_mask=on static_camera_tf=on" in line
+    assert "flags: undistort=off fold_mask=on static_camera_tf=on scale=1.0" in line
 
 
 def test_a_stereo_frame_of_the_wrong_size_is_counted_and_named_in_the_report(
@@ -679,4 +679,4 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     assert (image.width, image.height) == (640, 360) and image.encoding == "bgr8"
     node._report()
     line = node.logger.texts("info")[-1]
-    assert line.endswith("flags: scale=0.5 undistort=off fold_mask=on static_camera_tf=on")
+    assert line.endswith("flags: undistort=off fold_mask=on static_camera_tf=on scale=0.5")

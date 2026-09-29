@@ -1,15 +1,15 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
-// The contract of tests/unit/test_zupt.py::test_zupt_contract_the_cpp_bridge_mirrors, replayed row
-// for row against zupt.hpp, verdict words included. Like gyro_bias_contract.cpp it is a
+// The contract of the zero-velocity update, replayed row for row against zupt.hpp, verdict words
+// included. Like gyro_bias_contract.cpp it is a
 // stand-alone main() with no ROS and no gtest, because the package has no ament test target. One
 // command (no line continuation here: GCC's -Wcomment reads a backslash as one):
 //
 //     c++ -std=c++17 -Wall -Wextra -Wpedantic -O2 -I ros/pepin_base_cpp/include
 //         ros/pepin_base_cpp/test/zupt_contract.cpp -o /tmp/zupt_contract && /tmp/zupt_contract
 //
-// It prints one line per row and exits non-zero on any disagreement. Python is the reference: a
-// row changes there first, then here.
+// It prints one line per row and exits non-zero on any disagreement;
+// tests/unit/test_base_cpp_contracts.py compiles and runs it.
 
 #include <cmath>
 #include <cstdio>
@@ -147,9 +147,9 @@ int main()
   check(pepin::zupt_clamped(settle, 600.0) == 60.0, "and 600 s the longest window");
   check(pepin::zupt_clamped(*pepin::zupt_range("zupt_cmd_hold_s"), nan) == 0.0, "NaN: low end");
 
-  check(pepin::kRestZuptVariance == 1e-6, "pepin.zupt.REST_ZUPT_VARIANCE");
-  check(pepin::kGyroQuietRadS == 0.005, "pepin.zupt.GYRO_QUIET_RAD_S");
-  check(pepin::kZuptHz == 10.0, "pepin.zupt.ZUPT_HZ");
+  check(pepin::kRestZuptVariance == 1e-6, "kRestZuptVariance");
+  check(pepin::kGyroQuietRadS == 0.005, "kGyroQuietRadS");
+  check(pepin::kZuptHz == 10.0, "kZuptHz");
 
   std::printf(failures == 0 ? "\nthe contract holds\n" : "\n%d checks failed\n", failures);
   return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -27,7 +27,7 @@ from nav_msgs.msg import Path as PathMsg  # noqa: E402
 from pepin_bringup.bag_recorder import BAG_TOPICS, record_command  # noqa: E402
 from pepin_bringup.run_recorder import RunRecorder  # noqa: E402
 from sensor_msgs.msg import Imu, LaserScan, Range  # noqa: E402
-from std_msgs.msg import Header, String  # noqa: E402
+from std_msgs.msg import Header  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -141,20 +141,17 @@ MESSAGES: list[tuple[str, Any, str]] = [
     ("/odom", odometry(1000.1, 1.5, 0.25), "_on_odom"),
     ("/odometry/filtered", odometry(1000.2, 1.51, 0.26, 0.2, 0.1), "_on_ekf"),
     ("/imu/data_raw", imu(1000.3), "_on_imu"),
-    ("/tracker_pose", tracker_pose(1000.4), "_on_loc"),
     ("/cmd_vel", twist(), "_on_cmd"),
     ("/plan", plan(1000.5), "_on_plan"),
     ("/local_costmap/costmap", grid(1000.6, [0, 0, 50, 99, -1, -1, 100, 0]), "_on_costmap"),
     ("/global_costmap/costmap", grid(1000.7, [0, 0, 50, 99, -1, -1, 100, 0]), "_on_global_costmap"),
     ("/tof/front", tof(1000.8), "tof:front"),
-    ("/localization/measurement", String(data='{"x":1.0}'), "_on_measurement"),
-    ("/localization/sources", String(data='{"fit":0.9}'), "_on_sources"),
     ("/navigate_to_pose/_action/status", statuses(), "status:navigate_to_pose"),
 ]
 # The rows dated on arrival rather than by a stamp of their own: the two recorders cannot agree
 # on that number (one is the moment the message reached the node, the other the moment the bag
 # wrote it), and everything else in them must still be equal.
-ARRIVAL_DATED = {"cmd", "nav", "meas", "srcs"}
+ARRIVAL_DATED = {"cmd", "nav"}
 
 
 def live_rows(tmp_path: Path) -> list[dict[str, Any]]:
@@ -212,14 +209,11 @@ def test_every_record_a_drive_writes_is_covered(
         "pose",
         "ekf",
         "imu",
-        "loc",
         "cmd",
         "plan",
         "costmap",
         "gcostmap",
         "tof",
-        "meas",
-        "srcs",
         "nav",
     }
 
@@ -294,7 +288,9 @@ def test_the_bag_records_every_topic_the_jsonl_recorder_subscribes_to(tmp_path: 
     recorder.start("test")
     recorder._apply_pending()  # the run-only subscriptions, normally made by the node's timer
     recorder.stop()
-    assert set(node.subs) <= set(BAG_TOPICS), set(node.subs) - set(BAG_TOPICS)
+    # /pose is the goal server's read of map -> base_link; the bag keeps /tf itself, and the
+    # converter composes the same `loc` rows from it (TF_EDGES).
+    assert set(node.subs) - {"/pose"} <= set(BAG_TOPICS), set(node.subs) - set(BAG_TOPICS)
     assert {"/tf", "/tf_static", "/odom_laser"} <= set(BAG_TOPICS)
     assert "/ldlidar_node/scan" in BAG_TOPICS, "the unfiltered lidar, for the cart's self-mask"
     assert {"/depth_marks", "/depth_free"} <= set(BAG_TOPICS), "what the camera told the costmaps"

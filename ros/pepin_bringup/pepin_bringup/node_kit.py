@@ -529,15 +529,9 @@ class TfHistory:
 
 
 def bridged_qos_profile(topic: str) -> Any:
-    """The QoS every endpoint of ``topic`` must use when the topic crosses the bridge
+    """The QoS every endpoint of ``topic`` must use when the topic crosses between the machines
     (:data:`pepin.deployment.BRIDGED_QOS`), or the sensor-data default where there is no rule.
-
-    Not a matter of taste: the bridge fixes a route's DDS QoS at the moment the route is created
-    — from the local endpoint it discovered, or from the far bridge's announcement, whichever
-    came first — and never revises it. Two sides that disagree therefore get a route whose QoS
-    is decided by a race, and the loser is starved: the board writes /imu/data_raw RELIABLE ten
-    deep at 48 Hz, these nodes read it, and while they asked for best effort five deep the
-    laptop saw 10-11 Hz (2026-09-13, scratch/bridge_state_182255_dds_table.txt).
+    A reader and a writer that disagree on reliability do not match, and the loser hears nothing.
     """
     pinned = bridged_qos(topic)
     if pinned is None:
@@ -725,8 +719,8 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     order. Then, in this order: the node's ``close()`` if it has one (its worker threads and
     TF listener are stopped and JOINED), every :class:`TfLookup` still open
     (:func:`close_open_lookups`: tf2_ros's listener thread is not a daemon, and a node with no
-    close of its own never exited), ``destroy_node`` (the DDS participant is disposed, so
-    the bridge forgets the name at once and the respawn meets no ghost), and the context's
+    close of its own never exited), ``destroy_node`` (the participant is disposed, so
+    the respawn meets no ghost of the name), and the context's
     shutdown (:func:`end_context`, race-proof too). The join is the fix for the depth node's
     SIGABRT: a daemon thread still inside the network's C++ when the interpreter finalised was
     ended with ``pthread_exit``, which unwinds through ``noexcept`` frames into
