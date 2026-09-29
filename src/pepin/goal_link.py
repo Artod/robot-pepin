@@ -36,7 +36,8 @@ PORT = 3337
 # cancel_all asks the same two, with the same zero goal id).
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 # One deadline for the whole cancel, shared between the navigators: the operator is watching.
-CANCEL_CONFIRM_S = 3.0
+CANCEL_CONFIRM_S = 30.0  # 3 s until 2026-09-29: under load the confirmation came later, and the
+# unconfirmed cancel of a Ctrl-C fell through to ros/stop.sh, whose restart zeroes the odometry
 # action_msgs/CancelGoal's return codes in words, as goto_ros.py prints them.
 CANCEL_OUTCOMES = {0: "accepted", 1: "rejected", 2: "no such goal", 3: "the goal had already ended"}
 # A cancel or a where is answered in well under a second; past this the server is not there.
@@ -259,7 +260,8 @@ class DriveReport:
 
 def run_cancel(host: str, port: int, out: TextIO) -> int:
     """Cancel every goal through the goal server and print goto_ros.py's line for it."""
-    answer = ask({"cmd": "cancel"}, host, port)
+    # The server confirms within CANCEL_CONFIRM_S: the answer is waited for a little longer.
+    answer = ask({"cmd": "cancel"}, host, port, timeout_s=CANCEL_CONFIRM_S + 3.0)
     line = cancel_line(answer)
     if line is None:
         print(

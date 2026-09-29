@@ -177,6 +177,20 @@
         "/local_plan": {
           "visible": true,
           "color": "#ffea00"
+        },
+        "/lookahead_collision_arc": {
+          "visible": true,
+          "lineWidth": 0.04,
+          "color": "#ff1744"
+        },
+        "/received_global_plan": {
+          "visible": true,
+          "lineWidth": 0.02,
+          "color": "#ffffff"
+        },
+        "/lookahead_point": {
+          "visible": true,
+          "color": "#ff9100"
         }
       },
       "layers": {
@@ -403,6 +417,20 @@
           "unknownColor": "#00000000",
           "invalidColor": "#00000000",
           "frameLocked": true
+        },
+        "/lookahead_collision_arc": {
+          "visible": true,
+          "lineWidth": 0.04,
+          "color": "#ff1744"
+        },
+        "/received_global_plan": {
+          "visible": true,
+          "lineWidth": 0.02,
+          "color": "#ffffff"
+        },
+        "/lookahead_point": {
+          "visible": true,
+          "color": "#ff9100"
         }
       },
       "layers": {

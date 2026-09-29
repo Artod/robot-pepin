@@ -116,7 +116,7 @@ CERTAINTY_WAIT_S = 3.0
 # who typed "cancel" is watching the cart move. It is the budget for the WHOLE cancel, every
 # navigator in it: spent per action it was 9 s (a discovery wait plus a spin, twice) under a
 # shell timeout of 5, and the second navigator was never asked at all.
-CANCEL_CONFIRM_S = 3.0
+CANCEL_CONFIRM_S = 30.0  # as pepin.goal_link's, and for its reason
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 # Where RTAB-Map (the node /rtabmap/rtabmap) takes an operator's pose in localisation mode.
 RTABMAP_INITIAL_POSE = "/rtabmap/initialpose"

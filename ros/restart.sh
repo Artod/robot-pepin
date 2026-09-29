@@ -2,7 +2,7 @@
 # One command that brings this robot up WORKING, repairs what it can and says what it could not:
 # the restart, the proof that the planner plans, and every check that has bitten us. Usage:
 #
-#   ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]
+#   ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--fast] [--dry-run]
 #
 #   board          the board's stack WITH its zenoh router (ros/lib.sh pepin_board_restart: stack
 #                  stopped, router restarted, stack started), then its first report line (90 s).
@@ -21,6 +21,9 @@
 #                  (initial_transform_timeout, ros/params/nav2_params.yaml) and the proof below
 #                  catches whatever still races
 #   --no-check     restart only: no proof, no repair, no checks
+#   --fast         --no-check, and no waiting for either half's first report line: the commands
+#                  are sent and the script returns; the stack still needs its own time to come
+#                  up (Nav2 on the board about a minute), and nothing here says whether it did
 #   --dry-run      print the order of everything above and touch nothing
 #
 # THE PROOF (4.1), whenever the laptop half is up after the restart: from pepin-vslam, the pose
@@ -61,16 +64,17 @@ REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed 
 ERROR_WINDOW_S=60   # how far back the error counts look
 
 usage() {
-    echo "usage: ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]"
+    echo "usage: ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--fast] [--dry-run]"
     exit 2
 }
-HALF=""; DEPLOY=false; FRESH_GRAPH=false; CHECK=true; DRY=false
+HALF=""; DEPLOY=false; FRESH_GRAPH=false; CHECK=true; DRY=false; WAIT=true
 case "${1:-}" in board | laptop | both) HALF="$1"; shift ;; *) usage ;; esac
 for arg in "$@"; do
     case "$arg" in
         --deploy) DEPLOY=true ;;
         --fresh-graph) FRESH_GRAPH=true ;;
         --no-check) CHECK=false ;;
+        --fast) CHECK=false; WAIT=false ;;
         --dry-run) DRY=true ;;
         *) usage ;;
     esac
@@ -168,7 +172,9 @@ restart_board() {
     # Which line says this half is back. Under PEPIN_LOCALIZER=tracker it is the tracker's first
     # report; under rtabmap no tracker is launched at all, so the recorder — the one node of ours
     # that runs on the board in every arrangement — is what is waited for instead.
-    if pepin_localizer_is_tracker; then
+    if [ "$WAIT" != true ]; then
+        echo "--fast: not waiting for the board's first report line"
+    elif pepin_localizer_is_tracker; then
         wait_for "board" "$WAIT_BOARD_S" pepin-ros "relocalizer\]: tracker:" || true
     else
         wait_for "board" "$WAIT_BOARD_S" pepin-ros "run recorder ready" || true
@@ -213,6 +219,10 @@ restart_laptop() {  # [vslam]: the camera half only (after a board restart), els
     fi
     [ "${1:-}" = vslam ] || "$HERE/laptop.sh" start
     "$HERE/laptop.sh" "${args[@]}"
+    if [ "$WAIT" != true ]; then
+        echo "--fast: not waiting for the laptop's first depth line"
+        return 0
+    fi
     wait_for "laptop" "$WAIT_LAPTOP_S" pepin-vslam "\]: depth: " || true
 }
 
@@ -305,14 +315,20 @@ describe() {
         else
             say "board: stop pepin-ros, restart pepin-zrouter, start pepin-ros (ssh root@$BOARD)"
         fi
-        say "wait up to ${WAIT_BOARD_S} s for the board's first report line"
+        [ "$WAIT" != true ] || say "wait up to ${WAIT_BOARD_S} s for the board's first report line"
     fi
+    local waits=""
+    [ "$WAIT" != true ] || waits="; wait up to ${WAIT_LAPTOP_S} s for the first depth line"
     case "$HALF" in
         board) say "ask docker ps whether the laptop half is up (pepin-vslam): if it is, ros/laptop.sh vslam --neck — RTAB-Map onto the board's new odometry — and wait up to ${WAIT_LAPTOP_S} s for its first depth line; if it is down, say so" ;;
-        *) say "laptop: ros/laptop.sh start, then ros/laptop.sh vslam --neck$fresh; wait up to ${WAIT_LAPTOP_S} s for the first depth line" ;;
+        *) say "laptop: ros/laptop.sh start, then ros/laptop.sh vslam --neck$fresh$waits" ;;
     esac
     if [ "$CHECK" != true ]; then
-        say "stop there: no proof, no repair, no checks (--no-check)"
+        if [ "$WAIT" = true ]; then
+            say "stop there: no proof, no repair, no checks (--no-check)"
+        else
+            say "stop there: nothing waited for, no proof, no repair, no checks (--fast)"
+        fi
         return 0
     fi
     say "the proof (4.1), if the laptop half is up (else 4.1 fails: no map to plan on): from pepin-vslam, ros/tools/map_odom.py and ros/tools/planner_check.py — a new global costmap within 10 s, one path 0.5 m ahead — asked again for up to ${PLANNER_WAIT_S} s"
@@ -836,6 +852,7 @@ else
 fi
 if [ "$CHECK" != true ]; then
     printf '\nno proof and no checks (--no-check)\n'
+    [ "$WAIT" = true ] || echo "--fast: nothing was waited for; ros/restart.sh $HALF proves the stack when it matters"
     exit 0
 fi
 ensure_planner  # before the checks: they then read the stack as it will be driven

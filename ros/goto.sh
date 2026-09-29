@@ -10,7 +10,7 @@
 #   ros/goto.sh places           list both books, each entry saying which one it came from
 #   ros/goto.sh seed X Y [YAW]   after placing the robot by hand: tell AMCL where it is
 #   ros/goto.sh cancel           cancel every goal on the board's navigators; it prints what came
-#                                of it within 3 s (ros/stop.sh is the hard stop that also brakes)
+#                                of it within 30 s (ros/stop.sh is the hard stop that also brakes)
 #   ros/goto.sh where            pose, scan-to-map fit and the pose's own sigma right now
 #   ros/goto.sh relocalize       whole-map search now (after a carry or a push)
 # Before a goal is sent, goto prints its preflight, one line per check, and any REFUSED stops the
@@ -125,9 +125,13 @@ finish() {  # everything recorded, always: scans, odometry, tracked pose, the go
     watch_stop
     if [ "$INTERRUPTED" = 1 ]; then
         echo; echo "Ctrl-C: cancelling the navigation task on the board..."
-        # Over the goal server's socket first when the goal went that way; the hard stop when
-        # the socket cannot confirm the cancel.
-        if [ "$TCP_GOAL" = 1 ] && goal_link cancel; then :; else "$(dirname "$0")/stop.sh"; fi
+        # A cancel and nothing else, asked twice: never ros/stop.sh from here. Its hard branch
+        # restarts the board's stack, which zeroes the odometry — the pose and the volume are
+        # lost and both halves need a restart (2026-09-28 21:48 and 2026-09-29 00:17, each an
+        # interrupted drive). The red button stays a command the operator types.
+        if goal_link cancel || goal_link cancel; then :; else
+            echo "!! the cancel was NOT confirmed: if the cart still moves, ros/stop.sh is the hard stop (it restarts the board)"
+        fi
     elif [ "$TCP_GOAL" = 1 ]; then
         :  # no process of this drive on the board to look for; pepin.goal_link said how it ended
     elif ssh "root@$BOARD" "docker exec pepin-ros pgrep -f '^python3 /tools/goto_ros.py' >/dev/null" 2>/dev/null; then

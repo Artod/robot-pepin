@@ -635,11 +635,11 @@ def test_a_navigator_that_is_not_up_or_does_not_answer_is_said_so(tmp_path: Path
     node.service_clients[CANCEL_SERVICES["navigate_through_poses"]].ready = False
     said = node.cancel_every_goal()
     assert said == {
-        "navigate_to_pose": {"outcome": "NOT confirmed in 3 s — use ros/stop.sh"},
+        "navigate_to_pose": {"outcome": "NOT confirmed in 30 s — use ros/stop.sh"},
         "navigate_through_poses": {"outcome": "no server answered"},
     }
     waited = node.service_clients[CANCEL_SERVICES["navigate_through_poses"]].waits
-    assert waited and max(waited) <= 1.5, "an absent navigator costs half its share, not more"
+    assert waited and max(waited) <= 15.0, "an absent navigator costs half the window, not more"
 
 
 def test_the_flag_off_cancels_only_this_node_s_own_goal(tmp_path: Path) -> None:
