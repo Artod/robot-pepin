@@ -3,3 +3,10 @@
 # LD19 lidar UART adapter: Silabs CP2102 (10c4:ea60)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", SYMLINK+="servo-bus"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="lidar"
+# reSpeaker XVF3800 USB 4-mic array (Seeed, 2886:001a). Its ALSA card id would be the last word of
+# the product name, "Array"; "respeaker" names it whatever else is plugged in
+# (plughw:CARD=respeaker,DEV=0). The audio group, which owns /dev/snd/*, also gets the USB node the
+# voice direction is read through (root, which runs pepin-audio, needs neither), and USB
+# autosuspend stays off for it.
+SUBSYSTEM=="sound", KERNEL=="card*", ACTION=="add", ATTRS{idVendor}=="2886", ATTRS{idProduct}=="001a", ATTR{id}="respeaker"
+SUBSYSTEM=="usb", ENV{DEVTYPE}=="usb_device", ATTR{idVendor}=="2886", ATTR{idProduct}=="001a", MODE="0660", GROUP="audio", ATTR{power/control}="on"

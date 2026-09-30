@@ -119,6 +119,7 @@ FRESH_EACH_START = ("pepin_bringup.ghost_wait",)
 HOST_SERVICES: dict[str, str] = {
     "pepin.base_server": "board: pepin-base.service runs it from /opt/pepin (board/README.md)",
     "pepin.tof_server": "board: pepin-tof.service runs it from /opt/pepin (board/README.md)",
+    "pepin.audio_server": "board: pepin-audio.service runs it from /opt/pepin (board/README.md)",
     "pepin.depth_service": "laptop: ros/models.sh restart depth",
     "pepin.localization_service": "laptop: ros/models.sh restart localization",
 }

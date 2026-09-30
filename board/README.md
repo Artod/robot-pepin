@@ -1,8 +1,8 @@
 # Board: Orange Pi Zero 3 as the robot's relay
 
 The board runs Armbian and does nothing clever: it bridges the servo bus and the
-lidar to TCP, streams the ToF ranges, serves the camera, and — the one real-time
-job — owns the wheels. Everything else runs on the laptop.
+lidar to TCP, streams the ToF ranges, serves the camera and the microphone array,
+and — the one real-time job — owns the wheels. Everything else runs on the laptop.
 
 ## Services
 
@@ -12,6 +12,7 @@ job — owns the wheels. Everything else runs on the laptop.
 | 3334 | ser2net | `ser2net.service` | raw TCP to `/dev/lidar` (LD19, 230400 baud) |
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, publishes odometry state at 20 Hz |
+| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status` |
 | 8080 | ustreamer | `pepin-camera.service` | MJPEG stream and `/snapshot` of the overview camera |
 
 The base server is the only client of :3333 while it runs. Bench tools that
@@ -29,6 +30,8 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/tof-init.service` | `/etc/systemd/system/tof-init.service` |
 | `board/pepin-tof.service` | `/etc/systemd/system/pepin-tof.service` |
 | `board/pepin-base.service` | `/etc/systemd/system/pepin-base.service` |
+| `board/pepin-audio.service` | `/etc/systemd/system/pepin-audio.service` |
+| `board/xvf_host_install.sh` | run once on the board: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `board/pepin-ros.service` | `/etc/systemd/system/pepin-ros.service` (branch ros2-nav2: the ROS container at boot) |
 | `board/ser2net-stale-locks.conf` | `/etc/systemd/system/ser2net.service.d/stale-locks.conf` |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
@@ -43,6 +46,20 @@ rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin
 scp config/base.json config/neck.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof'
 ```
+
+## Microphone array
+
+The reSpeaker XVF3800 USB array (Seeed, `2886:001a`) sits on the powered hub and the robot's speaker on its 3.5 mm jack: the voice must leave through the array, or its echo canceller has no reference. `pepin.audio_server` streams the array's processed channel (16 kHz mono, echo cancelled, beamformed, noise suppressed), reads the voice direction over USB control and plays the laptop's PCM; framing in `src/pepin/audio_link.py`, laptop tools and the plug-in checklist in `scratch/audio/` (`DAY_ONE.md`). Install from the laptop (the second line deploys only the audio modules; the rsync above does the whole package):
+
+```bash
+ssh root@pepin.local 'apt install -y alsa-utils libusb-1.0-0 usbutils dfu-util && /opt/pepin/bin/pip install pyusb==1.3.1 libusb-package==1.0.30.0'
+scp src/pepin/audio_server.py src/pepin/audio_link.py src/pepin/xvf3800.py src/pepin/telemetry.py root@pepin.local:/opt/pepin/pepin/
+scp board/99-pepin-usb.rules root@pepin.local:/etc/udev/rules.d/ && ssh root@pepin.local 'udevadm control --reload'
+scp board/xvf_host_install.sh root@pepin.local:/tmp/ && ssh root@pepin.local 'bash /tmp/xvf_host_install.sh'
+scp board/pepin-audio.service root@pepin.local:/etc/systemd/system/ && ssh root@pepin.local 'systemctl daemon-reload && systemctl enable --now pepin-audio'
+```
+
+The udev rule names the card `respeaker` (`plughw:CARD=respeaker,DEV=0`) when the array is plugged in after it; without it the card is `Array`, which the server finds too. `libusb-package` is only for Seeed's `xvf_host.py`. The service runs as root; a login user needs the `audio` group. Firmware 2.0.10 or newer (`xvf_host VERSION`; the direction froze outside the LED ring's doa effect before), 2.1.1 current. Check: `uv run python scratch/audio/listen.py --status`.
 
 ## The neck on the base server's port (:3336)
 
