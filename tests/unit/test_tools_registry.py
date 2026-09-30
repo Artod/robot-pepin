@@ -8,6 +8,7 @@ from typing import Literal
 
 import pytest
 
+from pepin.tools import TOOLS
 from pepin.tools.registry import (
     Image,
     Registry,
@@ -245,3 +246,35 @@ def test_every_provider_shape_renders_the_same_schema() -> None:
         assert a["input_schema"] == o["function"]["parameters"]
         assert g.get("parameters", a["input_schema"]) == a["input_schema"]
     assert "parameters" not in gemini[2]  # crash() takes nothing: Gemini refuses empty objects
+
+
+def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
+    """THE registry: every tool of the first set is there, each renders for every provider,
+    and the only tools that set the robot in motion are the two drives, which go through the
+    goal server; nothing else can move the wheels."""
+    names = [t.name for t in TOOLS]
+    assert names == [
+        "where_am_i",
+        "list_places",
+        "go_to",
+        "go_to_pose",
+        "cancel",
+        "look",
+        "look_around",
+        "see",
+        "find",
+        "recall",
+        "map_tree",
+        "remember",
+        "say",
+        "status",
+    ]
+    assert {t.name for t in TOOLS if t.moves} == {"go_to", "go_to_pose"}
+    for rendered in (
+        anthropic_tools(TOOLS),
+        openai_tools(TOOLS),
+        gemini_function_declarations(TOOLS),
+    ):
+        assert len(rendered) == len(TOOLS)
+    for t in TOOLS:
+        assert len(t.description) > 40, f"{t.name}: the model needs more than that"
