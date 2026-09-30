@@ -253,3 +253,43 @@ def test_a_history_without_the_camera_s_own_edge_answers_the_plain_lookup() -> N
     plain = FramePoser(FakeHistory()).camera_in_map(2.0)
     assert placed is not None and plain is not None
     assert np.array_equal(placed.rotation, plain.rotation)
+
+
+# ---- the newest edge of a head that stands still ---------------------------------------------
+class NeckHistory:
+    """The neck's edge as a recent history: its newest sample at ``newest`` s, and the head
+    ``turned_deg`` further round half a second earlier (0: still) — what TF holds while the
+    frame's own stamp is not covered yet."""
+
+    def __init__(self, newest: float, turned_deg: float) -> None:
+        self.newest = newest
+        self.now = RigidPose(rotation_matrix(0.0, 0.0, math.sin(0.1), math.cos(0.1)), np.zeros(3))
+        a = 0.1 - math.radians(turned_deg) / 2.0
+        self.before = RigidPose(rotation_matrix(0.0, 0.0, math.sin(a), math.cos(a)), np.zeros(3))
+
+    def pose_at(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        return None
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> RigidPose | None:
+        if stamp > self.newest:
+            return None
+        return self.now if stamp > self.newest - 0.25 else self.before
+
+    def latest_pose(self, frame: str, fixed: str) -> tuple[RigidPose, float] | None:
+        return self.now, self.newest
+
+
+def test_the_newest_edge_stands_for_a_frame_only_while_the_head_stands_still() -> None:
+    """A frame 0.1 s newer than the neck's newest edge takes that edge while the head has not
+    moved over the half second before it; a head that turned 10 deg in that half second, or an
+    edge older than the caller allows, gives nothing — the caller waits for the stamp."""
+    from pepin.frame_pose import same_pose, settled_pose
+
+    still = NeckHistory(newest=10.0, turned_deg=0.0)
+    got = settled_pose(still, 10.1, "camera_optical", "base_link", max_age_s=1.0)
+    assert got is still.now
+    turning = NeckHistory(newest=10.0, turned_deg=10.0)
+    assert settled_pose(turning, 10.1, "camera_optical", "base_link", max_age_s=1.0) is None
+    assert settled_pose(still, 11.5, "camera_optical", "base_link", max_age_s=1.0) is None
+    assert same_pose(still.now, still.before)
+    assert not same_pose(turning.now, turning.before)
