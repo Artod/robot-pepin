@@ -6,12 +6,22 @@ cannot say is where a body TOUCHES the floor: the legs under a seat, a box lower
 plane, the plinth of a sofa set back from its front. :mod:`pepin.contact` reads exactly that off
 the same frame: going up each image column the pixels are floor until the depth stops growing the
 way the floor's would, and the ray through that boundary pixel, intersected with the floor plane,
-is a range that does not depend on the network's scale at all — only the mount, the optics and the
-cart's lean enter it. This node is that function wired to ROS: ``/camera/depth`` (32FC1 metres,
-published by :mod:`pepin_bringup.depth_stream` once the lidar has fitted the depth's law),
+is a range that does not depend on the network's scale at all — only the camera's pose, the optics
+and the cart's lean enter it. This node is that function wired to ROS: ``/camera/depth`` (32FC1
+metres, published by :mod:`pepin_bringup.depth_stream` once the lidar has fitted the depth's law),
 ``/camera/camera_info`` for the optics and ``/imu/data_raw`` for which way is up; out goes
 ``/contact_scan``, a LaserScan in base_link over the same half-degree fan as ``/depth_scan``, NaN
 where no column could say anything (a costmap neither marks nor clears there).
+
+The camera's pose is TF's ``base_link <- <the depth's frame>`` at the frame's own stamp — the
+neck's live edge composed with the eye's — never config/camera.json's mount: that mount is the
+neck's LINK at its reference pose (23.8 deg down, straight ahead), while the picture is the
+eye's, about 18.5 deg down and 4.5 deg left at rest, and wherever the neck points it after a
+move (measured 2026-09-30, scratch/neck_aware/). The frame's stamp is waited for up to
+CAMERA_WAIT_S on this node's worker thread, after the newest edge of a head standing still
+(:func:`pepin.frame_pose.settled_pose`) was tried; a frame TF cannot place is dropped and
+counted, not placed straight ahead. The fan's window turns with the head (angle_min is the
+camera's yaw minus 40 deg), like ``/depth_scan``'s.
 
 Reading the ANCHORED depth costs nothing: :func:`pepin.depth.floor_anchor` snaps pixels within
 4 cm of the plane onto it, and 4 cm is inside the contact band itself
@@ -44,7 +54,6 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
-from pepin.camera import CameraConfig, mount_transform
 from pepin.contact import (
     N_BINS,
     ContactVerdict,
@@ -53,13 +62,25 @@ from pepin.contact import (
 )
 from pepin.depth import SCAN_HALF_FOV, SCAN_STEP, Array, CameraPose, Intrinsics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin_bringup.msgs import array_from_image, scan_from_ranges
-from pepin_bringup.node_kit import LeanFeed, Switches, Tally, Worker, spin_main
+from pepin.frame_pose import BASE_FRAME, same_pose, settled_pose
+from pepin.tsdf import RigidPose
+from pepin_bringup.msgs import array_from_image, scan_from_ranges, stamp_seconds
+from pepin_bringup.node_kit import (
+    LeanFeed,
+    Switches,
+    Tally,
+    TfHistory,
+    TfLookup,
+    Worker,
+    spin_main,
+)
 
 CONFIG = "/ws/config/camera.json"
 RANGE_MIN_M = 0.10  # the LaserScan's floor; the contact line itself never comes nearer than 1.0 m
 LEAN_EPSILON = 0.003  # how far the up vector may move before the floor's geometry is rebuilt
-STAGES = ("plane", "scan", "publish")
+STAGES = ("pose", "plane", "scan", "publish")
+CAMERA_WAIT_S = 0.2  # how long a frame waits for TF to cover its stamp (on the worker thread)
+CAMERA_MAX_AGE_S = 1.0  # the newest edge of a still head stands in for a frame this much newer
 RANGE_CEILING_M = 10.0  # the widest a drive may open max_range to while measuring a new cap
 
 # The node's flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
@@ -123,9 +144,6 @@ class ContactScan(Node):
     def __init__(self) -> None:
         super().__init__("contact_scan")
         config = Path(str(self.declare_parameter("config", CONFIG).value))
-        cfg = CameraConfig.load(config)
-        x, y, z, _roll, pitch, _yaw = mount_transform(cfg)
-        self._camera = CameraPose(x, y, z, pitch)
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(
@@ -135,6 +153,8 @@ class ContactScan(Node):
         newest = QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(LaserScan, "/contact_scan", reliable)
         self._tally = Tally(STAGES)
+        self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._history = TfHistory(self._tf, timeout_s=CAMERA_WAIT_S)
         self._intr: Intrinsics | None = None
         self._lean = LeanFeed(
             self,
@@ -145,16 +165,17 @@ class ContactScan(Node):
         self._plane: FloorPlane | None = None
         self._plane_up: Array | None = None  # the lean it was built for
         self._plane_intr: Intrinsics | None = None  # and the optics
+        self._plane_edge: RigidPose | None = None  # and the camera's pose on the cart
         self._verdict: ContactVerdict | None = None  # the last frame's, for the report line
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/depth", self._on_depth, newest)
         self._worker = Worker(self._process, name="contact", on_error=self._on_work_error).start()
         self.create_timer(30.0, self._report)
         self.get_logger().info(
-            f"contact scan up: /camera/depth -> /contact_scan in base_link, camera at {z:.2f} m"
-            f" and {np.degrees(pitch):.0f} deg down; the fan of /depth_scan,"
+            "contact scan up: /camera/depth -> /contact_scan in base_link, the camera placed by"
+            " TF at each frame's stamp; the fan of /depth_scan,"
             f" {np.degrees(2 * SCAN_HALF_FOV):.0f} deg in steps of {np.degrees(SCAN_STEP):.1f}"
-            f" deg; flags: {self._switches.state()}"
+            f" deg, turning with the head; flags: {self._switches.state()}"
         )
 
     def close(self) -> None:
@@ -189,19 +210,40 @@ class ContactScan(Node):
             self._tally.count("dropped")
 
     # ---- the frame ---------------------------------------------------------------------------
-    def _floor_plane(self, intr: Intrinsics) -> FloorPlane:
-        """The floor's geometry for the current lean and optics, rebuilt only when one of them
-        moves: per pixel where its ray lands on the plane, how far that is and in which bearing."""
+    def _on_tf_failure(self, kind: str, text: str) -> None:
+        self._tally.count("tf_" + kind)
+        self._tally.note(kind, text)
+
+    def _camera_at(self, stamp: float, frame: str) -> RigidPose | None:
+        """``base_link <- frame`` (the depth's optical frame) at ``stamp``: from what TF holds,
+        else the newest edge of a head that stands still, else a wait of up to CAMERA_WAIT_S
+        for the stamp; ``None`` when TF cannot place the frame at all."""
+        pose = self._history.pose_at_nowait(stamp, frame, BASE_FRAME)
+        if pose is None:
+            pose = settled_pose(self._history, stamp, frame, BASE_FRAME, max_age_s=CAMERA_MAX_AGE_S)
+        if pose is None:
+            pose = self._history.pose_at(stamp, frame, BASE_FRAME)
+        return pose
+
+    def _floor_plane(self, intr: Intrinsics, edge: RigidPose) -> FloorPlane:
+        """The floor's geometry for the current lean, optics and camera pose, rebuilt only when
+        one of them moves: per pixel where its ray lands on the plane, how far that is and in
+        which bearing. The head standing still keeps its plane; a turning head rebuilds it
+        every frame (a tenth of a second here, on this node's own thread)."""
         up = self._lean.up
         if (
             self._plane is None
             or self._plane_up is None
+            or self._plane_edge is None
             or self._plane_intr != intr  # a camera_info of another size: every array is wrong
             or float(np.linalg.norm(up - self._plane_up)) > LEAN_EPSILON
+            or not same_pose(edge, self._plane_edge)
         ):
-            self._plane = FloorPlane.of(intr, self._camera, up)
+            camera = CameraPose.from_optical(edge.rotation, edge.translation)
+            self._plane = FloorPlane.of(intr, camera, up)
             self._plane_up = np.asarray(up, dtype=float).copy()
             self._plane_intr = intr
+            self._plane_edge = edge
             self._tally.count("planes")
         return self._plane
 
@@ -222,8 +264,13 @@ class ContactScan(Node):
         if depth is None:
             self._tally.count("bad_frame")
             return
+        with self._tally.measure("pose"):
+            edge = self._camera_at(stamp_seconds(msg.header.stamp), msg.header.frame_id)
+        if edge is None:
+            self._tally.count("no_pose")  # dropped: never placed as if the head looked ahead
+            return
         with self._tally.measure("plane"):
-            plane = self._floor_plane(intr)
+            plane = self._floor_plane(intr, edge)
         max_range = float(self._switches["max_range"])
         with self._tally.measure("scan"):
             angle_min, step, ranges, verdict = contact_scan(
@@ -252,7 +299,10 @@ class ContactScan(Node):
         """The window's numbers, the last frame's verdict and the flags in one line."""
         w = self._tally.take()
         c = w.counts
-        unseen = f"{c['no_intrinsics']} without optics, {c['bad_frame']} unreadable"
+        unseen = (
+            f"{c['no_intrinsics']} without optics, {c['bad_frame']} unreadable,"
+            f" {c['no_pose']} TF could not place"
+        )
         verdict = self._verdict
         ranges = w.samples.get("range", [])
         self.get_logger().info(
@@ -264,6 +314,11 @@ class ContactScan(Node):
             + (f"; last frame: {verdict}" if verdict is not None else "; no frame yet")
             + f"; {self._lean.report()}; flags: {self._switches.state()};"
             + f" ms median/max: {w.stages()}"
+            + (
+                "; tf: " + "; ".join(f"{k} {c['tf_' + k]}: {t}" for k, t in w.notes.items())
+                if w.notes
+                else ""
+            )
         )
         if c["unleaned"]:
             self.get_logger().warning(
