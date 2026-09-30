@@ -627,3 +627,50 @@ def _range_pool(n: int = 6000, near: float = 0.7, far: float = 2.0) -> tuple[np.
     """(network, true) pairs over a room that spans ``near`` to ``far`` metres."""
     z = np.linspace(near, far, n)
     return _tilted(z), z
+
+
+# ---- the neck's pan as the camera's yaw ------------------------------------------------------
+def test_a_panned_head_projects_what_it_looks_at_onto_the_principal_point() -> None:
+    """The neck turned 30 deg left: a point 2 m out along that bearing, at the lens's height,
+    sits on the optical axis — and a point dead ahead of the cart is off to the right of the
+    picture. The pose from TF's edge carries the pan as its yaw (2026-09-30: the lidar's beams
+    were projected as if the head looked ahead whatever the neck did)."""
+    from pepin.depth import optical_heading, rotation_matrix
+
+    yaw = math.radians(30.0)
+    cam = CameraPose(x=0.0, y=0.0, z=1.23, yaw=yaw)
+    along = np.array([[2.0 * math.cos(yaw), 2.0 * math.sin(yaw), 1.23]])
+    hit = project(along, cam, INTR)
+    assert hit[0, 0] == pytest.approx(320.0) and hit[0, 1] == pytest.approx(180.0)
+    assert hit[0, 2] == pytest.approx(2.0)
+    ahead = project(np.array([[2.0, 0.0, 1.23]]), cam, INTR)
+    assert ahead[0, 0] > 320.0  # right of the centre: the cart's x is 30 deg to the head's right
+    # the same pose read off an optical edge: z forward = the head's heading
+    link = np.array(
+        [[math.cos(yaw), -math.sin(yaw), 0.0], [math.sin(yaw), math.cos(yaw), 0.0], [0.0, 0.0, 1.0]]
+    )
+    optical = link @ rotation_matrix(-0.5, 0.5, -0.5, 0.5)
+    assert optical_heading(optical)[1] == pytest.approx(yaw)
+    from_edge = CameraPose.from_optical(optical, np.array([0.0, 0.0, 1.23]))
+    assert from_edge.yaw == pytest.approx(yaw) and from_edge.pitch == pytest.approx(0.0, abs=1e-12)
+
+
+def test_a_level_floor_does_not_care_where_the_head_looks_and_a_leaning_one_does() -> None:
+    """On a level floor the floor's depth per pixel is the same at every pan. On a floor leaning
+    along the head's heading it is the same as the unpanned head on a floor leaning along the
+    cart's x: the lean is read in the head's frame."""
+    from pepin.depth import floor_depth
+
+    intr = Intrinsics(fx=400.0, fy=400.0, cx=320.0, cy=180.0, width=640, height=360)
+    ahead = CameraPose(0.0, 0.0, 1.23, math.radians(26.0))
+    panned = CameraPose(0.0, 0.0, 1.23, math.radians(26.0), math.radians(60.0))
+    assert np.allclose(floor_depth(intr, ahead), floor_depth(intr, panned), equal_nan=True)
+    a, yaw = math.radians(5.0), math.radians(60.0)
+    along_head = np.array([-math.sin(a) * math.cos(yaw), -math.sin(a) * math.sin(yaw), math.cos(a)])
+    along_x = np.array([-math.sin(a), 0.0, math.cos(a)])
+    assert np.allclose(
+        floor_depth(intr, panned, along_head), floor_depth(intr, ahead, along_x), equal_nan=True
+    )
+    assert not np.allclose(
+        floor_depth(intr, panned, along_x), floor_depth(intr, ahead, along_x), equal_nan=True
+    )

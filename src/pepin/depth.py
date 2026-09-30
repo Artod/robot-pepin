@@ -66,24 +66,34 @@ def decode_rgb(data: bytes, height: int, width: int, encoding: str) -> npt.NDArr
 
 @dataclass(frozen=True)
 class CameraPose:
-    """Where the camera_link sits in base_link: metres forward, left, up, and its pitch in
-    radians (positive tilts the view down, the ROS convention)."""
+    """Where the camera sits in base_link: metres forward, left, up, its pitch in radians
+    (positive tilts the view down, the ROS convention) and its yaw (radians, positive turns the
+    view left: the neck's pan). Roll is not carried: the neck has no roll joint."""
 
     x: float
     y: float
     z: float
     pitch: float = 0.0
+    yaw: float = 0.0
 
     @classmethod
     def from_optical(cls, rotation: Array, translation: Array) -> CameraPose:
         """The pose from ``base_link <- camera_optical`` (the live TF edge when the neck
-        moves): the translation as is (the optical frame shares the link's origin) and the
-        pitch of the optical axis. A pan of the head is not carried — the projections here
-        assume the camera looks along base_link's x (:func:`optical_heading` says how far it
-        does not, and :func:`depth_to_scan` takes that pan beside this pose)."""
+        moves): the translation as is, and the optical axis as a pitch and a yaw
+        (:func:`optical_heading`). Every projection here turns by the yaw, so a panned head
+        projects where it looks."""
         t = np.asarray(translation, dtype=float)
-        pitch, _pan = optical_heading(rotation)
-        return cls(float(t[0]), float(t[1]), float(t[2]), pitch)
+        pitch, pan = optical_heading(rotation)
+        return cls(float(t[0]), float(t[1]), float(t[2]), pitch, pan)
+
+
+def up_in_head(up: Array, yaw: float) -> Array:
+    """A base_link vector (the floor's up) in the frame turned by ``yaw`` about base_link's z —
+    the head's frame, where the pitch-only projections below are written. A level ``up`` is
+    the same in both; a leaning one is not."""
+    c, s = math.cos(yaw), math.sin(yaw)
+    u = np.asarray(up, dtype=float)
+    return np.array([c * u[0] + s * u[1], -s * u[0] + c * u[1], u[2]])
 
 
 def optical_heading(rotation: Array) -> tuple[float, float]:
@@ -143,11 +153,13 @@ def project_all(
     lands inside the image or in front of the camera (a point behind the lens has a negative
     depth and a meaningless pixel): for a caller that must keep the points' order."""
     p = np.asarray(points_base, dtype=float) - np.array([cam.x, cam.y, cam.z])
+    cy, sy = math.cos(cam.yaw), math.sin(cam.yaw)
+    ahead, aside = cy * p[:, 0] + sy * p[:, 1], -sy * p[:, 0] + cy * p[:, 1]  # the pan undone
     c, s = math.cos(cam.pitch), math.sin(cam.pitch)
     # camera_link axes: forward, left, up; the pitch turns forward towards the floor
-    forward = c * p[:, 0] - s * p[:, 2]
-    left = p[:, 1]
-    up = s * p[:, 0] + c * p[:, 2]
+    forward = c * ahead - s * p[:, 2]
+    left = aside
+    up = s * ahead + c * p[:, 2]
     with np.errstate(divide="ignore", invalid="ignore"):
         u = intr.fx * (-left / forward) + intr.cx
         v = intr.fy * (-up / forward) + intr.cy
@@ -346,18 +358,21 @@ def floor_depth(intr: Intrinsics, cam: CameraPose, up: Array = UP_LEVEL) -> Arra
     """The depth every pixel would have if its ray ended on the floor: the plane through
     base_link's origin (the wheels' contact) perpendicular to ``up`` (gravity's opposite in
     base_link; level by default, tilted when the cart stands on a slipper). NaN at and above
-    the horizon, where the ray never meets the floor."""
+    the horizon, where the ray never meets the floor. The head's yaw turns the rays, which
+    matters only on a leaning floor: the plane is worked out in the head's frame."""
     rows, cols = np.mgrid[0 : intr.height, 0 : intr.width]
     left = -(cols - intr.cx) / intr.fx
     lift = -(rows - intr.cy) / intr.fy
     c, s = math.cos(cam.pitch), math.sin(cam.pitch)
-    # camera rays (forward 1, left, up) into base_link through the mount's pitch
+    # camera rays (forward 1, left, up) into the head's frame through the mount's pitch
     dx = c + s * lift
     dy = left
     dz = -s + c * lift
-    n = np.asarray(up, dtype=float) / np.linalg.norm(up)
+    n = up_in_head(np.asarray(up, dtype=float) / np.linalg.norm(up), cam.yaw)
     n_dot_d = n[0] * dx + n[1] * dy + n[2] * dz
-    n_dot_c = n[0] * cam.x + n[1] * cam.y + n[2] * cam.z
+    n_dot_c = float(np.asarray(up, dtype=float) @ np.array([cam.x, cam.y, cam.z])) / float(
+        np.linalg.norm(up)
+    )  # a dot product: the same in either frame
     with np.errstate(divide="ignore", invalid="ignore"):
         t = np.where(n_dot_d < -1e-6, -n_dot_c / n_dot_d, np.nan)
     expected: Array = np.where(t > 0, t, np.nan)  # depth along the axis: the ray's forward is 1

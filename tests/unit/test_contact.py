@@ -294,3 +294,26 @@ def test_an_array_band_floor_reaches_depth_to_scan_pixel_by_pixel() -> None:
     banded = depth_to_scan(leaking, intr, cam, min_z=fan_min_z(expected, cam.z))[2]
     assert np.count_nonzero(np.isfinite(flat)) > 20  # the far floor marks itself as obstacles
     assert np.count_nonzero(np.isfinite(banded)) == 0  # 0.18 m is inside the band past 2 m
+
+
+# ---- the neck's pan --------------------------------------------------------------------------
+def test_a_panned_head_lifts_its_pixels_onto_the_floor_where_it_looks() -> None:
+    """The head turned 40 deg left: every pixel lands on the floor where the unpanned head's
+    pixel lands, turned 40 deg about the lens's vertical (here base_link's z) — the floor
+    point, the bearing bins and the window's angle_min all turn with the neck, so the contact
+    scan is a base_link scan whichever way the head looks."""
+    from pepin.contact import scan_bins
+
+    yaw = math.radians(40.0)
+    panned = CameraPose(x=0.0, y=0.0, z=1.23, pitch=math.radians(26.0), yaw=yaw)
+    v, u = np.array([300.0, 200.0, 359.0]), np.array([100.0, 320.0, 600.0])
+    x0, y0 = ipm(v, u, INTR, CAM)
+    x1, y1 = ipm(v, u, INTR, panned)
+    c, s = math.cos(yaw), math.sin(yaw)
+    assert x1 == pytest.approx(c * x0 - s * y0) and y1 == pytest.approx(s * x0 + c * y0)
+    assert np.array_equal(scan_bins(x1, y1, yaw), scan_bins(x0, y0))
+    # a floor point dead ahead of the panned head is the centre bin, not 40 deg off it
+    assert scan_bins(np.array([c]), np.array([s]), yaw)[0] == CENTRE
+    plane = FloorPlane.of(INTR, panned)
+    angle_min, _step, _ranges, _verdict = contact_scan(_scene(), plane)
+    assert angle_min == pytest.approx(yaw - SCAN_HALF_FOV)

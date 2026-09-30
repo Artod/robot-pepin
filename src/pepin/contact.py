@@ -159,16 +159,18 @@ def ipm(
     (continuous, :func:`pepin.depth.project`'s convention) meets the floor — the plane through
     the wheels' contact perpendicular to ``up`` (level by default, leaning with the cart when
     the accelerometer says so). NaN where the ray never meets it (at and above the horizon).
-    The exact inverse of :func:`pepin.depth.project` for a point on the plane; the network's
-    scale never enters."""
+    The exact inverse of :func:`pepin.depth.project` for a point on the plane, the head's yaw
+    included; the network's scale never enters."""
     u = np.asarray(u, dtype=float)
     v = np.asarray(v, dtype=float)
     left = -(u - intr.cx) / intr.fx
     lift = -(v - intr.cy) / intr.fy
     c, s = math.cos(cam.pitch), math.sin(cam.pitch)
-    dx = c + s * lift  # the ray in base_link, per unit optical depth
-    dy = left
+    ahead = c + s * lift  # the ray in the head's frame, per unit optical depth
     dz = -s + c * lift
+    cy, sy = math.cos(cam.yaw), math.sin(cam.yaw)
+    dx = cy * ahead - sy * left  # ...and in base_link, turned by the neck's pan
+    dy = sy * ahead + cy * left
     n = np.asarray(up, dtype=float) / np.linalg.norm(up)
     n_dot_d = n[0] * dx + n[1] * dy + n[2] * dz
     n_dot_c = n[0] * cam.x + n[1] * cam.y + n[2] * cam.z
@@ -178,14 +180,19 @@ def ipm(
     return cam.x + t * dx, cam.y + t * dy
 
 
-def scan_bins(x: Array, y: Array) -> Ints:
+def scan_bins(x: Array, y: Array, yaw: float = 0.0) -> Ints:
     """Which half-degree bearing of :func:`pepin.depth.depth_to_scan`'s fan each base_link point
-    falls in; -1 where the point is unknown, behind the camera or outside the fan."""
+    falls in; -1 where the point is unknown, behind the camera or outside the fan. The bearing
+    is measured from the head's heading ``yaw`` (the fan's window turns with the neck, so bin i
+    is the i-th half-degree across the picture and its angle is ``yaw - SCAN_HALF_FOV + i *
+    SCAN_STEP`` in base_link)."""
     xs = np.asarray(x, dtype=float)
     ys = np.asarray(y, dtype=float)
+    cy, sy = math.cos(yaw), math.sin(yaw)
+    along, across = cy * xs + sy * ys, -sy * xs + cy * ys
     with np.errstate(invalid="ignore"):
-        bearing = np.arctan2(ys, xs)
-        in_fan = np.isfinite(xs) & np.isfinite(ys) & (xs > 0.0)
+        bearing = np.arctan2(across, along)
+        in_fan = np.isfinite(xs) & np.isfinite(ys) & (along > 0.0)
         in_fan &= np.abs(bearing) <= SCAN_HALF_FOV
     index = np.rint((np.where(in_fan, bearing, 0.0) + SCAN_HALF_FOV) / SCAN_STEP)
     out: Ints = np.where(in_fan, index, -1).astype(np.int64)
@@ -225,7 +232,7 @@ class FloorPlane:
             x=x,
             y=y,
             range_m=np.hypot(x, y),
-            bin=scan_bins(x, y),
+            bin=scan_bins(x, y, cam.yaw),
             height=float(unit @ np.array([cam.x, cam.y, cam.z])),
         )
 
@@ -441,8 +448,9 @@ def contact_scan(
     that its contact is below the picture reads NaN too, and the lidar owns that metre).
     ``scale_rows`` is the frame's floor scale rows (0: off) and ``scale_bounds`` what it may
     swallow — widened, the scan reads a depth image no law has corrected yet. Returns
-    (angle_min, angle_increment, ranges, verdict) — the first three ready for a LaserScan like
-    :func:`pepin.depth.depth_to_scan`."""
+    (angle_min, angle_increment, ranges, verdict) — the first three ready for a base_link
+    LaserScan like :func:`pepin.depth.depth_to_scan`'s, the window turned with the head:
+    ``angle_min`` is the plane's camera yaw minus SCAN_HALF_FOV."""
     d = np.asarray(depth, dtype=float)
     with np.errstate(invalid="ignore"):
         beyond: Mask = ~(plane.range_m < max_range)
@@ -457,7 +465,7 @@ def contact_scan(
         at_contact = band[np.clip(columns.top, 0, plane.intr.height - 1), cols.astype(int)]
         x, y = band_shadow(x, y, at_contact, plane)
     reach = np.hypot(x, y)
-    bins = scan_bins(x, y)
+    bins = scan_bins(x, y, plane.cam.yaw)
     with np.errstate(invalid="ignore"):
         marks = (columns.state == int(ColumnState.CONTACT)) & (reach < max_range) & (bins >= 0)
     decided = (columns.state == int(ColumnState.CONTACT)) | (
@@ -480,7 +488,7 @@ def contact_scan(
         cleared=int(np.isinf(ranges).sum()),
         unseen=int(np.isnan(ranges).sum()),
     )
-    return -SCAN_HALF_FOV, SCAN_STEP, ranges, verdict
+    return plane.cam.yaw - SCAN_HALF_FOV, SCAN_STEP, ranges, verdict
 
 
 # ---- the floor kept out of the obstacle fan ------------------------------------------------------
