@@ -199,6 +199,31 @@ def joint_angles(cfg: NeckConfig, pan_ticks: int, tilt_ticks: int) -> NeckAngles
     return NeckAngles(pan, pitch)
 
 
+def ticks_for(cfg: NeckConfig, angles: NeckAngles) -> tuple[int, int]:
+    """The encoder ticks ``(pan, tilt)`` that point the camera at ``angles``: the inverse of
+    :func:`joint_angles`, to the nearest tick. Raises ``ValueError`` while the reference ticks are
+    unread — the model then measures nothing, so no angle has a tick to be commanded with."""
+    ref = cfg.reference
+    if ref.pan_ticks is None or ref.tilt_ticks is None:
+        raise ValueError("the neck's reference ticks are unread in config/neck.json")
+    pan = ref.pan_ticks + round(angles.pan_rad / (ref.pan_sign * RAD_PER_TICK))
+    down = angles.pitch_rad - math.radians(ref.pitch_deg)
+    return pan, ref.tilt_ticks + round(down / (ref.tilt_sign * RAD_PER_TICK))
+
+
+def angle_limits(cfg: NeckConfig) -> tuple[tuple[float, float], tuple[float, float]]:
+    """How far the head may turn, as ``((pan_min, pan_max), (pitch_min, pitch_max))`` in radians
+    (pan positive left, pitch positive down): the configured tick limits through the angle model.
+    Raises ``ValueError`` while the reference ticks are unread, as :func:`ticks_for` does."""
+    if not cfg.reference.known:
+        raise ValueError("the neck's reference ticks are unread in config/neck.json")
+    low = joint_angles(cfg, cfg.pan.min_ticks, cfg.tilt.min_ticks)
+    high = joint_angles(cfg, cfg.pan.max_ticks, cfg.tilt.max_ticks)
+    pans = sorted((low.pan_rad, high.pan_rad))
+    pitches = sorted((low.pitch_rad, high.pitch_rad))
+    return (pans[0], pans[1]), (pitches[0], pitches[1])
+
+
 def pan_pivot(cfg: NeckConfig) -> tuple[float, float, float]:
     """Where the pan axis meets the neck in base_link: the measured camera position with the
     lever arms, posed as at the reference, taken away — so the reference reproduces the mount."""

@@ -14,11 +14,13 @@ from pepin.neck import (
     NeckConfig,
     NeckPivot,
     NeckReference,
+    angle_limits,
     camera_pose,
     joint_angles,
     neck_servo_ids,
     pan_pivot,
     parse_neck,
+    ticks_for,
     ticks_from,
 )
 
@@ -198,3 +200,40 @@ def test_the_base_server_s_reply_is_parsed_and_other_lines_are_not() -> None:
     assert stale is not None and stale.ticks == (1, 2) and stale.error == "x"
     assert parse_neck({"type": "state", "x": 0.0}) is None
     assert parse_neck({"type": "pong"}) is None
+
+
+@pytest.mark.parametrize(("pan_sign", "tilt_sign"), [(1, 1), (-1, 1), (1, -1), (-1, -1)])
+def test_ticks_for_is_the_inverse_of_joint_angles(pan_sign: int, tilt_sign: int) -> None:
+    """An angle asked for comes back from the encoders it commands, to half a tick, whatever
+    the signs: the head's look(pan, tilt) and its report agree."""
+    cfg = _with(_read(NeckConfig.from_json(NECK)), pan_sign=pan_sign, tilt_sign=tilt_sign)
+    for pan_deg, pitch_deg in ((0.0, 23.8), (90.0, 10.0), (-120.0, 60.0), (35.5, -15.0)):
+        wanted = NeckAngles(math.radians(pan_deg), math.radians(pitch_deg))
+        got = joint_angles(cfg, *ticks_for(cfg, wanted))
+        assert got.pan_rad == pytest.approx(wanted.pan_rad, abs=RAD_PER_TICK / 2)
+        assert got.pitch_rad == pytest.approx(wanted.pitch_rad, abs=RAD_PER_TICK / 2)
+
+
+def test_the_reference_pose_commands_the_reference_ticks() -> None:
+    cfg = NeckConfig.from_json(NECK)
+    ref = cfg.reference
+    at_rest = NeckAngles(0.0, math.radians(ref.pitch_deg))
+    assert ticks_for(cfg, at_rest) == (ref.pan_ticks, ref.tilt_ticks)
+
+
+def test_the_head_s_reach_is_its_tick_limits_in_angles() -> None:
+    """The file's limits through the model: about 156 deg either way, 20 up to 92 down (the
+    'pan about +-156, tilt 22 up .. 90 down' of the brain plan)."""
+    (pan_lo, pan_hi), (pitch_lo, pitch_hi) = angle_limits(NeckConfig.from_json(NECK))
+    assert math.degrees(pan_lo) == pytest.approx(-156.7, abs=0.5)
+    assert math.degrees(pan_hi) == pytest.approx(155.7, abs=0.5)
+    assert math.degrees(pitch_lo) == pytest.approx(-19.9, abs=0.5)
+    assert math.degrees(pitch_hi) == pytest.approx(92.3, abs=0.5)
+
+
+def test_no_angle_is_commanded_while_the_reference_is_unread() -> None:
+    cfg = _with(NeckConfig.from_json(NECK), pan_ticks=None, tilt_ticks=None)
+    with pytest.raises(ValueError, match="unread"):
+        ticks_for(cfg, NeckAngles(0.0, 0.4))
+    with pytest.raises(ValueError, match="unread"):
+        angle_limits(cfg)
