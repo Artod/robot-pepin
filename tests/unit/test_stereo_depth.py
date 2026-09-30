@@ -124,11 +124,11 @@ def test_the_rig_s_metres_are_the_rectifier_s_to_the_bit() -> None:
     assert np.array_equal(rig.depth_m(disparities), rectifier.depth_m(disparities), equal_nan=True)
 
 
-def test_the_reach_is_where_the_error_model_crosses_ten_centimetres() -> None:
+def test_the_reach_is_where_the_error_model_crosses_twenty_five_centimetres() -> None:
     """The reach is derived, not copied from the mono network's 3.0 m: sigma_z = z^2 / (fx*B) *
-    sigma_d reaches 10 cm at 2.17 m on this rig, and the nearest measurable depth is 18 cm."""
+    sigma_d reaches 25 cm at 3.43 m on this rig, and the nearest measurable depth is 18 cm."""
     reach = reach_m(FX, BASELINE_M)
-    assert reach == pytest.approx(2.17, abs=0.01)
+    assert reach == pytest.approx(3.43, abs=0.01)
     assert reach**2 / FX_B * DISPARITY_SIGMA_PX == pytest.approx(DEPTH_SIGMA_M)
     assert near_m(FX, BASELINE_M, 128) == pytest.approx(0.18, abs=0.005)
     assert reach_m(0.0, BASELINE_M) == 0.0 and near_m(FX, BASELINE_M, 0) == 0.0
@@ -141,7 +141,7 @@ def test_a_source_without_its_rig_refuses_instead_of_inventing_a_metre(planes: t
     with pytest.raises(StereoUnavailableError):
         depth(left, right)
     depth.geometry = RIG
-    assert depth.reach == pytest.approx(2.17, abs=0.01), "a reach nobody stated is derived"
+    assert depth.reach == pytest.approx(3.43, abs=0.01), "a reach nobody stated is derived"
     assert np.isfinite(depth(left, right)).any()
 
 

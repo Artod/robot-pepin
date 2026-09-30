@@ -453,9 +453,9 @@ class DepthLaw:
     stopping a truncation short so a surface standing AT the reach is not rubbed out by the very
     rays that could not measure it. ``reach_m`` is the source's own reach and nothing else — the
     node measures it from the frames (the largest finite depth they carry), because
-    ``depth_reach_m`` on the publisher is a looser gate (3.0 m) than the rig itself (2.46 m by
-    its error model, 2.54 m measured off the published frames) and carving to 3.0 m would carve
-    through half a metre the camera never looked at.
+    ``depth_reach_m`` on the publisher is a looser gate (4.0 m) than the rig itself (~3.9 m by
+    its error model since 2026-09-30, 2.46 m before at a 10 cm budget) and carving to the gate
+    would carve through metres the camera never looked at.
 
     ``no_depth_weight`` is why this is not as loud as a measurement. A NaN is not evidence of
     emptiness: the matcher also refuses a near textureless wall, a rectification margin and an

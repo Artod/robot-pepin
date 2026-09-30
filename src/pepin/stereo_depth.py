@@ -91,7 +91,12 @@ DISP_SCALE = 16.0  # OpenCV's fixed point: the matcher answers in sixteenths of 
 # actually see are MJPEG off the board, blocky where the texture is faint. Half a pixel is the
 # honest number for those; it is what the reach hangs on, so it is stated, not assumed.
 DISPARITY_SIGMA_PX = 0.5
-DEPTH_SIGMA_M = 0.10  # the depth error at which this camera stops answering for its own depth
+# The depth error at which this camera stops answering for its own depth. 0.10 m reached 2.46 m on
+# this rig (fx*B 32 m*px): enough for the costmap's camera layer (2.5 m) and the volume's marks
+# (3.0 m), but a bookshelf 4 m away was named by the detector and refused as no_depth (sightings,
+# tape 0472: 171 of 783 detections). 0.25 m reaches ~4 m; past 3 m only the volume and the
+# sightings read the depth, and a sighting is placed by the median over its mask.
+DEPTH_SIGMA_M = 0.25
 MODES = ("sgbm", "hh", "hh4", "3way")
 MATCHERS = ("sgbm", "raft")  # which engine answers a pair; the node's stereo_matcher flag
 # A rectified eye's "no data": pure black regions that touch the picture's border and are at least

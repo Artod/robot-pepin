@@ -94,7 +94,7 @@ CONFIG_CAM = CameraPose(*mount_transform(CONFIG)[:3], mount_transform(CONFIG)[4]
 # must sit where the node projects them from.
 LIDAR_Z_M = load_lidar_mount().z_m
 LIDAR_MOUNT = RigidPose(np.eye(3), np.array([0.0, 0.0, LIDAR_Z_M]))
-SCAN_MAX_RANGE = 3.0  # the node's default
+SCAN_MAX_RANGE = 4.0  # the node's default
 SCAN_EVERY_FRAME = 0.0  # ``scan_hz`` off: one fan per frame, which is what these tests count
 WALLS = (1.0, 1.5, 2.5, 3.5, 2.0, 3.0)  # views enough for POOL_MIN_SAMPLES pairs and a spread
 LAW = (1.3, 0.03)  # the network's own error: 1 / z = a / D + b
@@ -902,8 +902,8 @@ def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
     """The published depth's reach and /depth_scan's cap are the same physical claim, so they are
     the same constant: two literals would drift, and the costmap's obstacle_max_range of 2.5 m has
     to stay under both."""
-    assert DEPTH_REACH_M == 3.0
-    assert load_knobs("depth_stream")["depth_reach_m"] == 3.0
+    assert DEPTH_REACH_M == 4.0
+    assert load_knobs("depth_stream")["depth_reach_m"] == 4.0
     assert FLAGS["depth_reach"] is True
     assert SCAN_MAX_RANGE == DEPTH_REACH_M, "this file's own reference uses the node's default"
 
@@ -911,8 +911,8 @@ def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
 def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
     build: Build,
 ) -> None:
-    """Two nodes, the same seeded law and the same frame of a wall 3.5 m off: the one with
-    ``depth_reach`` on publishes NaN exactly where the other published more than 3 m, and nothing
+    """Two nodes, the same seeded law and the same frame of a wall 4.5 m off: the one with
+    ``depth_reach`` on publishes NaN exactly where the other published more than 4 m, and nothing
     else moves — same finite pixels to the bit, same /depth_scan to the bit."""
     # Every ruler off and the law seeded: the two nodes then publish the SAME pixels bit for bit,
     # because a law that still moves moves at so much per SECOND of wall time (``law_slew``) and
@@ -926,14 +926,14 @@ def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
     on, on_net = build(**frozen)
     assert off.set_parameters([Param("depth_reach", False)])[0].successful
     assert off._switches.on("depth_reach") is False and on._switches.on("depth_reach") is True
-    frame(off, off_net, CONFIG_CAM, 3.5, 0)
-    frame(on, on_net, CONFIG_CAM, 3.5, 0)
+    frame(off, off_net, CONFIG_CAM, 4.5, 0)
+    frame(on, on_net, CONFIG_CAM, 4.5, 0)
     raw = np.asarray(array_from_image(published(off)[0][0]), dtype=float)
     gated = np.asarray(array_from_image(published(on)[0][0]), dtype=float)
     assert raw.shape == gated.shape == (HEIGHT, WIDTH)
-    beyond = raw > 3.0
+    beyond = raw > DEPTH_REACH_M
     assert beyond.any() and (~beyond & np.isfinite(raw)).any(), "the frame has both halves"
-    assert np.all(np.isnan(gated[beyond])), "past 3 m the camera says nothing"
+    assert np.all(np.isnan(gated[beyond])), "past the reach the camera says nothing"
     assert np.array_equal(gated[~beyond], raw[~beyond], equal_nan=True), "and nothing else moves"
     assert np.array_equal(
         np.asarray(published(off)[1][0].ranges),
@@ -943,8 +943,8 @@ def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
     on._report()
     line = on.logger.texts("info")[-1]
     share = int(beyond.sum()) / (HEIGHT * WIDTH) * 100.0
-    assert f"published NaN past 3.0 m over {share:.1f}% of the pixels" in line
-    assert "depth_reach=on " in line and "depth_reach_m=3.0" in line
+    assert f"published NaN past {DEPTH_REACH_M:.1f} m over {share:.1f}% of the pixels" in line
+    assert "depth_reach=on " in line and "depth_reach_m=4.0" in line
     off._report()
     assert "published NaN past" not in off.logger.texts("info")[-1]
 
@@ -1152,13 +1152,13 @@ def test_the_fan_never_announces_a_range_the_stereo_head_does_not_measure(build:
     matcher = rig(node)
     assert node._stereo is not None
     reach = float(node._stereo.reach)
-    assert 0.5 < reach < 3.0
+    assert 0.5 < reach < DEPTH_REACH_M
     stereo_frame(node, matcher, CONFIG_CAM, 1.5, 0)
     _depths, scans = published(node)
     assert scans[0].range_max == pytest.approx(reach)
     far, _net2 = build(depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False)
     rig(far)
-    assert far._scan_max_range == pytest.approx(3.0)
+    assert far._scan_max_range == pytest.approx(DEPTH_REACH_M)
 
 
 def test_a_left_picture_with_no_right_eye_of_its_stamp_is_dropped_and_counted(

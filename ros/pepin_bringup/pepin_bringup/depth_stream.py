@@ -206,8 +206,10 @@ SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands be
 # published image's reach (the ``depth_reach`` flag) and /depth_scan's own cap
 # (``scan_max_range``) — because they are the same physical claim, and two literals would drift:
 # the costmap's obstacle_max_range of 2.5 m has to stay under the scan's cap, and the camera half
-# of RTAB-Map's grid has to stay under the image's. Measured: see the ``depth_reach_m`` flag.
-DEPTH_REACH_M = 3.0
+# of RTAB-Map's grid has to stay under the image's. The rig's own reach (pepin.stereo_depth's
+# DEPTH_SIGMA_M, ~4 m on this rig since 2026-09-30) binds first: the scan's cap is the smaller of
+# the two. Measured: see the ``depth_reach_m`` flag.
+DEPTH_REACH_M = 4.0
 
 # What a METRIC source changes in the chain, by flag name (the rest keep FLAGS' defaults): the
 # lidar's pairs are still collected and the affine law still fitted, as a witness

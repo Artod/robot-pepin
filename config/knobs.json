@@ -57,7 +57,7 @@
       "note": "how far behind a frame's stamp TF's newest edge may be before that edge is taken for dead and no lookup on the frame's path waits for it: the camera pose falls to config/camera.json's mount and the lidar's scan passes uncarried, both at once and both counted. 0 turns the guard off — every lookup waits CARRY_WAIT_S again"},
     "lidar_sigma_m": {"default": 0.0, "range": [0.0, 0.2],
       "note": "what one lidar beam's range is trusted to, in metres. 0 (the default) gives every beam the flat weight of 1, the reference pair. Above 0, a beam's weight is 1 / sigma^2 in inverse depth, sigma_m / z^2, which reads as a weight proportional to z^4"},
-    "depth_reach_m": {"default": 3.0, "range": [0.3, 12.0],
+    "depth_reach_m": {"default": 4.0, "range": [0.3, 12.0],
       "note": "metres past which the published depth is NaN; the same number /depth_scan is capped at"},
     "scan_hz": {"default": 5.0, "range": [0.0, 30.0],
       "note": "the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all"}
