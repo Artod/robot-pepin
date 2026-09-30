@@ -67,6 +67,7 @@ PoseWithCovarianceStamped = _msg(
 Image = _msg(
     "Image", header=Header, height=0, width=0, encoding="", is_bigendian=0, step=0, data=b""
 )
+JointState = _msg("JointState", header=Header, name=list, position=list, velocity=list, effort=list)
 LaserScan = _msg(
     "LaserScan",
     header=Header,
@@ -932,6 +933,7 @@ def install() -> Any:
             CameraInfo=CameraInfo,
             Image=Image,
             LaserScan=LaserScan,
+            JointState=JointState,
             PointCloud2=PointCloud2,
             Range=Range,
             PointField=PointField,
