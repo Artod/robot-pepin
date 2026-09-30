@@ -24,6 +24,7 @@ import logging
 from collections.abc import Callable, Iterable
 
 from pepin.audio_link import AUDIO_PORT, AudioClient, AudioFrame, DoaReading, Speaker, board_host
+from pepin.log import setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ def main() -> None:
     parser.add_argument("--host", default=board_host())
     parser.add_argument("--port", type=int, default=AUDIO_PORT)
     args = parser.parse_args()
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname).1s %(message)s")
+    setup_logging("voice")
     client = AudioClient(args.host, args.port).start()
     logger.info("connected: %s", client.hello)
     try:

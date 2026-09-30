@@ -230,9 +230,11 @@ def play_paced(
 
 
 def tcp_connect(address: tuple[str, int]) -> socket.socket:
-    """Default connector: a blocking TCP socket to ``address`` (2 s to connect)."""
+    """Default connector: a blocking TCP socket to ``address`` (2 s to connect), without
+    Nagle's delay — a ``flush`` is a few bytes that must leave at once."""
     sock = socket.create_connection(address, timeout=2.0)
     sock.settimeout(None)
+    sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     return sock
 
 
