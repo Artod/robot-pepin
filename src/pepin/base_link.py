@@ -28,6 +28,8 @@ when the last driver leaves, whoever is still connected only asking (the neck no
 
 from __future__ import annotations
 
+import json
+import socket
 import threading
 import time
 from dataclasses import dataclass, replace
@@ -39,6 +41,45 @@ from pepin.streams import Connector, JsonLinesClient
 
 BASE_PORT = 3336
 DEADMAN_S = 0.5  # the board stops the wheels when no twist arrived for this long
+NECK_MOVE_WAIT_S = 8.0  # a neck move gives up after 3 s on the board; its reply comes a bit later
+
+
+def ask(
+    host: str,
+    message: dict[str, Any],
+    reply_type: str,
+    wait_s: float,
+    port: int = BASE_PORT,
+) -> dict[str, Any] | None:
+    """One request on a fresh connection, and the first ``{"type": reply_type}`` line back.
+
+    The port broadcasts a state line 20 times a second to everyone connected; those are
+    skipped. ``None`` when the answer did not come within ``wait_s``; ``OSError`` when nobody
+    listens. A connection that only asks is not a driver, so the wheels are left alone.
+    """
+    with socket.create_connection((host, port), timeout=3.0) as sock:
+        sock.sendall((json.dumps(message) + "\n").encode())
+        sock.settimeout(1.0)
+        deadline, buffer = time.monotonic() + wait_s, b""
+        while time.monotonic() < deadline:
+            try:
+                chunk = sock.recv(4096)
+            except TimeoutError:
+                continue
+            if not chunk:
+                return None
+            buffer += chunk
+            *lines, buffer = buffer.split(b"\n")
+            for line in lines:
+                if not line.strip():
+                    continue
+                try:
+                    reply = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(reply, dict) and reply.get("type") == reply_type:
+                    return reply
+    return None
 
 
 @dataclass(frozen=True)

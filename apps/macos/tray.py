@@ -1,8 +1,14 @@
 """macOS menu-bar app: the robot's health at a glance, one click away.
 
-A daemon thread polls :func:`pepin.health.run_health` (ssh + TCP, read-only) on
-an interval; a rumps timer drains the results on the main thread and rebuilds
-the menu, so no AppKit call ever happens off the main thread.
+A daemon thread polls :func:`pepin.health.run_health` (ssh + TCP, read-only) for the
+board and :func:`pepin.health.probe_laptop` for this Mac's half (the goal server, the
+containers) on an interval; a rumps timer drains the results on the main thread and
+rebuilds the menu, so no AppKit call ever happens off the main thread. The menu itself
+is :mod:`tray_menu`'s data, rendered here.
+
+    uv run --group macos python apps/macos/tray.py            the app
+    uv run --group macos python apps/macos/tray.py --check    build the menu from a fake
+                                                              report, touch nothing, exit 0
 """
 
 from __future__ import annotations
@@ -11,9 +17,10 @@ import logging
 import queue
 import shutil
 import subprocess
+import sys
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,15 +33,31 @@ from AppKit import (
     NSForegroundColorAttributeName,
     NSMutableAttributedString,
 )
+from tray_menu import (
+    STOP_CONFIRM_S,
+    TELEOP_GAME,
+    TELEOP_TERMINAL,
+    TURN_ONCE,
+    Item,
+    Poll,
+    fake_report,
+    menu,
+    neck_home_line,
+    terminal_script,
+    title_for,
+    where_line,
+)
 
+from pepin import goal_link
+from pepin.base_link import NECK_MOVE_WAIT_S
+from pepin.base_link import ask as ask_base
 from pepin.health import (
     FAST_FOR_S,
     FAST_POLL_S,
-    SLOW_POLL_S,
     HealthReport,
     Probe,
-    is_stale,
     next_poll_s,
+    probe_laptop,
     run_health,
 )
 from pepin.log import setup_logging
@@ -51,25 +74,8 @@ UV = shutil.which("uv") or "/opt/homebrew/bin/uv"
 # macOS renders it white or black to match the other items); the title next to it is
 # empty when all is well.
 ICON = Path(__file__).with_name("icon_template.png")
-TITLE_OK, TITLE_WARN, TITLE_DEAD, TITLE_STALE = None, "⚠", "✕", "?"  # polling shows in the menu
 
 log = logging.getLogger("tray")
-
-
-@dataclass(frozen=True)
-class Poll:
-    """One background poll: when it ran, and either a report or the error that stopped it."""
-
-    at: datetime
-    report: HealthReport | None = None
-    error: str | None = None
-
-    @property
-    def reachable(self) -> bool:
-        """True when the board itself answered — a failed board probe means ssh is dead."""
-        if self.report is None:
-            return False
-        return all(p.ok for p in self.report.probes if p.system == "board")
 
 
 def _noop(_sender: Any) -> None:
@@ -81,11 +87,10 @@ def _line(text: str) -> Any:
     return rumps.MenuItem(text, callback=_noop)
 
 
-def _probe_line(probe: Probe) -> Any:
-    """One probe as a menu line: a green check or a red cross, then ``system — detail``."""
-    glyph = "✓" if probe.ok else "✗"
-    item = _line(f"{glyph} {probe.system} — {probe.detail}")
-    color = NSColor.systemGreenColor() if probe.ok else NSColor.systemRedColor()
+def _probe_line(text: str, ok: bool) -> Any:
+    """A probe line: its first character (the check or the cross) green or red."""
+    item = _line(text)
+    color = NSColor.systemGreenColor() if ok else NSColor.systemRedColor()
     title = NSMutableAttributedString.alloc().initWithString_(item.title)
     title.addAttribute_value_range_(
         NSFontAttributeName, NSFont.menuFontOfSize_(0), (0, len(item.title))
@@ -93,20 +98,24 @@ def _probe_line(probe: Probe) -> Any:
     title.addAttribute_value_range_(
         NSForegroundColorAttributeName, NSColor.labelColor(), (0, len(item.title))
     )
-    title.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, len(glyph)))
+    title.addAttribute_value_range_(NSForegroundColorAttributeName, color, (0, 1))
     item._menuitem.setAttributedTitle_(title)
     return item
 
 
-def _vitals_lines(report: HealthReport) -> list[str]:
-    """Board vitals as one or two human lines (CPU, memory, disk, uptime, wifi power save)."""
-    v = report.vitals
-    temp = f"{v.cpu_temp_c:.0f} °C" if v.cpu_temp_c is not None else "? °C"
-    mem = f"{v.mem_free_mb} MB free" if v.mem_free_mb is not None else "? MB free"
-    lines = [f"CPU {temp} · {mem} · disk {v.disk_used_pct} · up {v.uptime}"]
-    if v.wifi_power_save_off is not None:
-        lines.append("wifi power save off" if v.wifi_power_save_off else "wifi power save ON")
-    return lines
+def render(items: list[Item], callback: Callable[[str], Callable[[Any], None]]) -> list[Any]:
+    """The menu's data as rumps items; ``callback(name)`` is the method an action line calls."""
+    rendered: list[Any] = []
+    for item in items:
+        if item.separator:
+            rendered.append(rumps.separator)
+        elif item.action is not None:
+            rendered.append(rumps.MenuItem(item.text, callback=callback(item.action)))
+        elif item.ok is not None:
+            rendered.append(_probe_line(item.text, item.ok))
+        else:
+            rendered.append(_line(item.text))
+    return rendered
 
 
 class TrayApp(rumps.App):
@@ -118,7 +127,6 @@ class TrayApp(rumps.App):
         self._notes: queue.Queue[tuple[str, str]] = queue.Queue()  # (title, body) from helpers
         self._wake = threading.Event()
         self._fast_until = time.monotonic() + FAST_FOR_S
-        self._forced = False
         self._polling = True
         self._host: str | None = None
         self._last: Poll | None = None
@@ -129,11 +137,12 @@ class TrayApp(rumps.App):
         self._timer = rumps.Timer(self._drain, 1)
         self._timer.start()
 
+    # -- polling ----------------------------------------------------------------------------
+
     def _worker(self) -> None:
         """Poll loop: run on the interval or on demand, hand results to the queue."""
         while True:
             self._wake.clear()
-            self._forced = False
             self._polling = True
             try:
                 result = self._poll_once()
@@ -145,11 +154,20 @@ class TrayApp(rumps.App):
             self._wake.wait(self._cadence_s)
 
     def _poll_once(self) -> Poll:
-        """Resolve the board address if it is not known yet, then run the quick health tier."""
+        """Resolve the board if it is not known yet, run the quick tier, then this Mac's half.
+
+        A board that cannot be resolved is one red probe, not a blank menu: the laptop's
+        lines are still worth seeing with the robot off.
+        """
         try:
-            if self._host is None:
-                self._host = board_address()
-            report = run_health(self._host, full=False)
+            try:
+                if self._host is None:
+                    self._host = board_address()
+                report = run_health(self._host, full=False)
+            except ConnectionError as exc:
+                self._host = None  # re-resolve on the next poll
+                report = HealthReport(probes=[Probe("board", False, str(exc)[:80])])
+            report.probes.extend(probe_laptop(self._host))
             log.info(
                 "poll %s: %s (%.1fs)%s",
                 self._host,
@@ -162,7 +180,7 @@ class TrayApp(rumps.App):
             )
             return Poll(datetime.now(), report=report)
         except Exception as exc:
-            self._host = None  # re-resolve on the next poll
+            self._host = None
             log.warning("poll failed: %s", exc)
             return Poll(datetime.now(), error=str(exc))
 
@@ -189,76 +207,15 @@ class TrayApp(rumps.App):
     def _show(self, poll: Poll | None) -> None:
         """Rebuild title and menu from one poll result (``None`` before the first poll)."""
         self._last = poll
-        self.title = self._title_for(poll)
+        now = datetime.now()
+        self.title = title_for(poll, self._cadence_s, now)
         self.menu.clear()
-        self.menu.update(self._items(poll))
+        items = menu(poll, self._cadence_s, self._polling, now)
+        self.menu.update(render(items, lambda name: getattr(self, name)))
 
     @staticmethod
     def _age_s(poll: Poll) -> float:
         return (datetime.now() - poll.at).total_seconds()
-
-    def _title_for(self, poll: Poll | None) -> str | None:
-        """A glyph next to the icon: stale, unreachable, degraded — or nothing when all go."""
-        if poll is None:
-            return None
-        if is_stale(self._age_s(poll), self._cadence_s):
-            return TITLE_STALE
-        if not poll.reachable:
-            return TITLE_DEAD
-        return TITLE_OK if poll.report is not None and poll.report.all_go else TITLE_WARN
-
-    def _items(self, poll: Poll | None) -> list[Any]:
-        """The whole menu: header, probes, vitals, battery note, actions."""
-        items: list[Any] = [
-            rumps.MenuItem("■ STOP THE ROBOT", callback=self._on_stop),
-            rumps.separator,
-            _line(self._header(poll)),
-            rumps.separator,
-        ]
-        if poll is not None and poll.report is not None:
-            items += [_probe_line(p) for p in poll.report.probes]
-            items += [rumps.separator, *(_line(text) for text in _vitals_lines(poll.report))]
-        elif poll is not None:
-            items += [_line(f"✗ board — {poll.error}"), rumps.separator]
-        return [*items, _line("Battery: no sensor"), rumps.separator, *self._actions()]
-
-    def _header(self, poll: Poll | None) -> str:
-        """``Pepin · ALL GO (12.3s) · updated 12:34:56`` and its NO GO / unreachable variants."""
-        if poll is None:
-            return "Pepin · first poll running…"
-        age = self._age_s(poll)
-        ago = f"{age:.0f} s ago" if age < 90 else f"{age / 60:.0f} min ago"
-        stale = " · STALE" if is_stale(age, self._cadence_s) else ""
-        stamp = f"updated {poll.at:%H:%M:%S} ({ago}){stale}" + (
-            " · refreshing…" if self._polling else ""
-        )
-        if poll.report is None:
-            return f"Pepin · UNREACHABLE · {stamp}"
-        if poll.report.all_go:
-            return f"Pepin · ALL GO ({poll.report.duration_s:.1f}s) · {stamp}"
-        return f"Pepin · NO GO: {', '.join(poll.report.failed)} · {stamp}"
-
-    def _actions(self) -> list[Any]:
-        """Refresh, poll interval, dashboard, logs, quit."""
-        cadence = (
-            f"{self._cadence_s:.0f} s"
-            if self._cadence_s < 120
-            else f"{self._cadence_s / 60:.0f} min"
-        )
-        return [
-            rumps.MenuItem("Refresh now", callback=self._on_refresh),
-            _line(
-                f"Polling every {cadence} ({FAST_POLL_S:.0f} s after a refresh or any NO GO, "
-                f"{SLOW_POLL_S / 60:.0f} min when all go)"
-            ),
-            rumps.MenuItem("Open dashboard", callback=self._on_dashboard),
-            rumps.MenuItem("Open logs folder", callback=self._on_logs),
-            rumps.separator,
-            rumps.MenuItem("Turn once in place (recorded)", callback=self._on_turn),
-            rumps.MenuItem("Teleop in a terminal (i , j l, k stops)", callback=self._on_teleop),
-            rumps.separator,
-            rumps.MenuItem("Quit", callback=rumps.quit_application),
-        ]
 
     def _notify(self, poll: Poll) -> None:
         """Notify on a GO <-> NO GO transition only, never on every poll."""
@@ -276,60 +233,130 @@ class TrayApp(rumps.App):
                 log.warning("notification failed: %s", exc)
         self._was_all_go = all_go
 
-    def _on_refresh(self, _sender: Any) -> None:
+    # -- actions ----------------------------------------------------------------------------
+
+    def on_refresh(self, _sender: Any) -> None:
         """Poll right now and go back to the fast cadence for a while."""
-        self._forced = True
         self._fast_until = time.monotonic() + FAST_FOR_S
         self._wake.set()
 
-    def _on_dashboard(self, _sender: Any) -> None:
+    def on_dashboard(self, _sender: Any) -> None:
         """Launch the local dashboard script from the repo root."""
         self._spawn([UV, "run", "python", "scripts/dashboard.py"])
 
-    def _on_logs(self, _sender: Any) -> None:
+    def on_logs(self, _sender: Any) -> None:
         """Reveal the log folder in Finder."""
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
         self._spawn(["open", str(LOGS_DIR)])
 
-    def _on_stop(self, _sender: Any) -> None:
-        """The red button: ros/stop.sh right now, in the background (no Terminal window to
-        wait for) — Nav2 is asked to cancel, and if that is not confirmed in 3 s the ROS
-        processes are killed so the base's deadman cuts the wheels (then the stack restarts).
-        Its last line comes back as a notification."""
+    def on_quit(self, _sender: Any) -> None:
+        """Leave the menu bar."""
+        rumps.quit_application()
+
+    def on_stop(self, _sender: Any) -> None:
+        """The red button, in the background (no Terminal window to wait for).
+
+        First the goal server's cancel over its socket, wherever Nav2 runs — this Mac's
+        3337 (the macnav container, ros/laptop.sh) or the board's — given STOP_CONFIRM_S to
+        confirm; a cancel the navigators confirmed is the whole stop, the board untouched.
+        Unreachable or unconfirmed, ros/stop.sh takes over: it kills the board's ROS
+        processes so the base's deadman cuts the wheels, then restarts that stack (~45 s, the
+        odometry starts from zero). The outcome comes back as a notification.
+        """
         log.info("STOP requested from the tray")
 
         def run() -> None:
-            try:
-                done = subprocess.run(
-                    ["bash", "ros/stop.sh"],
-                    cwd=REPO_ROOT,
-                    capture_output=True,
-                    text=True,
-                    timeout=90,
-                )
-                lines = (done.stdout + done.stderr).strip().splitlines()
-                body = lines[-1] if lines else f"stop.sh exited {done.returncode}"
-            except (OSError, subprocess.TimeoutExpired) as exc:
-                body = f"stop.sh failed: {exc}"
+            body = self._cancel_through_goal_server()
+            if body is None:
+                body = self._hard_stop()
             log.info("STOP: %s", body)
             self._notes.put(("STOP", body))
 
         threading.Thread(target=run, name="stop-robot", daemon=True).start()
 
-    def _on_turn(self, _sender: Any) -> None:
+    def _cancel_through_goal_server(self) -> str | None:
+        """The cancel line when a navigator confirmed the goal server's cancel; None otherwise."""
+        host = goal_link.find_server(self._host)
+        if host is None:
+            log.info("STOP: no goal server on 127.0.0.1 or %s", self._host)
+            return None
+        try:
+            answer = goal_link.ask({"cmd": "cancel"}, host, timeout_s=STOP_CONFIRM_S)
+        except goal_link.GoalServerUnreachableError as exc:
+            log.warning("STOP: the goal server at %s did not confirm: %s", host, exc)
+            return None
+        line = goal_link.cancel_line(answer)
+        if not goal_link.cancel_confirmed(answer) or line is None:
+            log.warning("STOP: no navigator confirmed the cancel: %s", answer)
+            return None
+        return f"{line} (goal server {host})"
+
+    @staticmethod
+    def _hard_stop() -> str:
+        """ros/stop.sh: its last line."""
+        try:
+            done = subprocess.run(
+                ["bash", "ros/stop.sh"], cwd=REPO_ROOT, capture_output=True, text=True, timeout=90
+            )
+            lines = (done.stdout + done.stderr).strip().splitlines()
+            return "hard stop: " + (lines[-1] if lines else f"stop.sh exited {done.returncode}")
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return f"hard stop: stop.sh failed: {exc}"
+
+    def on_where(self, _sender: Any) -> None:
+        """The cart's pose from the goal server (``where``), wherever Nav2 runs, notified."""
+
+        def run() -> None:
+            host = goal_link.find_server(self._host)
+            if host is None:
+                body = f"no goal server on 127.0.0.1:{goal_link.PORT}" + (
+                    f" or {self._host}:{goal_link.PORT}" if self._host else ""
+                )
+            else:
+                try:
+                    body = where_line(goal_link.ask({"cmd": "where"}, host))
+                except goal_link.GoalServerUnreachableError as exc:
+                    body = f"the goal server at {host} did not answer: {exc}"
+            log.info("where: %s", body)
+            self._notes.put(("Where", body))
+
+        threading.Thread(target=run, name="where", daemon=True).start()
+
+    def on_neck_home(self, _sender: Any) -> None:
+        """``neck_home`` to the base server on the board (the head's reference pose, then
+        torque off; refused while the wheels turn), its answer as a notification."""
+
+        def run() -> None:
+            try:
+                host = self._host or board_address()
+                reply = ask_base(host, {"cmd": "neck_home"}, "neck_goto", NECK_MOVE_WAIT_S)
+                body = neck_home_line(reply)
+            except (OSError, ConnectionError) as exc:
+                body = f"neck home: the base server did not answer: {exc}"
+            log.info("%s", body)
+            self._notes.put(("Neck", body))
+
+        threading.Thread(target=run, name="neck-home", daemon=True).start()
+
+    def on_turn(self, _sender: Any) -> None:
         """One full turn in place (ros/go.sh round: 372 deg by the gyro, recorded), in a
         Terminal window so the sweep and the verdict are visible; the cart moves."""
-        self._in_terminal("ros/go.sh round tray")
+        self._in_terminal(TURN_ONCE)
 
-    def _on_teleop(self, _sender: Any) -> None:
-        """Keyboard driving in a Terminal window (ros/teleop.sh: i forward, comma back,
-        j/l turn, k or space stops, Ctrl-C ends); the cart moves while keys are held."""
-        self._in_terminal("ros/teleop.sh")
+    def on_teleop(self, _sender: Any) -> None:
+        """Keyboard driving in a Terminal window (ros/teleop.sh: arrows drive, Shift+arrows
+        slow, space stops, Ctrl-C ends; needs the laptop's pepin-vslam container)."""
+        self._in_terminal(TELEOP_TERMINAL)
+
+    def on_teleop_game(self, _sender: Any) -> None:
+        """Game-mode teleop (pepin.teleop --game: a focused window, keys act while held,
+        WASD moves the neck) in a Terminal window, from the repo root."""
+        self._in_terminal(TELEOP_GAME)
 
     def _in_terminal(self, command: str) -> None:
         """Open Terminal.app on the repo root running one command; the window stays for
         its output. Failures only reach the log."""
-        script = f"cd {REPO_ROOT} && {command}"
+        script = terminal_script(REPO_ROOT, command)
         self._spawn(
             [
                 "osascript",
@@ -349,12 +376,38 @@ class TrayApp(rumps.App):
             log.warning("cannot run %s: %s", command, exc)
 
 
-def main() -> None:
-    """Set up file logging and hand control to the macOS run loop."""
+def check() -> int:
+    """Smoke test with the robot off: every import done, the menu built from a fake report and
+    rendered into real NSMenuItems, nothing polled, no status item made. Exit 0 when it all held."""
+    now = datetime.now()
+    poll = Poll(now, report=fake_report())
+    items = menu(poll, FAST_POLL_S, polling=False, now=now)
+    rendered = render(items, lambda _name: _noop)
+    for item in items:
+        print("-" * 40 if item.separator else item.text)
+    actions = sorted(item.action for item in items if item.action is not None)
+    missing = [name for name in actions if not callable(getattr(TrayApp, name, None))]
+    if missing:
+        print(f"tray --check: menu actions without a method: {missing}", file=sys.stderr)
+        return 1
+    print(
+        f"tray --check OK: {len(rendered)} menu items, {len(actions)} actions, title"
+        f" {title_for(poll, FAST_POLL_S, now)!r}, rumps {rumps.__version__}, repo {REPO_ROOT}"
+    )
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """``--check`` builds the menu and exits; otherwise set up file logging and hand control to
+    the macOS run loop."""
+    args = sys.argv[1:] if argv is None else argv
+    if "--check" in args:
+        return check()
     setup_logging("tray", log_dir=LOGS_DIR, console=False)
     log.info("tray starting, repo=%s", REPO_ROOT)
     TrayApp().run()
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

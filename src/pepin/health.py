@@ -3,7 +3,9 @@
 Two tiers: ``quick`` (a few seconds: board vitals, bridges, servo bus, lidar
 rate, ToF stream, camera presence) for periodic polling, and ``full`` which
 adds real camera frames and ToF model-ID reads for a launch-readiness check.
-Every probe returns a :class:`Probe`; nothing here moves the robot.
+Both tiers are the board's; :func:`probe_laptop` is the laptop's half (the goal
+server, the containers), asked without ssh. Every probe returns a
+:class:`Probe`; nothing here moves the robot.
 """
 
 from __future__ import annotations
@@ -428,6 +430,66 @@ def run_health(
             add(p)
     report.duration_s = time.monotonic() - t0
     return report
+
+
+# -- the laptop's half --------------------------------------------------------------------------
+
+# The containers the laptop may run (ros/laptop.sh vslam, ros/laptop.sh start, the macnav
+# container): the one that must be up for a drive is the mapper; the other two are where Nav2
+# lives when it does not live on the board.
+LAPTOP_CONTAINERS = ("pepin-vslam", "pepin-macnav", "pepin-laptop")
+DOCKER_PS = ["docker", "ps", "--format", "{{.Names}} {{.Status}}"]
+
+
+def probe_goal_server(board_host: str | None) -> Probe:
+    """Where the goal server answers (port 3337): this Mac — Nav2 runs here — or the board."""
+    from pepin.goal_link import PORT, find_server
+
+    host = find_server(board_host, PORT)
+    if host is None:
+        where = f"127.0.0.1:{PORT}" + (f" or {board_host}:{PORT}" if board_host else "")
+        return Probe("goal server", False, f"nobody listens on {where}")
+    side = "Nav2 on this Mac" if host == "127.0.0.1" else "Nav2 on the board"
+    return Probe("goal server", True, f"{host}:{PORT} ({side})")
+
+
+def probe_laptop_containers(
+    ps_output: str | None = None,
+    run: Callable[[list[str]], subprocess.CompletedProcess[str]] | None = None,
+) -> Probe:
+    """Which of the laptop's containers run (``docker ps``); red without the mapper, pepin-vslam."""
+    if ps_output is None:
+        runner = run or (
+            lambda argv: subprocess.run(argv, capture_output=True, text=True, timeout=5)
+        )
+        try:
+            done = runner(DOCKER_PS)
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            return Probe("laptop stack", False, f"docker: {str(exc)[:50]}")
+        if done.returncode != 0:
+            return Probe("laptop stack", False, "docker daemon not running")
+        ps_output = done.stdout
+    up = _running_containers(ps_output)
+    if "pepin-vslam" not in up:
+        others = ", ".join(f"{name} {status}" for name, status in up.items())
+        detail = "pepin-vslam not running (ros/laptop.sh vslam)" + (f"; {others}" if others else "")
+        return Probe("laptop stack", False, detail)
+    return Probe("laptop stack", True, ", ".join(f"{n} {s}" for n, s in up.items()))
+
+
+def _running_containers(ps_output: str) -> dict[str, str]:
+    """``{name: "up 2 hours"}`` for the laptop's containers, from ``docker ps`` name+status."""
+    up: dict[str, str] = {}
+    for line in ps_output.splitlines():
+        name, _, status = line.strip().partition(" ")
+        if name in LAPTOP_CONTAINERS and status.startswith("Up"):
+            up[name] = status.lower()
+    return up
+
+
+def probe_laptop(board_host: str | None) -> list[Probe]:
+    """The laptop's half of the stack, no ssh: the goal server and the containers."""
+    return [probe_goal_server(board_host), probe_laptop_containers()]
 
 
 # -- polling cadence for the menu-bar app -------------------------------------------------------

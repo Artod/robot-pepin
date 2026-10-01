@@ -84,6 +84,7 @@ files = [
     "ros/sim",
     "scripts/timesync.py",
     "scripts/extrinsics.py",
+    "apps/macos",
 ]
 strict = true
 ignore_missing_imports = true
@@ -116,6 +117,11 @@ disallow_subclassing_any = false
 disallow_any_generics = false
 disallow_untyped_calls = false
 disallow_untyped_defs = false
+
+# The menu-bar app subclasses rumps.App, which has no stubs (Any); the rest of it is strict.
+[[tool.mypy.overrides]]
+module = "tray"
+disallow_subclassing_any = false
 
 # Vendored upstream source (src/pepin/vendor): untyped by nature, excluded above, and skipped
 # on import too so a strict call into it is Any rather than an untyped-call error. Judging it
