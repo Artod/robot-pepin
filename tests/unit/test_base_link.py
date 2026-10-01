@@ -2,6 +2,7 @@
 
 import contextlib
 import json
+import time
 
 from pepin.base_link import BaseClient, decode_state
 from pepin.kinematics import Twist
@@ -28,6 +29,35 @@ def test_commands_are_dropped_not_raised_while_the_link_is_down() -> None:
     client.set_twist(Twist(0.1, 0.0))  # no socket yet: logged, not an exception
     client.stop()
     assert client.state() is None
+
+
+def test_neck_jog_and_the_neck_request_are_the_boards_lines() -> None:
+    sent: list[dict[str, object]] = []
+    client = BaseClient("unused")
+    client.send = sent.append  # type: ignore[method-assign]
+    client.neck_jog(1, -1, slow=True)
+    client.neck_jog(0, 0)
+    client.ask_neck()
+    assert sent == [
+        {"cmd": "neck_jog", "pan": 1, "tilt": -1, "slow": True},
+        {"cmd": "neck_jog", "pan": 0, "tilt": 0, "slow": False},
+        {"cmd": "neck"},
+    ]
+
+
+def test_neck_answers_and_refused_jogs_are_kept_for_the_window() -> None:
+    client = BaseClient("unused")
+    assert client.neck() is None and client.neck_error() is None
+    client._ingest(
+        {"type": "neck", "pan_ticks": 2029, "tilt_ticks": 2311, "age_s": 0.0, "read_ms": 1.2}
+    )
+    reading = client.neck()
+    assert reading is not None and reading.ticks == (2029, 2311)
+    client._ingest({"type": "neck_jog", "error": "the wheels are moving"})
+    assert client.neck_error() == "the wheels are moving"
+    assert client.neck_error(now=time.monotonic() + 5.0) is None, "old news is dropped"
+    client._ingest({"type": "neck_jog"})  # not an error: nothing to keep
+    assert client.neck_error() == "the wheels are moving"
 
 
 def test_pong_wakes_a_waiting_ping() -> None:

@@ -405,6 +405,13 @@ ros/teleop.sh                         # or drive by goal — the map grows as th
 ros/map.sh save flat3_new             # freeze the grid into ros/maps/flat3_new.{yaml,pgm}
 ```
 
+`ros/teleop.sh` latches a key until the next one (a terminal has no key-up): arrows drive at full
+speed, Shift+arrows slow, space stops. The game mode, `uv run python -m pepin.teleop --game
+[--host 10.0.0.187]`, is a small window where keys act only while HELD and the window is focused:
+arrows the wheels at the same speeds, W/S tilt and A/D pan the head (the base server's `neck_jog`,
+board/README.md), Shift slow, Space stops everything, Esc quits. It speaks to the base server on
+:3336 directly, past ROS, so a drive made with it is not recorded.
+
 Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates (recorded like
 any other drive), and a click in Foxglove (Publish → `/goal_pose`, frame `map`) does the same
 without a tape. **The goal server takes the cart's pose from `map -> base_link`** and accepts a

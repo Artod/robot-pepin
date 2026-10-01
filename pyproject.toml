@@ -20,6 +20,7 @@ dev = [
     "ruff>=0.6",
 ]
 macos = [
+    "pygame>=2.6.1",
     "rumps>=0.4.0",
 ]
 # The depth network on the laptop's GPU (pepin.depth_service, ros/depth_host.sh): torch comes
@@ -41,6 +42,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/pepin"]
+
+# `uv sync` and `uv run` install these groups unasked: the laptop is where both run, and the
+# menu-bar app (rumps) and the game-mode teleop (pygame) must not die on a missing import. The
+# board never installs from this file (board/README.md: src/pepin is rsynced).
+[tool.uv]
+default-groups = ["dev", "macos"]
 
 [tool.ruff]
 line-length = 100

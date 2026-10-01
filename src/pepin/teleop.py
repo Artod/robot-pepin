@@ -1,29 +1,53 @@
-"""Keyboard driving: terminal key reading and the key-to-twist mapping.
+"""Keyboard driving: the key-to-command mappings, a terminal reader and a game-mode window.
 
-Arrow keys only, so driving does not depend on the input language. A terminal gives no key-up,
-so a key LATCHES its command until the next key: Up/Down drive straight, Left/Right turn in
-place, always at full speed; with Shift held, at the slow speed for aiming and parking. Space
-stops; any other key changes nothing.
+Two ways to drive from a keyboard, one mapping of the arrows between them.
 
-The mapping is a pure function so it can be unit-tested; the terminal plumbing is a thin
-context manager around cbreak mode.
+The terminal (``ros/teleop.sh``, :mod:`pepin_bringup.teleop_keys`) reads arrow keys only, so
+driving does not depend on the input language. A terminal gives no key-up, so a key LATCHES
+its command until the next key: Up/Down drive straight, Left/Right turn in place, always at
+full speed; with Shift held, at the slow speed for aiming and parking. Space stops; any other
+key changes nothing.
+
+The game mode, ``uv run python -m pepin.teleop --game [--host 10.0.0.187]``, is a small pygame
+window on the Mac that talks to the base server itself (:class:`pepin.base_link.BaseClient`,
+TCP 3336). Keys act while HELD and stop the moment they are released — and only while the
+window has the focus: a global key listener would move the robot on a keystroke meant for
+another application. Arrows are the wheels, the mapping and speeds above (Up/Down with
+Left/Right combine into an arc); W/S tilt the head and A/D pan it (``neck_jog`` on the board,
+which walks the goal at its own rate within config/neck.json's limits and has its own
+half-second deadman); Shift makes both slow; Space stops everything; Esc or closing the window
+stops the wheels, ends the jog and exits, and so does any exception. The loop runs at 20 Hz: a
+twist every tick while an arrow is held (the base's deadman is 0.5 s) and one stop on release;
+a jog every tick while a head key is held and one zero jog on release. The window shows the
+twist, the neck's encoders, the speed and whether it has the focus.
+
+The mappings are pure functions so they can be unit-tested; the terminal plumbing is a thin
+context manager around cbreak mode, and pygame is imported only under ``--game``.
 """
 
 from __future__ import annotations
 
+import argparse
+import logging
 import os
 import select
 import sys
 import termios
+import time
 import tty
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from types import TracebackType
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
-from pepin.kinematics import Twist
+from pepin.base_link import BASE_PORT
+from pepin.kinematics import STOP, Twist
 
-FAST_LINEAR_M_S = 0.30  # config/base.json max_speed_m_s: the base clips anything above
+if TYPE_CHECKING:
+    from pepin.base_link import BaseState
+    from pepin.neck import NeckReading
+
+FAST_LINEAR_M_S = 0.45  # config/base.json max_speed_m_s: the base clips anything above
 FAST_ANGULAR_RAD_S = 1.0  # config/base.json max_yaw_rate_rad_s
 SLOW_LINEAR_M_S = 0.04  # Shift: aiming and parking
 SLOW_ANGULAR_RAD_S = 0.15
@@ -149,3 +173,249 @@ class KeyReader:
             return None
         data = os.read(self._fd, 1)
         return data.decode("latin-1") if data else None
+
+
+# -- game mode: keys act while held -----------------------------------------------------------
+
+GAME_HZ = 20.0  # ticks of the window loop; a twist each one while held, well inside the deadman
+GAME_HZ_MIN, GAME_HZ_MAX = 5.0, 50.0  # --hz is clamped: 5 Hz is still inside the deadman
+EXIT_STOP_REPEATS = 3  # the exit's stops go out a few times, like teleop_keys': one may be lost
+EXIT_STOP_GAP_S = 0.05
+GAME_HELP = "arrows drive, W/S tilt, A/D pan, Shift slow, Space stops all, Esc quits"
+WINDOW_TITLE = "Pepin teleop — keys act only while this window is focused"
+DEFAULT_HOST = "10.0.0.187"
+
+
+@dataclass(frozen=True)
+class HeldKeys:
+    """The game keys that are down this tick; the default (nothing held) is what an unfocused
+    window reads, whatever the keyboard is doing."""
+
+    up: bool = False
+    down: bool = False
+    left: bool = False
+    right: bool = False
+    tilt_up: bool = False  # W
+    tilt_down: bool = False  # S
+    pan_left: bool = False  # A
+    pan_right: bool = False  # D
+    shift: bool = False
+    space: bool = False
+
+
+@dataclass(frozen=True)
+class GameCommand:
+    """What one tick asks the base for: the wheels' twist; the head's jog, pan +1 left and
+    tilt +1 down as :class:`pepin.neck.NeckAngles` signs them; slow or fast; and whether Space
+    is down, which stops everything this tick and every tick it stays down."""
+
+    twist: Twist = STOP
+    pan: int = 0
+    tilt: int = 0
+    slow: bool = False
+    stop_all: bool = False
+
+
+def game_command(keys: HeldKeys) -> GameCommand:
+    """The command for one tick of held keys: opposite keys cancel, Up/Down and Left/Right
+    combine into an arc, Shift picks the slow speeds, Space overrides everything."""
+    if keys.space:
+        return GameCommand(stop_all=True, slow=keys.shift)
+    linear = SLOW_LINEAR_M_S if keys.shift else FAST_LINEAR_M_S
+    angular = SLOW_ANGULAR_RAD_S if keys.shift else FAST_ANGULAR_RAD_S
+    return GameCommand(
+        twist=Twist(
+            linear * (int(keys.up) - int(keys.down)),
+            angular * (int(keys.left) - int(keys.right)),
+        ),
+        pan=int(keys.pan_left) - int(keys.pan_right),
+        tilt=int(keys.tilt_down) - int(keys.tilt_up),
+        slow=keys.shift,
+    )
+
+
+class BaseCommands(Protocol):
+    """What the game loop asks of a base link; :class:`pepin.base_link.BaseClient` has it."""
+
+    def set_twist(self, twist: Twist) -> None:
+        """Drive at this body velocity; re-arms the board's deadman."""
+        ...
+
+    def stop(self) -> None:
+        """Stop the wheels now."""
+        ...
+
+    def neck_jog(self, pan: int, tilt: int, *, slow: bool = False) -> None:
+        """Walk the head in these directions; both zero stops it where it is."""
+        ...
+
+
+class CommandStream:
+    """The messages behind the held keys: a twist every tick while the wheels are asked to
+    move and one stop the tick they are released; a jog every tick while the head is asked to
+    move and one zero jog the tick it is released; Space sends both stops every tick it is
+    down. Nothing is sent while nothing is held, so the board's idle release runs."""
+
+    def __init__(self, link: BaseCommands) -> None:
+        """``link`` receives the messages; nothing is sent until :meth:`tick`."""
+        self._link = link
+        self._wheels = False  # the wheels were asked to move on the previous tick
+        self._head = False  # the head was asked to move on the previous tick
+
+    def tick(self, command: GameCommand) -> None:
+        """Send what this tick's command asks for, given what the previous tick asked."""
+        wheels = command.twist != STOP
+        if wheels:
+            self._link.set_twist(command.twist)
+        elif self._wheels or command.stop_all:
+            self._link.stop()
+        head = command.pan != 0 or command.tilt != 0
+        if head:
+            self._link.neck_jog(command.pan, command.tilt, slow=command.slow)
+        elif self._head or command.stop_all:
+            self._link.neck_jog(0, 0, slow=command.slow)
+        self._wheels, self._head = wheels, head
+
+    def stop_all(self, *, repeats: int = 1, gap_s: float = 0.0) -> None:
+        """Stop the wheels and the head now, whatever the previous tick was (exit, a crash);
+        ``repeats`` times, ``gap_s`` apart, when one line going astray must not matter."""
+        for i in range(repeats):
+            if i:
+                time.sleep(gap_s)
+            self.tick(GameCommand(stop_all=True))
+
+
+def status_lines(
+    command: GameCommand,
+    state: BaseState | None,
+    neck: NeckReading | None,
+    neck_error: str | None,
+    *,
+    focused: bool,
+) -> list[str]:
+    """What the window shows: the help, the twist and speed, the board's word on the wheels,
+    the neck's encoders and the jog, a refused jog, and the focus warning."""
+    speed = "SLOW (Shift held)" if command.slow else "FAST (Shift: slow)"
+    lines = [
+        GAME_HELP,
+        f"wheels   v {command.twist.linear:+.2f} m/s   w {command.twist.angular:+.2f} rad/s   "
+        f"{speed}",
+    ]
+    if state is None:
+        lines.append("base     no state yet: connecting")
+    else:
+        wheels = "moving" if state.moving else "still"
+        torque = "armed" if state.armed else "free"
+        deadman = ", DEADMAN fired" if state.deadman else ""
+        lines.append(f"base     {wheels}, {torque}{deadman}, state {state.age_s * 1000:.0f} ms old")
+    jog = f"jog pan {command.pan:+d} tilt {command.tilt:+d}" if command.pan or command.tilt else ""
+    if neck is not None and neck.ticks is not None:
+        lines.append(f"neck     pan {neck.pan_ticks} ticks   tilt {neck.tilt_ticks} ticks   {jog}")
+    else:
+        lines.append(f"neck     encoders unread   {jog}")
+    if neck_error is not None:
+        lines.append(f"neck     refused: {neck_error}")
+    if command.stop_all:
+        lines.append("STOP: everything stopped")
+    if not focused:
+        lines.append("UNFOCUSED: keys are ignored, everything is stopped")
+    return lines
+
+
+def _held_keys(pressed: Sequence[bool], pg: Any) -> HeldKeys:
+    """pygame's key state as :class:`HeldKeys` (``pg`` is the pygame module, for its codes)."""
+    return HeldKeys(
+        up=bool(pressed[pg.K_UP]),
+        down=bool(pressed[pg.K_DOWN]),
+        left=bool(pressed[pg.K_LEFT]),
+        right=bool(pressed[pg.K_RIGHT]),
+        tilt_up=bool(pressed[pg.K_w]),
+        tilt_down=bool(pressed[pg.K_s]),
+        pan_left=bool(pressed[pg.K_a]),
+        pan_right=bool(pressed[pg.K_d]),
+        shift=bool(pressed[pg.K_LSHIFT] or pressed[pg.K_RSHIFT]),
+        space=bool(pressed[pg.K_SPACE]),
+    )
+
+
+def run_game(host: str, port: int = BASE_PORT, *, hz: float = GAME_HZ) -> None:
+    """The game-mode window against the base server at ``host:port``, until Esc or the window
+    closes; the wheels and the head are stopped on the way out, whatever the reason."""
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    import pygame  # only the game mode pays for it; the terminal teleop runs where it is absent
+
+    from pepin.base_link import BaseClient
+
+    client = BaseClient(host, port).start()
+    stream = CommandStream(client)
+    pygame.init()
+    try:
+        screen = pygame.display.set_mode((760, 240))
+        pygame.display.set_caption(WINDOW_TITLE)
+        font = pygame.font.Font(None, 26)
+        clock = pygame.time.Clock()
+        running = True
+        while running:
+            for event in pygame.event.get():
+                quit_key = event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+                if event.type == pygame.QUIT or quit_key:
+                    running = False
+            focused = bool(pygame.key.get_focused())
+            keys = _held_keys(pygame.key.get_pressed(), pygame) if focused else HeldKeys()
+            command = game_command(keys)
+            stream.tick(command)
+            client.ask_neck()
+            lines = status_lines(
+                command, client.state(), client.neck(), client.neck_error(), focused=focused
+            )
+            screen.fill((24, 24, 28) if focused else (72, 16, 16))
+            for row, line in enumerate(lines):
+                screen.blit(font.render(line, True, (230, 230, 230)), (16, 16 + 28 * row))
+            pygame.display.flip()
+            clock.tick(hz)
+    finally:
+        stream.stop_all(repeats=EXIT_STOP_REPEATS, gap_s=EXIT_STOP_GAP_S)
+        client.close()
+        pygame.quit()
+
+
+def main(argv: list[str] | None = None) -> None:
+    """``python -m pepin.teleop --game [--host HOST] [--port PORT]``: the game-mode window.
+
+    The latching terminal teleop is not run from here: it is a ROS node (``ros/teleop.sh``).
+    """
+    parser = argparse.ArgumentParser(
+        description="Drive Pepin from a window where keys act only while held and focused."
+    )
+    parser.add_argument(
+        "--game",
+        action="store_true",
+        help="the game-mode window (the only mode here; the terminal teleop is ros/teleop.sh)",
+    )
+    parser.add_argument(
+        "--host",
+        default=os.environ.get("PEPIN_HOST", DEFAULT_HOST),
+        help="the board running the base server (default: PEPIN_HOST, else 10.0.0.187)",
+    )
+    parser.add_argument("--port", type=int, default=BASE_PORT, help="the base server's port")
+    parser.add_argument(
+        "--hz",
+        type=float,
+        default=GAME_HZ,
+        help=f"the loop rate, clamped to {GAME_HZ_MIN:.0f}..{GAME_HZ_MAX:.0f} (the board's deadman"
+        " is 0.5 s)",
+    )
+    args = parser.parse_args(argv)
+    if not args.game:
+        parser.error("pass --game; the latching terminal teleop runs through ros/teleop.sh")
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    try:
+        import pygame  # noqa: F401  # the one dependency this mode adds: one line, not a traceback
+    except ModuleNotFoundError:
+        parser.exit(2, "pygame is not installed: uv sync --group macos\n")
+    logging.basicConfig(level=logging.INFO, format="%(levelname).1s %(name)s: %(message)s")
+    run_game(args.host, args.port, hz=min(max(args.hz, GAME_HZ_MIN), GAME_HZ_MAX))
+
+
+if __name__ == "__main__":
+    main()

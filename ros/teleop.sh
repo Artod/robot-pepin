@@ -7,11 +7,15 @@
 #                            and on Ctrl-C stops the wheels, closes both recordings and copies
 #                            everything to the laptop (ros/maps/rec/). The map itself is built
 #                            OFFLINE afterwards — no other command for you to run.
-# Keys: arrows drive at full speed (0.15 m/s, 0.5 rad/s), Shift+arrows slow (0.04 m/s, 0.15 rad/s);
+# Keys: arrows drive at full speed (0.45 m/s, 1.0 rad/s), Shift+arrows slow (0.04 m/s, 0.15 rad/s);
 # a key latches until the next one; space STOPS; Ctrl-C stops the wheels and ends the run. The
 # keyboard node runs on the LAPTOP in pepin-vslam (a new process on the board stalls its link for
 # 3-4 s). PEPIN_TELEOP=twist_keyboard: the old teleop_twist_keyboard on the board (i/,/j/l, k stops).
 # The base's deadman stops the wheels within 0.5 s of the last command either way.
+# Game mode, without ROS: `uv run python -m pepin.teleop --game [--host 10.0.0.187]` opens a small
+# window where keys act only while HELD and the window is focused — arrows the wheels (same speeds),
+# W/S tilt and A/D pan the head, Shift slow, Space stops all, Esc quits. It talks to the base server
+# directly (:3336), so nothing here is recorded; this script stays the recorded way to drive.
 set -uo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
