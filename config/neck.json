@@ -9,7 +9,8 @@
     "id": 10,
     "center": 2048,
     "min": 1814,
-    "max": 3090
+    "max": 2760,
+  "max_note": "2760 since 2026-09-30: the remounted stereo module's own stop reads 2783 (tilted down by hand, read through the base server), 23 ticks = 2 deg of margin; the 3090 before it would have driven the camera 27 deg into the stop"
   },
   "reference": {
     "pan_ticks": 2029,

@@ -14,6 +14,10 @@ Wire format, one JSON object per line in both directions::
                      {"cmd": "stop"}                              stop now
                      {"cmd": "ping"}                              which servos answer on the bus
                      {"cmd": "neck"}                              the neck's encoders (pan, tilt)
+                     {"cmd": "neck_jog", "pan": -1|0|1, "tilt": -1|0|1, "slow": false}
+                                                                  walk the head (pan +1 left,
+                                                                  tilt +1 down) while repeated
+                                                                  within its 0.5 s deadman
     board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, ~20 Hz
                      {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
                      {"type": "pong", "busy": true}                   moving: servos not pinged
@@ -21,9 +25,12 @@ Wire format, one JSON object per line in both directions::
                       "read_ms": 1.4}                             see :func:`pepin.neck.parse_neck`
                      {"type": "neck", "error": "..."}             a silent servo (stale ticks, if
                                                                   any, ride along)
+                     {"type": "neck_jog", "error": "..."}         a refused jog (an accepted one
+                                                                  is silent, like a twist)
 
-Only a client that has sent ``twist`` or ``stop`` counts as a driver: the wheels are released
-when the last driver leaves, whoever is still connected only asking (the neck node).
+The absolute moves (``neck_goto``, ``neck_home``) are board/README.md's; ``ros/neck.sh`` speaks
+them. Only a client that has sent ``twist`` or ``stop`` counts as a driver: the wheels are
+released when the last driver leaves, whoever is still connected only asking (the neck node).
 """
 
 from __future__ import annotations
@@ -36,12 +43,14 @@ from dataclasses import dataclass, replace
 from typing import Any
 
 from pepin.kinematics import Twist
+from pepin.neck import NeckReading, parse_neck
 from pepin.odometry import Pose2D
 from pepin.streams import Connector, JsonLinesClient
 
 BASE_PORT = 3336
 DEADMAN_S = 0.5  # the board stops the wheels when no twist arrived for this long
 NECK_MOVE_WAIT_S = 8.0  # a neck move gives up after 3 s on the board; its reply comes a bit later
+NECK_ERROR_SHOWN_S = 2.0  # a refused jog is reported for this long after it arrived
 
 
 def ask(
@@ -131,6 +140,8 @@ class BaseClient(JsonLinesClient):
         self._lock = threading.Lock()
         self._pong: dict[str, Any] | None = None
         self._pong_ready = threading.Event()
+        self._neck: NeckReading | None = None
+        self._neck_error: tuple[str, float] | None = None  # text, laptop clock of its arrival
 
     def state(self, now: float | None = None) -> BaseState | None:
         """Newest state with ``age_s`` measured at ``now``; None before the first message."""
@@ -158,6 +169,29 @@ class BaseClient(JsonLinesClient):
         """Ask the board to stop the wheels now."""
         self.send({"cmd": "stop"})
 
+    def neck_jog(self, pan: int, tilt: int, *, slow: bool = False) -> None:
+        """Walk the head: ``pan`` +1 left / -1 right, ``tilt`` +1 down / -1 up (the signs of
+        :class:`pepin.neck.NeckAngles`), 0 holds that axis; repeat it within the board's half
+        second or the head stops and lets go. Both zero stops the head where it is."""
+        self.send({"cmd": "neck_jog", "pan": pan, "tilt": tilt, "slow": slow})
+
+    def ask_neck(self) -> None:
+        """Ask for the neck's encoders; the answer lands in :meth:`neck` when it comes."""
+        self.send({"cmd": "neck"})
+
+    def neck(self) -> NeckReading | None:
+        """The newest ``neck`` answer; None before the first."""
+        with self._lock:
+            return self._neck
+
+    def neck_error(self, now: float | None = None) -> str | None:
+        """The text of a jog the board refused within the last ``NECK_ERROR_SHOWN_S``, else None."""
+        now = time.monotonic() if now is None else now
+        with self._lock:
+            if self._neck_error is None or now - self._neck_error[1] > NECK_ERROR_SHOWN_S:
+                return None
+            return self._neck_error[0]
+
     def ping(self, timeout_s: float = 3.0) -> dict[str, bool] | None:
         """Servos answering on the bus; {} while driving; None when the board did not reply."""
         self._pong_ready.clear()
@@ -169,7 +203,8 @@ class BaseClient(JsonLinesClient):
         return {str(k): bool(v) for k, v in self._pong.get("servos", {}).items()}
 
     def _ingest(self, message: dict[str, Any]) -> None:
-        """Route one decoded message: states replace the newest, pongs wake :meth:`ping`."""
+        """Route one decoded message: states replace the newest, pongs wake :meth:`ping`, neck
+        readings replace the newest, a refused jog is kept with its arrival time."""
         kind = message.get("type")
         if kind == "state":
             now = time.monotonic()
@@ -179,3 +214,10 @@ class BaseClient(JsonLinesClient):
         elif kind == "pong":
             self._pong = message
             self._pong_ready.set()
+        elif kind == "neck":
+            reading = parse_neck(message)
+            with self._lock:
+                self._neck = reading
+        elif kind == "neck_jog" and message.get("error") is not None:
+            with self._lock:
+                self._neck_error = (str(message["error"]), time.monotonic())
