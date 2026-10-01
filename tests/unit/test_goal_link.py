@@ -322,3 +322,28 @@ def test_goto_s_switch_off_is_the_old_path(tmp_path: Path, served: FakeGoalServe
 def test_goto_s_where_goes_over_the_socket(tmp_path: Path, served: FakeGoalServer) -> None:
     output, ssh = goto(tmp_path, served.port, "where")
     assert '"event": "where"' in output and ssh == []
+
+
+def test_a_cancel_is_confirmed_by_any_navigator_that_answered_even_with_nothing_to_cancel() -> None:
+    """The red button's test: a navigator that answered (zero goals included) is a confirmed
+    cancel; a server nobody answered, or one without navigators, is not."""
+    assert goal_link.cancel_confirmed({"event": "cancelled", "navigators": NAVIGATORS})
+    idle = {"navigate_to_pose": {"outcome": "no such goal", "cancelling": 0}}
+    assert goal_link.cancel_confirmed({"event": "cancelled", "navigators": idle})
+    nobody = {action: {"outcome": "no server answered"} for action in goal_link.NAV_ACTIONS}
+    assert not goal_link.cancel_confirmed({"event": "cancelled", "navigators": nobody})
+    assert not goal_link.cancel_confirmed({"event": "cancelled", "had_goal": False})
+    assert not goal_link.cancel_confirmed({"event": "where"})
+
+
+def test_the_goal_server_is_looked_for_on_this_machine_first_then_the_board() -> None:
+    """ros/go.sh's transport decision, in Python: Nav2 on the Mac answers on 127.0.0.1, else the
+    board's; the port decides, never a configuration file."""
+    with socket.socket() as listener:  # a bare port: the probe connects and says nothing
+        listener.bind(("127.0.0.1", 0))
+        listener.listen(2)
+        port = int(listener.getsockname()[1])
+        assert goal_link.find_server("10.0.0.187", port, timeout_s=0.5) == "127.0.0.1"
+        assert goal_link.find_server(None, port, timeout_s=0.5) == "127.0.0.1"
+    assert goal_link.find_server(None, closed_port(), timeout_s=0.5) is None
+    assert goal_link.find_server("127.0.0.1", closed_port(), timeout_s=0.5) is None

@@ -1,5 +1,6 @@
 """The base link's wire format and the client's non-blocking state."""
 
+import contextlib
 import json
 
 from pepin.base_link import BaseClient, decode_state
@@ -37,3 +38,75 @@ def test_pong_wakes_a_waiting_ping() -> None:
     threading.Timer(0.02, lambda: client._ingest(pong)).start()
     assert client.ping(timeout_s=1.0) == {"7": True, "8": False}
     assert client.ping(timeout_s=0.01) is None  # nobody answers this time
+
+
+class FakeBaseServer:
+    """The base server's port: streams state lines to whoever connects, and answers one request
+    with the lines given for its ``cmd``. What it was asked is kept in ``asked``."""
+
+    def __init__(self, answers: dict[str, list[dict[str, object]]]) -> None:
+        import socket
+        import threading
+
+        self.answers = answers
+        self.asked: list[dict[str, object]] = []
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(2)
+        self._listener.settimeout(10.0)
+        self.port = int(self._listener.getsockname()[1])
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        while True:
+            try:
+                connection, _ = self._listener.accept()
+            except OSError:
+                return
+            with connection:
+                connection.sendall(encode({"type": "state", "t": 1.0, "x": 0.0}))
+                connection.sendall(b"\n")  # the blank line a reader must skip
+                request = json.loads(connection.makefile("r").readline())
+                self.asked.append(request)
+                connection.sendall(encode({"type": "state", "t": 1.05, "x": 0.0}))
+                for answer in self.answers.get(str(request.get("cmd")), []):
+                    connection.sendall(encode(answer))
+                with contextlib.suppress(OSError):
+                    connection.recv(1)  # hold the line until the client hangs up
+
+    def close(self) -> None:
+        self._listener.close()
+
+
+def test_a_one_shot_request_skips_the_state_stream_and_returns_the_asked_reply() -> None:
+    from pepin.base_link import ask
+
+    reply = {
+        "type": "neck_goto", "pan_ticks": 2029, "tilt_ticks": 2360, "reached": True, "ms": 1200.0,
+    }  # fmt: skip
+    server = FakeBaseServer({"neck_home": [reply]})
+    try:
+        got = ask("127.0.0.1", {"cmd": "neck_home"}, "neck_goto", wait_s=2.0, port=server.port)
+    finally:
+        server.close()
+    assert got == reply
+    assert server.asked == [{"cmd": "neck_home"}]
+
+
+def test_a_one_shot_request_gives_up_on_a_silent_server_and_fails_on_a_closed_port() -> None:
+    import socket
+
+    import pytest
+
+    from pepin.base_link import ask
+
+    server = FakeBaseServer({})  # states only: no answer of the asked type ever comes
+    try:
+        assert ask("127.0.0.1", {"cmd": "neck"}, "neck", wait_s=0.2, port=server.port) is None
+    finally:
+        server.close()
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        closed = int(probe.getsockname()[1])
+    with pytest.raises(OSError):
+        ask("127.0.0.1", {"cmd": "neck"}, "neck", wait_s=0.2, port=closed)

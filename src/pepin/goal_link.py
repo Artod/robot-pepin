@@ -80,6 +80,29 @@ def cancel_line(answer: dict[str, Any]) -> str | None:
     )
 
 
+def cancel_confirmed(answer: dict[str, Any]) -> bool:
+    """True when at least one navigator answered the goal server's cancel (``cancelling`` in its
+    part, zero included: no goal to cancel is a confirmed outcome, not a silent navigator)."""
+    navigators = answer.get("navigators")
+    if answer.get("event") != "cancelled" or not isinstance(navigators, dict):
+        return False
+    return any(isinstance(said, dict) and "cancelling" in said for said in navigators.values())
+
+
+def find_server(board_host: str | None, port: int = PORT, timeout_s: float = 1.0) -> str | None:
+    """The host whose goal server listens on ``port``: this machine first (Nav2 on the laptop,
+    ``ros/laptop.sh`` or the macnav container), then the board; ``None`` when neither answers.
+    The same decision ``ros/go.sh`` makes before every command."""
+    hosts = ["127.0.0.1"] + ([board_host] if board_host and board_host != "127.0.0.1" else [])
+    for host in hosts:
+        try:
+            with socket.create_connection((host, port), timeout=timeout_s):
+                return host
+        except OSError:
+            continue
+    return None
+
+
 def events(
     request: dict[str, Any],
     host: str,
@@ -272,7 +295,7 @@ def run_cancel(host: str, port: int, out: TextIO) -> int:
         )
         return EXIT_UNSUPPORTED
     print(line, file=out, flush=True)
-    if not any("cancelling" in said for said in answer["navigators"].values()):
+    if not cancel_confirmed(answer):
         # Not one navigator answered the server: a second opinion from the board is worth a
         # stall here, and the old path gives it.
         print("!! no navigator confirmed the cancel through the goal server", file=out, flush=True)
