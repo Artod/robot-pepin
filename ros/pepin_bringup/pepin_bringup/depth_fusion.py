@@ -206,6 +206,7 @@ from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.graphbend import GraphBend
 from pepin.lean import LeanGate
 from pepin.mounts import LASER_FRAME, load_lidar_mount
+from pepin.tof_rays import TOF_RATE_HZ, TOF_WEIGHT, fan_image, fans_to_clear, optical_pose, tof_law
 from pepin.tsdf import (
     YAW_SEARCH,
     AlignReason,
@@ -233,6 +234,7 @@ from pepin.volume_scan import (
 )
 from pepin.watch import DRIVE_FIT, SOURCE_PATIENCE_S, PaintTrust
 from pepin.worldmap import (
+    TOF,
     CorrectionFollower,
     LidarLaw,
     PlanarMount,
@@ -312,7 +314,11 @@ PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by
 BAND_STRIDE = 3
 BAND_MIN_POINTS = 50  # a frame with fewer points in the band is not worth a yaw search
 AT_BOUND_STREAK = 30  # ~3 s of frames refused at the search's bound: the model no longer fits
-STAGES = ("align", "integrate", "scan", "marks", "grid", "grid_map")
+STAGES = ("align", "integrate", "scan", "tof", "marks", "grid", "grid_map")
+# The three ToF fans, in their own frames (pepin_bringup.tof_bridge publishes both; the frame
+# names are pepin.mounts.TOF_FRAME, the topic its _SCAN_TOPIC under the root namespace).
+TOF_NAMES = ("front", "left", "right")
+TOF_SCAN_TOPIC = "/tof/{name}/scan"
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line.
@@ -326,6 +332,29 @@ FLAGS = FlagSet(
         on_when="whenever the fused surface or the volume's map is wanted",
         off_when="to freeze the model where it stands — a snapshot to save, a picture to read, a"
         " run where the camera is carried by hand",
+    ),
+    Flag(
+        "tof_rays",
+        True,
+        description="the three ToF fans (/tof/<name>/scan) are written into the volume as rays"
+        " from their own frames, through the camera's integrator: a return marks a surface at its"
+        " range and carves the ray free up to it, +inf carves free out to the fan's trusted range"
+        " (its range_max, pepin.tof_horizon.trusted_max_range), every fan at weight"
+        " pepin.tof_rays.TOF_WEIGHT. Both costmaps then read what the whiskers saw out of"
+        " the volume (/depth_marks, /camera_grid) like the camera's; off, the fans touch the"
+        " volume at all and feed only the local costmap's own layers, as before 2026-10-01",
+        why="a pillow under the cart's nose is below the lidar's plane and too near for the"
+        " stereo rig, so only the ToF saw it, only the local costmap's reflex layers knew, and the"
+        " global planner kept routing through it (2026-10-01). The volume is the one memory of"
+        " what is where and both costmaps already read it, so the whiskers write it too. At"
+        " weight 0.5 a hit speaks in the marks after 8 fans (the node's min_weight 4.0, 0.5 s at"
+        " 15 Hz)"
+        " and a saturated one (max_weight 20) is carved by 29 misses, 1.9 s (pepin.tof_rays,"
+        " tests/unit/test_tof_rays.py). Unmeasured on the cart as of this writing",
+        on_when="on every drive: the planner must know what the whiskers saw",
+        off_when="a sensor reading its own surroundings (a cable hanging in its cone) paints"
+        " phantoms into the volume that the planner cannot pass — the local costmap's layers"
+        " still get the fans either way",
     ),
     Flag(
         "volume_frame",
@@ -946,6 +975,17 @@ class DepthFusion(Node):
             QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE),
         )
         self._laser: tuple[PlanarMount, float, bool] | None = None  # mount, yaw, upside down
+        # The ToF fans have their own worker too: a fan is sub-millisecond to integrate but
+        # waits for the lock a camera frame holds, and the executor thread must not. Newest
+        # first, as for the scans: a fan still waiting is dropped and counted.
+        self._tofs = Worker(self._on_tof_work, name="tof", on_error=self._on_work_error).start()
+        for name in TOF_NAMES:
+            self.create_subscription(
+                LaserScan,
+                TOF_SCAN_TOPIC.format(name=name),
+                self._on_tof,
+                QoSProfile(depth=2, reliability=ReliabilityPolicy.RELIABLE),
+            )
         self._snapshots = SnapshotClock(float(self._switches["snapshot_s"]))
         # ...and whether the volume in memory is fit to replace the one on disk at all
         # (pepin.worldmap.SnapshotTrust): a run that loses the tracker must leave the last good
@@ -1078,6 +1118,7 @@ class DepthFusion(Node):
         if not self._worker.stop():
             self.get_logger().warning("the fusion worker did not finish its frame; leaving anyway")
         self._scans.stop()
+        self._tofs.stop()
         # Best effort, and never at the snapshot's expense: after a SIGINT rclpy has already shut
         # the context and nothing can be published, so a stopped fusion leaves its last grid in
         # a layer that is still on (ros/README.md, "Camera grid A/B"); on a loud exit with the
@@ -1237,6 +1278,7 @@ class DepthFusion(Node):
             # force now, not under the correction the emptied one was standing in
         self._worker.clear()
         self._scans.clear()
+        self._tofs.clear()
         with self._sync.lock:
             for queue in self._sync.queues:
                 queue.clear()
@@ -1364,6 +1406,64 @@ class DepthFusion(Node):
         self._trust.painted(now)  # ...and the map on disk may be replaced by this one
         if self._snapshots.due(now) and self._switches["snapshot_s"] > 0.0:
             self._snapshot()
+
+    def _on_tof(self, msg: LaserScan) -> None:
+        """A ToF fan: straight to its worker, newest first."""
+        if not self._up:
+            return
+        self._tally.count("tof_in")
+        if self._tofs.offer(msg):
+            self._tally.count("tof_dropped")
+
+    def _on_tof_work(self, msg: LaserScan) -> None:
+        """One ToF fan into the volume at the pose TF gives its frame for its stamp, as a tiny
+        depth image through the camera's integrator (pepin.tof_rays): a return marks and carves
+        up to itself, +inf carves free out to the fan's trusted range, NaN says nothing.
+        Dropped and counted when TF has no pose for the frame at that moment, and
+        under the camera's own paint gate in a map-framed volume. The marks and grids go out
+        afterwards as after any integration, so a parked cart whose lidar sees the same view
+        still carries a new whisker mark to the costmaps."""
+        if not self._switches.on("tof_rays"):
+            self._tally.count("tof_off")
+            return
+        if not self._follow(msg.header.stamp):
+            return  # the volume owes the graph a move: nothing goes in until it has been made
+        at = stamp_seconds(msg.header.stamp)
+        if self._switches.on("fit_gate") and not self._odom_volume:
+            refusal = self._paint_refusal(at)
+            if refusal is not None:
+                self._withhold("low_fit", refusal)
+                return
+        poser = self._poser_now
+        sensor = poser.frame_in_map(msg.header.frame_id, at)
+        base = poser.base_in_map(at) if sensor is not None else None
+        if sensor is None or base is None:
+            self._tally.count("tof_no_tf")  # the lookup's own handler counted the edge
+            return
+        ranges = np.asarray(msg.ranges, dtype=float)
+        if np.isfinite(ranges).any():
+            self._tally.count("tof_hits")
+        elif np.isinf(ranges).any():
+            self._tally.count("tof_misses")
+        else:
+            self._tally.count("tof_silent")
+            return  # nothing to write: every beam says "I do not know"
+        depth, intr = fan_image(ranges, msg.angle_min, msg.angle_increment)
+        self._roll_window(base)
+        with self._tally.measure("tof"), self._lock:
+            touched = self._world.integrate_depth(
+                depth,
+                None,
+                intr,
+                optical_pose(sensor),
+                stamp=at,
+                law=tof_law(float(msg.range_max)),
+                sensor=TOF,
+            )
+        self._tally.count("tof_fans")
+        self._tally.count("tof_voxels", touched)
+        self._publish_marks(base, msg.header.stamp)
+        self._publish_grid(base, msg.header.stamp)
 
     def _roll_window(self, base: RigidPose) -> None:
         """Keep the rolling window on the cart, before the observation that found it there goes
@@ -2005,10 +2105,26 @@ class DepthFusion(Node):
             f" refused: {self._refusals(w) or 'none'}; skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
             f" {self._marks_line(w)}; {self._grid_line(w)}; {self._frame_line(w)};"
-            f" {self._band_text()}; {self._carve_line()}; {self._world_line(w)};"
+            f" {self._band_text()}; {self._carve_line()}; {self._tof_line(w)};"
+            f" {self._world_line(w)};"
             f" {self._follow_line(w)};"
             f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+        )
+
+    def _tof_line(self, w: Window) -> str:
+        """The whiskers' half of the report: how many fans the volume took and what one cost,
+        how many were hits, misses or silent, how many were dropped — for TF, in the queue, or
+        by the flag — and the clearing arithmetic a drive is judged by."""
+        c = w.counts
+        clear = fans_to_clear(self._spec.max_weight)
+        return (
+            f"tof: {int(c['tof_fans'])} fans ({w.rate('tof_fans'):.1f}/s,"
+            f" {w.ms_per('tof', 'tof_fans'):.1f} ms a fan) — {int(c['tof_hits'])} hits,"
+            f" {int(c['tof_misses'])} misses, {int(c['tof_silent'])} silent; dropped: no tf"
+            f" {int(c['tof_no_tf'])}, queue {int(c['tof_dropped'])}, flag off {int(c['tof_off'])};"
+            f" weight {TOF_WEIGHT:g} a fan, a saturated hit carved by {clear} misses"
+            f" ({clear / TOF_RATE_HZ:.1f} s at {TOF_RATE_HZ:.0f} Hz)"
         )
 
     def _frame_line(self, w: Window | None = None) -> str:
