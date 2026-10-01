@@ -12,13 +12,26 @@ read, this node only asks). The geometry is pepin.neck on config/neck.json: at t
 ticks the transform equals the static one, so flipping the switch moves nothing.
 
 Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (2 since
-2026-09-14), ``tf_hz`` (10), ``config`` (config/neck.json beside the library,
+2026-09-14), ``move_poll_hz`` (20, while the head moves), ``tf_hz`` (10), ``config``
+(config/neck.json beside the library,
 pepin.deployment.config_file); the flag ``neck_tf`` (:data:`FLAGS`, live).
 
 The bus is polled at ``poll_hz`` and the edge is published at ``tf_hz``: a servo-bus read costs
-13.5 ms of an A53 core, and the head does not move while the cart drives, so the last measured
-edge is republished with a fresh stamp between polls. Consumers see the same dense TF stream they
-saw at 10 Hz polling; the bus sees a fifth of the reads.
+13.5 ms of an A53 core, so while the head stands still the last measured edge is republished
+with a fresh stamp between polls. Consumers see the same dense TF stream they saw at 10 Hz
+polling; the bus sees a fifth of the reads.
+
+A HELD EDGE IS A CLAIM THAT THE HEAD STOOD STILL, so it is made only while it is true: the
+last two readings agree within STILL_TICKS. The first reading that differs starts a move: the
+held edge stops, the bus is asked at ``move_poll_hz`` (the base server's cache is refreshed at
+20 Hz during a move of its own anyway) and only measured edges go out, each at its own
+reading's stamp, so TF interpolates the turn between real samples and a frame waits for them
+instead of being handed the pose of half a second ago; MOVE_LINGER_S of unchanged readings
+end the move. Measured 2026-09-30 before this rule, a 30 deg turn at 35 deg/s over a parked
+cart: TF held the old pose for 0.4 s into the turn, then one intermediate sample, and the
+depth frames stamped inside the turn were folded up to 16 deg off (scratch/neck_aware/). The
+first poll interval of a move (up to 1 / ``poll_hz``) is still unseen: only the one who
+commands a move can close that (scratch/neck_aware/DESIGN.md).
 
 ``neck_tf`` defaults on because the model is checked against the hardware: the reference ticks
 in config/neck.json were read at the measured mount pose and both servo signs were verified by
@@ -52,6 +65,9 @@ _REPORT_S = 30.0
 _STALE_S = 1.0  # a cached reading older than this (the servo fell silent) is not a pose
 _TF_HZ = 10.0  # the rate the edge is published at, poll or no poll: TF lookups want it dense
 _TF_HOLD_S = 2.0  # with the bus silent this long the last edge is a guess, not a pose: stop
+_MOVE_POLL_HZ = 20.0  # the poll while the head moves: the base server's own cache rate
+STILL_TICKS = 2  # two readings this close (0.18 deg) are one pose: the encoder's own jitter
+MOVE_LINGER_S = 1.0  # unchanged readings for this long end a move
 
 # The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line. neck_tf defaults on since the
@@ -87,6 +103,7 @@ class NeckState(Node):
         host = str(self.declare_parameter("host", "127.0.0.1").value)
         port = int(self.declare_parameter("port", 3336).value)
         self._poll_hz = float(self.declare_parameter("poll_hz", 2.0).value)
+        self._move_poll_hz = float(self.declare_parameter("move_poll_hz", _MOVE_POLL_HZ).value)
         self._tf_hz = float(self.declare_parameter("tf_hz", _TF_HZ).value)
         config = str(self.declare_parameter("config", str(config_file("neck.json"))).value)
         self._switches = Switches(self, FLAGS)
@@ -94,7 +111,7 @@ class NeckState(Node):
         self._joints_pub = self.create_publisher(JointState, "neck/state", 10)
         self._tf = TransformBroadcaster(self)
         self._counts = dict.fromkeys(
-            ("polls", "replies", "errors", "stale", "out_of_limits", "held"), 0
+            ("polls", "replies", "errors", "stale", "out_of_limits", "held", "moving"), 0
         )
         self._last: tuple[int, int] | None = None
         self._last_error = ""
@@ -102,9 +119,13 @@ class NeckState(Node):
         # The last measured edge and when it was measured (monotonic): what _hold_tf republishes.
         self._last_edge: tuple[float, float, float, float, float, float] | None = None
         self._last_edge_at = 0.0
+        # When the readings last changed (monotonic; -inf: never) and when the bus was last
+        # asked: the head is MOVING within MOVE_LINGER_S of a change, and is then polled fast.
+        self._changed_at = float("-inf")
+        self._polled_at = float("-inf")
         self._link = JsonLineLink(host, port, self._on_line, name="base server")
         self._link.start()
-        self.create_timer(1.0 / self._poll_hz, self._poll)
+        self.create_timer(1.0 / max(self._poll_hz, self._move_poll_hz), self._poll)
         self.create_timer(1.0 / self._tf_hz, self._hold_tf)
         self.create_timer(_REPORT_S, self._report)
         ref = self._cfg.reference
@@ -129,9 +150,22 @@ class NeckState(Node):
         """Close the link to the base server, on the way out."""
         self._link.stop()
 
+    @property
+    def moving(self) -> bool:
+        """Whether the head is turning: its readings changed within MOVE_LINGER_S."""
+        return time.monotonic() - self._changed_at < MOVE_LINGER_S
+
     def _poll(self) -> None:
-        """Ask the base server for the encoders; a dropped request (link down) is not an error."""
+        """Ask the base server for the encoders — at ``poll_hz`` while the head stands still,
+        at ``move_poll_hz`` while it moves; a dropped request (link down) is not an error."""
+        now = time.monotonic()
+        hz = self._move_poll_hz if self.moving else self._poll_hz
+        if now - self._polled_at < 1.0 / hz - 1e-3:
+            return
+        self._polled_at = now
         self._counts["polls"] += 1
+        if self.moving:
+            self._counts["moving"] += 1
         self._link.send(_NECK_REQUEST)
         self._log_link_status()
 
@@ -155,6 +189,9 @@ class NeckState(Node):
             self._counts["stale"] += 1  # the last good ticks of a servo that fell silent
             return
         pan, tilt = ticks
+        last = self._last
+        if last is None or max(abs(pan - last[0]), abs(tilt - last[1])) > STILL_TICKS:
+            self._changed_at = time.monotonic()  # a move: no held edge until it is over
         self._last, self._read_ms = ticks, reading.read_ms
         if not (self._cfg.pan.within_limits(pan) and self._cfg.tilt.within_limits(tilt)):
             self._counts["out_of_limits"] += 1
@@ -185,12 +222,15 @@ class NeckState(Node):
 
     def _hold_tf(self) -> None:
         """Republish the last measured edge with a fresh stamp, so the TF stream stays dense
-        while the bus is polled slowly; silent for longer than ``_TF_HOLD_S`` of silence."""
+        while the bus is polled slowly — only while the head stands still (a held edge says it
+        did), and never past ``_TF_HOLD_S`` of silence."""
         edge = self._last_edge
         if edge is None:
             return
         if not self._switches.on("neck_tf"):
             return
+        if self.moving:
+            return  # measured edges only, at their own stamps: TF interpolates the turn
         if time.monotonic() - self._last_edge_at > _TF_HOLD_S:
             return
         self._counts["held"] += 1
@@ -209,8 +249,9 @@ class NeckState(Node):
         error = f"; last error: {self._last_error}" if c["errors"] else ""
         model = "" if self._cfg.reference.known else ", reference unread: the pose is the mount"
         self.get_logger().info(
-            f"neck: polls {c['polls']}, replies {c['replies']}, errors {c['errors']}, stale"
-            f" {c['stale']}, out of limits {c['out_of_limits']}, TF held {c['held']}; {where};"
+            f"neck: polls {c['polls']} ({c['moving']} while moving), replies {c['replies']},"
+            f" errors {c['errors']}, stale {c['stale']}, out of limits {c['out_of_limits']}, TF"
+            f" held {c['held']}; {where};"
             f" read {self._read_ms:.1f} ms; flags: {self._switches.state()}, poll"
             f" {self._poll_hz:.0f} Hz, TF {self._tf_hz:.0f} Hz"
             f"{model}{error}"

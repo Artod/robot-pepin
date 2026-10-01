@@ -27,17 +27,18 @@ the newest one wins. Every stage is timed and reported.
 
 Where the camera sits is asked of TF at every frame's stamp (:class:`pepin.frame_pose.FramePoser`
 over the kit's :class:`TfHistory`): the neck moves, and ``base_link -> camera_link`` is published
-live from its encoders by the board's neck node; config/camera.json's mount is the fallback
-while TF has no such edge yet, and the report line counts the frames that used it. The same
-poser carries the scan to the frame's moment through the odometry. Neither ask ever waits for
-an edge that has stopped: TF goes through :class:`LiveEdgeHistory`, which refuses any blocking
-lookup of an edge whose newest sample is more than ``tf_dead_s`` behind the frame — the config
-mount and the uncarried scan at once, both counted, instead of CARRY_WAIT_S burnt per frame on
-a route that has died (2026-09-16: the neck's edge 344 s old, 0.9-3 frames/s). A pan of the
-head is counted too, and behind ``scan_honours_pan`` the published fan turns with it — the
-bearings of /depth_scan are the cart's whichever way the neck looks, and the fan's angular
-window sits off base_link's x by the pan. The depth image the pipeline corrects is still
-projected as if the head looked along that x: the anchors read pixels and heights, not bearings.
+live from its encoders by the board's neck node; the last edge TF held stands in when the
+frame's stamp cannot be had, and config/camera.json's mount (straight ahead) only while TF has
+never had such an edge; the report line counts both. The same poser carries the scan to the
+frame's moment through the odometry. Neither ask ever waits for an edge that has stopped: TF
+goes through :class:`LiveEdgeHistory`, which refuses any blocking lookup of an edge whose newest
+sample is more than ``tf_dead_s`` behind the frame — the last edge and the uncarried scan at
+once, both counted, instead of CARRY_WAIT_S burnt per frame on a route that has died
+(2026-09-16: the neck's edge 344 s old, 0.9-3 frames/s). The pan is part of the camera's pose
+(:class:`pepin.depth.CameraPose`'s yaw): the lidar's beams are projected into the picture where
+the head looks, and behind ``scan_honours_pan`` the published fan turns with it — the bearings
+of /depth_scan are the cart's whichever way the neck looks, and the fan's angular window sits
+off base_link's x by the pan.
 
 THE STEREO SOURCE: the node also subscribes to ``/camera/right/image`` and
 ``/camera/right/camera_info``, pairs the right eye with the left picture by EXACT stamp (both
@@ -150,7 +151,7 @@ from pepin.depth_service import (
     RemoteDepth,
 )
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.frame_pose import FramePoser
+from pepin.frame_pose import FramePoser, settled_pose
 from pepin.stereo_depth import (
     MATCHERS as STEREO_MATCHERS,
 )
@@ -379,15 +380,16 @@ FLAGS = FlagSet(
         "camera_tf_latest",
         True,
         description="take the newest base_link <- camera_optical edge TF holds (at most"
-        f" {CAMERA_TF_MAX_AGE_S:.0f} s old) when the frame's own stamp is not covered yet, instead"
-        " of waiting CARRY_WAIT_S for it; off: the old wait at the exact stamp",
+        f" {CAMERA_TF_MAX_AGE_S:.0f} s old, and only while the head has not moved over the half"
+        " second before it) when the frame's own stamp is not covered yet, instead of waiting"
+        " CARRY_WAIT_S for it; off: the old wait at the exact stamp",
         why="on since 2026-09-15 06:00: the neck's edge crosses the bridge late (bursts of +0.75 s)"
         " and the head stands still while the cart drives; waiting for the exact stamp cost"
         " 0.2 s on every frame ('Extrapolation ... into the future' x104 a window), the stream"
         " fell to 3.5 frames/s and rgbd_odometry starved (0 poses/s)",
-        on_when="always while the head does not move during a frame (it does not: neck moves"
-        " are refused while the wheels turn)",
-        off_when="a head that pans while driving, where a 1 s old edge would be a wrong pose",
+        on_when="always: a turning head is recognised (its edge moved within the last half"
+        " second) and waited for at the exact stamp instead (2026-09-30)",
+        off_when="to measure what the shortcut is worth: every uncovered frame then waits",
     ),
     Flag(
         "fan_floor_gate",
@@ -419,10 +421,10 @@ FLAGS = FlagSet(
         description="fold /depth_scan onto the floor through the neck's pan: the fan's bearings"
         " turn with the head and its angular window turns with them, so angle_min comes out at"
         " pan - 40 deg instead of -40. The pan is the yaw of the same base_link <-"
-        " camera_optical edge the volume path reads (camera_tf_latest); with no such edge the"
-        " config mount's straight-ahead yaw stands in, and the report line's config counter says"
-        " for how many frames. Off: the fan is projected as if the head looked along the cart's"
-        " x, whatever the encoders say",
+        " camera_optical edge the volume path reads (camera_tf_latest); with none at the frame's"
+        " stamp the last edge TF held stands in, and only while TF never had one the config"
+        " mount's straight-ahead yaw (the report line counts both). Off: the fan is projected as"
+        " if the head looked along the cart's x, whatever the encoders say",
         why="the fan carried no pan at all until 2026-09-15, and the report line said so ('head"
         " panned N frames (projected as if not)'). At rest that is not nothing: the pan"
         " reference measured that day (config/neck.json pan_note,"
@@ -1234,32 +1236,42 @@ class DepthStream(Node):
 
     def _camera_at(self, stamp: Any) -> tuple[CameraPose, RigidPose | None]:
         """Where the camera sat at ``stamp``: ``base_link <- camera_optical`` from TF (the
-        neck's live edge, or the static one) twice over — as the pipeline's pitch-only pose,
-        and as the edge itself for what needs the whole rotation (the fan turns with the neck's
-        pan). Without such an edge in TF:
-        config/camera.json's mount, counted, and no edge. A head turned past PAN_NOTICE_RAD is
-        counted too: the volume path and the fan (``scan_honours_pan``) turn with it, while the
-        pitch-only pose the rest of the pipeline reads still assumes the cart's x.
+        neck's live edge, or the static one) twice over — as the pipeline's pose (position,
+        pitch and the pan as a yaw: every projection turns with the head) and as the edge
+        itself, for the fan. A head turned past PAN_NOTICE_RAD is counted.
 
-        Three asks, cheapest first, and only the last of them can wait: the frame's own stamp
-        from what TF already holds, the newest edge while it is younger than
-        CAMERA_TF_MAX_AGE_S (``camera_tf_latest``), and then the blocking lookup — which
-        :class:`LiveEdgeHistory` refuses outright once the neck's edge is more than
-        ``tf_dead_s`` behind this frame, so a dead route costs the config mount and not 0.2 s
-        of every frame."""
+        Four asks, cheapest first, and only the third can wait: the frame's own stamp from what
+        TF already holds; the newest edge, while it is younger than CAMERA_TF_MAX_AGE_S and the
+        head has not moved over the half second before it (``camera_tf_latest``,
+        :func:`pepin.frame_pose.settled_pose` — a turning head is never stood in for by an old
+        sample); the blocking lookup at the stamp — refused outright by
+        :class:`LiveEdgeHistory` once the neck's edge is more than ``tf_dead_s`` behind this
+        frame, so a dead route costs no wait; and then the newest edge TF holds at any age, the
+        head's last known pose, counted. config/camera.json's mount, which looks straight ahead,
+        only while TF has never carried the edge at all."""
         at = stamp_seconds(stamp)
         pose = self._history.pose_at_nowait(at, self._camera_frame, self._base_frame)
         if pose is None and self._switches.on("camera_tf_latest"):
-            # The neck's edge crosses the bridge late (bursts of +0.75 s, 2026-09-15) and the
-            # head does not move while the cart drives: a lookup at the frame's own stamp
-            # waited CARRY_WAIT_S on every frame ("Extrapolation ... into the future" x104 a
-            # window, 3.5 frames/s, VO starved). The newest edge, if young, is the head's pose.
-            latest = self._history.latest_pose(self._camera_frame, self._base_frame)
-            if latest is not None and at - latest[1] <= CAMERA_TF_MAX_AGE_S:
-                pose = latest[0]
+            # The neck's edge crosses the bridge late (bursts of +0.75 s, 2026-09-15): a lookup
+            # at the frame's own stamp waited CARRY_WAIT_S on every frame ("Extrapolation ...
+            # into the future" x104 a window, 3.5 frames/s, VO starved). The newest edge of a
+            # head that stands still is the head's pose; of a turning one it is not.
+            pose = settled_pose(
+                self._history,
+                at,
+                self._camera_frame,
+                self._base_frame,
+                max_age_s=CAMERA_TF_MAX_AGE_S,
+            )
+            if pose is not None:
                 self._tally.count("camera_tf_latest")
         if pose is None:
             pose = self._poser.camera_in_base(at)  # the old path: wait for the stamp
+        if pose is None:
+            latest = self._history.latest_pose(self._camera_frame, self._base_frame)
+            if latest is not None:
+                pose = latest[0]  # where the head was last seen, never "straight ahead"
+                self._tally.count("camera_tf_stale")
         if pose is None:
             self._tally.count("camera_from_config")
             self._last_cam = self._camera_config
@@ -1300,8 +1312,8 @@ class DepthStream(Node):
         )
         before = int(np.count_nonzero(np.isfinite(ranges)))
         if gate == "contact":
-            # Both fans are indexed by the bearing across the PICTURE, so the contact scan's
-            # bins line up with the panned fan's bin for bin without a pan of its own.
+            # Both fans are indexed by the bearing across the PICTURE (each window turned by the
+            # head's yaw), so the contact scan's bins line up with the panned fan's bin for bin.
             plane = FloorPlane.of(ctx.intr, ctx.cam, ctx.up)
             _min, _step, contact, _verdict = contact_scan(depth, plane)
             ranges, _removed = gate_by_contact(ranges, contact)
@@ -1532,6 +1544,9 @@ class DepthStream(Node):
                 extra += f", rig unknown {c['no_stereo']} frames"
         if c["carry_insane"]:
             extra += f", carry insane {c['carry_insane']} frames (the odometry ran away)"
+        if c["camera_tf_stale"]:
+            neck = self._dead_edge(w, "neck") or "no edge at the stamp"
+            extra += f", camera pose from the last edge {c['camera_tf_stale']} frames ({neck})"
         if c["camera_from_config"]:
             neck = self._dead_edge(w, "neck") or "no TF edge"
             extra += f", camera pose from config {c['camera_from_config']} frames ({neck}"

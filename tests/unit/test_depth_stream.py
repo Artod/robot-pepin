@@ -416,7 +416,9 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     node._tf.buffer.transforms[("base_link", "camera_optical")] = _optical_edge(31.5, pan_deg=20.0)
     turned, edge = node._camera_at(_stamp(1))
     assert turned.pitch == pytest.approx(math.radians(31.5)) and turned.z == 1.2
-    # the pose drops the pan, the edge beside it keeps it: the fan turns with the edge
+    # the pose carries the pan as its yaw (every projection turns with it), and so does the
+    # edge beside it, which the fan is folded through
+    assert turned.yaw == pytest.approx(math.radians(20.0))
     assert edge is not None
     assert optical_heading(edge.rotation)[1] == pytest.approx(math.radians(20.0))
     frame(node, net, turned, 2.0, 1)  # the second count: the frame's own lookup
@@ -439,10 +441,15 @@ def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: B
 
 
 # ---- a TF route that has died ---------------------------------------------------------------
+# The neck's last edge a stopped route leaves in TF: the head 31.5 deg down, 20 deg left.
+LAST_EDGE = pose_from_transform(_optical_edge(31.5, pan_deg=20.0))
+LAST_CAM = CameraPose.from_optical(LAST_EDGE.rotation, LAST_EDGE.translation)
+
+
 class StoppedTf:
     """TF whose route died ``age_s`` before the first frame: nothing covers a frame's stamp,
-    the newest edge of every pair is that old, and the blocking ask — the one the guard exists
-    to refuse — sleeps ``wait_s`` and counts itself in ``waits``."""
+    the newest edge of every pair is that old (:data:`LAST_EDGE`), and the blocking ask — the
+    one the guard exists to refuse — sleeps ``wait_s`` and counts itself in ``waits``."""
 
     def __init__(self, age_s: float, wait_s: float = CARRY_WAIT_S) -> None:
         self.stamp = stamp_seconds(_stamp(0)) - age_s
@@ -458,7 +465,7 @@ class StoppedTf:
         return None
 
     def latest_pose(self, frame: str, fixed: str) -> Any:
-        return RigidPose(np.eye(3), np.zeros(3)), self.stamp
+        return LAST_EDGE, self.stamp
 
 
 def stopped_tf(node: DepthStream, age_s: float, wait_s: float = CARRY_WAIT_S) -> StoppedTf:
@@ -469,20 +476,22 @@ def stopped_tf(node: DepthStream, age_s: float, wait_s: float = CARRY_WAIT_S) ->
     return fake
 
 
-def test_a_dead_neck_edge_gives_the_config_pose_at_once_instead_of_waiting(build: Build) -> None:
+def test_a_dead_neck_edge_gives_the_last_edge_at_once_instead_of_waiting(build: Build) -> None:
     """2026-09-16: the board's TF route died, base_link <- camera_optical stopped 344 s back,
     and every frame still spent CARRY_WAIT_S on a lookup no publisher was going to answer
-    (pose 212/226 ms, 0.9-3 frames/s). An edge older than tf_dead_s is dead: the config mount
-    at once, counted as such, and no wait at all."""
+    (pose 212/226 ms, 0.9-3 frames/s). An edge older than tf_dead_s is dead: no wait at all,
+    and the pose is that edge's — where the head was last seen, panned 20 deg — never the config
+    mount's straight ahead (2026-09-30), counted as such."""
     node, _net = build()
     fake = stopped_tf(node, age_s=10.0)
     started = time.perf_counter()
-    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert node._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
     spent_ms = (time.perf_counter() - started) * 1e3
     assert fake.waits == 0, "no lookup waited for an edge that has stopped"
     assert spent_ms < 1.0, f"the dead route cost the frame {spent_ms:.1f} ms"
     counts = node._tally.take()
-    assert counts.counts["neck_edge_dead"] == 1 and counts.counts["camera_from_config"] == 1
+    assert counts.counts["neck_edge_dead"] == 1 and counts.counts["camera_tf_stale"] == 1
+    assert counts.counts["camera_from_config"] == 0
     assert counts.samples["neck_edge_stale_s"] == pytest.approx([10.0])
 
 
@@ -491,15 +500,16 @@ def test_an_edge_younger_than_tf_dead_s_is_still_waited_for(build: Build) -> Non
     frame's stamp and does not cover it yet. That wait stays — the guard refuses only the
     lookups that cannot be answered. Both ways round the newest-edge shortcut: an edge half a
     second old with ``camera_tf_latest`` off (the old ask at the exact stamp), and one two
-    seconds old, which that shortcut refuses (CAMERA_TF_MAX_AGE_S) and the wait then takes."""
+    seconds old, which that shortcut refuses (CAMERA_TF_MAX_AGE_S) and the wait then takes.
+    The wait unanswered, the last edge stands in."""
     old_ask, _net = build(camera_tf_latest=False)
     fake = stopped_tf(old_ask, age_s=0.5, wait_s=0.0)
-    assert old_ask._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert old_ask._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
     assert fake.waits == 1, "a young edge is still waited for at the frame's stamp"
     assert old_ask._tally.take().counts["neck_edge_dead"] == 0
     node, _net = build()
     older = stopped_tf(node, age_s=2.0, wait_s=0.0)
-    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert node._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
     assert older.waits == 1 and node._tally.take().counts["neck_edge_dead"] == 0
 
 
@@ -508,8 +518,37 @@ def test_tf_dead_s_zero_waits_on_a_dead_edge_as_the_node_used_to(build: Build) -
     edge is."""
     node, _net = build(tf_dead_s=0.0)
     fake = stopped_tf(node, age_s=10.0, wait_s=0.0)
-    assert node._camera_at(_stamp(0)) == (CONFIG_CAM, None)
+    assert node._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
     assert fake.waits == 1 and node._tally.take().counts["neck_edge_dead"] == 0
+
+
+class TurningTf(StoppedTf):
+    """A live neck edge 0.1 s behind the frame that does not cover its stamp yet, with the
+    head ``turned_deg`` further round half a second before that newest sample (0: still)."""
+
+    def __init__(self, turned_deg: float) -> None:
+        super().__init__(age_s=0.1, wait_s=0.0)
+        self.before = pose_from_transform(_optical_edge(31.5, pan_deg=20.0 - turned_deg))
+
+    def pose_at_nowait(self, stamp: float, frame: str, fixed: str) -> Any:
+        return self.before if stamp < self.stamp - 0.25 else None
+
+
+def test_the_newest_edge_stands_in_only_for_a_head_that_stands_still(build: Build) -> None:
+    """``camera_tf_latest``: a frame newer than the neck's newest edge takes that edge without
+    a wait when the head did not move over the half second before it — and waits for its own
+    stamp when the head was turning (at 35 deg/s a 1 s old sample is 35 deg off)."""
+    node, _net = build()
+    still = TurningTf(turned_deg=0.0)
+    node._history.history = still
+    assert node._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
+    assert still.waits == 0 and node._tally.take().counts["camera_tf_latest"] == 1
+    turning = TurningTf(turned_deg=10.0)
+    node._history.history = turning
+    node._camera_at(_stamp(0))
+    counts = node._tally.take().counts
+    assert turning.waits == 1, "a turning head is waited for at the frame's own stamp"
+    assert counts["camera_tf_latest"] == 0
 
 
 def test_a_dead_odometry_edge_leaves_the_scan_uncarried_instead_of_waiting(build: Build) -> None:
@@ -567,8 +606,8 @@ def test_the_report_line_names_a_dead_neck_edge_and_how_stale_it_is(build: Build
     frame(node, net, CONFIG_CAM, 2.0, 0)
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "camera pose from config 1 frames (neck edge dead 1 frames (10 s stale)" in line
-    assert "no TF edge" not in line
+    assert "camera pose from the last edge 1 frames (neck edge dead 1 frames (10 s stale)" in line
+    assert "camera pose from config" not in line and "no TF edge" not in line
     assert "scans uncarried 1" in line and "odom edge dead 2 asks (10 s stale)" in line
     assert "tf_dead_s=3.0" in line
 

@@ -26,6 +26,7 @@ gyro's own signature — is not a lean but an unknown, and is placed level like 
 
 from __future__ import annotations
 
+import math
 from typing import Protocol, runtime_checkable
 
 import numpy as np
@@ -38,6 +39,12 @@ BASE_FRAME = "base_link"
 CAMERA_FRAME = "camera_optical"
 MAP_FRAME = "map"
 ODOM_FRAME = "odom"
+# A head is STILL when its edge has not moved over the last STILL_S before its newest sample by
+# more than STILL_RAD / STILL_M: then that newest edge may stand for a frame a little newer than
+# it. Two encoder ticks are 0.18 deg; the neck turns at ~35 deg/s, so a move shows at once.
+STILL_S = 0.5
+STILL_RAD = math.radians(0.2)
+STILL_M = 0.003
 
 
 class PoseHistory(Protocol):
@@ -295,6 +302,45 @@ class FramePoser:
         return RigidPose(planar.rotation @ lean.rotation(), planar.translation)
 
 
+def settled_pose(
+    history: RecentPoseHistory,
+    stamp: float,
+    frame: str,
+    fixed: str,
+    *,
+    max_age_s: float,
+    still_s: float = STILL_S,
+) -> RigidPose | None:
+    """The newest ``fixed <- frame`` edge standing in for its pose at ``stamp``, without a wait,
+    only where it may: the edge is at most ``max_age_s`` behind ``stamp`` and did not move over
+    the ``still_s`` before its own newest sample. ``None`` otherwise — the caller then waits
+    for the exact stamp or has no pose.
+
+    For the neck's edge (base_link <- camera_optical): a head that has not turned for half a
+    second is where its newest edge says, and a frame a few tens of milliseconds newer than that
+    edge is placed right; a head that is turning is somewhere between its samples, and the
+    newest one is up to a whole poll behind it (a newest edge up to 1.0 s old was taken on
+    trust until 2026-09-30: at the neck's 35 deg/s, a pose up to 35 deg off)."""
+    latest = history.latest_pose(frame, fixed)
+    if latest is None:
+        return None
+    pose, at = latest
+    if stamp - at > max_age_s:
+        return None
+    before = history.pose_at_nowait(at - still_s, frame, fixed)
+    if before is None or not same_pose(before, pose):
+        return None
+    return pose
+
+
+def same_pose(a: RigidPose, b: RigidPose, rad: float = STILL_RAD, metres: float = STILL_M) -> bool:
+    """Whether two poses differ by at most ``rad`` of rotation and ``metres`` of translation."""
+    turn = a.rotation.T @ b.rotation
+    cos = max(-1.0, min(1.0, (float(np.trace(turn)) - 1.0) / 2.0))
+    moved = float(np.linalg.norm(np.asarray(a.translation) - np.asarray(b.translation)))
+    return math.acos(cos) <= rad and moved <= metres
+
+
 def _compose(outer: RigidPose, inner: RigidPose) -> RigidPose:
     """``outer`` applied to ``inner``: the pose of ``inner``'s frame in ``outer``'s parent."""
     return RigidPose(
@@ -302,4 +348,14 @@ def _compose(outer: RigidPose, inner: RigidPose) -> RigidPose:
     )
 
 
-__all__ = ["BASE_FRAME", "CAMERA_FRAME", "MAP_FRAME", "ODOM_FRAME", "FramePoser", "PoseHistory"]
+__all__ = [
+    "BASE_FRAME",
+    "CAMERA_FRAME",
+    "MAP_FRAME",
+    "ODOM_FRAME",
+    "FramePoser",
+    "PoseHistory",
+    "RecentPoseHistory",
+    "same_pose",
+    "settled_pose",
+]
