@@ -1434,12 +1434,14 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
 
 
 def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
-    """Both paint paths ask one predicate (pepin.watch.PaintTrust) before they write."""
+    """Every paint path asks one predicate (pepin.watch.PaintTrust) before it writes."""
     node = sf.tree(f"{NODES}/depth_fusion.py")
     assert "PaintTrust" in sf.imported(node), "the predicate is the watch's, not a local number"
     assert "self._paint_refusal" in sf.calls(node), "asked before anything is written"
     asked = (REPO / NODES / "depth_fusion.py").read_text().count("self._paint_refusal(")
-    assert asked == 2, "both paint paths ask it: the camera's frame and the lidar's revolution"
+    assert asked == 3, (
+        "all three paint paths ask it: the camera's frame, the lidar's revolution, a ToF fan"
+    )
     assert "/localization/sigma" in sf.strings(node), "the tracker's own sigma, where it speaks"
     flags = _live_table("depth_fusion")
     assert flags.flag("lidar_fit_gate").default is True, "a revolution is gated like a frame"

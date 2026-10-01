@@ -131,12 +131,18 @@ class FramePoser:
         leans — and the lean composed between the halves, so the camera swings about the wheels
         by roll and pitch as the body does; a history that cannot serve the split (no edge to
         the camera on its own) answers the one lookup unleaned rather than nothing at all."""
+        return self.frame_in_map(self.camera, stamp)
+
+    def frame_in_map(self, frame: str, stamp: float) -> RigidPose | None:
+        """``map <- frame`` at ``stamp`` for any frame riding on the cart (the camera, a ToF
+        sensor): the camera's own chain, leaned the same way, so every sensor's rays leave the
+        body from where the body actually is."""
         if self.lean_at(stamp) is None:
-            return self._history.pose_at(stamp, self.camera, self.map_frame)
+            return self._history.pose_at(stamp, frame, self.map_frame)
         base = self._leaned(self._history.pose_at(stamp, self.base, self.map_frame), stamp)
-        on_cart = self.camera_in_base(stamp)
+        on_cart = self._history.pose_at(stamp, frame, self.base)
         if base is None or on_cart is None:
-            return self._history.pose_at(stamp, self.camera, self.map_frame)
+            return self._history.pose_at(stamp, frame, self.map_frame)
         return _compose(base, on_cart)
 
     def camera_in_base(self, stamp: float) -> RigidPose | None:

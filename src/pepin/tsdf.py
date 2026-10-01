@@ -474,15 +474,44 @@ class DepthLaw:
     no_depth_free: bool = False  # a pixel with no depth carves its ray, or touches nothing
     no_depth_weight: float = 0.5  # of what a measurement at the reach weighs
     reach_m: float = 0.0  # the source's own reach, metres; 0: unknown, so nothing is carved
+    # A fixed weight for every measured pixel instead of the grid's (ref / d)^2: what a ranger
+    # gets whose error does not shrink as the surface comes nearer (a ToF fan,
+    # :mod:`pepin.tof_rays`). A depthless pixel then weighs ``no_depth_weight`` of THIS, since
+    # this is what a measurement at the reach weighs. None: the grid's own law, as for a camera.
+    hit_weight: float | None = None
+    # A depthless pixel carves to the reach ITSELF, and a measured pixel writes nothing beyond
+    # it: for a ranger whose "nothing" is certain out to its reach (a ToF fan's +inf means no
+    # return within its trusted range, the sensor itself seeing much farther), so that no halo
+    # a hit leaves behind the surface can outlive the sensor's own power to carve it. Off, the
+    # camera's law: carve one truncation short of the reach, write a hit's whole halo.
+    carve_to_reach: bool = False
 
     def carve_to_m(self, truncation_m: float) -> float:
         """How far down a depthless ray free space may be written, metres: the source's reach
-        less one truncation (a surface standing at the reach keeps its halo), and 0 — carve
-        nothing — while no reach is known, the flag is off, or the weight is 0 (a ray that
-        weighs nothing says nothing, and it must not reach the average as a zero divisor)."""
+        less one truncation (a surface standing at the reach keeps its halo) — the reach itself
+        under ``carve_to_reach`` — and 0 — carve nothing — while no reach is known, the flag is
+        off, or the weight is 0 (a ray that weighs nothing says nothing, and it must not reach
+        the average as a zero divisor)."""
         if not self.no_depth_free or self.reach_m <= 0.0 or self.no_depth_weight <= 0.0:
             return 0.0
+        if self.carve_to_reach:
+            return self.reach_m
         return max(0.0, self.reach_m - truncation_m)
+
+    @property
+    def write_limit_m(self) -> float:
+        """How far along its ray a MEASURED pixel may write at all: unbounded, or the reach
+        under ``carve_to_reach`` (a hit near the reach then marks without its back halo)."""
+        if self.carve_to_reach and self.reach_m > 0.0:
+            return self.reach_m
+        return math.inf
+
+    def measurement_weight(self, spec: GridSpec, depth: Floats) -> Floats:
+        """What a measured pixel at ``depth`` weighs under this law: :attr:`hit_weight` when
+        the source has a fixed one, the grid's (ref / d)^2 otherwise."""
+        if self.hit_weight is not None:
+            return np.full(np.shape(depth), self.hit_weight, dtype=float)
+        return spec.observation_weight(depth)
 
 
 class ObservedReach:
@@ -680,12 +709,17 @@ class Tsdf:
             return None
         return slice(lo[0], hi[0]), slice(lo[1], hi[1]), slice(lo[2], hi[2])
 
-    def _frustum_box(self, intr: Intrinsics, pose: RigidPose) -> tuple[slice, slice, slice] | None:
+    def _frustum_box(
+        self, intr: Intrinsics, pose: RigidPose, far_m: float | None = None
+    ) -> tuple[slice, slice, slice] | None:
         """The voxels a frame can touch: the bounding box of the camera and its four corner
-        rays at ``range_max`` plus the truncation (a surface at the range limit is felt that
-        far behind it), so a frame integrates its own view, not a 8 m cube around it."""
+        rays at ``far_m`` (``range_max`` by default) plus the truncation (a surface at the far
+        limit is felt that far behind it), so a frame integrates its own view, not a 8 m cube
+        around it. :meth:`integrate` passes the frame's own far limit — the deepest pixel it
+        carries, or how far its depthless pixels carve — so a short-ranged source (a ToF fan
+        reaching 1 m) does not pay for four metres of voxels its rays cannot reach."""
         s = self.spec
-        far = s.range_max_m + s.truncation_m
+        far = (s.range_max_m if far_m is None else min(s.range_max_m, far_m)) + s.truncation_m
         us, vs = (-0.5, intr.width - 0.5), (-0.5, intr.height - 0.5)  # the pixels' outer edges
         corners = np.array(
             [
@@ -733,7 +767,13 @@ class Tsdf:
         cannot reach, which no ray could ever carve.
         """
         s = self.spec
-        box = self._frustum_box(intr, pose)
+        depth_law = law if law is not None else DepthLaw()
+        carve_to = depth_law.carve_to_m(s.truncation_m)
+        # the frame's own far limit: nothing beyond its deepest pixel or its carve can be written
+        d_all = np.asarray(depth, dtype=np.float32)
+        d_finite = d_all[np.isfinite(d_all)]
+        far_m = max(float(d_finite.max()) if d_finite.size else 0.0, carve_to)
+        box = self._frustum_box(intr, pose, far_m)
         if box is None:
             return 0
         centres = self._centres(box)
@@ -753,16 +793,14 @@ class Tsdf:
         if not np.any(seen):
             return 0
         d = np.full(centres.shape[0], np.nan, dtype=np.float32)
-        d[seen] = np.asarray(depth, dtype=np.float32)[vi[seen], ui[seen]]
+        d[seen] = d_all[vi[seen], ui[seen]]
         finite = np.isfinite(d)
         measured = finite & (d > NEAR_M) & (d <= s.range_max_m)
         sdf = d - z  # positive: the voxel is between the camera and the surface
-        touch = measured & (sdf > -s.truncation_m)
+        touch = measured & (sdf > -s.truncation_m) & (z <= depth_law.write_limit_m)
         # A pixel with NO depth: its ray is free space as far as the source answers for it, at a
         # weight that says so (:class:`DepthLaw`). The two masks are disjoint by construction —
         # a voxel reads one pixel, and that pixel either measured something or did not.
-        depth_law = law if law is not None else DepthLaw()
-        carve_to = depth_law.carve_to_m(s.truncation_m)
         carving = carve_to > NEAR_M
         carve = (
             seen & ~finite & (z > NEAR_M) & (z <= carve_to)
@@ -779,12 +817,12 @@ class Tsdf:
         # the weakest honest reading of a depthless ray: what a measurement AT the reach weighs,
         # reduced (:class:`DepthLaw`), because a NaN is also what a textureless wall looks like
         w_free = np.float32(
-            depth_law.no_depth_weight * float(s.observation_weight(np.array(carve_to)))
+            depth_law.no_depth_weight * float(depth_law.measurement_weight(s, np.array(carve_to)))
             if carving
             else 0.0
         )
         w_obs = np.full(flat.size, w_free, dtype=np.float32)
-        w_obs[told] = s.observation_weight(d[flat][told]).astype(np.float32)
+        w_obs[told] = depth_law.measurement_weight(s, d[flat][told]).astype(np.float32)
         shape = (box[0].stop - box[0].start, box[1].stop - box[1].start, box[2].stop - box[2].start)
         ix, iy, iz = np.unravel_index(flat, shape)
         ix, iy, iz = ix + box[0].start, iy + box[1].start, iz + box[2].start

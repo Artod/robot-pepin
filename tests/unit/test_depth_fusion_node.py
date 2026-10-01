@@ -29,6 +29,8 @@ from pepin_bringup.depth_fusion import DepthFusion  # noqa: E402
 from ros_stubs import Header, LaserScan, Parameter, String, TransformStamped  # noqa: E402
 from ros_stubs import Time as TimeMsg  # noqa: E402
 
+from pepin.tof_rays import fans_to_speak  # noqa: E402
+
 REPO = Path(__file__).resolve().parents[2]
 SCAN_S = 100.0  # the stamp every revolution of this file carries
 BEAMS = 360
@@ -947,3 +949,110 @@ def test_the_report_line_says_what_the_grids_carried(tmp_path: Path) -> None:
     assert line.startswith("grid: 2 on /camera_grid")
     assert "6.0 m at 5 cm" in line and "in odom" in line
     assert "/camera_grid_map on 200x160 at 5 cm from (-5.00, -4.00): 2 updates" in line
+
+
+# ---- the whiskers write the volume (tof_rays) ----------------------------------------------
+# A pillow under the cart's nose is below the lidar's plane and too near for the stereo rig: only
+# the ToF saw it, and until 2026-10-01 only the local costmap's own layers knew. The fans now go
+# into the volume as rays from their own frames (pepin.tof_rays), so both costmaps read them out
+# of /depth_marks like the camera's surfaces.
+
+TOF_S = SCAN_S
+TOF_BEAMS = 11  # the front whisker's fan at its 0.96 m ceiling (pepin.tof_horizon.cone_beams)
+TOF_REACH_M = 0.96
+TOF_FOV = 0.47
+
+
+def tof_msg(value: float, t: float = TOF_S, name: str = "front") -> Any:
+    """One fan of the ``name`` whisker, every beam ``value`` (metres, +inf for nothing within the
+    trusted range, NaN for "I do not know"), as pepin_bringup.tof_bridge.fan_scan publishes it."""
+    return LaserScan(
+        header=Header(stamp=stamp(t), frame_id=f"tof_{name}"),
+        angle_min=-TOF_FOV / 2,
+        angle_increment=TOF_FOV / (TOF_BEAMS - 1),
+        range_min=0.05,
+        range_max=TOF_REACH_M,
+        ranges=[value] * TOF_BEAMS,
+    )
+
+
+def whisker_node(tmp_path: Path) -> DepthFusion:
+    """An odom node whose TF also carries the front whisker's mount (config/tof.json: 0.27 m up,
+    facing forward) — and NO edge for the left one, which is the dead-edge case below."""
+    node = odom_node(tmp_path)
+    node._tf.buffer.transforms[("odom", "tof_front")] = edge("odom", "tof_front", TOF_S, z=0.27)
+    return node
+
+
+def ahead_in_marks(node: DepthFusion) -> float:
+    """The nearest mark inside the front whisker's cone, metres; NaN for none."""
+    ranges = np.array(marks(node).ranges)
+    mid, half = ranges.size // 2, round((TOF_FOV / 2) / math.radians(0.5))
+    cone = ranges[mid - half : mid + half + 1]
+    return float(np.nanmin(cone)) if np.isfinite(cone).any() else math.nan
+
+
+def test_a_whisker_hit_reaches_the_marks_the_costmaps_read(tmp_path: Path) -> None:
+    """Eight fans at 0.4 m (the node's min_weight 4.0 at 0.5 a fan: half a second at 15 Hz) and
+    the marks carry a surface 0.4 m ahead; the volume holds it at the sensor's own height; the
+    report counts the hits."""
+    node = whisker_node(tmp_path)
+    speak = fans_to_speak(float(node._switches["min_weight"]))
+    assert speak == 8
+    for i in range(speak - 1):
+        node._on_tof_work(tof_msg(0.4, TOF_S + 0.07 * i))
+    assert math.isnan(ahead_in_marks(node)), "seven fans are not yet agreement"
+    node._on_tof_work(tof_msg(0.4, TOF_S + 0.07 * speak))
+    assert ahead_in_marks(node) == pytest.approx(0.4, abs=0.05)
+    idx, inside = node._world.volume.voxel_of(np.array([[0.4, 0.0, 0.27]]))
+    assert inside[0] and node._world.volume.weight[tuple(idx[0])] == pytest.approx(4.0)
+    assert node._world.frames[-1][1] == "tof"
+    counts = node._tally.take().counts
+    assert counts["tof_fans"] == speak and counts["tof_hits"] == speak and counts["tof_no_tf"] == 0
+
+
+def test_misses_carve_the_whisker_s_mark_within_two_seconds_of_fans(tmp_path: Path) -> None:
+    """The pillow stared at for 40 fans is saturated (max_weight 20); taken away, +inf fans
+    carve it, and the marks stop reading it inside 30 fans — two seconds at 15 Hz."""
+    node = whisker_node(tmp_path)
+    for i in range(40):
+        node._on_tof_work(tof_msg(0.4, TOF_S + 0.07 * i))
+    assert ahead_in_marks(node) == pytest.approx(0.4, abs=0.05)
+    misses = 0
+    while not math.isnan(ahead_in_marks(node)):
+        node._on_tof_work(tof_msg(math.inf, TOF_S + 3.0 + 0.07 * misses))
+        misses += 1
+        assert misses <= 30
+    assert node._tally.take().counts["tof_misses"] == misses
+
+
+def test_a_fan_whose_frame_tf_does_not_know_is_dropped_and_counted(tmp_path: Path) -> None:
+    node = whisker_node(tmp_path)
+    before = float(node._world.volume.weight.sum())
+    node._on_tof_work(tof_msg(0.4, name="left"))  # no odom -> tof_left edge in this TF
+    assert float(node._world.volume.weight.sum()) == before, "nothing was written"
+    counts = node._tally.take().counts
+    assert counts["tof_no_tf"] == 1 and counts["tof_fans"] == 0 and counts["no_tf"] >= 1
+
+
+def test_tof_rays_off_integrates_nothing_and_says_so(tmp_path: Path) -> None:
+    node = whisker_node(tmp_path)
+    node._switches.set("tof_rays", False)
+    for _ in range(4):
+        node._on_tof_work(tof_msg(0.4))
+    assert float(node._world.volume.weight.sum()) == 0.0
+    counts = node._tally.take().counts
+    assert counts["tof_off"] == 4 and counts["tof_fans"] == 0
+    assert "tof_rays=off" in node._switches.state()
+
+
+def test_the_report_line_counts_the_whiskers_and_states_the_clearing_arithmetic(
+    tmp_path: Path,
+) -> None:
+    node = whisker_node(tmp_path)
+    node._on_tof_work(tof_msg(0.4))
+    node._on_tof_work(tof_msg(math.inf, TOF_S + 0.07))
+    node._on_tof_work(tof_msg(math.nan, TOF_S + 0.14))
+    line = node._tof_line(node._tally.take())
+    assert "2 fans" in line and "1 hits, 1 misses, 1 silent" in line
+    assert "carved by 29 misses (1.9 s at 15 Hz)" in line

@@ -79,7 +79,7 @@ Ints = npt.NDArray[np.intp]
 FREE, OCCUPIED, UNKNOWN = 0, 100, -1
 PGM_FREE, PGM_OCCUPIED, PGM_UNKNOWN = 254, 0, 205
 
-LIDAR, CAMERA = "lidar", "camera"  # the sensors a snapshot's frame list names
+LIDAR, CAMERA, TOF = "lidar", "camera", "tof"  # the sensors a snapshot's frame list names
 # 4 dropped the minted map identity: a volume no longer claims to be a room, because the room's
 # geometry is the graph database's and this is the surface painted in that database's frame. A
 # snapshot of any other version is refused by :meth:`WorldMap.load` and the caller starts empty —
@@ -467,6 +467,7 @@ class WorldMap:
         pose: RigidPose,
         stamp: float | None = None,
         law: DepthLaw | None = None,
+        sensor: str = CAMERA,
     ) -> int:
         """Fuse one depth frame the way :meth:`pepin.tsdf.Tsdf.integrate` does, then hand the
         lidar's layer back to the lidar: inside that layer the voxels the lidar has spoken for
@@ -482,12 +483,15 @@ class WorldMap:
         and is therefore passed per frame rather than stored here; ``None`` is
         :attr:`depth_law`, and its default is the old behaviour where a NaN pixel writes
         nothing. The protection above is exactly what keeps the new carving honest: a depthless
-        ray may not touch the layer the beams own."""
+        ray may not touch the layer the beams own.
+
+        ``sensor`` names the source in the frame list (:data:`CAMERA`; :data:`TOF` for a ToF fan
+        drawn as a tiny depth image, :mod:`pepin.tof_rays`)."""
         law = law if law is not None else self.depth_law
         rows = self._rows if self.protect_lidar_layer else None
         if rows is None:
             touched = self.volume.integrate(depth, rgb, intr, pose, law)
-            self._note(stamp, CAMERA, pose)
+            self._note(stamp, sensor, pose)
             return touched
         lo, hi = rows
         keep_sdf = self.volume.sdf[:, :, lo:hi].copy()
@@ -496,7 +500,7 @@ class WorldMap:
         owned = self.lidar_weight[:, :, lo:hi] > 0.0
         np.copyto(self.volume.sdf[:, :, lo:hi], keep_sdf, where=owned)
         np.copyto(self.volume.weight[:, :, lo:hi], keep_weight, where=owned)
-        self._note(stamp, CAMERA, pose)
+        self._note(stamp, sensor, pose)
         return touched
 
     def shift(self, shift: PlanarShift, law: str = NEAREST) -> None:
