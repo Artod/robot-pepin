@@ -439,8 +439,10 @@ def test_a_move_writes_the_goal_then_answers_when_the_head_arrives() -> None:
         core.command({"cmd": "neck_goto", "pan_ticks": 2021, "tilt_ticks": 2311}, now=1.0) is None
     )
     assert bus.torque == [("on", ["neck", "head"])]
-    assert goals(bus) == {"neck": 2021, "head": 2311}
-    assert ("Goal_Velocity", {"neck": 400}) in bus.writes, "a profile speed, not a wheel command"
+    assert bus.writes == [
+        ("Goal_Velocity", {"neck": 400, "head": 400}),  # a profile speed, not a wheel command
+        ("Goal_Position", {"neck": 2021, "head": 2311}),
+    ], "two transactions for two axes: each register once, both servos in it"
     core.tick(1.1)  # the servos are still on their way
     assert core.take_replies() == []
     bus.positions.update({"neck": 2021, "head": 2309})  # arrived, the tilt two ticks off
@@ -657,7 +659,7 @@ def test_a_jog_energises_the_head_and_walks_the_goal_at_the_fast_rate() -> None:
     core, bus = make_move_core()
     assert jog(core, 1.0, pan=1) is None, "accepted: silent, like a twist"
     assert bus.torque == [("on", ["neck", "head"])]
-    assert ("Goal_Velocity", {"neck": 455}) in bus.writes, "the profile speed is the jog rate"
+    assert ("Goal_Velocity", {"neck": 455, "head": 455}) in bus.writes, "the profile is the rate"
     assert goals(bus) == {"neck": 2048, "head": 2360}, "seeded where the head is: no jump"
     end = run_jog(core, bus, seconds=1.0, pan=1, start=1.0 + TICK_S)  # 50 ticks after the start
     assert goals(bus)["neck"] == pytest.approx(2048 - 455, abs=2)
@@ -671,10 +673,10 @@ def test_shift_makes_the_jog_slow_and_the_rate_changes_live() -> None:
     core, bus = make_move_core()
     end = run_jog(core, bus, seconds=1.0, tilt=1, slow=True)  # tilt +1 is down: ticks rise
     assert goals(bus)["head"] == pytest.approx(2360 + 91, abs=2), "8 deg/s is 91 ticks/s"
-    assert ("Goal_Velocity", {"head": 91}) in bus.writes
+    assert ("Goal_Velocity", {"neck": 91, "head": 91}) in bus.writes
     run_jog(core, bus, seconds=1.0, pan=-1, slow=False, start=end)  # right: ticks rise
     assert goals(bus)["neck"] == pytest.approx(2048 + 455, abs=3)
-    assert ("Goal_Velocity", {"neck": 455}) in bus.writes, "the profile follows the rate"
+    assert ("Goal_Velocity", {"neck": 455, "head": 455}) in bus.writes, "the profile follows"
     assert goals(bus)["head"] == pytest.approx(2360 + 91, abs=2), "tilt released: frozen"
 
 
@@ -755,9 +757,18 @@ def test_a_jog_is_refused_while_the_wheels_turn_and_ends_when_they_start() -> No
     end = run_jog(core, bus, seconds=0.2, tilt=1, start=1.2)
     assert bus.torque[-1][0] == "on"
     core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, now=end)
+    traffic = (len(bus.writes), len(bus.torque))  # the wheels' own write is in already
     core.tick(end)
-    assert bus.torque[-1] == ("off", ["neck", "head"]), "the wheels started: the jog ends"
-    assert jog(core, end + TICK_S, tilt=1) is not None, "and is refused while they turn"
+    assert (len(bus.writes), len(bus.torque)) == traffic, "no neck write on a tick that drives"
+    assert core._mover is not None and not core._mover.jogging, "the jog is over, goal frozen"
+    assert bus.torque[-1][0] == "on", "the head stays held until the wheels stand"
+    core.tick(end + 0.3)  # still driving: still not a neck transaction
+    assert (len(bus.writes), len(bus.torque)) == traffic
+    assert jog(core, end + 0.3, tilt=1) is not None, "and a jog is refused while they turn"
+    core.command({"cmd": "stop"}, now=end + 0.4)
+    core.tick(end + 0.4)
+    assert bus.torque[-1] == ("off", ["neck", "head"]), "the first tick at rest lets go"
+    assert jog(core, end + 0.5, tilt=1) is None, "and the head can be jogged again"
 
 
 def test_a_jog_never_delays_the_wheels_deadman() -> None:
@@ -832,3 +843,43 @@ def test_shutdown_releases_a_jogging_head() -> None:
     run_jog(core, bus, seconds=0.2, tilt=1)
     core.release()
     assert bus.torque[-1] == ("off", ["neck", "head"])
+
+
+def test_encoders_failing_mid_jog_end_it_with_torque_off_and_an_error_reply() -> None:
+    """The reader keeps the last ticks when a servo falls silent; a jog must not walk its goal
+    on against them (the lag rule would let it, up to the allowance)."""
+    core, bus = make_move_core()
+    end = run_jog(core, bus, seconds=0.2, pan=1)
+    frozen = goals(bus)["neck"]
+    bus.neck_silent = True
+    jog(core, end + 0.06, pan=1)  # past the reader's 50 ms cache: the next read fails
+    core.tick(end + 0.06)
+    assert bus.torque[-1] == ("off", ["neck", "head"])
+    assert core._mover is not None and not core._mover.jogging
+    (reply,) = core.take_replies()
+    assert reply["type"] == "neck_jog" and reply["error"].startswith("the encoders failed")
+    assert "no reply from ids" in reply["error"]
+    assert goals(bus)["neck"] == frozen, "the stale ticks moved nothing"
+
+
+def test_a_stalled_tick_advances_the_goal_by_at_most_two_ticks_worth() -> None:
+    """A 0.5 s stall of the tick thread is not one 227-tick stride for the head."""
+    core, bus = make_move_core()
+    jog(core, 1.0, pan=-1)  # right: ticks rise
+    core.tick(1.0)
+    jog(core, 1.5, pan=-1)  # the message keeps the deadman quiet; the tick thread stalled
+    core.tick(1.5)
+    stride = goals(bus)["neck"] - 2048
+    assert 10 < stride <= round(2 * TICK_S * 455) + 1  # 18 ticks, two ticks' worth
+
+
+def test_both_axes_jogging_cost_one_write_per_tick() -> None:
+    core, bus = make_move_core()
+    assert jog(core, 1.0, pan=1, tilt=-1) is None  # left and up: room on both axes for a second
+    assert [name for name, _ in bus.writes] == ["Goal_Velocity", "Goal_Position"]
+    assert bus.writes[-1] == ("Goal_Position", {"neck": 2048, "head": 2360}), "one seed write"
+    before = len(bus.writes)
+    run_jog(core, bus, seconds=1.0, pan=1, tilt=-1, start=1.0 + TICK_S)
+    added = bus.writes[before:]
+    assert len(added) == 50, "fifty ticks, fifty transactions"
+    assert all(name == "Goal_Position" and set(v) == {"neck", "head"} for name, v in added)

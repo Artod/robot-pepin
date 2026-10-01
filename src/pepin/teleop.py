@@ -33,6 +33,7 @@ import os
 import select
 import sys
 import termios
+import time
 import tty
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -177,6 +178,9 @@ class KeyReader:
 # -- game mode: keys act while held -----------------------------------------------------------
 
 GAME_HZ = 20.0  # ticks of the window loop; a twist each one while held, well inside the deadman
+GAME_HZ_MIN, GAME_HZ_MAX = 5.0, 50.0  # --hz is clamped: 5 Hz is still inside the deadman
+EXIT_STOP_REPEATS = 3  # the exit's stops go out a few times, like teleop_keys': one may be lost
+EXIT_STOP_GAP_S = 0.05
 GAME_HELP = "arrows drive, W/S tilt, A/D pan, Shift slow, Space stops all, Esc quits"
 WINDOW_TITLE = "Pepin teleop — keys act only while this window is focused"
 DEFAULT_HOST = "10.0.0.187"
@@ -272,9 +276,13 @@ class CommandStream:
             self._link.neck_jog(0, 0, slow=command.slow)
         self._wheels, self._head = wheels, head
 
-    def stop_all(self) -> None:
-        """Stop the wheels and the head now, whatever the previous tick was (exit, a crash)."""
-        self.tick(GameCommand(stop_all=True))
+    def stop_all(self, *, repeats: int = 1, gap_s: float = 0.0) -> None:
+        """Stop the wheels and the head now, whatever the previous tick was (exit, a crash);
+        ``repeats`` times, ``gap_s`` apart, when one line going astray must not matter."""
+        for i in range(repeats):
+            if i:
+                time.sleep(gap_s)
+            self.tick(GameCommand(stop_all=True))
 
 
 def status_lines(
@@ -366,7 +374,7 @@ def run_game(host: str, port: int = BASE_PORT, *, hz: float = GAME_HZ) -> None:
             pygame.display.flip()
             clock.tick(hz)
     finally:
-        stream.stop_all()
+        stream.stop_all(repeats=EXIT_STOP_REPEATS, gap_s=EXIT_STOP_GAP_S)
         client.close()
         pygame.quit()
 
@@ -390,12 +398,23 @@ def main(argv: list[str] | None = None) -> None:
         help="the board running the base server (default: PEPIN_HOST, else 10.0.0.187)",
     )
     parser.add_argument("--port", type=int, default=BASE_PORT, help="the base server's port")
-    parser.add_argument("--hz", type=float, default=GAME_HZ, help="the loop rate")
+    parser.add_argument(
+        "--hz",
+        type=float,
+        default=GAME_HZ,
+        help=f"the loop rate, clamped to {GAME_HZ_MIN:.0f}..{GAME_HZ_MAX:.0f} (the board's deadman"
+        " is 0.5 s)",
+    )
     args = parser.parse_args(argv)
     if not args.game:
         parser.error("pass --game; the latching terminal teleop runs through ros/teleop.sh")
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    try:
+        import pygame  # noqa: F401  # the one dependency this mode adds: one line, not a traceback
+    except ModuleNotFoundError:
+        parser.exit(2, "pygame is not installed: uv sync --group macos\n")
     logging.basicConfig(level=logging.INFO, format="%(levelname).1s %(name)s: %(message)s")
-    run_game(args.host, args.port, hz=args.hz)
+    run_game(args.host, args.port, hz=min(max(args.hz, GAME_HZ_MIN), GAME_HZ_MAX))
 
 
 if __name__ == "__main__":

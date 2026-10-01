@@ -227,6 +227,23 @@ def test_stop_all_sends_both_stops_whatever_the_previous_tick_was() -> None:
     link = FakeLink()
     CommandStream(link).stop_all()
     assert link.sent == [("stop",), ("jog", 0, 0, False)]
+    link = FakeLink()
+    CommandStream(link).stop_all(repeats=3, gap_s=0.0)
+    assert link.sent == [("stop",), ("jog", 0, 0, False)] * 3, "the exit: one line may go astray"
+
+
+def test_the_entry_point_names_the_missing_pygame_in_one_line(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    import sys
+
+    from pepin.teleop import main
+
+    monkeypatch.setitem(sys.modules, "pygame", None)  # an install without the macos group
+    with pytest.raises(SystemExit) as left:
+        main(["--game"])
+    assert left.value.code not in (0, None)
+    assert "pygame is not installed: uv sync --group macos" in capsys.readouterr().err
 
 
 def test_status_lines_show_the_twist_the_neck_and_the_focus() -> None:
@@ -305,7 +322,8 @@ def test_the_window_loop_runs_headless_and_stops_everything_on_exit(
         worker.join(timeout=2.0)
     assert "neck" in seen_commands, "the window polled the encoders"
     # Besides the polls (and the server's own "release" once the client has left, which may or
-    # may not have been ticked yet): only the exit's two stops — unfocused, nothing was driven.
+    # may not have been ticked yet): only the exit's stops, three times — unfocused, nothing
+    # was driven.
     driving = [cmd for cmd in seen_commands if cmd not in ("neck", "release")]
-    assert driving == ["stop", "neck_jog"], "the exit stopped the wheels and the head"
+    assert driving == ["stop", "neck_jog"] * 3, "the exit stopped the wheels and the head, thrice"
     assert not core.moving and bus.torque == [], "nothing moved, the head was never energised"

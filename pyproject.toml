@@ -43,6 +43,12 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/pepin"]
 
+# `uv sync` and `uv run` install these groups unasked: the laptop is where both run, and the
+# menu-bar app (rumps) and the game-mode teleop (pygame) must not die on a missing import. The
+# board never installs from this file (board/README.md: src/pepin is rsynced).
+[tool.uv]
+default-groups = ["dev", "macos"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py312"

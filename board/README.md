@@ -71,11 +71,18 @@ asked — it is born when the head stops, and that may be seconds after the requ
 
 The jog obeys the same rules and differs where a rate differs from a target: its goal is clamped
 to the limits (it is walking, not aiming, so the limit is where it stops), it is refused while
-the wheels turn and ends the tick they start, a jog and a move refuse each other, and the servo
-is never wound up: a goal more than ~10 deg ahead of the encoder waits for the head. Its cost on
-the board while a key is held: the cached encoder read (at most twenty a second, the same as a
-move or a polling client) and one `Goal_Position` write per moving axis per 20 ms tick; nothing
-when idle. WiFi lost mid-jog: the head stops within 0.5 s and lets go.
+the wheels turn and ends the tick they start — the goal freezes at once, the torque comes off at
+the first tick at rest, so a tick that drives the wheels never waits on a neck servo — a jog and
+a move refuse each other, the servo is never wound up (a goal more than ~10 deg ahead of the
+encoder waits for the head), a tick that stalled advances the goal by at most two ticks' worth,
+and encoders that fail mid-jog end it with torque off and an error line. Its cost on the board
+while a key is held, counted on the unit tests' fake bus: per 20 ms tick ONE `Goal_Position`
+write carrying every axis that moved (one transaction for both axes, not one each), plus the
+cached encoder read at most every 50 ms (the same read a move or a polling client costs). In
+milliseconds, from what the base server measured on 2026-09-11 (a two-servo neck read 9.7 ms;
+the wheel loop's own read and write p95 5.6 ms, so an unacknowledged write is 1–2 ms): a tick
+with the read ≈ 12 ms, a tick without ≈ 2 ms, ≈ 6 ms on average — with one write per axis it
+was ≈ 13 / 3 / 7. Nothing when idle. WiFi lost mid-jog: the head stops within 0.5 s and lets go.
 
 ## Setting up a fresh board
 

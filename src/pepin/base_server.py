@@ -76,6 +76,7 @@ NECK_JOG_FAST_DEG_S = 40.0  # a held key: the whole tilt range in about two seco
 NECK_JOG_SLOW_DEG_S = 8.0  # a held key with Shift: aiming
 NECK_JOG_DEADMAN_S = DEADMAN_S  # no jog message for this long: the head stops, torque off
 NECK_JOG_LAG_TICKS = 120  # ~10 deg: a goal this far ahead of the head waits for it
+NECK_TICK_S = 0.02  # the board's 50 Hz tick: a stalled tick advances a jog by at most two of these
 
 
 def jog_ticks_s(deg_s: float) -> float:
@@ -213,10 +214,12 @@ class NeckMover:
         jog_slow_deg_s: float = NECK_JOG_SLOW_DEG_S,
         jog_deadman_s: float = NECK_JOG_DEADMAN_S,
         jog_lag_ticks: int = NECK_JOG_LAG_TICKS,
+        tick_s: float = NECK_TICK_S,
     ) -> None:
         """``reader`` is the cached encoder reader a move watches; ``speed`` the profile speed
         in ticks per second; ``config`` the limits and the reference pose of config/neck.json;
-        the ``jog_*`` numbers are the two jog rates, the jog's deadman and its lag allowance."""
+        the ``jog_*`` numbers are the two jog rates, the jog's deadman and its lag allowance;
+        ``tick_s`` the tick a jog's stride is bounded by."""
         self._bus = bus
         self._reader = reader
         self._cfg = config
@@ -226,8 +229,10 @@ class NeckMover:
         self._jog_rates = {False: jog_ticks_s(jog_fast_deg_s), True: jog_ticks_s(jog_slow_deg_s)}
         self._jog_deadman_s = jog_deadman_s
         self._jog_lag = jog_lag_ticks
+        self._tick_s = tick_s
         self._move: NeckMove | None = None
         self._jog: NeckJog | None = None
+        self._release_pending = False  # a jog the wheels ended: torque off once they stand
         self._energised: list[str] = []
 
     def home(self, *, hold: bool, now: float) -> dict[str, Any] | None:
@@ -252,6 +257,7 @@ class NeckMover:
             return neck_error("a neck move is already under way")
         if self._jog is not None:
             return neck_error("a neck jog is under way")
+        self._settle()  # a command only arrives at rest: a deferred release is done first
         targets: dict[str, int] = {}
         for joint, target in ((self._cfg.pan, pan_ticks), (self._cfg.tilt, tilt_ticks)):
             if target is None:
@@ -270,10 +276,9 @@ class NeckMover:
                 return neck_error(wrong_mode)
             self._bus.enable_torque(list(targets))
             self._energised = list(targets)
-            for name, goal in targets.items():
-                # In position mode Goal_Velocity is the profile (maximum) speed, not a command.
-                self._bus.sync_write("Goal_Velocity", {name: self._speed}, normalize=False)
-                self._bus.sync_write("Goal_Position", {name: goal}, normalize=False)
+            # In position mode Goal_Velocity is the profile (maximum) speed, not a command.
+            self._write_profile(list(targets), self._speed)
+            self._bus.sync_write("Goal_Position", targets, normalize=False)
         except (TimeoutError, OSError) as exc:
             self.release()
             return neck_error(f"the bus refused the move: {exc}")
@@ -294,6 +299,7 @@ class NeckMover:
         """
         if self._move is not None:
             return jog_error("a neck move is under way")
+        self._settle()  # a command only arrives at rest: a deferred release is done first
         ref = self._cfg.reference
         direction = {
             self._cfg.pan.name: pan * ref.pan_sign,
@@ -340,9 +346,8 @@ class NeckMover:
             self._bus.enable_torque(names)
             self._energised = list(names)
             self._write_profile(names, self._jog_rates[slow])
-            for name, ticks in start.items():
-                # Where the head is, as the first goal: torque on must not move it anywhere.
-                self._bus.sync_write("Goal_Position", {name: ticks}, normalize=False)
+            # Where the head is, as the first goal: torque on must not move it anywhere.
+            self._bus.sync_write("Goal_Position", start, normalize=False)
         except (TimeoutError, OSError) as exc:
             self.release()
             return jog_error(f"the bus refused the jog: {exc}")
@@ -357,18 +362,21 @@ class NeckMover:
         return None
 
     def _write_profile(self, names: list[str], ticks_s: float) -> None:
-        """The profile (maximum) speed of those servos, one short transaction each."""
-        for name in names:
-            self._bus.sync_write("Goal_Velocity", {name: round(ticks_s)}, normalize=False)
+        """The profile (maximum) speed of those servos, one transaction for all of them."""
+        speed = dict.fromkeys(names, round(ticks_s))
+        self._bus.sync_write("Goal_Velocity", speed, normalize=False)
 
     def step(self, now: float, *, at_rest: bool) -> dict[str, Any] | None:
-        """One tick of whatever is under way. A jog: its goals advanced, or ended by its
-        deadman or by wheels that started turning (no reply either way). A move: the final
-        reply once the head has arrived or the deadline passed (torque off unless the move
-        asked to hold), None while it still moves. None when nothing is under way."""
+        """One tick of whatever is under way. A jog: its goals advanced; ended with an error
+        reply when the encoders or the bus fail; ended silently by its deadman, or by wheels
+        that started turning — then the torque comes off at the first tick at rest, never on a
+        tick that drives the wheels. A move: the final reply once the head has arrived or the
+        deadline passed (torque off unless the move asked to hold), None while it still moves.
+        None when nothing is under way."""
+        if self._release_pending and at_rest:
+            self._settle()
         if self._jog is not None:
-            self._step_jog(now, at_rest=at_rest)
-            return None
+            return self._step_jog(now, at_rest=at_rest)
         move = self._move
         if move is None:
             return None
@@ -401,27 +409,40 @@ class NeckMover:
             reply["error"] = str(reading["error"])
         return reply
 
-    def _step_jog(self, now: float, *, at_rest: bool) -> None:
-        """Advance the goals of a jog under way by one tick, or end it: the deadman, or wheels
-        that started turning (a write to a silent servo would stall the wheel loop)."""
+    def _step_jog(self, now: float, *, at_rest: bool) -> dict[str, Any] | None:
+        """Advance the goals of a jog under way by one tick — one write for every axis that
+        moved — or end it: wheels that started turning, the deadman, encoders that failed, a
+        bus that refused the write. The last two answer an error reply."""
         jog = self._jog
         if jog is None:
-            return
+            return None
+        if not at_rest:
+            # Not one neck write on a tick that drives the wheels (a silent servo costs 0.4 s
+            # per acknowledged write): the goal stops here, the torque comes off at rest.
+            logger.info("neck jog ended: the wheels are moving; torque off once they stand")
+            self._jog = None
+            self._release_pending = True
+            return None
         if now - jog.heard > self._jog_deadman_s:
             logger.info("neck jog: no message for %.1f s, stopping, torque off", now - jog.heard)
             self.release()
-            return
-        if not at_rest:
-            logger.info("neck jog ended: the wheels are moving")
-            self.release()
-            return
-        dt, jog.stepped = now - jog.stepped, now
+            return None
+        # A stalled tick is not one long stride: at most two ticks' worth in one write.
+        dt = min(now - jog.stepped, 2.0 * self._tick_s)
+        jog.stepped = now
         reading = self._reader.read(now, at_rest=True)
+        age = float(reading.get("age_s", math.inf))
+        if reading.get("error") is not None or age > self._jog_deadman_s:
+            why = str(reading.get("error", f"no encoder reading for {age:.1f} s"))
+            logger.warning("neck jog: the encoders failed (%s); stopping, torque off", why)
+            self.release()
+            return jog_error(f"the encoders failed mid-jog: {why}")
         here = {
             self._cfg.pan.name: reading.get("pan_ticks"),
             self._cfg.tilt.name: reading.get("tilt_ticks"),
         }
         rate = self._jog_rates[jog.slow]
+        targets: dict[str, int] = {}
         for joint in (self._cfg.pan, self._cfg.tilt):
             direction = jog.direction[joint.name]
             if direction == 0:
@@ -432,23 +453,33 @@ class NeckMover:
             goal = min(max(goal + direction * rate * dt, joint.min_ticks), joint.max_ticks)
             jog.goal[joint.name] = goal
             target = round(goal)
-            if jog.written.get(joint.name) == target:
-                continue
-            try:
-                self._bus.sync_write("Goal_Position", {joint.name: target}, normalize=False)
-            except (TimeoutError, OSError) as exc:
-                logger.warning("neck jog: the bus refused the write (%s); torque off", exc)
-                self.release()
-                return
-            jog.written[joint.name] = target
+            if jog.written.get(joint.name) != target:
+                targets[joint.name] = target
+        if not targets:
+            return None
+        try:
+            self._bus.sync_write("Goal_Position", targets, normalize=False)
+        except (TimeoutError, OSError) as exc:
+            logger.warning("neck jog: the bus refused the write (%s); torque off", exc)
+            self.release()
+            return jog_error(f"the bus refused the jog: {exc}")
+        jog.written.update(targets)
+        return None
+
+    def _settle(self) -> None:
+        """The torque release a jog deferred while the wheels turned, done now that they stand:
+        from the tick thread at rest, or before a neck command (which only arrives at rest)."""
+        if self._release_pending:
+            self.release()
 
     def release(self) -> None:
         """Torque off whatever this mover energised — the end of a move or a jog, or shutdown
-        with a held neck — and forget any move or jog; a bus that will not take it is logged,
-        not raised."""
+        with a held neck — and forget any move, jog or deferred release; a bus that will not
+        take it is logged, not raised."""
         names, self._energised = self._energised, []
         self._move = None
         self._jog = None
+        self._release_pending = False
         if not names:
             return
         try:

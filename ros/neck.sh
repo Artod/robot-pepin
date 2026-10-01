@@ -7,7 +7,7 @@
 #   ros/neck.sh goto PAN TILT   move to those encoder ticks, then torque off (push it by hand again)
 #   ros/neck.sh hold PAN TILT   the same, but leave the servos energised so the head holds its pose
 # Ticks, not degrees, on purpose: the encoders are what the server speaks, and config/neck.json's
-# limits are in ticks (pan 257..3812, tilt 1814..3090). A target outside them is refused by the
+# limits are in ticks (pan 257..3812, tilt 1814..2760). A target outside them is refused by the
 # server, never quietly clamped; a move is refused while the wheels turn, and gives up after 3 s
 # with "NOT reached". PEPIN_HOST picks the board, PEPIN_BASE_PORT the port.
 set -uo pipefail
