@@ -123,8 +123,14 @@ HOST_SERVICES: dict[str, str] = {
     "pepin.localization_service": "laptop: ros/models.sh restart localization",
 }
 
-# Modules started per call by a script (nothing long-lived holds them).
-PER_CALL = ("pepin.census", "pepin.goal_link", "pepin.push", "pepin_bringup.teleop_keys")
+# Modules started per call by a script or by hand (nothing long-lived holds them).
+PER_CALL = (
+    "pepin.census",
+    "pepin.goal_link",
+    "pepin.push",
+    "pepin.teleop",
+    "pepin_bringup.teleop_keys",
+)
 
 
 def restart_hint(halves: Iterable[str]) -> str:
