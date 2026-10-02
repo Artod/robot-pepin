@@ -309,6 +309,14 @@ class GetState:
     Response = _msg("GetState_Response", current_state=State)
 
 
+class GetPointMapROI:
+    """map_msgs/GetPointMapROI: a box (centre and sides) or a sphere (``r``) in, the points of
+    the map inside it back (depth_fusion's ``/fusion/column``)."""
+
+    Request = _msg("GetPointMapROI_Request", x=0.0, y=0.0, z=0.0, r=0.0, l_x=0.0, l_y=0.0, l_z=0.0)
+    Response = _msg("GetPointMapROI_Response", sub_map=PointCloud2)
+
+
 class ClearEntireCostmap:
     """nav2_msgs/ClearEntireCostmap: empty a costmap; nothing goes in and nothing comes back."""
 
@@ -894,6 +902,7 @@ def install() -> Any:
         ),
         "map_msgs": _module("map_msgs"),
         "map_msgs.msg": _module("map_msgs.msg", OccupancyGridUpdate=OccupancyGridUpdate),
+        "map_msgs.srv": _module("map_msgs.srv", GetPointMapROI=GetPointMapROI),
         "nav_msgs": _module("nav_msgs"),
         "nav_msgs.msg": _module(
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_

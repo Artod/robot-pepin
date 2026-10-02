@@ -75,6 +75,9 @@ The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set dep
 ``grid_size_m``, ``grid_resolution_m``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
 ``no_depth_weight``, ``no_depth_reach_m``; their state is printed in every report line.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+For the gaze arbiter: ``/fusion/frame`` (std_msgs/Header) is every fused camera frame at its own
+stamp, and ``/fusion/column`` (map_msgs/GetPointMapROI) the surface points of a box of the
+volume with their weights.
 
 THE CAMERA GRIDS (``grid_out``, off as shipped, 2026-09-24). ``/depth_marks`` is accumulated by
 each costmap's camera_layer into a grid of its own — two more copies of this memory, the global
@@ -95,11 +98,13 @@ from typing import Any
 
 import numpy as np
 from map_msgs.msg import OccupancyGridUpdate
+from map_msgs.srv import GetPointMapROI
 from message_filters import Subscriber, TimeSynchronizer
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
+from std_msgs.msg import Header
 from std_srvs.srv import Trigger
 
 from pepin.camera_grid import (
@@ -129,8 +134,11 @@ from pepin.volume_scan import (
     MARKS_MIN_RANGE_M,
     MARKS_RANGE_M,
     MARKS_STEP,
+    Column,
     MarksLaw,
     band_surface,
+    column_points,
+    column_window,
     empty_marks,
     fan_counts,
     free_ranges,
@@ -146,6 +154,7 @@ from pepin.worldmap import (
 )
 from pepin_bringup.msgs import (
     array_from_image,
+    cloud_from_fields,
     cloud_from_points,
     grid_update,
     map_geometry,
@@ -153,6 +162,7 @@ from pepin_bringup.msgs import (
     rpy_from_transform,
     scan_arrays,
     scan_from_ranges,
+    stamp_from_seconds,
     stamp_seconds,
 )
 from pepin_bringup.node_kit import (
@@ -181,6 +191,13 @@ MARKS_TOPIC = "/depth_marks"
 # ObstacleLayer marks at the end of every finite range it is given, so one source that cleared a
 # ray at 1.2 m would plant a lethal cell at 1.2 m — at the frontier of knowledge.
 FREE_TOPIC = "/depth_free"
+# THE GAZE ARBITER'S TWO QUESTIONS (pepin_bringup.gaze). Which camera frames went into the volume,
+# each as a header at its own stamp, published as it is fused: a look waits for still frames
+# stamped after the head settled, and only the fused ones carve or confirm anything. And what the
+# volume holds in a box (map_msgs/GetPointMapROI, the box in the volume's frame): the surface
+# points with their voxel weights, asked before and after a stall look over the blocking cells.
+FRAME_TOPIC = "/fusion/frame"
+COLUMN_SERVICE = "/fusion/column"
 # THE CAMERA GRIDS (``grid_out``, 2026-09-24): the same surface as grids that the costmaps'
 # camera_grid_layer (a StaticLayer, ros/params/nav2_params.yaml) only DRAWS, so Nav2 keeps no copy
 # of the memory of its own (pepin.camera_grid). /camera_grid is a square about the cart in the
@@ -400,6 +417,8 @@ class DepthFusion(Node):
         self._canvas_at = -math.inf  # when its full grid went out (GEOMETRY_SETTLE_S)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_service(Trigger, "/fusion/reset", self._on_reset)
+        self._frame_pub = self.create_publisher(Header, FRAME_TOPIC, reliable)
+        self.create_service(GetPointMapROI, COLUMN_SERVICE, self._on_column)
         # the depth copies the image's header, so the pair has one exact stamp; the synchronizer
         # keeps PAIR_QUEUE of each and calls back under its own lock, on the executor thread
         depth_sub = Subscriber(self, Image, "/camera/depth", qos_profile=reliable)
@@ -642,6 +661,37 @@ class DepthFusion(Node):
         )
         return response
 
+    def _on_column(self, request: Any, response: Any) -> Any:
+        """``/fusion/column``: the surface points in an axis-aligned box of the volume (centre
+        ``x, y, z`` and sides ``l_x, l_y, l_z`` in the volume's frame; ``r`` > 0 a cube of half
+        side ``r``), read by the rule of the marks (``min_weight``), each with its voxel's weight
+        and the lidar's weight there, stamped with the last fused frame. The box is copied under
+        the model's lock and read outside it, as the marks are."""
+        centre = np.array([request.x, request.y, request.z], dtype=float)
+        sides = [request.l_x, request.l_y, request.l_z] if request.r <= 0.0 else [2 * request.r] * 3
+        half = np.array(sides, dtype=float) / 2.0
+        lo, hi = centre - half, centre + half
+        with self._lock:
+            window = column_window(self._world.volume, self._world.lidar_weight, lo, hi)
+            stamp = self._last_stamp
+        column = Column.empty()
+        if window is not None:
+            column = column_points(*window, lo, hi, float(self._switches["min_weight"]))
+        points = column.points
+        response.sub_map = cloud_from_fields(
+            {
+                "x": points[:, 0],
+                "y": points[:, 1],
+                "z": points[:, 2],
+                "weight": column.weight,
+                "lidar": column.lidar,
+            },
+            stamp if stamp is not None else stamp_from_seconds(0.0),
+            ODOM_FRAME,
+        )
+        self._tally.count("columns")
+        return response
+
     # ---- inputs --------------------------------------------------------------------------
     def _on_info(self, msg: CameraInfo) -> None:
         if not self._up:
@@ -877,6 +927,7 @@ class DepthFusion(Node):
                 depth, rgb, intr, camera, stamp=at, law=self._depth_law()
             )
             self._last_stamp = stamp
+        self._frame_pub.publish(Header(stamp=stamp, frame_id=ODOM_FRAME))
         self._tally.count("frames")
         self._tally.count("voxels", touched)
         self._publish_marks(base, stamp)  # the camera's own turn to move the marks

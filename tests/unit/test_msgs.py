@@ -153,3 +153,22 @@ def test_a_world_slice_round_trips_through_a_nav_msgs_map() -> None:
     assert grid.spec == mine.spec
     assert np.array_equal(grid.log_odds, mine.log_odds)
     assert np.array_equal(np.sort(grid.occupied_xy(), axis=0), np.sort(mine.occupied_xy(), axis=0))
+
+
+def test_named_float_fields_survive_a_cloud_both_ways() -> None:
+    """``/fusion/column``'s answer: the points with their weights, read back by name."""
+    columns = {
+        "x": [0.5, 0.6],
+        "y": [0.0, -0.1],
+        "z": [0.3, 0.35],
+        "weight": [12.0, 4.5],
+        "lidar": [0.0, 1.0],
+    }
+    cloud = msgs.cloud_from_fields(columns, ros_stubs.Time(sec=3), "odom")
+    assert (cloud.width, cloud.point_step, cloud.header.frame_id) == (2, 20, "odom")
+    back = msgs.fields_from_cloud(cloud)
+    assert list(back) == list(columns)
+    for name, values in columns.items():
+        assert back[name].tolist() == pytest.approx(values)
+    empty = msgs.fields_from_cloud(msgs.cloud_from_fields({"x": [], "weight": []}, 0, "odom"))
+    assert {name: len(v) for name, v in empty.items()} == {"x": 0, "weight": 0}
