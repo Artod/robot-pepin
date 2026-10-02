@@ -96,9 +96,9 @@ finish() {  # everything of this drive closed and named, always, once
     FINISHED=1
     set +e
     if [ "$INTERRUPTED" = 1 ]; then
-        # A cancel and nothing else, asked again until confirmed: never ros/stop.sh from here.
-        # Its hard branch restarts the board's stack, which zeroes the odometry (2026-09-28
-        # 21:48 and 2026-09-29 00:17, each an interrupted drive). The red button is typed.
+        # A cancel and nothing else, asked again until confirmed: never ros/stop.sh from here,
+        # whose hard branch takes Nav2 down (and until 2026-10-01 restarted the board, zeroing
+        # the odometry: 2026-09-28 21:48, 2026-09-29 00:17). The red button is typed.
         echo "Ctrl-C: every goal cancelled? asking again"
         if goal_link cancel || goal_link cancel || goto_ros cancel; then :; else
             echo "!! the cancel was NOT confirmed: if the cart still moves, ros/stop.sh is the hard stop"

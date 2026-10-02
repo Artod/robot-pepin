@@ -259,9 +259,9 @@ class TrayApp(rumps.App):
         First the goal server's cancel over its socket — this Mac's 3337, where Nav2 runs
         (ros/laptop.sh nav) — given STOP_CONFIRM_S to confirm; a cancel the navigators confirmed
         is the whole stop, the board untouched.
-        Unreachable or unconfirmed, ros/stop.sh takes over: it kills the board's ROS
-        processes so the base's deadman cuts the wheels, then restarts that stack (~45 s, the
-        odometry starts from zero). The outcome comes back as a notification.
+        Unreachable or unconfirmed, ros/stop.sh takes over: the base server's own stop,
+        Nav2's container stopped on this Mac, the base's stop again; the board is never
+        restarted. The outcome comes back as a notification.
         """
         log.info("STOP requested from the tray")
 

@@ -30,7 +30,7 @@ TELEOP_GAME = "uv run python -m pepin.teleop --game"
 TELEOP_TERMINAL = "ros/teleop.sh"
 TURN_ONCE = "ros/goto.sh round tray"
 # The red button waits this long for the goal server's cancel before the hard stop (ros/stop.sh,
-# the same 3 s it gives its own polite step): a longer wait here is wheels turning.
+# whose own cancel gets the same 3 s): a longer wait here is wheels turning.
 STOP_CONFIRM_S = 3.0
 
 

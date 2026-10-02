@@ -299,7 +299,13 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
-    assert "timeout 3" in stop and "pkill -9 -f" in stop and "systemctl restart pepin-ros" in stop
+    # The red button: the Mac's goal server first, 3 s; then the base's own stop and Nav2 down.
+    # Never a board restart: it zeroes the odometry the map is tied to.
+    assert "pepin.goal_link --timeout 3 cancel" in stop
+    assert r"{\"cmd\": \"stop\"}" in stop and "3336" in stop
+    assert "pepin_stop_container pepin-macnav" in stop
+    acted = "\n".join(ln for ln in stop.splitlines() if not ln.lstrip().startswith("#"))
+    assert "systemctl" not in acted and "pkill" not in acted and "goto_ros" not in acted
     goto = (REPO / "ros/goto.sh").read_text()
     assert re.search(r"trap .*EXIT", goto)
     # Ctrl-C cancels and never restarts the board (2026-09-29): the red button is typed by hand.

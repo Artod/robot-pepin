@@ -46,12 +46,12 @@ board otherwise — and which of `pepin-vslam` / `pepin-macnav` / `pepin-laptop`
 (`docker ps`; red without the mapper). ALL GO means both halves.
 
 The first item, **■ STOP THE ROBOT**, is the red button, run in the background and reported
-as a notification. It cancels every goal through the goal server's socket wherever Nav2
-runs (`pepin.goal_link`, the same cancel as `ros/goto.sh cancel`), giving it 3 s to confirm; a
-confirmed cancel is the whole stop and the board is untouched. If no goal server answers or
-no navigator confirms, `ros/stop.sh` takes over: the board's ROS processes are killed so
-the base's deadman cuts the wheels, then that stack restarts (~45 s; the odometry starts
-from zero, so `ros/restart.sh both` is owed after).
+as a notification. It cancels every goal through the goal server's socket on this Mac,
+where Nav2 runs (`pepin.goal_link`, the same cancel as `ros/goto.sh cancel`), giving it 3 s to
+confirm; a confirmed cancel is the whole stop and the board is untouched. If no goal server
+answers or no navigator confirms, `ros/stop.sh` takes over: the base server's own stop on the
+board, Nav2's container stopped on this Mac, and the base's stop once more (`ros/laptop.sh nav`
+brings Nav2 back; the board is never restarted, so the odometry and the map stay).
 
 Read-only asks, each answered as a notification: **Where** (the goal server's `where`: the
 cart's pose from `map -> base_link`, the planner, the lidar rate) and **Neck home**

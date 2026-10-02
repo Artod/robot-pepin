@@ -8,7 +8,7 @@ board stalled all laptop -> board delivery for 2.6-3.1 s, journal 2026-09-25).
 Standard library only: ``ros/goto.sh`` runs it with the laptop's own interpreter
 (``PYTHONPATH=src python3 -m pepin.goal_link``), so a cancel never waits for an environment.
 
-    python3 -m pepin.goal_link [--host H] [--port P] cancel
+    python3 -m pepin.goal_link [--host H] [--port P] [--timeout S] cancel
     python3 -m pepin.goal_link [--host H] [--port P] where
     python3 -m pepin.goal_link [--host H] [--port P] planner NAME
     python3 -m pepin.goal_link [--host H] [--port P] [--log FILE] go NAME | X Y [YAW_DEG]
@@ -277,10 +277,11 @@ class DriveReport:
         )
 
 
-def run_cancel(host: str, port: int, out: TextIO) -> int:
-    """Cancel every goal through the goal server and print goto_ros.py's line for it."""
-    # The server confirms within CANCEL_CONFIRM_S: the answer is waited for a little longer.
-    answer = ask({"cmd": "cancel"}, host, port, timeout_s=CANCEL_CONFIRM_S + 3.0)
+def run_cancel(host: str, port: int, out: TextIO, timeout_s: float = CANCEL_CONFIRM_S + 3.0) -> int:
+    """Cancel every goal through the goal server and print goto_ros.py's line for it. The
+    server confirms within CANCEL_CONFIRM_S, so the answer is waited for a little longer by
+    default; the red button (ros/stop.sh) waits 3 s and then stops the wheels itself."""
+    answer = ask({"cmd": "cancel"}, host, port, timeout_s=timeout_s)
     line = cancel_line(answer)
     if line is None:
         print(
@@ -355,12 +356,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--log", type=Path, help="a goal's lines are also written here")
+    parser.add_argument(
+        "--timeout", type=float, default=CANCEL_CONFIRM_S + 3.0, help="cancel: seconds to wait"
+    )
     parser.add_argument("command", choices=("cancel", "where", "planner", "go"))
     parser.add_argument("goal", nargs="*", help="go: NAME or X Y [YAW_DEG]; planner: NAME")
     args = parser.parse_args(argv)
     try:
         if args.command == "cancel":
-            return run_cancel(args.host, args.port, sys.stdout)
+            return run_cancel(args.host, args.port, sys.stdout, args.timeout)
         if args.command == "where":
             return run_where(args.host, args.port, sys.stdout)
         if args.command == "planner":
