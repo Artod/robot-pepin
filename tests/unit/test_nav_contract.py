@@ -2183,22 +2183,22 @@ def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
             )
 
 
-def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> None:
+def test_the_hook_checks_the_shell_scripts_and_the_books_stay_on_the_mac() -> None:
     """The pose the tracker writes on the laptop's mount is not a tracked file; the places books
-    the board edits are fetched, not pushed (the tracked copies went stale), and turn_full
-    refuses to turn under a goal."""
+    live on the Mac with the maps (2026-10-01: the board is a sensor box), so they are neither
+    pushed to the board nor fetched from it, and turn_full refuses to turn under a goal."""
     ignored = (REPO / ".gitignore").read_text().splitlines()
     assert "ros/maps/last_pose.json" in ignored
     fetch = (REPO / "ros/fetch.sh").read_text()
-    assert "--include='*.places.yaml' --exclude='*'" in fetch
-    assert "root@$BOARD:/root/pepin-ros/maps/" in fetch
+    assert "root@$BOARD:/root/pepin-ros/maps/rec/" in fetch, "the board's recordings come home"
+    assert "places.yaml" not in fetch, "the board's copy of a book is no longer the truth"
     sync = (REPO / "ros/sync.sh").read_text()
     # No map goes to the sensor box, and --delete never reaches what the board wrote under maps/.
     assert "--exclude 'maps/*'" in sync
     tracked = subprocess.run(
         ["git", "ls-files", "ros/maps"], capture_output=True, text=True, cwd=REPO, check=True
     ).stdout
-    assert ".places.yaml" in tracked, "the books stay tracked; fetch.sh refreshes them"
+    assert ".places.yaml" in tracked, "the books stay tracked, here"
     turn = sf.tree("ros/tools/turn_full.py")
     limits = sf.assignments(turn)
     # a full circle at 0.35 rad/s takes 18.5 s; a turn still running past a minute is stuck
