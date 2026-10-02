@@ -24,6 +24,9 @@ Environment=PEPIN_TOF=false
 # The neck's encoders and the live camera transform (ros/feature.sh neck on|off); the laptop's
 # SLAM must then start with ros/laptop.sh vslam --neck, or two nodes publish base_link -> camera_link.
 Environment=PEPIN_NECK=false
+# The board's own recording of its raw sensors (pepin.board_bag, ros/feature.sh board_bag on|off):
+# minute MCAP files in /root/pepin-ros/maps/board_rec, capped at 20 GB, 10 GB of the card kept free.
+Environment=PEPIN_BOARD_BAG=false
 # The middleware is rmw_zenoh_cpp against pepin-zrouter.service (ros/run.sh sets it).
 # One container per boot; --rm so a stale one never blocks the name. The image is built on the
 # laptop and loaded here by ros/build-image.sh --ship.
@@ -42,7 +45,7 @@ ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NT
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} board_bag:=${PEPIN_BOARD_BAG}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by

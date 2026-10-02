@@ -43,6 +43,10 @@ Arguments:
   ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
   process, ~150 MB). The laptop's camera node must then keep its static edge off
   (ros/laptop.sh vslam --neck); ros/feature.sh neck on|off flips this one.
+- ``board_bag`` (default false): the board's raw sensors recorded on the board itself, always,
+  into minute MCAP files under /maps/board_rec, capped at 20 GB with 10 GB of the card always
+  left free (pepin.board_bag: one long-lived ``ros2 bag record`` and its supervisor, niced under
+  every sensor). ros/feature.sh board_bag on|off flips it.
 """
 
 import math
@@ -394,6 +398,19 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration("neck")),
         **RESPAWN,
     )
+    # THE BOARD'S OWN RECORDING (pepin.board_bag): every raw sensor topic into minute MCAP files on
+    # the card, for as long as the stack runs, so a drive whose WiFi stalled is still whole here.
+    # One recorder opened once (a zenoh session opened per goal stalled the board's delivery,
+    # 2026-09-25), its supervisor deleting the oldest minutes past the cap. The least important
+    # process on the board: niced under every sensor, and a supervisor that dies takes its
+    # recorder with it (PR_SET_PDEATHSIG) before the respawn starts a new one.
+    board_bag = ExecuteProcess(
+        cmd=["python3", "-m", "pepin.board_bag", "--dir", "/maps/board_rec"],
+        output="screen",
+        prefix="nice -n 10",
+        condition=IfCondition(LaunchConfiguration("board_bag")),
+        **RESPAWN,
+    )
     return LaunchDescription(
         [
             DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
@@ -406,6 +423,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("neck", default_value="false"),
+            DeclareLaunchArgument("board_bag", default_value="false"),
             # The lidar and the base in two respawned processes (see sensors_container); false is
             # the single sensors_container of before.
             DeclareLaunchArgument("sensor_split", default_value="true"),
@@ -415,5 +433,6 @@ def generate_launch_description() -> LaunchDescription:
             tof,
             laser_odom,
             neck,
+            board_bag,
         ]
     )
