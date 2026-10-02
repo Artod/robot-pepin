@@ -690,7 +690,7 @@ def test_restart_sh_parses_and_never_drives() -> None:
 
 def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Nothing about the map is passed any more (World R): the database IS the map, the launch
-    reads for itself whether it exists, and the board's tracker adopts whatever grid it publishes.
+    reads for itself whether it exists, and Nav2's costmaps read whatever grid it publishes.
     The board is not asked which map it serves, because there is no answer that would change
     anything here. The neck owns base_link -> camera_link, so --neck always goes with it."""
     code, out, sent = _restart(tmp_path, "laptop", "--no-check")

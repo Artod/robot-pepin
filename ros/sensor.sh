@@ -1,8 +1,8 @@
 #!/bin/bash
 # One command per sensor, for the redundancy demo: the lidar and the camera go on and off while
 # the robot runs, in what writes into the costmaps (the per-sensor layers of
-# ros/params/nav2_params.yaml, on the local and the global costmap alike). The board tracker's
-# `sources` half of this switch is on the tag alt/tracker-2026-09-22.
+# ros/params/nav2_params.yaml, on the local and the global costmap alike). What RTAB-Map's
+# snapshots carry is sensor_pack's `sources` flag.
 #   ros/sensor.sh status            which layers are on, what is fresh
 #   ros/sensor.sh lidar on|off      the lidar as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence

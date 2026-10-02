@@ -127,7 +127,7 @@ def remember(
     if what == "place":
         return fail(
             "a place to drive back to is named in RTAB-Map's graph by its places node"
-            " (ros/go.sh mark NAME on the robot), which these tools cannot reach yet;"
+            " (ros/goto.sh mark NAME on the robot), which these tools cannot reach yet;"
             " naming the area as a zone (what=zone) works"
         )
     if what == "object":

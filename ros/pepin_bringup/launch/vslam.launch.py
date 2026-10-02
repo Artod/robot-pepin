@@ -508,8 +508,8 @@ TF_ODOMETRY_VARIANCE = {
 # expected to be the IDENTITY (map == odom), not the last saved correction, until RTAB-Map
 # recognises a node. That is the same shape of start-up lie the board's old tracker was fixed for
 # on 2026-09-21 (it broadcast the identity for 9.5 s and then jumped 2.9 m), and it has NOT been
-# measured on this stack. The parked acceptance procedure in ros/README.md is where it gets
-# measured; until it is, treat the first seconds of a start as "the pose is the odometry's".
+# measured on this stack. Restart check 1.13 (ros/README.md, "Restarting") reads it at every
+# start; until a start has been timed, treat its first seconds as "the pose is the odometry's".
 PUBLISH_MAP_TO_ODOM = {
     "publish_tf": True,
     "tf_delay": 0.05,  # 20 Hz, the rate the board's consumers of this edge were built for
@@ -903,9 +903,9 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # THE GRID IS THE MAP (World R): rtabmap's own "map" publisher, remapped onto /map in every
     # session. It is transient-local, depth 1, reliable (rtabmap_util/MapsManager.cpp: latch, true
     # by default), so whoever subscribes late is handed the current grid at once; it crosses the
-    # transport to the board, where both costmaps' static layers read it. Nothing
-    # else publishes /map — the board's map_server is off (ros/nav.launch.py) — so the two
-    # publishers of one /map that broke 2026-09-10 cannot happen.
+    # transport to Nav2, where both costmaps' static layers read it. Nothing else publishes
+    # /map — no map_server is launched — so the two publishers of one /map that broke
+    # 2026-09-10 cannot happen.
     #   RTAB-Map builds the grid ONLY while something subscribes to it (MapsManager's
     # get_subscription_count gate, and map_cleanup drops the per-node grid cache when the last
     # subscriber goes): pepin_bringup.rtabmap_frame's relay is what keeps it alive.

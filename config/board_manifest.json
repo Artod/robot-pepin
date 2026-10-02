@@ -314,11 +314,11 @@
     {
       "name": "session_logger",
       "match": "session_logger\\.py",
-      "role": "The per-drive recorder started by ros/goto.sh and ros/teleop.sh: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
+      "role": "The recorded teleop run's recorder, started by ros/teleop.sh NAME: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "started inside the pepin-ros container by ros/goto.sh:95, ros/teleop.sh:32 (ros/tools/session_logger.py)",
+      "owner": "started inside the pepin-ros container by ros/teleop.sh NAME (ros/tools/session_logger.py)",
       "when": "sometimes",
       "budget": {
         "cpu_percent": 25.0,

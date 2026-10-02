@@ -14,8 +14,7 @@
 #      own beside ours (maps/rec)
 #   5. the kicks, all at once: ros/board.sh kick on the board, ros/laptop.sh kick here, each
 #      waiting for its node's NEW pid and that pid's own ready line (ros/kick_ready.awk); a
-#      node that is not running on its half (the other recorder, the goal server's other side,
-#      the tracker under RTAB-Map) is skipped
+#      node that is not running on its half (the other recorder) is skipped
 # One line per node: kicked at, ready at, seconds. Exit 0 every kicked node is back, 1 a kick
 # failed, 2 refused. A kick takes its node away for its seconds: push at rest, never mid-drive.
 set -euo pipefail

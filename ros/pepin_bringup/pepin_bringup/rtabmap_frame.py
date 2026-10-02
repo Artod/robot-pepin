@@ -291,8 +291,8 @@ FLAGS = FlagSet(
         " launch before RTAB-Map opens the file) says every node carries exactly one of the same"
         " length — and only while the camera snapshots are described (descriptor_null_share);"
         " otherwise the words, and the report line says why. Live",
-        why="words until a drive has shown the descriptor on the robot (a default flips after a"
-        " drive). Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs"
+        why="descriptor since 2026-09-28, once the drives of 09-25/26 and 09-28 had shown it on"
+        " the robot. Measured 2026-09-24 in RTAB-Map itself on the replay of the evening runs"
         " against the backfilled daylight database (scratch/models/replay_place.py,"
         " replay_matrix.sh, matrix_report.py; xfeat, 2 px, proximity on, a lidar-only snapshot"
         " every fourth). Words at the stock Rtabmap/LoopThr 0.11: hypotheses 0.05-0.09, 0 camera"

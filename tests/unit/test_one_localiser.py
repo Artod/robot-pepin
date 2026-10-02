@@ -341,7 +341,7 @@ def test_the_goal_server_republishes_the_pose_it_already_reads() -> None:
 
 
 def test_a_mark_is_taken_from_the_transform_and_refused_when_it_goes_stale() -> None:
-    """``ros/go.sh mark`` is how every place in the room was made: the pose is map -> base_link,
+    """``ros/goto.sh mark`` is how every place in the room was made: the pose is map -> base_link,
     and the refusal names that edge."""
     from pepin_bringup import places
 

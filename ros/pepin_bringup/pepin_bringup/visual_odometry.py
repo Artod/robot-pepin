@@ -95,21 +95,19 @@ FLAGS = FlagSet(
         " own sigma and the depth scale's share of the step just taken added in quadrature"
         " (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m,"
         " vo_yaw_sigma_deg); or the one rtabmap's registration computed, untouched",
-        why="the constant, because rtabmap's own number answers the wrong question. Measured at"
-        " rest on this robot (2026-09-14, scratch/vo_probe.py, 85 s): its registration claimed a"
-        " position standard deviation of 3.8 mm at the median and 15.9 mm at p90 — an honest"
-        " spread of the feature matches, and a claim about the PICTURE. The error that matters"
-        " is the scale of the depth those features sit on, and that scale is a network's law"
-        " fitted against the lidar (0.94 to 1.98 across one afternoon, 2026-09-11), which no"
-        " registration can see. So the topic carries a constant a person can argue with, and"
-        " rtabmap's own is one flag away for the session that wants to compare them — one flag"
-        " away and worth reading twice before it is turned on with vo_publish: 3.8 mm through"
+        why="dynamic since 2026-09-16, because neither of the other two answers the right"
+        " question. rtabmap's own number is a claim about the PICTURE: measured at rest on this"
+        " robot (2026-09-14, scratch/vo_probe.py, 85 s) its registration claimed a position"
+        " standard deviation of 3.8 mm at the median and 15.9 mm at p90, and 3.8 mm through"
         " robot_localization's differential conversion (2 * sigma^2 * dt) is a velocity sigma of"
-        " 1.8 mm/s, 325x the wheels' certainty per sample, which is no longer a third opinion"
-        " but the whole odometry (scratch/vo_weight.py)",
-        on_when="never as such — it is a choice: 'rtabmap' while comparing the two on a tape,"
-        " and with vo_publish off unless the point of the session is that comparison",
-        off_when="'constant' is the shipping value; leave it there unless a session is about the"
+        " 1.8 mm/s, 325x the wheels' certainty per sample — no longer a third opinion but the"
+        " whole odometry (scratch/vo_weight.py). The error that matters grows with the step the"
+        " cart took, through the depth's scale, which no registration can see; a constant ignores"
+        " both. So the published sigma is the registration's own, floored, and the scale's share"
+        " of the step (pepin.visual_odometry.SCALE_ERROR) in quadrature",
+        on_when="never as such — it is a choice: 'constant' or 'rtabmap' while comparing on a"
+        " tape, and with vo_publish off unless the point of the session is that comparison",
+        off_when="'dynamic' is the shipping value; leave it there unless a session is about the"
         " covariance itself",
     ),
 )

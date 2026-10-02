@@ -1,5 +1,5 @@
 {
-  "_note": "Config knobs: numbers each node reads at start and keeps as live ROS parameters (ros/flags.sh get|set NODE KNOB). Feature flags live in each node's FLAGS table; see CLAUDE.md rule 19 and ros/README.md, Feature flags.",
+  "_note": "Config knobs: numbers each node reads at start and keeps as live ROS parameters (ros/flags.sh get|set NODE KNOB). Feature flags live in each node's FLAGS table; see ros/README.md, Feature flags.",
   "camera_stream": {
     "scale": {"default": 0.5, "range": [0.0, 1.0],
       "note": "the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason"}

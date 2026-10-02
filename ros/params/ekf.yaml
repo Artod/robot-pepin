@@ -215,7 +215,7 @@ ekf_filter_node:
     # witness stops it within one period. vx and vy at zupt_var_linear, vyaw at zupt_var_yaw,
     # both 1e-6: 400x under the gyro's 4e-4 (zupt.hpp says why that number).
     # EVERY ONE OF THOSE IS A LIVE PARAMETER of /base_bridge, range-checked and in force at the
-    # next tick (ros/README.md, "The base bridge's zero-velocity update"): this file needs no
+    # next tick (ros/pepin_base_cpp/README.md, "Zero-velocity update"): this file needs no
     # edit to tune it. Off: ``ros2 param set /base_bridge zupt_publish false``; the filter is
     # then what it was before.
     # NOT YET MEASURED ON THE ROBOT. The yaw half of this file, fed the sources' rest means

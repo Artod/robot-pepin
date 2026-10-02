@@ -24,8 +24,8 @@ unfixed defects that have each taken this robot's navigation down:
    the loop runs for ever holding the costmap's mutex: one thread at 100 %, "Pose Goes Off
    Grid", every service timing out, zero plans. It takes a jump of the pose in ``map`` between
    a Range's stamp and the costmap update — a tracker restart, a relocalisation, the cart
-   carried by hand — and it was reproduced on this robot on 2026-09-21 with
-   ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
+   carried by hand — and it was reproduced on this robot on 2026-09-21 by restarting the
+   relocaliser (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
    The jump happens AFTER the reading has left, so no publisher could hold it off.
 
 An ``ObstacleLayer`` has neither defect: its MessageFilter drops what it cannot place instead

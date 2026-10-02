@@ -472,8 +472,8 @@ local_costmap:
       #      ("Pose Goes Off Grid", every service timing out, zero plans). One jump of the pose in
       #      map between a reading's stamp and the update is enough — a tracker restart, a
       #      relocalisation, the cart carried by hand — and no publisher can gate it, because the
-      #      jump happens after the reading has left. Reproduced on 2026-09-21 with
-      #      `ros/thin.sh kick relocalizer`: tid 191 of the Nav2 container, 415 s of CPU in 700 s.
+      #      jump happens after the reading has left. Reproduced on 2026-09-21 by restarting the
+      #      relocaliser: tid 191 of the Nav2 container, 415 s of CPU in 700 s.
       # An ObstacleLayer has neither: its MessageFilter drops what it cannot place instead of
       # blocking on it, its queue is bounded, and it walks the points it was given rather than a
       # rectangle of cells. tof_bridge draws each cone as a fan for it — one beam per costmap
@@ -767,8 +767,7 @@ local_costmap:
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         # /map: RTAB-Map's grid, relayed onto that name by pepin_bringup.rtabmap_frame (latched,
-        # transient-local). The board's map_server is off in a known room (ros/nav.launch.py's
-        # map_server argument), so this is the one publisher of /map.
+        # transient-local). No map_server is launched, so this is the one publisher of /map.
         map_topic: /map
         map_subscribe_transient_local: True
       # On False the full grid is published only when its origin moves, so a robot standing still
@@ -979,8 +978,8 @@ global_costmap:
         plugin: "nav2_costmap_2d::StaticLayer"
         footprint_clearing_enabled: true  # a cell under the cart is free: the cart stands there
         # IT READS /map: RTAB-Map's grid, the map RTAB-Map's own map -> odom is measured against,
-        # relayed onto that name by pepin_bringup.rtabmap_frame. Nobody else publishes /map (the
-        # board's map_server is off by default, ros/nav.launch.py's map_server argument).
+        # relayed onto that name by pepin_bringup.rtabmap_frame. Nobody else publishes /map (no
+        # map_server is launched).
         # A LATCHED MAP REPUBLISHED ON CHANGE IS FINE HERE: this layer keeps a live subscription with
         # transient-local durability (hence the line below), so it takes the first map whenever it
         # appears — before or after this node started — and re-takes every later one.

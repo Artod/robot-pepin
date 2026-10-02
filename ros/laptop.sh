@@ -9,7 +9,7 @@
 #   ros/laptop.sh logs [vslam|macnav]   follow a container's output (macnav by default)
 #   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them: RTAB-Map
 #                            on its one database (ros/maps/rtabmap.db), whose loop-closed grid is
-#                            THE map — published on /map for the board's tracker. The database is
+#                            THE map — published on /map for Nav2's costmaps. The database is
 #                            kept across restarts and is only ever deleted by --fresh
 #   ros/laptop.sh vslam --camera-only   no lidar in the snapshots: the grid is the camera's depth
 #   ros/laptop.sh vslam --fresh   build the room from nothing: the database is deleted and no volume

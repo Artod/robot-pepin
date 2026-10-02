@@ -50,11 +50,11 @@ are read off the two ``camera_info`` messages, so this node never opens the cali
 picture, its stamp and its frame are the left eye's throughout.
 
 WHICH ENGINE matches the two eyes is the live ``stereo_matcher`` flag in {sgbm, raft}, default
-``sgbm``. Both are built at start and the flag points the source at one of them, so an A/B costs
+``raft``. Both are built at start and the flag points the source at one of them, so an A/B costs
 no restart and nothing is rebuilt mid-drive. ``raft`` is RAFT-Stereo on the laptop's GPU, in the
 same native host process the mono network uses (:mod:`pepin.stereo_host`, ``ros/depth_host.sh
 stereo``): it turns the reflection phantoms SGBM paints on the parquet from 450 separate specks
-into 94 blobs and costs 89 ms a pair against 17, which is why the default waits for a live drive.
+into 94 blobs and costs 89 ms a pair against 17; it is the default since 2026-09-23.
 A pair the host cannot answer goes to SGBM, and the report line counts it and says how long the
 host has been down.
 

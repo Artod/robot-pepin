@@ -174,8 +174,8 @@ def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None
     them about 4e9, and one thread spins for ever holding the costmap's mutex. It needs one jump
     of the pose in ``map`` between a reading's stamp and the update — a tracker restart, a
     relocalisation, the cart lifted — which happens after the reading has left, so no publisher
-    can hold it off. Reproduced with ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2
-    container: 415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, and the
+    can hold it off. Reproduced by restarting the relocaliser (tid 191 of the Nav2 container:
+    415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, and the
     whiskers are ObstacleLayers fed by a fan.
     """
     for costmap in ("local_costmap", "global_costmap"):

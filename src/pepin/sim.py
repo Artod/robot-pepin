@@ -7,7 +7,7 @@ there through the cart's own mount and scan filter, and when the base stops by i
 bridge's 0.5 s deadman). What it does not model is listed in ros/README.md, "Simulation": wheel
 slip, lidar noise, the camera and the ToF sensors, WiFi, light.
 
-The grid is RTAB-Map's, the one the stack drives on (``/map`` under ``PEPIN_LOCALIZER=rtabmap``):
+The grid is RTAB-Map's, the one the stack drives on (``/map``):
 :func:`grid_from_rtabmap_db` reads the grid a database saved at its last shutdown
 (``Admin.opt_map``, what RTAB-Map publishes when it loads the database to localise), and
 :func:`graph_poses_from_rtabmap_db` the node poses the places ride on (pepin.places).
