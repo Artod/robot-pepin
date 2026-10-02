@@ -12,7 +12,8 @@ laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + 
 pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
   costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (C++: /odom,
   velocity smoother), goal_server               /imu/data_raw, /zupt), EKF (odom -> base_link),
-  (127.0.0.1:3337), run_recorder                rf2o (/odom_laser), tof_bridge, neck_state
+  (127.0.0.1:3337), run_recorder, gaze          rf2o (/odom_laser), tof_bridge, neck_state
+  (the head's one owner, 127.0.0.1:3339)
 pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, the wheels),
   camera, depth, visual odometry, the           pepin-tof.service (:3335), ser2net (:3333,
   volume, foxglove_bridge (ws 8765)             the servo bus, the base server's own link)
@@ -30,6 +31,7 @@ pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, t
 | `ros/run.sh` | the board's `docker run`: host networking, the lidar device, `ros/maps` (recordings) and `ros/params` mounted |
 | `ros/pepin_bringup/` | ament_python package: every Python node and the launch files (`robot` / `bringup` on the board, `vslam` and `nav` on the Mac) |
 | `ros/pepin_base_cpp/` | ament_cmake package: the board's base bridge in C++ ([its README](pepin_base_cpp/README.md)) |
+| `ros/pepin_gaze_bt/` | ament_cmake package: `AskGaze`, the behaviour tree's door to the gaze arbiter ("Gaze") |
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates), the EKF, the behaviour tree, the bag QoS |
 | `ros/zenoh/router.json5` | both zenoh routers' configuration ("The zenoh routers") |
 | `ros/models.sh`, `ros/depth_host.sh` | the model services on the Mac's GPU ("The model services") |
@@ -403,6 +405,43 @@ and `/marks_audit/phantoms` (a red cloud), and a report line every 10 s: `marks 
 (lidar 97, camera-only 106, unexplained 11), nearest camera-only 0.42 m`. Its `marks_audit` flag
 switches it off live.
 
+## Gaze: the head's one owner
+
+`pepin_bringup.gaze` runs beside Nav2 in `pepin-macnav` and is the only thing that moves the
+neck (`pepin.gaze`): consumers ask, it decides by band (operator, navigation, the person's word,
+sensor checks, driving, idle), TTL and preemption, and the head falls home by itself when nothing
+holds it. It speaks to the board's base server on :3336 — `neck_goto`/`neck_home` at rest today,
+`neck_target` while driving once the base server carries the neck's encoders in its state lines
+(picked by itself). Its doors: `/gaze/stall_look` (std_srvs/Trigger) for the behaviour tree, and
+JSON over HTTP on `127.0.0.1:3339` (`pepin.gaze_link`: `POST /look`, `POST /renew`, `GET /state`)
+for the LLM tools. `/gaze/state` (JSON, 10 Hz and on every change) carries the phase, the pan
+and tilt, the holder and the blind interval (`blind_from`..`blind_until`, the board's clock) the
+frame consumers drop frames in; both recorders tape it (`gaze` rows) and every stall look
+(`/gaze/stall`, `stall` rows).
+
+**The stall look** (`stall_look`, off as shipped): when FollowPath fails, the tree's `StallLook`
+asks first. The hull swept along the plan's first `stall_ahead_m` gives the lethal cells that
+block; the ones the lidar does not back are looked at — the head saccades to the centroid of what
+the volume holds over them (`depth_fusion`'s `/fusion/column`), holds for `frames` fused frames
+(`/fusion/frame`), comes home, and the clears and the replan read the volume as it now is. One
+log line says it all: `stall look: 2 lethal cells under the hull in the first 1.0 m (lidar 0,
+camera-only 2, unexplained 0), the first at 0.30 m; centroid (0.52, 0.04, 0.31) in odom; looked
+pan +4 tilt 58 deg: done, 3 frames in 1480 ms; candidates 2/2 cells, weight 61 -> 0/2 cells,
+weight 0: carved; lidar-backed cells carved 0; home done in 900 ms`. A blocker under the bumper
+(deeper than `stall_max_depression_deg`) answers FAILURE: the tree backs up 0.10 m and asks once
+more. An image without `pepin_gaze_bt` (`ros/laptop-build.sh gaze`) runs the tree with
+`StallLook` cut out; `nav.launch.py` says which in the log.
+
+```bash
+ros/flags.sh set gaze stall_look true     # the look at the next stall (false: the tree as before)
+curl -s 127.0.0.1:3339/state              # the head: phase, angles, holder, blind interval
+ros/laptop.sh nav logs | grep "stall look"
+```
+
+`path_gaze` and `reverse_gaze` (off) need the `neck_target` base server; the tools' `look`,
+`look_around` and `find` are requests of the person's band, held ten seconds (`see` renews),
+refused during a drive while the base server moves the neck only at rest.
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
@@ -706,6 +745,7 @@ PEPIN_BUILD_CPUS=4 ros/build-image.sh # the same on 4 of the Docker VM's CPUs at
 ros/build-image.sh --ship             # build, then load it on the board (stack stopped first)
 ros/build-image.sh --ship-only        # load the image already built here
 ros/laptop-build.sh                   # the laptop's image on top of it, with Nav2 and RTAB-Map
+ros/laptop-build.sh gaze              # pepin-laptop:gaze: that image plus the AskGaze BT node
 ```
 
 The load tags it `pepin-ros:latest` and `pepin-ros:zenoh` on the board, the names `ros/run.sh`
