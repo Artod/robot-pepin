@@ -18,6 +18,8 @@
 #                            aside with it
 #   ros/laptop.sh vslam --no-vo   no visual odometry: rgbd_odometry and pepin_bringup.visual_odometry
 #                            do not start, and the board's EKF is the wheels and the gyro alone
+#   ros/laptop.sh vslam --vo-stereo   the visual odometry reads the two eyes (stereo_odometry) at
+#                            the camera's rate instead of the picture and the depth at the depth's
 #   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
 #                            neck on): the camera node here keeps its static edge off
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
@@ -265,6 +267,7 @@ case "${1:-}" in
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
         # vo_publish true).
         VO=true
+        VO_INPUT=depth
         # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
         # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
         # would be two publishers of one edge; the camera node's report warns of a mismatch.
@@ -275,7 +278,8 @@ case "${1:-}" in
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
                 --no-vo) VO=false ;;
-                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--neck] [--no-vo]"; exit 2 ;;
+                --vo-stereo) VO_INPUT=stereo ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-stereo]"; exit 2 ;;
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads
@@ -355,7 +359,7 @@ case "${1:-}" in
             ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
-            "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" >/dev/null
+            "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
         echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
@@ -368,5 +372,5 @@ case "${1:-}" in
             echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
         fi
         exit 0 ;;
-    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-stereo] | kick NODE]"; exit 2 ;;
 esac

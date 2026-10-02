@@ -2111,8 +2111,10 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "foxglove_bridge",
         # The camera as a third odometry: rtabmap's node and ours. Neither carries state the
         # way RTAB-Map's graph does — rgbd_odometry's is the last frame, and a restart of it is
-        # a jump pepin.visual_odometry.VoGate drops.
+        # a jump pepin.visual_odometry.VoGate drops. stereo_odometry is the same role under
+        # vo_input:=stereo; the launch starts one of the two.
         "rgbd_odometry",
+        "stereo_odometry",
         "visual_odometry",
     }
     # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument): the
@@ -2263,9 +2265,10 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
         known[script] = {name for name, _ in rows}
     vslam, nav = _launch_processes("vslam.launch.py"), _launch_processes("nav.launch.py")
     robot = _launch_processes("robot.launch.py")
-    # Foxglove's bridge and rtabmap's rgbd_odometry are not ours to kick: the kick sends SIGINT
-    # to a "pepin_bringup.<module>" command line, and neither is one.
-    kickable = (_respawning(vslam) - {"foxglove_bridge", "rgbd_odometry"}) | _respawning(nav)
+    # Foxglove's bridge and rtabmap's two odometries are not ours to kick: the kick sends SIGINT
+    # to a "pepin_bringup.<module>" command line, and none of them is one.
+    not_ours = {"foxglove_bridge", "rgbd_odometry", "stereo_odometry"}
+    kickable = (_respawning(vslam) - not_ours) | _respawning(nav)
     assert known["laptop.sh"] == kickable
     # Everything of OURS the board respawns is kickable: the sensor launch's own nodes (a code
     # change on the board is one kicked process, never a restart). rf2o's binary is not ours and
@@ -2662,6 +2665,28 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
         "rgbd_odometry's raw output is kept off /vo until the gate has seen it"
     )
     assert "LaunchConfiguration('vo')" in ast.unparse(keywords["condition"])
+    # vo_input:=stereo: the same role, the same table and output, on the two rectified eyes —
+    # all four topics carry one stamp, so it runs at the camera's rate without the depth.
+    declared = {
+        ast.unparse(c.args[0]): sf.keywords(c) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
+    }
+    assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'depth'", "today's input"
+    assert ast.literal_eval(sf.assignments(vslam)["VO_INPUTS"]) == ("depth", "stereo")
+    stereo = sf.keywords(_node_named(vslam, "stereo_odometry"))
+    assert ast.unparse(stereo["executable"]) == "'stereo_odometry'"
+    assert ast.unparse(stereo["parameters"]) == ast.unparse(keywords["parameters"])
+    assert ast.unparse(stereo["condition"]) == ast.unparse(keywords["condition"])
+    remapped = ast.unparse(stereo["remappings"])
+    for pair in (
+        "('left/image_rect', '/camera/image')",
+        "('left/camera_info', '/camera/camera_info')",
+        "('right/image_rect', '/camera/right/image')",
+        "('right/camera_info', '/camera/right/camera_info')",
+        "('odom', VO_RAW_TOPIC)",
+    ):
+        assert pair in remapped, remapped
+    laptop = (REPO / "ros/laptop.sh").read_text()
+    assert "--vo-stereo) VO_INPUT=stereo ;;" in laptop and '"vo_input:=$VO_INPUT"' in laptop
     gate = next(
         c
         for c in sf.calls_to(vslam, "ExecuteProcess")
@@ -2669,10 +2694,10 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
     )
     assert "LaunchConfiguration('vo')" in ast.unparse(sf.keywords(gate)["condition"])
     started = _started_by_describe(vslam)
-    assert {"rgbd_odometry", "vo"} <= started, "both start with the launch"
+    assert {"odometry", "vo"} <= started, "both start with the launch"
     from pepin.deployment import LAPTOP_SLAM_NODES
 
-    assert {"/rgbd_odometry", "/visual_odometry"} <= set(LAPTOP_SLAM_NODES), (
+    assert {"/rgbd_odometry", "/stereo_odometry", "/visual_odometry"} <= set(LAPTOP_SLAM_NODES), (
         "ros/flags.sh finds both in the SLAM container"
     )
 
