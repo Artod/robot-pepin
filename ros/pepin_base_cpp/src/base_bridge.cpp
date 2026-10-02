@@ -35,6 +35,18 @@
 // fresh command, the gyro quiet — the node tells the EKF so: a zero twist on /zupt, the filter's
 // odom2, which otherwise hears nothing at rest but its sources' own drift (rf2o +1.5 deg/min on a
 // parked cart, 2026-09-24). See zupt.hpp and publish_zupt().
+//
+// THE NECK rides the same line. The base server reads the two neck servos in the same sync_read
+// as the wheels and puts their ticks in the state line under the same stamp, so this node turns
+// every line that carries them into /neck/state (sensor_msgs/JointState: neck_pan positive left,
+// head_tilt the pitch below level) and base_link -> camera_link (neck.hpp, the twin of
+// pepin.neck), both stamped with the moment of THAT encoder read — the line's `t`, the board's
+// monotonic clock, carried onto the ROS clock — at up to `neck_publish_hz` (every 50 Hz line by
+// default). The geometry is parameters only (robot.launch.py reads config/neck.json and
+// config/camera.json): a retuned mount is a restart, never a rebuild. With no `neck_camera_frame`
+// no transform is published; a line without the ticks (a silent neck) publishes nothing, and
+// a stale edge is never republished. This replaced pepin_bringup.neck_state (a Python process
+// polling the base server at 2-20 Hz, git history before 2026-10-02).
 
 #include <algorithm>
 #include <array>
@@ -60,11 +72,13 @@
 #include <rcl_interfaces/msg/set_parameters_result.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <sensor_msgs/msg/imu.hpp>
+#include <sensor_msgs/msg/joint_state.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "pepin_base_cpp/gyro_bias.hpp"
 #include "pepin_base_cpp/link.hpp"
 #include "pepin_base_cpp/mpu6050.hpp"
+#include "pepin_base_cpp/neck.hpp"
 #include "pepin_base_cpp/protocol.hpp"
 #include "pepin_base_cpp/twist_from_pose.hpp"
 #include "pepin_base_cpp/zupt.hpp"
@@ -91,7 +105,8 @@ constexpr double kStateGapMaxS = 1.0;
 // silently taking a mutex inside std::atomic.
 static_assert(std::atomic<double>::is_always_lock_free, "the IMU loop must not lock");
 
-/// Bridges the base server to ROS: /odom and odom->base_link out, /cmd_vel down to wheels.
+/// Bridges the base server to ROS: /odom and odom->base_link out, /cmd_vel down to wheels, and
+/// the neck's encoders as /neck/state and base_link -> camera_link.
 class BaseBridge : public rclcpp::Node
 {
 public:
@@ -196,6 +211,8 @@ public:
       "seconds a non-zero /cmd_vel holds the update off (default: cmd_timeout_s, the age up to "
       "which the bridge keeps re-sending a command)");
 
+    declare_neck();
+
     pose_covariance_ = odometry_pose_covariance();
     twist_covariance_ = odometry_twist_covariance();
 
@@ -279,8 +296,143 @@ private:
   {
     const auto state = parse_state(message);
     if (state.has_value()) {
+      publish_neck(*state);  // first: /odom's mute (odom_publish) is the wheels', not the head's
       publish_state(*state);
     }
+  }
+
+  /// The neck's parameters: config/neck.json's geometry (pepin.neck.bridge_parameters), the
+  /// frames, the joint names and the rate cap, all from the launch; a model that cannot be right
+  /// (a sign that is not +-1, not two joint names) publishes nothing and says so once.
+  void declare_neck()
+  {
+    neck_model_.reference_pan_ticks =
+      static_cast<int>(declare_parameter<int>("neck_reference_pan_ticks", -1));
+    neck_model_.reference_tilt_ticks =
+      static_cast<int>(declare_parameter<int>("neck_reference_tilt_ticks", -1));
+    neck_model_.pan_sign = static_cast<int>(declare_parameter<int>("neck_pan_sign", 1));
+    neck_model_.tilt_sign = static_cast<int>(declare_parameter<int>("neck_tilt_sign", 1));
+    neck_model_.mount_x_m = declare_parameter<double>("neck_mount_x_m", 0.0);
+    neck_model_.mount_y_m = declare_parameter<double>("neck_mount_y_m", 0.0);
+    neck_model_.mount_z_m = declare_parameter<double>("neck_mount_z_m", 0.0);
+    neck_model_.mount_pitch_rad =
+      declare_parameter<double>("neck_mount_pitch_deg", 0.0) / kRadToDeg;
+    neck_model_.tilt_from_pan_x_m = declare_parameter<double>("neck_tilt_from_pan_x_m", 0.0);
+    neck_model_.tilt_from_pan_z_m = declare_parameter<double>("neck_tilt_from_pan_z_m", 0.0);
+    neck_model_.camera_from_tilt_x_m = declare_parameter<double>("neck_camera_from_tilt_x_m", 0.0);
+    neck_model_.camera_from_tilt_z_m = declare_parameter<double>("neck_camera_from_tilt_z_m", 0.0);
+    // The parent is the body the neck stands on; an empty child frame publishes no transform
+    // (a laptop broadcasting a static camera edge, ros/laptop.sh vslam --fixed-head, owns it).
+    neck_parent_frame_ = declare_parameter<std::string>("neck_parent_frame", base_frame_);
+    neck_camera_frame_ = declare_parameter<std::string>("neck_camera_frame", "");
+    neck_joint_names_ = declare_parameter<std::vector<std::string>>(
+      "neck_joint_names", std::vector<std::string>{"neck_pan", "head_tilt"});
+    const double hz = declare_parameter<double>("neck_publish_hz", 50.0);
+    neck_grid_ = NeckGrid(hz);
+    // How old a line's encoder read may be when it arrives and still be dated by it: on the board
+    // the read is milliseconds old; a bridge on another machine has another monotonic clock, and
+    // its lines are stamped on arrival instead (counted in the report line).
+    neck_max_age_s_ = declare_parameter<double>("neck_stamp_max_age_s", 0.5);
+    neck_publisher_ = create_publisher<sensor_msgs::msg::JointState>("neck/state", 10);
+    const bool signs = std::abs(neck_model_.pan_sign) == 1 && std::abs(neck_model_.tilt_sign) == 1;
+    neck_valid_ = signs && neck_joint_names_.size() == 2;
+    if (!neck_valid_) {
+      RCLCPP_ERROR(
+        get_logger(), "neck: signs %d/%d and %zu joint names: /neck/state stays silent",
+        neck_model_.pan_sign, neck_model_.tilt_sign, neck_joint_names_.size());
+      return;
+    }
+    const std::string edge = neck_camera_frame_.empty() ?
+      std::string(" (no camera transform: neck_camera_frame is empty)") :
+      " and " + neck_parent_frame_ + " -> " + neck_camera_frame_;
+    RCLCPP_INFO(
+      get_logger(),
+      "neck: reference pan %d tilt %d ticks%s, signs %+d %+d, mount %.3f m %.1f deg down; "
+      "/neck/state%s at <= %g Hz",
+      neck_model_.reference_pan_ticks, neck_model_.reference_tilt_ticks,
+      neck_model_.known() ? "" : " UNREAD (every pose is the static mount)", neck_model_.pan_sign,
+      neck_model_.tilt_sign, neck_model_.mount_z_m, neck_model_.mount_pitch_rad * kRadToDeg,
+      edge.c_str(), hz);
+  }
+
+  /// The ROS time of a state line's encoder read: its `t` (the board's monotonic clock, as
+  /// monotonic_s() here) carried onto the ROS clock by its age; the arrival when that age is not
+  /// one a line on this machine can have.
+  rclcpp::Time line_stamp(const BaseState & state)
+  {
+    const rclcpp::Time arrival = now();
+    const double age = monotonic_s() - state.stamp_s;
+    if (age >= 0.0 && age <= neck_max_age_s_) {
+      return arrival - rclcpp::Duration::from_seconds(age);
+    }
+    ++neck_arrival_stamped_;
+    return arrival;
+  }
+
+  /// Reader thread: a line that carries the neck's ticks as /neck/state and, with a camera frame,
+  /// base_link -> camera_link, both at that read's stamp, under the rate cap.
+  void publish_neck(const BaseState & state)
+  {
+    ++neck_lines_;
+    if (!state.neck_read || !neck_valid_) {
+      return;
+    }
+    ++neck_heard_;
+    neck_pan_ticks_ = state.pan_ticks;
+    neck_tilt_ticks_ = state.tilt_ticks;
+    if (!neck_grid_.due(state.stamp_s)) {
+      return;
+    }
+    const rclcpp::Time stamp = line_stamp(state);
+    const NeckAngles angles = joint_angles(neck_model_, state.pan_ticks, state.tilt_ticks);
+    sensor_msgs::msg::JointState joints;
+    joints.header.stamp = stamp;
+    joints.name = neck_joint_names_;
+    joints.position = {angles.pan_rad, angles.pitch_rad};
+    neck_publisher_->publish(joints);
+    ++neck_sent_;
+    if (neck_camera_frame_.empty()) {
+      return;
+    }
+    const NeckPose pose = camera_pose(neck_model_, angles);
+    const auto q = quaternion_from_rpy(pose.roll, pose.pitch, pose.yaw);
+    geometry_msgs::msg::TransformStamped transform;
+    transform.header.stamp = stamp;
+    transform.header.frame_id = neck_parent_frame_;
+    transform.child_frame_id = neck_camera_frame_;
+    transform.transform.translation.x = pose.x;
+    transform.transform.translation.y = pose.y;
+    transform.transform.translation.z = pose.z;
+    transform.transform.rotation.x = q[0];
+    transform.transform.rotation.y = q[1];
+    transform.transform.rotation.z = q[2];
+    transform.transform.rotation.w = q[3];
+    tf_->sendTransform(transform);
+  }
+
+  /// The neck as a report line prints it: how many lines carried its ticks, how many went out,
+  /// where it points, and how many reads were dated on arrival.
+  ///
+  /// ``neck: 3000 of 3000 lines carried the ticks, 3000 published; pan 2029 (+0.0 deg) tilt 2311
+  /// (23.8 deg down); 0 dated on arrival`` once a minute.
+  std::string neck_state() const
+  {
+    char line[256];
+    if (neck_heard_.load() == 0) {
+      std::snprintf(
+        line, sizeof(line), "neck: none of %ld lines carried the ticks, nothing published",
+        neck_lines_.load());
+      return line;
+    }
+    const NeckAngles angles = joint_angles(neck_model_, neck_pan_ticks_, neck_tilt_ticks_);
+    std::snprintf(
+      line, sizeof(line),
+      "neck: %ld of %ld lines carried the ticks, %ld published; pan %d (%+.1f deg) tilt %d "
+      "(%.1f deg down); %ld dated on arrival",
+      neck_heard_.load(), neck_lines_.load(), neck_sent_.load(), neck_pan_ticks_.load(),
+      angles.pan_rad * kRadToDeg, neck_tilt_ticks_.load(), angles.pitch_rad * kRadToDeg,
+      neck_arrival_stamped_.load());
+    return line;
   }
 
   /// One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform.
@@ -706,8 +858,10 @@ private:
   {
     if (imu_publisher_) {
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 60000, "%s; %s", gyro_bias_state().c_str(),
-        zupt_state().c_str());
+        get_logger(), *get_clock(), 60000, "%s; %s; %s", gyro_bias_state().c_str(),
+        zupt_state().c_str(), neck_state().c_str());
+    } else {
+      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 60000, "%s", neck_state().c_str());
     }
     const auto change = link_->take_status_change();
     if (!change.has_value()) {
@@ -715,9 +869,9 @@ private:
     }
     if (change->first) {
       RCLCPP_INFO(
-        get_logger(), "%s; odom twist: %s, %s; %s; %s", change->second.c_str(),
+        get_logger(), "%s; odom twist: %s, %s; %s; %s; %s", change->second.c_str(),
         twist_measured_ ? "measured" : "commanded", switch_state().c_str(),
-        gyro_bias_state().c_str(), zupt_state().c_str());
+        gyro_bias_state().c_str(), zupt_state().c_str(), neck_state().c_str());
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
@@ -971,6 +1125,23 @@ private:
   const std::array<double, 36> zupt_pose_covariance_ = diagonal(
     {kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance, kUnclaimedVariance,
       kUnclaimedVariance, kUnclaimedVariance});
+
+  // THE NECK (declare_neck, publish_neck): the model and the frames are fixed at start; the grid
+  // is the reader thread's alone; the counters and the last ticks are what the report line reads.
+  NeckModel neck_model_;
+  std::string neck_parent_frame_;
+  std::string neck_camera_frame_;
+  std::vector<std::string> neck_joint_names_;
+  NeckGrid neck_grid_{50.0};
+  double neck_max_age_s_ = 0.5;
+  bool neck_valid_ = false;
+  std::atomic<long> neck_lines_{0};
+  std::atomic<long> neck_heard_{0};
+  std::atomic<long> neck_sent_{0};
+  std::atomic<long> neck_arrival_stamped_{0};
+  std::atomic<int> neck_pan_ticks_{0};
+  std::atomic<int> neck_tilt_ticks_{0};
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr neck_publisher_;
 
   std::mutex mutex_;  // guards the command the resend timer repeats
   std::optional<std::pair<double, double>> command_;

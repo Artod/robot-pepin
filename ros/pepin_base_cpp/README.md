@@ -1,7 +1,8 @@
 # pepin_base_cpp
 
 The base bridge in C++: `/cmd_vel` down to the board's base server, its state stream up as
-`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw` and the rest `/zupt`. It is the
+`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw`, the rest `/zupt`, and the neck's
+encoders as `/neck/state` and `base_link -> camera_link`. It is the
 board's only base bridge: the Python one it was ported from (same node name, parameters and wire
 protocol) cost ~190 MB RSS and ~10% of a core, this one ~25 MB and ~1%, and RAM runs out first;
 that node is in git history before 2026-10-02. Its live switches are described in
@@ -13,7 +14,34 @@ that node is in git history before 2026-10-02. Its live switches are described i
 - `include/pepin_base_cpp/twist_from_pose.hpp` — the twist the wheels measured, off two poses.
 - `include/pepin_base_cpp/gyro_bias.hpp` — the gyro's zero, and the wheels' word on rest.
 - `include/pepin_base_cpp/zupt.hpp` — when the cart is certainly still, for the EKF's /zupt.
-- `src/base_bridge.cpp` — the node: /odom, TF, the /cmd_vel sink, the 5 Hz resend, `main`.
+- `include/pepin_base_cpp/neck.hpp` — the neck's ticks as joint angles and the camera's pose.
+- `src/base_bridge.cpp` — the node: /odom, TF, the /cmd_vel sink, the 5 Hz resend, the neck.
+
+## Neck
+
+The base server reads the two neck servos in the same sync_read as the wheels and puts
+`pan_ticks`/`tilt_ticks` in the state line under the same stamp `t` (the board's monotonic clock,
+the middle of that encoder read). Every line that carries them becomes `/neck/state`
+(`sensor_msgs/JointState`, `neck_pan` positive left and `head_tilt` the pitch below level, in
+radians) and `base_link -> camera_link`, both stamped with that read carried onto the ROS clock
+(`now() - (monotonic now - t)`; a line older than `neck_stamp_max_age_s`, 0.5, is stamped on
+arrival and counted), at up to `neck_publish_hz` (50: every line). `neck.hpp` is the twin of
+`pepin.neck` (`test/neck_contract.cpp` holds it to the Python model). A line without the ticks (a
+silent neck) publishes nothing: no edge is held or republished.
+
+Every number is a parameter, handed over by robot.launch.py from `config/neck.json`
+(`pepin.neck.bridge_parameters`: `neck_reference_pan_ticks`/`_tilt_ticks`, -1 unread,
+`neck_pan_sign`/`neck_tilt_sign`, `neck_mount_x_m`/`_y_m`/`_z_m`/`neck_mount_pitch_deg`, the four
+lever arms `neck_tilt_from_pan_*`/`neck_camera_from_tilt_*`) and `config/camera.json`
+(`neck_camera_frame`, the active camera's link frame; empty publishes no transform), with
+`neck_parent_frame` (base_link) and `neck_joint_names`: a re-measured mount is `ros/sync.sh` and a
+restart of the base container, never a rebuild. No switch: a rig without neck servos publishes
+nothing here and runs the laptop with `ros/laptop.sh vslam --fixed-head`. The report line, once a
+minute: how many lines carried the ticks, how many went out, where the head points.
+
+Board cost, AN ESTIMATE until a census: one JointState and one transform per state line, about
+what the /odom beside them costs (+2-3 % of a core); it retired `pepin_bringup.neck_state`, a
+Python process at 10 % and 66 MB.
 
 ## IMU
 
@@ -127,6 +155,9 @@ skipped without a `c++`).
   its own header comment has the `c++` line.
 - `test/zupt_contract.cpp` — the zero-velocity update's table, replayed against `zupt.hpp` the same
   way, verdict words and defaults included.
+- `test/neck_contract.cpp` — the neck's rate cap replayed as a table, then the model fed from
+  stdin: `tests/unit/test_base_cpp_contracts.py` writes `config/neck.json` (and variants) in and
+  holds every answer to `pepin.neck`'s within 1e-9.
 - `test/protocol_samples.json` — wire lines recorded from the Python bridge this one was ported
   from: the twists and stops `protocol.hpp` must encode byte for byte, and the state lines it must
   parse.

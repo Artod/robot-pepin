@@ -313,6 +313,27 @@ def camera_pose(
     )
 
 
+def bridge_parameters(cfg: NeckConfig) -> dict[str, int | float]:
+    """config/neck.json as the C++ base bridge's neck parameters (ros/pepin_base_cpp's neck.hpp,
+    the twin of this model): the reference pose and ticks (-1 for an unread one), the signs, the
+    lever arms. robot.launch.py hands them over; nothing of the geometry is compiled in."""
+    ref, arm = cfg.reference, cfg.pivot
+    return {
+        "neck_reference_pan_ticks": -1 if ref.pan_ticks is None else ref.pan_ticks,
+        "neck_reference_tilt_ticks": -1 if ref.tilt_ticks is None else ref.tilt_ticks,
+        "neck_pan_sign": ref.pan_sign,
+        "neck_tilt_sign": ref.tilt_sign,
+        "neck_mount_x_m": ref.x_m,
+        "neck_mount_y_m": ref.y_m,
+        "neck_mount_z_m": ref.z_m,
+        "neck_mount_pitch_deg": ref.pitch_deg,
+        "neck_tilt_from_pan_x_m": arm.tilt_from_pan_x_m,
+        "neck_tilt_from_pan_z_m": arm.tilt_from_pan_z_m,
+        "neck_camera_from_tilt_x_m": arm.camera_from_tilt_x_m,
+        "neck_camera_from_tilt_z_m": arm.camera_from_tilt_z_m,
+    }
+
+
 def _pitched(x: float, z: float, pitch: float) -> tuple[float, float]:
     """A lever (x forward, z up) after a pitch about y; a downward pitch dips its tip."""
     return x * math.cos(pitch) + z * math.sin(pitch), -x * math.sin(pitch) + z * math.cos(pitch)
