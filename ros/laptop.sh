@@ -102,8 +102,17 @@ xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE'
 # The middleware flags every node container here is given: the session (a peer of THIS
 # machine's router) plus ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router
 # survives and joins when it appears instead of dying on the start order.
+# The session's tx queues raised to 16 batches each (rmw_zenoh's default is smaller): with the
+# default the Foxglove bridge in pepin-vslam hit "Unable to push non droppable network message"
+# within minutes of every start and hung silently (2026-09-30, 2026-10-01), as Nav2 did before
+# scratch/macnav/up.sh got the same override. 32 panics zenoh (`*num <= RBLEN`): 16 is the ceiling.
+ZENOH_QUEUE="${PEPIN_ZENOH_QUEUE:-16}"
+ZENOH_QUEUES=""
+for prio in control real_time interactive_high interactive_low data_high data data_low background; do
+    ZENOH_QUEUES="$ZENOH_QUEUES;transport/link/tx/queue/size/$prio=$ZENOH_QUEUE"
+done
 RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
-         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)")
+         -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)$ZENOH_QUEUES")
 # A clock the two halves disagree on is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
 start_check() { pepin_time_source_check || exit 1; }
