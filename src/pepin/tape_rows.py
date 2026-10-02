@@ -20,6 +20,7 @@ a live recorder can hand it ``time.time()`` and a converter the bag's receive ti
 
 from __future__ import annotations
 
+import json
 import math
 from typing import Any
 
@@ -54,6 +55,8 @@ TOPIC_RECORDS: dict[str, str] = {
     "/navigate_to_pose/_action/status": "nav",
     "/compute_path_to_pose/_action/status": "nav",
     "/follow_path/_action/status": "nav",
+    "/gaze/state": "gaze",
+    "/gaze/stall": "stall",
 }
 # The frames the ``loc`` rows are composed from when the tape carries no tracker pose: the
 # laptop's correction and the board's own odometry, the two edges every other consumer composes.
@@ -192,6 +195,28 @@ def nav_row(action: str, msg: Any, now: float) -> dict[str, Any]:
         "action": action,
         "status": [int(s.status) for s in msg.status_list],
     }
+
+
+def gaze_row(msg: Any, now: float) -> dict[str, Any]:
+    """Where the head was and who held it (``/gaze/state``, the arbiter's JSON: the phase, the
+    pan and tilt, the request, the blind interval), dated on arrival."""
+    return {"t": now, "topic": "gaze", **_json_object(msg.data)}
+
+
+def stall_row(msg: Any, now: float) -> dict[str, Any]:
+    """One stall look (``/gaze/stall``): the blockers, where the head looked, the frames, the
+    volume's columns before and after, the verdict; dated by the arbiter's own ``t``."""
+    data = _json_object(msg.data)
+    return {"t": float(data.pop("t", now)), "topic": "stall", **data}
+
+
+def _json_object(text: str) -> dict[str, Any]:
+    """A JSON object from a String message, or what was wrong with it."""
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        return {"error": f"not JSON: {exc}"}
+    return data if isinstance(data, dict) else {"error": "not a JSON object"}
 
 
 def cmd_row(msg: Any, now: float) -> dict[str, Any]:

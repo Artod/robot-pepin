@@ -12,7 +12,8 @@ laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + 
 pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
   costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (C++: /odom,
   velocity smoother), goal_server               /imu/data_raw, /zupt, /neck/state, the camera's
-  (127.0.0.1:3337), run_recorder                tf), EKF (odom -> base_link), rf2o, tof_bridge
+  (127.0.0.1:3337), run_recorder, gaze          tf), EKF (odom -> base_link), rf2o, tof_bridge
+  (the head's one owner, 127.0.0.1:3339)
 pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, the wheels),
   camera, depth, visual odometry, the           pepin-tof.service (:3335), ser2net (:3333,
   volume, foxglove_bridge (ws 8765)             the servo bus, the base server's own link)
@@ -30,6 +31,7 @@ pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, t
 | `ros/run.sh` | the board's `docker run`: host networking, the lidar device, `ros/maps` (recordings) and `ros/params` mounted |
 | `ros/pepin_bringup/` | ament_python package: every Python node and the launch files (`robot` / `bringup` on the board, `vslam` and `nav` on the Mac) |
 | `ros/pepin_base_cpp/` | ament_cmake package: the board's base bridge in C++ ([its README](pepin_base_cpp/README.md)) |
+| `ros/pepin_gaze_bt/` | ament_cmake package: `AskGaze`, the behaviour tree's door to the gaze arbiter ("Gaze") |
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates), the EKF, the behaviour tree, the bag QoS |
 | `ros/zenoh/router.json5` | both zenoh routers' configuration ("The zenoh routers") |
 | `ros/models.sh`, `ros/depth_host.sh` | the model services on the Mac's GPU ("The model services") |
@@ -409,6 +411,43 @@ and `/marks_audit/phantoms` (a red cloud), and a report line every 10 s: `marks 
 (lidar 97, camera-only 106, unexplained 11), nearest camera-only 0.42 m`. Its `marks_audit` flag
 switches it off live.
 
+## Gaze: the head's one owner
+
+`pepin_bringup.gaze` runs beside Nav2 in `pepin-macnav` and is the only thing that moves the
+neck (`pepin.gaze`): consumers ask, it decides by band (operator, navigation, the person's word,
+sensor checks, driving, idle), TTL and preemption, and the head falls home by itself when nothing
+holds it. It speaks to the board's base server on :3336 — `neck_goto`/`neck_home` at rest today,
+`neck_target` while driving once the base server carries the neck's encoders in its state lines
+(picked by itself). Its doors: `/gaze/stall_look` (std_srvs/Trigger) for the behaviour tree, and
+JSON over HTTP on `127.0.0.1:3339` (`pepin.gaze_link`: `POST /look`, `POST /renew`, `GET /state`)
+for the LLM tools. `/gaze/state` (JSON, 10 Hz and on every change) carries the phase, the pan
+and tilt, the holder and the blind interval (`blind_from`..`blind_until`, the board's clock) the
+frame consumers drop frames in; both recorders tape it (`gaze` rows) and every stall look
+(`/gaze/stall`, `stall` rows).
+
+**The stall look** (`stall_look`, off as shipped): when FollowPath fails, the tree's `StallLook`
+asks first. The hull swept along the plan's first `stall_ahead_m` gives the lethal cells that
+block; the ones the lidar does not back are looked at — the head saccades to the centroid of what
+the volume holds over them (`depth_fusion`'s `/fusion/column`), holds for `frames` fused frames
+(`/fusion/frame`), comes home, and the clears and the replan read the volume as it now is. One
+log line says it all: `stall look: 2 lethal cells under the hull in the first 1.0 m (lidar 0,
+camera-only 2, unexplained 0), the first at 0.30 m; centroid (0.52, 0.04, 0.31) in odom; looked
+pan +4 tilt 58 deg: done, 3 frames in 1480 ms; candidates 2/2 cells, weight 61 -> 0/2 cells,
+weight 0: carved; lidar-backed cells carved 0; home done in 900 ms`. A blocker under the bumper
+(deeper than `stall_max_depression_deg`) answers FAILURE: the tree backs up 0.10 m and asks once
+more. An image without `pepin_gaze_bt` (`ros/laptop-build.sh gaze`) runs the tree with
+`StallLook` cut out; `nav.launch.py` says which in the log.
+
+```bash
+ros/flags.sh set gaze stall_look true     # the look at the next stall (false: the tree as before)
+curl -s 127.0.0.1:3339/state              # the head: phase, angles, holder, blind interval
+ros/laptop.sh nav logs | grep "stall look"
+```
+
+`path_gaze` and `reverse_gaze` (off) need the `neck_target` base server; the tools' `look`,
+`look_around` and `find` are requests of the person's band, held ten seconds (`see` renews),
+refused during a drive while the base server moves the neck only at rest.
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
@@ -480,6 +519,9 @@ minute, and every live flag on it back to its default.
 | `depth_stream` | `law_watch` | bool | off | yes | the affine law is fitted on the lidar's pairs and printed, and the depth is published exactly as the source measured it; no frame waits for a law |
 | `depth_stream` | `imu_lean` | bool | on | yes | the cart's lean (pepin.lean, from /imu/data_raw) is followed with the gyro as well as the accelerometer and carried into the scan's carry and the camera's place in the map; off, the floor plane leans with the accelerometer alone, as it always has, and nothing else is leaned |
 | `depth_stream` | `gaze_gate` | bool | on | yes | frames whose exposure window (stamp +- gate_exposure_s) overlaps a head saccade (/gaze/state's blind intervals, + gate_settle_s after settling) or holds a body yaw faster than gate_yaw_dps (/imu/data_raw; 0 is off) are dropped here and counted; off, every frame passes as before |
+| `gaze` | `stall_look` | bool | off | yes | when the controller fails, the behaviour tree's AskGaze asks for a look at the camera-only and unexplained marks blocking the hull in the plan's first stall_ahead_m: the head saccades to their voxel centroid, holds for 'frames' still frames so the volume carves a phantom or confirms a thing, comes home, and the tree clears and replans; off, AskGaze answers at once and the tree runs as before |
+| `gaze` | `path_gaze` | bool | off | yes | while a drive runs, the head looks along the plan path_lookahead_s ahead (pan clamped to path_pan_clamp_deg, a dead-band of path_deadband_deg); only with a base server that moves the neck while driving (neck_target), otherwise idle |
+| `gaze` | `reverse_gaze` | bool | off | yes | a reverse leg longer than reverse_min_s, or any reverse with the rear tight, turns the head reverse_pan_deg toward the side the rear swings to; only with a base server that moves the neck while driving |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim, graceful, dwb | mppi | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance; graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi (ros/goto.sh controller NAME). Published latched on controller_selector and goal_checker_selector, so a change is read by the behaviour tree at its next tick |
 | `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
@@ -533,6 +575,38 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `depth_stream` | `gate_exposure_s` | number 0..0.2 | 0.035 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `depth_stream` | `gate_settle_s` | number 0..1 | 0.1 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade |
 | `depth_stream` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |
+| `gaze` | `frames` | integer 0..20 | 3 | still depth frames a look waits for at each view: fused into the volume and stamped later than one frame period after the head settled; a request may ask for its own number |
+| `gaze` | `settle_tol_deg` | number 0.1..10 | 1.0 | how close, in degrees, the encoders must read to the target for the head to have arrived |
+| `gaze` | `move_timeout_s` | number 0.5..10 | 3.0 | a move not settled by then ends unreached (the encoders say where the head is), and a write the base server keeps refusing for this long is denied |
+| `gaze` | `frame_period_s` | number 0..1 | 0.105 | the blind tail after the head settles, one depth frame period at 9.5 fps: /gaze/state's blind_until is the settle plus this |
+| `gaze` | `ttl_operator_s` | number 0.1..10 | 0.5 | the default life of an operator's request (band 0), renewed while keys are held |
+| `gaze` | `ttl_navigation_s` | number 0.5..30 | 3.0 | the default life of a navigation request (band 1): the stall look's saccade and frames must fit in it |
+| `gaze` | `ttl_person_s` | number 1..120 | 10.0 | the default life of the person's request (band 2: look, look_around, find); see renews it |
+| `gaze` | `ttl_sensor_s` | number 0.5..30 | 2.0 | the default life of a sensor-triggered check (band 3) |
+| `gaze` | `ttl_driving_s` | number 0.2..5 | 0.5 | the life of path gaze and reverse gaze (band 4), renewed every path_period_s while they apply |
+| `gaze` | `ttl_idle_s` | number 1..300 | 20.0 | the default life of an idle request (band 5) |
+| `gaze` | `drive_home_tol_deg` | number 0.5..45 | 5.0 | at a drive's start a head the encoders read further than this from where the arbiter last put it (a jog, a hand, ros/neck.sh) is sent home: no drive starts with a crooked head |
+| `gaze` | `stall_ahead_m` | number 0.2..3 | 1.0 | how far along the plan the hull is swept for blockers at a stall |
+| `gaze` | `stall_margin_m` | number 0..0.3 | 0.05 | the hull grown by this much on every side for the sweep (one costmap cell) |
+| `gaze` | `stall_cluster_m` | number 0.05..1 | 0.25 | candidates first reached within this much of the nearest one are one blocker: the look aims at their centroid |
+| `gaze` | `stall_match_cells` | number 0.5..5 | 1.5 | how near a lidar return or a camera mark must land to a blocking cell, in costmap cells, to account for it (marks_audit's match_cells) |
+| `gaze` | `stall_column_bottom_m` | number 0..1 | 0.15 | the bottom of the columns asked of /fusion/column over the blockers, metres above the cart's floor plane: depth_fusion's marks_min_z, where the camera's marks start, so the floor's own surface is never a blocker |
+| `gaze` | `stall_column_top_m` | number 0.3..2 | 1.3 | the top of the columns asked of /fusion/column over the blockers, metres above the cart's floor plane: the top of the band the marks are read in (pepin.volume_scan.MARKS_MAX_Z_M) |
+| `gaze` | `stall_max_depression_deg` | number 45..95 | 85.0 | a blocker deeper below the lens than this is in the frame's last rows: the look answers 'back off' and the tree backs up before asking again |
+| `gaze` | `slow_deg_s` | number 1..60 | 20.0 | the head's speed for a 'slow' request (a detector that wants unblurred frames), with neck_target; a saccade goes at the board's own top speed |
+| `gaze` | `target_renew_s` | number 0.1..5 | 0.5 | how often a held neck_target is sent again: well inside the board's lease, whose lapse sends the head home |
+| `gaze` | `path_period_s` | number 0.05..2 | 0.2 | how often path gaze and reverse gaze are recomputed and renewed while a drive runs |
+| `gaze` | `path_lookahead_s` | number 0.5..5 | 2.0 | path gaze looks at the plan's point this many seconds of the current speed ahead |
+| `gaze` | `path_min_m` | number 0.2..3 | 0.6 | ...but at least this far along the plan |
+| `gaze` | `path_max_m` | number 0.3..5 | 1.5 | ...and at most this far |
+| `gaze` | `path_deadband_deg` | number 0..45 | 8.0 | path gaze moves the head only when the new aim is this far from the held one: saccade and hold, no creeping |
+| `gaze` | `path_pan_clamp_deg` | number 0..150 | 60.0 | path gaze's pan limit while driving: a goal behind is turned to by the body, not the head |
+| `gaze` | `path_near_m` | number 0.2..3 | 1.0 | a path point nearer than this tilts the head below home |
+| `gaze` | `path_near_offset_deg` | number 0..45 | 15.0 | ...to atan(lens height / distance) less this, so the floor under the point sits in the lower third of the picture |
+| `gaze` | `reverse_pan_deg` | number 60..156 | 150.0 | reverse gaze's pan toward the rear, on the side the rear swings to |
+| `gaze` | `reverse_tilt_deg` | number 0..63 | 23.8 | reverse gaze's tilt: home's until the body self-filter lands, since deeper looks back see the cart's own top shelf |
+| `gaze` | `reverse_min_s` | number 0..10 | 1.0 | a reverse leg must last this long before the head turns back (unless the rear is tight) |
+| `gaze` | `reverse_rear_m` | number 0..1 | 0.3 | a lethal cell this close behind the hull makes the rear tight: the head turns back from the first reversing twist |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |
 | `marks_audit` | `match_cells` | number 0.5..5 | 1.5 | how near a beam must land to a cell, in costmap cells, to account for it |
 | `rtabmap_frame` | `pnp_reproj_px` | number 1..4 | 2.0 | Vis/PnPReprojError: how far, in pixels, a database point may reproject from its match in the current picture and still count as an inlier of the visual registration (20 inliers accept it, Vis/MinInliers). Sent with the strategy's parameters and changed live |
@@ -691,6 +765,7 @@ PEPIN_BUILD_CPUS=4 ros/build-image.sh # the same on 4 of the Docker VM's CPUs at
 ros/build-image.sh --ship             # build, then load it on the board (stack stopped first)
 ros/build-image.sh --ship-only        # load the image already built here
 ros/laptop-build.sh                   # the laptop's image on top of it, with Nav2 and RTAB-Map
+ros/laptop-build.sh gaze              # pepin-laptop:gaze: that image plus the AskGaze BT node
 ```
 
 The load tags it `pepin-ros:latest` and `pepin-ros:zenoh` on the board, the names `ros/run.sh`

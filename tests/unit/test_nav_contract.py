@@ -1981,8 +1981,9 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     }
     # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument): the
     # JSONL tape, or `ros2 bag record` under a node that subscribes to nothing. Both respawn, and
-    # a kick reaches whichever is running.
-    assert _respawning(nav) == {"run_recorder", "bag_recorder", "goal_server"}
+    # a kick reaches whichever is running. The gaze arbiter keeps its requests in memory only:
+    # a respawn drops them, and every waiting caller already has its own timeout.
+    assert _respawning(nav) == {"run_recorder", "bag_recorder", "goal_server", "gaze"}
     # The board's sensor launch runs our processes too (the neck node among them until it went
     # into the base bridge, 2026-10-02). The drivers around them are ROS packages the container
     # restarts with the launch.

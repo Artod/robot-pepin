@@ -13,6 +13,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from pepin.gaze import DRIVE_REFUSAL
 from pepin.tools.clients import HeadMove, HeadPose, HeadReach, ServiceDownError
 from pepin.tools.registry import Image
 from pepin.tools.robot import Robot
@@ -148,13 +149,15 @@ def arrival_script(x: float, y: float, yaw_deg: float, place: str | None) -> lis
 
 @dataclass
 class FakeNeck:
-    """The head: moves arrive at once (``wheels_moving`` refuses them, as the base server does)."""
+    """The head as the gaze arbiter lends it: moves arrive at once, ``wheels_moving`` (a drive)
+    refuses them in the arbiter's words, and ``kept`` counts the renewals ``see`` asks for."""
 
     clock: FakeClock
     pose_now: HeadPose = REST
     wheels_moving: bool = False
     down: bool = False
     moves: list[tuple[float | None, float | None]] = field(default_factory=list)
+    kept: int = 0
 
     def reach(self) -> HeadReach:
         """The real neck's reach, rounded."""
@@ -170,11 +173,11 @@ class FakeNeck:
         return self.pose_now
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
-        """Arrive at once, one second later, or refuse while the wheels turn."""
+        """Arrive at once, one second later, or be refused during a drive."""
         self._check()
         self.moves.append((pan_deg, tilt_deg))
         if self.wheels_moving:
-            return HeadMove(False, self.pose_now, "the wheels are moving")
+            return HeadMove(False, self.pose_now, DRIVE_REFUSAL)
         self.clock.sleep(1.0)
         self.pose_now = HeadPose(
             self.pose_now.pan_deg if pan_deg is None else pan_deg,
@@ -182,14 +185,15 @@ class FakeNeck:
         )
         return HeadMove(True, self.pose_now, "", 1000.0)
 
-    def home(self) -> HeadMove:
-        """Back to the working pose."""
-        return self.turn(REST.pan_deg, REST.tilt_deg)
+    def keep(self) -> None:
+        """Count the renewal."""
+        self._check()
+        self.kept += 1
 
     def _check(self) -> None:
         if self.down:
             raise ServiceDownError(
-                "base server", "10.0.0.187:3336", "timed out", "Is the board up?"
+                "gaze arbiter", "http://127.0.0.1:3339", "refused", "Is Nav2 up on this Mac?"
             )
 
 

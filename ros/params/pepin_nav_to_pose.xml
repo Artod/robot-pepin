@@ -1,8 +1,11 @@
 <!--
   Pepin's navigate-to-pose tree: the stock Nav2 "replanning and recovery" tree, waiting before it
   retreats. A plan every second from where the cart stands; a controller that stops making
-  progress waits a second and plans again from there (a person on the path, a miss beside a
-  mark); a planner refusal waits, turns, then backs up; the round robin below is the last resort.
+  progress looks at what blocks it (the gaze arbiter's stall look, when on), waits a second and
+  plans again from there (a person on the path, a miss beside a mark); a planner refusal waits,
+  turns, then backs up; the round robin below is the last resort. An image without the AskGaze
+  plugin (pepin_gaze_bt) gets this tree with the element named StallLook cut out
+  (nav.launch.py), and every AskGaze must stand inside it.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -79,6 +82,23 @@
                controller's own error, seconds before the global round robin would get there. -->
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+            <!-- The stall look (pepin_bringup.gaze, its stall_look flag): before the costmaps are
+                 cleared, the head looks at the camera-only and unexplained marks blocking the
+                 hull in the plan's first metre, holds for a few still frames so the volume carves
+                 a phantom or confirms a thing, and comes home; the clears and the replan below
+                 then read the volume as it is now. AskGaze waits exactly as long as the look and
+                 succeeds at once with the flag off or the arbiter away, so the tree is then the
+                 one before. FAILURE means the blocker is under the bumper, in the frame's last
+                 rows: back up 0.10 m and ask again, and nothing here ever fails the recovery. -->
+            <Fallback name="StallLook">
+              <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
+              <ForceSuccess>
+                <Sequence>
+                  <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
+                  <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
+                </Sequence>
+              </ForceSuccess>
+            </Fallback>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
             <ClearEntireCostmap name="ClearGlobalCostmap-FollowPath" service_name="global_costmap/clear_entirely_global_costmap"/>
             <!-- Wait first (a person on the path; never a retreat half-way), then plan again from

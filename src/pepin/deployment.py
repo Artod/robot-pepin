@@ -156,6 +156,7 @@ LAPTOP_NAV_NODES = (
     "/goal_server",
     "/run_recorder",
     "/bag_recorder",
+    "/gaze",  # the gaze arbiter: every head decision, the stall look, path and reverse gaze
 )
 
 

@@ -19,14 +19,19 @@ from pepin.camera_grid import GRID_RESOLUTION_M, GRID_SIZE_M
 from pepin.contact import CONTACT_MAX_RANGE
 from pepin.depth import SCALE_CEILING
 from pepin.flags import FlagSet, knob, knobs_of, load_knobs, load_table, read_knobs, with_knobs
+from pepin.gaze import GazeSettings
 from pepin.gaze_gate import EXPOSURE_S, GATE_KNOBS, SETTLE_S, YAW_DPS
 from pepin.global_descriptor import MAX_NULL_SHARE
 from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG
 from pepin.marks_audit import MATCH_CELLS, RADIUS_M
+from pepin.path_gaze import PathGazeLaw, ReverseLaw
 from pepin.snapshot import PAIR_PERIODS
+from pepin.stall_look import AHEAD_M as STALL_AHEAD_M
+from pepin.stall_look import CLUSTER_M as STALL_CLUSTER_M
+from pepin.stall_look import MARGIN_M as STALL_MARGIN_M
 from pepin.tsdf import band_half_z_m
-from pepin.volume_scan import MARKS_MIN_Z_M
+from pepin.volume_scan import MARKS_MAX_Z_M, MARKS_MIN_Z_M
 
 REPO = Path(__file__).resolve().parents[2]
 NODES = "ros/pepin_bringup/pepin_bringup"
@@ -58,6 +63,27 @@ NAMED = {
         for node in ("depth_stream", "sensor_pack", "visual_odometry")
         for name, value in zip(GATE_KNOBS, (EXPOSURE_S, SETTLE_S, YAW_DPS), strict=True)
     },
+    # the gaze arbiter: its library's defaults, and the marks' band its columns are read in
+    ("gaze", "frames"): GazeSettings().frames,
+    ("gaze", "settle_tol_deg"): GazeSettings().settle_tol_deg,
+    ("gaze", "move_timeout_s"): GazeSettings().move_timeout_s,
+    ("gaze", "frame_period_s"): GazeSettings().frame_period_s,
+    ("gaze", "ttl_navigation_s"): GazeSettings().ttl_for(1),
+    ("gaze", "ttl_person_s"): GazeSettings().ttl_for(2),
+    ("gaze", "ttl_driving_s"): GazeSettings().ttl_for(4),
+    ("gaze", "stall_ahead_m"): STALL_AHEAD_M,
+    ("gaze", "stall_margin_m"): STALL_MARGIN_M,
+    ("gaze", "stall_cluster_m"): STALL_CLUSTER_M,
+    ("gaze", "stall_match_cells"): MATCH_CELLS,
+    ("gaze", "stall_column_bottom_m"): MARKS_MIN_Z_M,
+    ("gaze", "stall_column_top_m"): MARKS_MAX_Z_M,
+    ("gaze", "path_lookahead_s"): PathGazeLaw().lookahead_s,
+    ("gaze", "path_deadband_deg"): PathGazeLaw().deadband_deg,
+    ("gaze", "path_pan_clamp_deg"): PathGazeLaw().pan_clamp_deg,
+    ("gaze", "reverse_pan_deg"): ReverseLaw().pan_deg,
+    ("gaze", "reverse_tilt_deg"): ReverseLaw().tilt_deg,
+    ("gaze", "reverse_min_s"): ReverseLaw().min_s,
+    ("gaze", "reverse_rear_m"): ReverseLaw().rear_m,
 }
 NODE_NAMED = {
     ("depth_stream", "tf_dead_s"): "TF_DEAD_S",

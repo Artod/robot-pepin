@@ -2,8 +2,12 @@
 # The robot's brain on this Mac; the board is a sensor box. Usage:
 #   ros/laptop.sh nav        start (or restart) Nav2 in pepin-macnav: planner, controller, costmaps,
 #                            behaviour tree, the goal server on 127.0.0.1:3337 (controller mppi),
-#                            the run recorder. PEPIN_MAP names the map whose places book the goal
-#                            server reads (map_server stays off: both costmaps read RTAB-Map's /map)
+#                            the run recorder, the gaze arbiter (its door on 127.0.0.1:3339).
+#                            PEPIN_MAP names the map whose places book the goal server reads
+#                            (map_server stays off: both costmaps read RTAB-Map's /map). Runs on
+#                            pepin-laptop:gaze when it is built on the laptop image
+#                            (ros/laptop-build.sh gaze: the stall look's BT node), else on that
+#                            image, with the tree's stall look cut out
 #   ros/laptop.sh nav down   stop it; ros/laptop.sh nav logs follows its output
 #   ros/laptop.sh stop       stop every container here, the router with them
 #   ros/laptop.sh logs [vslam|macnav]   follow a container's output (macnav by default)
@@ -103,10 +107,26 @@ vslam_image() {
     echo "$base"
 }
 xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE's (built FROM it)
-    local base_layers xfeat_layers
-    base_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' "$1" 2>/dev/null)" || return 1
-    xfeat_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' pepin-laptop:xfeat 2>/dev/null)" || return 1
-    [ -n "$base_layers" ] && [ "${xfeat_layers#"$base_layers"}" != "$xfeat_layers" ]
+    built_on pepin-laptop:xfeat "$1"
+}
+built_on() {  # IMAGE BASE: whether IMAGE's layers begin with BASE's (it was built FROM it)
+    local base_layers layers
+    base_layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' "$2" 2>/dev/null)" || return 1
+    layers="$(docker image inspect -f '{{join .RootFS.Layers " "}}' "$1" 2>/dev/null)" || return 1
+    [ -n "$base_layers" ] && [ "${layers#"$base_layers"}" != "$layers" ]
+}
+# The navigation container's image: pepin-laptop:gaze — the image above plus the stall look's BT
+# node (ros/pepin_gaze_bt, ros/laptop-build.sh gaze, under a minute) — whenever it was built on
+# the image above, so a laptop image rebuilt since is never traded for an older one; otherwise
+# the image above, whose tree then runs without the stall look (nav.launch.py says so in the
+# log). PEPIN_IMAGE wins.
+nav_image() {
+    local base
+    base="$(image)"
+    if [ -z "${PEPIN_IMAGE:-}" ] && built_on pepin-laptop:gaze "$base"; then
+        echo pepin-laptop:gaze; return
+    fi
+    echo "$base"
 }
 # The middleware flags every node container here is given: the session (a peer of THIS
 # machine's router) plus ZENOH_ROUTER_CHECK_ATTEMPTS=0, so a container started before the router
@@ -161,7 +181,7 @@ zrouter_up() {
 # (the kick waits for that line): the Python modules of vslam.launch.py and of nav.launch.py. Only
 # one of the two recorders runs (nav.launch.py's recorder argument); a kick of the other one finds
 # nothing and says so.
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder gaze"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -176,6 +196,7 @@ kick_target() {  # node name -> "container|start-up line"
         goal_server) echo "$NAV|goal server ready on port" ;;
         run_recorder) echo "$NAV|run recorder ready" ;;
         bag_recorder) echo "$NAV|bag recorder ready" ;;
+        gaze) echo "$NAV|gaze up: " ;;
         *) return 1 ;;
     esac
 }
@@ -209,13 +230,16 @@ case "${1:-}" in
         pepin_remove_container "$NAV"
         zrouter_up
         pepin_timeserver_up  # the clock the board follows (ros/lib.sh)
-        docker run -d --name "$NAV" --network "$NET" -p 127.0.0.1:3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
-            "$(image)" ros2 launch pepin_bringup nav.launch.py "map:=$MAP" "recorder:=$PEPIN_RECORDER" >/dev/null
+        # The gaze arbiter's door for the tools (pepin_bringup.gaze, 3339) goes on the loopback
+        # beside the goal server's, and it reaches the board's base server at PEPIN_HOST.
+        NAV_IMAGE="$(nav_image)"
+        docker run -d --name "$NAV" --network "$NET" -p 127.0.0.1:3337:3337 -p 127.0.0.1:3339:3339 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            -e ROS_DOMAIN_ID=7 -e "PEPIN_HOST=$BOARD" "${RMW_ENV[@]}" \
+            "$NAV_IMAGE" ros2 launch pepin_bringup nav.launch.py "map:=$MAP" "recorder:=$PEPIN_RECORDER" >/dev/null
         # The tree's transitions, one watcher per container, read by ros/goto.sh (which starts
         # it itself when it is missing).
         pepin_bt_watch || echo "bt watcher not started: ros/goto.sh starts it with the first goal"
-        echo "nav up: Nav2 in $NAV, map $MAP, goal server on 127.0.0.1:3337; ros/laptop.sh nav logs"
+        echo "nav up: Nav2 in $NAV on $NAV_IMAGE, map $MAP, goal server on 127.0.0.1:3337, gaze on 127.0.0.1:3339; ros/laptop.sh nav logs"
         exit 0 ;;
     stop)
         # The router is this side's own, so a stop takes it too. The time server (pepin-chrony) is left running: it is the board's clock, not a part of this

@@ -316,6 +316,48 @@ def cloud_from_points(points: Any, colours: Any | None, stamp: Any, frame_id: st
     return msg
 
 
+def cloud_from_fields(fields: dict[str, Any], stamp: Any, frame_id: str) -> Any:
+    """Named float columns of equal length (``x``, ``y``, ``z`` first by convention) as a
+    ``sensor_msgs/PointCloud2`` of float32 fields in that order: what ``/fusion/column`` answers
+    (the points with their voxel weights). :func:`fields_from_cloud` reads it back."""
+    names = list(fields)
+    columns = [np.asarray(fields[name], dtype=np.float32).reshape(-1) for name in names]
+    count = len(columns[0]) if columns else 0
+    cloud = np.zeros(count, dtype=[(name, "<f4") for name in names])
+    for name, column in zip(names, columns, strict=True):
+        cloud[name] = column
+    msg = PointCloud2()
+    msg.header.stamp, msg.header.frame_id = stamp, frame_id
+    msg.height, msg.width = 1, count
+    msg.fields = [
+        PointField(name=name, offset=4 * i, datatype=PointField.FLOAT32, count=1)
+        for i, name in enumerate(names)
+    ]
+    msg.is_bigendian = False
+    msg.point_step, msg.row_step = 4 * len(names), 4 * len(names) * count
+    msg.is_dense = True
+    msg.data = cloud.tobytes()
+    return msg
+
+
+def fields_from_cloud(msg: Any) -> dict[str, Array]:
+    """A ``sensor_msgs/PointCloud2``'s float32 fields as named columns (float64), each field read
+    at its own offset; fields of any other type are left out."""
+    count = int(msg.width) * int(msg.height)
+    step = int(msg.point_step)
+    raw = np.frombuffer(bytes(msg.data), dtype=np.uint8)
+    out: dict[str, Array] = {}
+    if count == 0 or step == 0:
+        return {f.name: np.zeros(0) for f in msg.fields if f.datatype == PointField.FLOAT32}
+    rows = raw[: count * step].reshape(count, step)
+    for f in msg.fields:
+        if f.datatype != PointField.FLOAT32:
+            continue
+        column = rows[:, f.offset : f.offset + 4].copy().view("<f4").reshape(-1)
+        out[f.name] = column.astype(np.float64)
+    return out
+
+
 # ---- IMU -----------------------------------------------------------------------------------
 def imu_arrays(msg: Any) -> tuple[Array, Array]:
     """A ``sensor_msgs/Imu`` as ``(acceleration, angular_velocity)``, m/s^2 and rad/s."""

@@ -488,7 +488,7 @@ class Tsdf:
         return move
 
     # ---- geometry helpers ----------------------------------------------------------------
-    def _index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
+    def index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
         """Voxel index ranges of the box ``lo_m``..``hi_m`` (map metres), clipped to the grid;
         ``None`` when the box misses the grid."""
         s = self.spec
@@ -521,7 +521,7 @@ class Tsdf:
             ]
         )
         pts = np.vstack([pose.translation, corners @ pose.rotation.T + pose.translation])
-        return self._index_box(pts.min(axis=0), pts.max(axis=0))
+        return self.index_box(pts.min(axis=0), pts.max(axis=0))
 
     def _centres(self, box: tuple[slice, slice, slice]) -> Float32:
         s = self.spec

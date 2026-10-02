@@ -3,7 +3,10 @@
 # the monocular depth network that turns the camera into a depth sensor (CPU: 0.33 s a frame
 # on the Docker VM, enough for 1 Hz map nodes). Built by ros/laptop-build.sh on top of
 # ros/build-image.sh's pepin-ros:sensors; the board never sees this image.
-FROM pepin-ros:sensors
+# BASE is what the last stage (the stall look's BT node) is built on: the stage below by default,
+# or an existing laptop image (ros/laptop-build.sh gaze), which then changes by that node alone.
+ARG BASE=laptop
+FROM pepin-ros:sensors AS laptop
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
         ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
         ros-jazzy-rtabmap-ros ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-viz \
@@ -19,3 +22,11 @@ RUN python3 -m pip install -q --break-system-packages --no-cache-dir torch torch
     && python3 -m pip install -q --break-system-packages --no-cache-dir transformers pillow \
     && HF_HUB_OFFLINE=0 TRANSFORMERS_OFFLINE=0 python3 -c "from transformers import AutoImageProcessor, AutoModelForDepthEstimation; \
         AutoImageProcessor.from_pretrained('$DEPTH_MODEL'); AutoModelForDepthEstimation.from_pretrained('$DEPTH_MODEL')"
+
+# The stall look's behaviour tree node (ros/pepin_gaze_bt: AskGaze, which bt_navigator loads as
+# pepin_ask_gaze_bt_node; nav.launch.py cuts the look out of the tree on an image without it).
+FROM ${BASE}
+COPY pepin_gaze_bt /ws/src/pepin_gaze_bt
+RUN . /opt/ros/jazzy/setup.sh && cd /ws \
+    && colcon build --packages-select pepin_gaze_bt --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rm -rf build log

@@ -45,12 +45,14 @@ from pepin.tape_rows import (
     cmd_row,
     costmap_row,
     ekf_row,
+    gaze_row,
     gcostmap_row,
     laser_odom_row,
     loc_row_from_transform,
     nav_row,
     plan_row,
     pose_row,
+    stall_row,
     stamp,
     tof_row,
 )
@@ -168,6 +170,10 @@ class TapeBuilder:
             return [tof_row(topic.rsplit("/", 1)[-1], msg, received_s)]
         if record == "nav":
             return [nav_row(topic.split("/")[1], msg, received_s)]
+        if record == "gaze":
+            return [gaze_row(msg, received_s)]
+        if record == "stall":
+            return [stall_row(msg, received_s)]
         return []
 
     def _on_tf(self, msg: Any, received_s: float) -> list[dict[str, Any]]:

@@ -5,8 +5,17 @@
 #        ros/laptop-build.sh xfeat  pepin-laptop:xfeat on top of pepin-laptop:zenoh
 #                                   (ros/Dockerfile.xfeat: RTAB-Map rebuilt with Python, XFeat and
 #                                   LighterGlue for the visual registration; about an hour)
+#        ros/laptop-build.sh gaze   pepin-laptop:gaze: pepin-laptop:zenoh plus the stall look's BT
+#                                   node (Dockerfile.laptop's last stage alone; under a minute).
+#                                   ros/laptop.sh nav runs it whenever it is built on that image
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+if [ "${1:-}" = gaze ]; then
+    BASE="${PEPIN_GAZE_BASE:-pepin-laptop:zenoh}"
+    docker build -f "$HERE/Dockerfile.laptop" -t pepin-laptop:gaze --build-arg "BASE=$BASE" "$HERE"
+    echo "pepin-laptop:gaze built on $BASE"
+    exit 0
+fi
 if [ "${1:-}" = xfeat ]; then
     BASE="${PEPIN_XFEAT_BASE:-pepin-laptop:zenoh}"
     # The Docker VM also runs the live stack, and a compiler that fills its memory gets the stack

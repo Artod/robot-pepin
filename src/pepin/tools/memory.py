@@ -13,7 +13,7 @@ from typing import Any, Literal
 
 from pepin.tools.clients import HeadPose
 from pepin.tools.drive import pose_on_map
-from pepin.tools.head import place_of, restore, sweep, why_not
+from pepin.tools.head import place_of, sweep, why_not
 from pepin.tools.registry import Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Robot
 
@@ -28,8 +28,8 @@ def find(robot: Robot, thing: str, look_around: bool = False) -> Result:
     """Look for a thing in view NOW and say where it is: range in metres, bearing in degrees (+
     left of the robot's nose) and map position. Answers only from sightings of the last 1.5 s,
     waiting up to 2.5 s for one. With look_around, when the thing is not in view the head sweeps
-    its reach (about 15 s) and stays pointed at the thing once found. For where a thing was
-    seen before, use recall.
+    its reach (about 15 s) and stays pointed at the thing once found (about ten seconds, then
+    it turns home by itself). For where a thing was seen before, use recall.
 
     Args:
         thing: what to look for, one English noun as the detector names things ("chair",
@@ -50,12 +50,10 @@ def find(robot: Robot, thing: str, look_around: bool = False) -> Result:
     for pan in directions:
         move = robot.neck.turn(pan, None)
         if not move.reached:
-            restore(robot, start)
             return fail(f"the head could not sweep: {why_not(move)}")
         rows = watch(robot, label)
         if rows:
             return found(rows, move.pose)
-    restore(robot, start)
     return fail(
         f"no {label} anywhere around here: the head looked in {len(directions) + 1} directions."
         f" recall('{label}') says where one was seen before; otherwise it is not in this room"
