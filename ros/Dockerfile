@@ -32,15 +32,21 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
         ros-jazzy-laser-filters ros-jazzy-teleop-twist-keyboard \
     && rm -rf /var/lib/apt/lists/*
 
-# LD19 lidar driver (maintained fork; the vendor's is unmaintained), built from source.
+# LD19 lidar driver (maintained fork; the vendor's is unmaintained), built from source: the
+# component alone. The repository's ldlidar_node package is its demo launch files, and its
+# rosdep keys are rviz2, slam_toolbox and robot_state_publisher (Qt, Mesa, LLVM, Ceres on a
+# headless board); its test keys are not needed either.
 WORKDIR /ws
 RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
         https://github.com/Myzhar/ldrobot-lidar-ros2.git src/ldrobot-lidar-ros2 \
     && . /opt/ros/jazzy/setup.sh \
     && apt-get update && apt-get install -y --no-install-recommends libudev-dev \
     && rosdep update --rosdistro jazzy \
-    && rosdep install --from-paths src --ignore-src -y --rosdistro jazzy \
-    && colcon build --cmake-args -DCMAKE_BUILD_TYPE=Release \
+    && rosdep install --from-paths src/ldrobot-lidar-ros2/ldlidar_component --ignore-src -y \
+        --rosdistro jazzy --dependency-types build --dependency-types build_export \
+        --dependency-types buildtool --dependency-types exec \
+    && colcon build --packages-select ldlidar_component \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=OFF \
     # the driver builds the vendor SDK as libldlidar.so but never installs it: put it beside the component
     && cp build/ldlidar_component/libldlidar.so install/ldlidar_component/lib/ \
     && rm -rf /var/lib/apt/lists/* build log
