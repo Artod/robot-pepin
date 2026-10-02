@@ -370,19 +370,12 @@ def find_corners(image: Any, board: Board) -> Corners | None:
     """The board's inner corners in a greyscale or colour image, refined to sub-pixel, or
     ``None`` when the whole board is not visible.
 
-    ``findChessboardCornersSB`` is tried first: it is both faster and steadier on a webcam's
-    MJPEG than the classic detector, which it falls back to on an OpenCV without it.
+    The classic detector only: ``findChessboardCornersSB`` takes OpenCV's OpenCL path, which
+    segfaults on macOS (Apple's OpenCL, any image, any flags, OpenCV 4.10 to 4.13).
     """
     import cv2
 
     grey = image if image.ndim == 2 else cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    finder = getattr(cv2, "findChessboardCornersSB", None)
-    if finder is not None:
-        found, corners = finder(
-            grey, board.size, flags=cv2.CALIB_CB_NORMALIZE_IMAGE | cv2.CALIB_CB_ACCURACY
-        )
-        if found:
-            return np.asarray(corners, dtype=np.float32)
     flags = cv2.CALIB_CB_ADAPTIVE_THRESH | cv2.CALIB_CB_NORMALIZE_IMAGE
     found, corners = cv2.findChessboardCorners(grey, board.size, flags=flags)
     if not found:

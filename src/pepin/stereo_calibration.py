@@ -29,9 +29,8 @@ OpenCV is imported inside the functions that need it, and no function here touch
 window or a file: the runner (``ros/tools/stereo_calibrate.py``, wrapped by
 ``ros/calibrate.sh stereo``) pulls the frames and draws, and hands corners in here.
 
-``cv2.findChessboardCornersSB`` is NOT used: it segfaults on the laptop's OpenCV build, which is
-why ``tests/unit/test_calibration.py`` is skipped there. The classic detector plus
-``cornerSubPix`` is what runs, and it is what the unit tests may safely import.
+``cv2.findChessboardCornersSB`` is NOT used: its OpenCL path segfaults on macOS. The classic
+detector plus ``cornerSubPix`` is what runs, and it is what the unit tests may safely import.
 """
 
 from __future__ import annotations
