@@ -46,7 +46,7 @@
         }
       },
       "topics": {
-        "/map_tracked": {
+        "/map": {
           "visible": true,
           "colorMode": "custom",
           "minColor": "#ffffffff",
@@ -54,15 +54,6 @@
           "unknownColor": "#80808080",
           "frameLocked": true,
           "alpha": 1.0
-        },
-        "/map": {
-          "visible": false,
-          "colorMode": "custom",
-          "minColor": "#0b2b36ff",
-          "maxColor": "#00e5ffff",
-          "unknownColor": "#00000000",
-          "alpha": 0.6,
-          "frameLocked": true
         },
         "/global_costmap/costmap": {
           "visible": true,
@@ -89,16 +80,6 @@
           "colorField": "intensity",
           "colorMode": "flat",
           "flatColor": "#ff9100"
-        },
-        "/tracker_pose": {
-          "visible": true,
-          "type": "arrow",
-          "color": "#00e5ff",
-          "arrowScale": [
-            0.6,
-            0.12,
-            0.12
-          ]
         },
         "/local_costmap/published_footprint": {
           "visible": true,

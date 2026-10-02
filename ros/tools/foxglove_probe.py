@@ -41,11 +41,8 @@ OP_CLOSE = 0x8
 DEFAULT_REQUIRED = (
     "/scan",
     "/tf",
-    # The one map, at both ends of it: RTAB-Map's live grid as the laptop publishes it, and the
-    # grid the board's tracker accepted and drives on (both costmaps' static layers read that one).
+    # The one map: RTAB-Map's grid, which the global costmap's static layer reads.
     "/map",
-    "/map_tracked",
-    "/tracker_pose",
     "/fusion/surface",
     # The camera's two words to the costmap: the frame that clears and the volume's slice that
     # marks (pepin_bringup.depth_fusion, 2026-09-21).

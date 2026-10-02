@@ -81,16 +81,6 @@
           "colorMode": "flat",
           "flatColor": "#ff9100"
         },
-        "/tracker_pose": {
-          "visible": true,
-          "type": "arrow",
-          "color": "#00e5ff",
-          "arrowScale": [
-            0.6,
-            0.12,
-            0.12
-          ]
-        },
         "/local_costmap/published_footprint": {
           "visible": true,
           "lineWidth": 0.03,

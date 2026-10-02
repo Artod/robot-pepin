@@ -241,6 +241,20 @@
       "note": "Measured 9 % / 15 MB."
     },
     {
+      "name": "audio_server",
+      "match": "pepin\\.audio_server",
+      "role": "The XVF3800 array's processed voice out and the speaker's playback in, over TCP 3338.",
+      "on_board_because": [
+        "hardware-attached"
+      ],
+      "owner": "pepin-audio.service (/opt/pepin, systemd)",
+      "budget": {
+        "cpu_percent": 5.0,
+        "rss_mb": 30.0
+      },
+      "note": "Measured 1.6 % / 20 MB idle and 2.0 % / 20 MB with a client listening (2026-10-02)."
+    },
+    {
       "name": "ser2net",
       "match": "(^|/)ser2net ",
       "role": "The servo bus and the lidar as TCP ports (3333/3334) so the laptop's tools can reach them without a serial cable.",

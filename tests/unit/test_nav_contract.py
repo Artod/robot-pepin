@@ -827,13 +827,11 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     # are on, and every other occupancy grid — the local costmap's window on the same cells,
     # RTAB-Map's own grid, and the volume's two other cross-sections — stays a click away,
     # because three grids in one horizontal plane fight each other for depth.
-    # /map_tracked, not /map: the board's relocalizer republishes the map its TRACKER is on and
-    # drives on, latched, while /map is the laptop's live grid a second or two ahead of it — so
-    # the tracked one is what the planner and the operator must be looking at, and the live one
-    # is a click away for the moments the two part (a loop closure).
-    assert {"/map_tracked", "/global_costmap/costmap", "/plan"} <= shown
-    assert not shown & {"/map", "/local_costmap/costmap"}
-    assert "/map" in room["topics"], "the laptop's live grid is in the layout, one click away"
+    # /map is RTAB-Map's grid, the one the global costmap's static layer reads; the board's
+    # relocalizer and its /map_tracked went with the board's Nav2 (2026-10-01).
+    assert {"/map", "/global_costmap/costmap", "/plan"} <= shown
+    assert "/local_costmap/costmap" not in shown
+    assert not {"/map_tracked", "/tracker_pose"} & set(room["topics"])
     assert not {"/map_lidar", "/map_camera", "/rtabmap/map"} & set(room["topics"]), (
         "the volume's own layers and RTAB-Map's namespaced grid went with World R"
     )
