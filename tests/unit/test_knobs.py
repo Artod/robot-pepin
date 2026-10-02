@@ -19,6 +19,7 @@ from pepin.camera_grid import GRID_RESOLUTION_M, GRID_SIZE_M
 from pepin.contact import CONTACT_MAX_RANGE
 from pepin.depth import SCALE_CEILING
 from pepin.flags import FlagSet, knob, knobs_of, load_knobs, load_table, read_knobs, with_knobs
+from pepin.gaze_gate import EXPOSURE_S, GATE_KNOBS, SETTLE_S, YAW_DPS
 from pepin.global_descriptor import MAX_NULL_SHARE
 from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG
@@ -51,6 +52,12 @@ NAMED = {
     ("rtabmap_frame", "pnp_reproj_px"): PNP_REPROJ_PX,
     ("rtabmap_frame", "descriptor_null_share"): MAX_NULL_SHARE,
     ("sensor_pack", "pair_periods"): PAIR_PERIODS,
+    # The gaze gate: one number in every node that carries it (pepin.gaze_gate).
+    **{
+        (node, name): value
+        for node in ("depth_stream", "sensor_pack", "visual_odometry")
+        for name, value in zip(GATE_KNOBS, (EXPOSURE_S, SETTLE_S, YAW_DPS), strict=True)
+    },
 }
 NODE_NAMED = {
     ("depth_stream", "tf_dead_s"): "TF_DEAD_S",

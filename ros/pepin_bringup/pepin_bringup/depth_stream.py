@@ -81,6 +81,12 @@ scale the law may be fitted to, ``tf_dead_s``, how stale a TF edge may be before
 it, ``imu_lean``, ``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is
 published (5 Hz, the board's local costmap's own ``update_frequency`` — every frame is still
 processed, the cap is on the publisher); their state is printed in every report line.
+
+THE GAZE GATE (``gaze_gate`` and the ``gate_*`` knobs, :mod:`pepin.gaze_gate`): a picture whose
+exposure overlaps a head saccade (``/gaze/state``) or a body yaw above ``gate_yaw_dps`` is dropped
+before the worker is offered it, so it costs no network time and every consumer of the depth —
+depth_fusion's volume, contact_scan, the costmap's clearing fan, rgbd_odometry — simply never
+receives it. Counted per window in the report line; without ``/gaze/state`` nothing is dropped.
 """
 
 from __future__ import annotations
@@ -140,6 +146,7 @@ from pepin.depth_service import (
 )
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import FramePoser, settled_pose
+from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
 from pepin.stereo_depth import (
     MATCHERS as STEREO_MATCHERS,
 )
@@ -161,6 +168,7 @@ from pepin_bringup.msgs import (
 )
 from pepin_bringup.node_kit import (
     Fatal,
+    GazeFeed,
     LeanFeed,
     Switches,
     Tally,
@@ -168,6 +176,7 @@ from pepin_bringup.node_kit import (
     TfLookup,
     Window,
     Worker,
+    gate_counts,
     spin_main,
 )
 
@@ -364,6 +373,9 @@ FLAGS = FlagSet(
         off_when="the moment the lean in the report line disagrees with the cart's visible"
         " attitude",
     ),
+    # A frame taken during a saccade or a fast body yaw never reaches the network: no depth, no
+    # /depth_scan, nothing for depth_fusion, contact_scan or rgbd_odometry to drop downstream.
+    GAZE_GATE,
 )
 FLOOR_STAGES = ("floor_anchor",)  # the stages that read the IMU's up vector
 
@@ -646,6 +658,12 @@ class DepthStream(Node):
             on_unmounted=self._no_imu_mount,
             enabled=self._leans_anything,
         )
+        self._gaze = GazeFeed(
+            self,
+            exposure_s=float(self._switches["gate_exposure_s"]),
+            settle_s=float(self._switches["gate_settle_s"]),
+            yaw_dps=float(self._switches["gate_yaw_dps"]),
+        )
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
@@ -799,6 +817,8 @@ class DepthStream(Node):
             self._lean.use_gyro = bool(new)
         elif name == "lean_min_quality":
             self._poser.min_lean_quality = float(new)
+        elif name in GATE_KNOBS:
+            self._gaze.set(name, float(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -979,6 +999,14 @@ class DepthStream(Node):
     def _on_image(self, msg: Image) -> None:
         if self._fatal.leaving:
             return  # nothing can answer: no more frames on the way out
+        self._tally.count("images")
+        if self._switches.on("gaze_gate"):
+            # Judged before the worker is offered it: a frame of a saccade must not push out
+            # the still frame waiting before it.
+            verdict = self._gaze.verdict(stamp_seconds(msg.header.stamp))
+            if verdict is not None:
+                self._tally.count(f"gaze_{verdict}")
+                return
         if self._worker.offer(msg):
             self._tally.count("dropped")
 
@@ -1301,8 +1329,8 @@ class DepthStream(Node):
             f" {self._pipeline.report()};"
             f" {c['verdicts']} lidar verdicts ({per_verdict:.0f} pairs each; held {c['held']} of"
             f" {c['processed']} frames){self._extras(w)}, source {self._source.name}:"
-            f" {self._source.report()}, flags: {self._switches.state()}, ms median/max:"
-            f" {w.stages()}"
+            f" {self._source.report()}, {self._gate_line(w)}, flags: {self._switches.state()},"
+            f" ms median/max: {w.stages()}"
         )
         self._pipeline.reset_stats()
         if law.fitted:
@@ -1319,6 +1347,12 @@ class DepthStream(Node):
                     f"cannot save the depth law to {self._law_file}: {exc}",
                     throttle_duration_sec=300,
                 )
+
+    def _gate_line(self, w: Window) -> str:
+        """What the gaze gate kept from the network this window, and the head's state."""
+        if not self._switches.on("gaze_gate"):
+            return "gaze gate off"
+        return f"gaze gate: {gate_counts(w.counts, w.counts['images'])}; {self._gaze.text()}"
 
     def _blind_because(self, counts: Counter[str]) -> str:
         """Why no beam judged the depth this window, in the words of the counter that won:

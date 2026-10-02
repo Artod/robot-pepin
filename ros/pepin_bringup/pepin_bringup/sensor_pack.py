@@ -137,8 +137,11 @@ THE REPORT LINE says what went into the last snapshot, every source's measured c
 counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null and
 why); the flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set sensor_pack
 <flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``,
-``global_descriptor``, ``place_descriptor`` and ``place_timeout_s``. The arrangement of before this
-node — RTAB-Map on its own synchronised triple — is in git history (before 2026-10-02).
+``global_descriptor``, ``place_descriptor``, ``place_timeout_s``, and the gaze gate's ``gaze_gate``
+with its ``gate_*`` knobs (:mod:`pepin.gaze_gate`: a picture taken while the head turned or the
+body spun is heard — the camera stays alive — but never becomes a member). The arrangement of
+before this node — RTAB-Map on its own synchronised triple — is in git history (before
+2026-10-02).
 """
 
 from __future__ import annotations
@@ -154,6 +157,7 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointFiel
 from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
+from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
 from pepin.global_descriptor import (
     ATTACH_AUTO,
     ATTACH_CHOICES,
@@ -176,7 +180,15 @@ from pepin.snapshot import (
 )
 from pepin.sources import CAMERA, LIDAR
 from pepin_bringup.msgs import header, stamp_seconds
-from pepin_bringup.node_kit import Switches, Tally, TfLookup, Window, spin_main
+from pepin_bringup.node_kit import (
+    GazeFeed,
+    Switches,
+    Tally,
+    TfLookup,
+    Window,
+    gate_counts,
+    spin_main,
+)
 
 SENSOR_DATA_TOPIC = "/rtabmap/sensor_data"  # rtabmap's own relative "sensor_data" in its namespace
 # ...and what those snapshots CARRY, latched, for the one reader that must follow it: rtabmap_frame
@@ -295,6 +307,10 @@ FLAGS = FlagSet(
         " invariant (a sick service, a measurement of the words alone); RTAB-Map then sees"
         " every place as equally likely by descriptor, so the words should be in force",
     ),
+    # A picture taken during a saccade or a fast body yaw is never a camera member: the moment
+    # waits for the next usable picture (pepin.snapshot.SnapshotPacker.heard keeps the camera
+    # alive meanwhile), so RTAB-Map gets neither a smeared keyframe nor a lidar-only node.
+    GAZE_GATE,
 )
 
 
@@ -460,6 +476,12 @@ class SensorPack(Node):
                 ),
             )
         self._say_place()
+        self._gaze = GazeFeed(
+            self,
+            exposure_s=float(self._switches["gate_exposure_s"]),
+            settle_s=float(self._switches["gate_settle_s"]),
+            yaw_dps=float(self._switches["gate_yaw_dps"]),
+        )
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self._on_info, reliable)
         self.create_subscription(Image, IMAGE_TOPIC, self._on_image, pair)
         self.create_subscription(Image, DEPTH_TOPIC, self._on_depth, pair)
@@ -496,6 +518,8 @@ class SensorPack(Node):
             self._packer.set_pair_periods(float(new))  # type: ignore[arg-type]
         elif name == "place_descriptor":
             self._say_place()
+        elif name in GATE_KNOBS:
+            self._gaze.set(name, float(new))  # type: ignore[arg-type]
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._info = msg
@@ -512,7 +536,14 @@ class SensorPack(Node):
                 throttle_duration_sec=30,
             )
             return
-        self._images.offer(stamp_seconds(msg.header.stamp), msg)
+        at = stamp_seconds(msg.header.stamp)
+        if self._switches.on("gaze_gate"):
+            verdict = self._gaze.verdict(at)
+            if verdict is not None:
+                self._tally.count(f"gaze_{verdict}")
+                self._packer.heard(CAMERA, at)  # still delivering, never a member
+                return
+        self._images.offer(at, msg)
         self._pair(msg, self._depths, arrival_is_image=True)
 
     def _on_depth(self, msg: Image) -> None:
@@ -798,7 +829,7 @@ class SensorPack(Node):
             f" {c['frames']} camera frames ({kinds or 'none'});"
             f" {self._packer.report()}; {self._last_note()}{self._losses(w)};"
             f" carrying {state.text() if state is not None else 'nothing said yet'}"
-            f" on {STATE_TOPIC}; {self._place_text()};"
+            f" on {STATE_TOPIC}; {self._place_text()}; {self._gate_text(w)};"
             f" flags: {self._switches.state()}; ms median/max: {w.stages()}"
         )
         if self._switches.on("sensor_pack") and c["packs"] == 0:
@@ -807,6 +838,12 @@ class SensorPack(Node):
                 f" {SCAN_TOPIC} arriving over the bridge, and does {DEPTH_TOPIC} come"
                 " (the depth law needs the lidar)?"
             )
+
+    def _gate_text(self, w: Window) -> str:
+        """The pictures the gaze gate kept out of the snapshots this window, and the head."""
+        if not self._switches.on("gaze_gate"):
+            return "gaze gate off"
+        return f"gaze gate: {gate_counts(w.counts, w.counts['image_in'])}; {self._gaze.text()}"
 
     def _last_note(self) -> str:
         """What the last snapshot was made of: ``last: full, driven by camera, scan 23 ms off``."""

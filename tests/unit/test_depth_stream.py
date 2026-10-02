@@ -943,6 +943,38 @@ def test_the_report_line_says_what_the_scan_cap_held_back(build: Build) -> None:
     assert "scan_hz 0: every frame" in node.logger.texts("info")[-1]
 
 
+# ---- the gaze gate (pepin.gaze_gate) -----------------------------------------------------------
+def _gaze(node: DepthStream, phase: str, since: float, blind: bool) -> None:
+    """One /gaze/state as the arbiter publishes it (board seconds)."""
+    text = json.dumps({"phase": phase, "since": since, "blind": blind})
+    node.subs["/gaze/state"][1](ros_stubs.String(data=text))
+
+
+def test_a_saccade_frame_never_reaches_the_network_and_is_counted(build: Build) -> None:
+    """Judged at arrival, before the worker: no depth, no fan, nothing downstream to drop — and a
+    still frame waiting in the worker is not pushed out by it. Without /gaze/state, and with the
+    flag off, every frame is offered exactly as before."""
+    node, _net = build()
+    node._worker.stop()  # judge the offers here, process nothing
+    node._on_image(_image(_stamp(5)))
+    assert node._worker.waiting, "no state at all: the frame goes to the network as before"
+    _gaze(node, "saccade", stamp_seconds(_stamp(6)) - 0.2, blind=True)
+    node._on_image(_image(_stamp(6)))
+    assert node._worker.waiting, "the still frame of before is still the one waiting"
+    node._worker.clear()
+    node._on_image(_image(_stamp(7)))
+    assert not node._worker.waiting, "a frame inside the saccade is dropped at the door"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "gaze gate: 2 blind, 0 spinning of 3 frames" in line
+    assert "head saccade since" in line and "gaze_gate=on" in line
+    assert node.set_parameters([Param("gaze_gate", False)])[0].successful
+    node._on_image(_image(_stamp(8)))
+    assert node._worker.waiting, "off: every frame passes"
+    node._report()
+    assert "gaze gate off" in node.logger.texts("info")[-1]
+
+
 # ---- the stereo head as the second source ---------------------------------------------------
 BASELINE_M = 0.063  # the module's nominal; the node learns it from the right eye's P[0,3]
 
