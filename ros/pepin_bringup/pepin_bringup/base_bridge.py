@@ -2,9 +2,9 @@
 
 The node itself is C++ (ros/pepin_base_cpp, composed into robot.launch.py's base container):
 /odom, odom -> base_link while no EKF owns it, the /cmd_vel sink, the MPU6050 as
-/imu/data_raw and the rest /zupt. Its two sensor mutes are declared there by these names and
-defaults; this table is their one description, read by ros/tools/flags_doc.py and
-ros/flags.sh (``ros/sensor.sh mute imu|odom``), and a contract test holds the C++ to it. The
+/imu/data_raw and the rest /zupt. Its two sensor mutes and /odom's stamp are declared there by
+these names and defaults; this table is their one description, read by ros/tools/flags_doc.py
+and ros/flags.sh (``ros/sensor.sh mute imu|odom``), and contract tests hold the C++ to it. The
 Python bridge that ran before 2026-09-06 is in git history.
 """
 
@@ -45,5 +45,21 @@ FLAGS = FlagSet(
         off_when="to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's"
         " TF lookups, the tracker's dead reckoning — without stopping the base server; unmute"
         " and /odom is back on the next state line (50 Hz)",
+    ),
+    Flag(
+        "odom_stamp",
+        "encoder",
+        choices=("encoder", "arrival"),
+        description="what /odom and odom -> base_link are dated by: the state line's encoder read"
+        " carried onto the ROS clock (`encoder`, the stamp /neck/state of the same line carries)"
+        " or the moment the line reached the bridge (`arrival`); a line older than 0.5 s is dated"
+        " on arrival either way",
+        why="encoder, because arrival is not when the wheels were read: for the same state line"
+        " /odom's arrival stamp ran p50 6.4 ms, p90 7.0, p99 8.9, max 26.4 ms after the encoder"
+        " read on a parked cart (scratch/gaze/odom_vs_neck_stamp.py, 2026-10-02), so the EKF"
+        " placed every wheel pose that late against the gyro and the head's transform",
+        on_when="`encoder` always: it is the measurement's own time",
+        off_when="`arrival` to compare against the old stamps, or if the EKF or a TF consumer"
+        " reports extrapolation into the past after the switch; live, the next state line",
     ),
 )

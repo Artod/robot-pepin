@@ -1510,10 +1510,12 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     ros/flags.sh reads), so the two parameter names have to exist in both or `ros/sensor.sh mute
     imu` validates a name the running bridge does not have."""
     flags = load_table(REPO / NODES / "base_bridge.py")
-    for name in flags.names:
+    mutes = [name for name in flags.names if flags.flag(name).kind == "bool"]
+    assert mutes == ["imu_publish", "odom_publish"]
+    for name in mutes:
         assert flags.flag(name).live and flags[name] is True, f"{name}: on, and live, or no test"
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
-    for name in flags.names:
+    for name in mutes:
         assert f'declare_parameter<bool>("{name}", true)' in cpp, f"{name} missing from the C++"
         assert f'get_parameter("{name}").as_bool()' in cpp, f"{name} read per message, not once"
     assert "switch_state()" in cpp, "the report line names the switches (CLAUDE.md rule 19)"
@@ -1521,6 +1523,30 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     from pepin.deployment import node_host
 
     assert node_host("base_bridge") == ("board", "pepin-ros")
+
+
+def test_odom_is_dated_by_the_encoder_read_the_neck_carries_behind_a_live_switch() -> None:
+    """/odom was stamped on its arrival at the bridge while /neck/state of the same state line
+    carried the encoder read: arrival ran p50 6.4 ms (max 26.4) behind it (2026-10-02). Held
+    here: one LineTime per line feeds both publishers, /odom and its transform take the read
+    under `odom_stamp` "encoder" (the table's default, the C++'s, read per line so the switch is
+    live) and the arrival under "arrival", and the report line names the switch."""
+    flag = load_table(REPO / NODES / "base_bridge.py").flag("odom_stamp")
+    assert flag.default == "encoder" and set(flag.choices) == {"encoder", "arrival"}
+    assert flag.live
+    cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    assert 'declare_parameter<std::string>("odom_stamp", "encoder")' in cpp
+    assert 'get_parameter("odom_stamp").as_string() != "arrival"' in cpp, "read per line"
+    line = cpp[cpp.index("void on_state_line(") :]
+    line = line[: line.index("\n  }\n")]
+    assert "const LineTime when = line_time(*state);" in line
+    assert "publish_neck(*state, when);" in line and "publish_state(*state, when);" in line
+    state = cpp[cpp.index("void publish_state(const BaseState & state, const LineTime & when)") :]
+    state = state[: state.index("\n  }\n")]
+    assert "const rclcpp::Time stamp = encoder ? when.read : when.arrival;" in state
+    assert state.count(".header.stamp = stamp;") == 2, "/odom and odom -> base_link alike"
+    assert "now()" not in state, "no second clock read for the wheels"
+    assert '" odom_stamp="' in cpp, "the report line names the switch"
 
 
 def test_the_board_bridge_publishes_the_rest_zupt_the_ekf_fuses_behind_a_live_switch() -> None:

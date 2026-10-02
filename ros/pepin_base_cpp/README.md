@@ -25,7 +25,10 @@ the middle of that encoder read). Every line that carries them becomes `/neck/st
 (`sensor_msgs/JointState`, `neck_pan` positive left and `head_tilt` the pitch below level, in
 radians) and `base_link -> camera_link`, both stamped with that read carried onto the ROS clock
 (`now() - (monotonic now - t)`; a line older than `neck_stamp_max_age_s`, 0.5, is stamped on
-arrival and counted), at up to `neck_publish_hz` (50: every line). `neck.hpp` is the twin of
+arrival and counted), at up to `neck_publish_hz` (50: every line). `/odom` and `odom -> base_link`
+of the same line carry the same stamp under `odom_stamp` "encoder" (the default since 2026-10-02;
+live, `ros2 param set /base_bridge odom_stamp arrival` is the old stamp on arrival, which ran p50
+6.4 ms, p99 8.9, max 26.4 ms after the read on a parked cart). `neck.hpp` is the twin of
 `pepin.neck` (`test/neck_contract.cpp` holds it to the Python model). A line without the ticks (a
 silent neck) publishes nothing: no edge is held or republished.
 

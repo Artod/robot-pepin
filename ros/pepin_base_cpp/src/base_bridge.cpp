@@ -17,6 +17,11 @@
 // reconnects forever. State lines are published straight from that reader thread (rclcpp
 // publishers are thread-safe): no queue, no drain timer, no CPU spent polling.
 //
+// /odom is DATED BY ITS ENCODER READ, not by its arrival here: the line's `t` carried onto the
+// ROS clock exactly as the neck's (line_time()), so /odom, odom -> base_link and /neck/state of
+// one line share one stamp. `odom_stamp` "arrival" is the old stamp, live (2026-10-02: arrival
+// ran p50 6.4, p99 8.9, max 26.4 ms behind the read at rest).
+//
 // /odom's TWIST is measured, not commanded: the state line's v and w are the twist the base
 // server was ASKED for, and publishing those puts Nav2's own output where the EKF reads a
 // sensor. See odom_twist() below and `odom_twist_source`.
@@ -168,6 +173,14 @@ public:
     // ``ros2 param set /base_bridge odom_twist_source commanded``.
     const auto twist_source = declare_parameter<std::string>("odom_twist_source", "measured");
     twist_measured_ = twist_source != "commanded";
+    // WHEN /odom HAPPENED. "encoder" (the default) dates /odom and odom -> base_link with the
+    // state line's encoder read, the neck's stamp (line_time); "arrival" is what this node did
+    // before 2026-10-02: now() when the line reached the reader thread, p50 6.4 ms (p99 8.9, max
+    // 26.4) after the read on a parked cart (scratch/gaze/odom_vs_neck_stamp.py). Read per line,
+    // so ``ros2 param set /base_bridge odom_stamp arrival`` switches back live; any other word is
+    // "encoder". A line older than `neck_stamp_max_age_s` is dated on arrival either way.
+    const auto odom_stamp = declare_parameter<std::string>("odom_stamp", "encoder");
+    odom_stamp_encoder_ = odom_stamp != "arrival";
     // THE ZERO-VELOCITY UPDATE (CLAUDE.md rule 19; zupt.hpp has the measurements). On, /zupt
     // carries a twist of exactly zero -- ekf.yaml's odom2 fuses its vx, vy and vyaw -- for as long
     // as the cart CERTAINLY stands still: the wheels have witnessed rest for `zupt_settle_s`, no
@@ -296,8 +309,9 @@ private:
   {
     const auto state = parse_state(message);
     if (state.has_value()) {
-      publish_neck(*state);  // first: /odom's mute (odom_publish) is the wheels', not the head's
-      publish_state(*state);
+      const LineTime when = line_time(*state);  // once: the head and the wheels share a stamp
+      publish_neck(*state, when);  // first: odom_publish mutes the wheels, not the head
+      publish_state(*state, when);
     }
   }
 
@@ -331,7 +345,7 @@ private:
     neck_grid_ = NeckGrid(hz);
     // How old a line's encoder read may be when it arrives and still be dated by it: on the board
     // the read is milliseconds old; a bridge on another machine has another monotonic clock, and
-    // its lines are stamped on arrival instead (counted in the report line).
+    // its lines are stamped on arrival instead (counted in the report line). /odom's limit too.
     neck_max_age_s_ = declare_parameter<double>("neck_stamp_max_age_s", 0.5);
     neck_publisher_ = create_publisher<sensor_msgs::msg::JointState>("neck/state", 10);
     const bool signs = std::abs(neck_model_.pan_sign) == 1 && std::abs(neck_model_.tilt_sign) == 1;
@@ -355,23 +369,31 @@ private:
       edge.c_str(), hz);
   }
 
-  /// The ROS time of a state line's encoder read: its `t` (the board's monotonic clock, as
-  /// monotonic_s() here) carried onto the ROS clock by its age; the arrival when that age is not
-  /// one a line on this machine can have.
-  rclcpp::Time line_stamp(const BaseState & state)
+  /// One state line's two moments on the ROS clock: when it reached this node, and when its
+  /// encoders were read (`read` is `arrival` and `dated` false when the line's age is not one a
+  /// line on this machine can have).
+  struct LineTime
+  {
+    rclcpp::Time arrival;
+    rclcpp::Time read;
+    bool dated;
+  };
+
+  /// The line's `t` (the board's monotonic clock, as monotonic_s() here) carried onto the ROS
+  /// clock by its age, beside the arrival it was carried from.
+  LineTime line_time(const BaseState & state) const
   {
     const rclcpp::Time arrival = now();
     const double age = monotonic_s() - state.stamp_s;
     if (age >= 0.0 && age <= neck_max_age_s_) {
-      return arrival - rclcpp::Duration::from_seconds(age);
+      return {arrival, arrival - rclcpp::Duration::from_seconds(age), true};
     }
-    ++neck_arrival_stamped_;
-    return arrival;
+    return {arrival, arrival, false};
   }
 
   /// Reader thread: a line that carries the neck's ticks as /neck/state and, with a camera frame,
   /// base_link -> camera_link, both at that read's stamp, under the rate cap.
-  void publish_neck(const BaseState & state)
+  void publish_neck(const BaseState & state, const LineTime & when)
   {
     ++neck_lines_;
     if (!state.neck_read || !neck_valid_) {
@@ -383,7 +405,10 @@ private:
     if (!neck_grid_.due(state.stamp_s)) {
       return;
     }
-    const rclcpp::Time stamp = line_stamp(state);
+    if (!when.dated) {
+      ++neck_arrival_stamped_;
+    }
+    const rclcpp::Time stamp = when.read;
     const NeckAngles angles = joint_angles(neck_model_, state.pan_ticks, state.tilt_ticks);
     sensor_msgs::msg::JointState joints;
     joints.header.stamp = stamp;
@@ -435,8 +460,9 @@ private:
     return line;
   }
 
-  /// One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform.
-  void publish_state(const BaseState & state)
+  /// One state line as a nav_msgs/Odometry on /odom and an odom->base_link transform, both
+  /// dated by `odom_stamp`: the line's encoder read (default) or its arrival here.
+  void publish_state(const BaseState & state, const LineTime & when)
   {
     const bool publish = get_parameter("odom_publish").as_bool();
     odom_publish_ = publish;
@@ -444,7 +470,13 @@ private:
       forget_wheel_twist();  // the gap this mute makes is not a measurement
       return;
     }
-    const auto stamp = now();
+    const bool encoder = get_parameter("odom_stamp").as_string() != "arrival";
+    odom_stamp_encoder_ = encoder;
+    ++odom_lines_;
+    if (encoder && !when.dated) {
+      ++odom_arrival_stamped_;
+    }
+    const rclcpp::Time stamp = encoder ? when.read : when.arrival;
     const double qz = std::sin(state.theta / 2.0);
     const double qw = std::cos(state.theta / 2.0);
 
@@ -583,7 +615,20 @@ private:
     return std::string("imu_publish=") + (imu_publish_ ? "on" : "off") + " odom_publish=" +
            (odom_publish_ ? "on" : "off") + " imu_bias_tracking=" +
            (imu_bias_tracking_ ? "on" : "off") + " zupt_publish=" +
-           (zupt_publish_ ? "on" : "off");
+           (zupt_publish_ ? "on" : "off") + " odom_stamp=" +
+           (odom_stamp_encoder_ ? "encoder" : "arrival");
+  }
+
+  /// How /odom is dated, as the minute line prints it: ``odom stamp encoder: 3000 lines, 0 dated
+  /// on arrival``.
+  std::string odom_stamp_state() const
+  {
+    char line[128];
+    std::snprintf(
+      line, sizeof(line), "odom stamp %s: %ld lines, %ld dated on arrival",
+      odom_stamp_encoder_ ? "encoder" : "arrival", odom_lines_.load(),
+      odom_arrival_stamped_.load());
+    return line;
   }
 
   /// The zero-velocity update as a report line prints it: publishing or why not, the count, and
@@ -858,10 +903,12 @@ private:
   {
     if (imu_publisher_) {
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 60000, "%s; %s; %s", gyro_bias_state().c_str(),
-        zupt_state().c_str(), neck_state().c_str());
+        get_logger(), *get_clock(), 60000, "%s; %s; %s; %s", gyro_bias_state().c_str(),
+        zupt_state().c_str(), neck_state().c_str(), odom_stamp_state().c_str());
     } else {
-      RCLCPP_INFO_THROTTLE(get_logger(), *get_clock(), 60000, "%s", neck_state().c_str());
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 60000, "%s; %s", neck_state().c_str(),
+        odom_stamp_state().c_str());
     }
     const auto change = link_->take_status_change();
     if (!change.has_value()) {
@@ -1077,6 +1124,9 @@ private:
   std::atomic<bool> imu_publish_{true};   // what the report line says; written by the IMU thread
   std::atomic<bool> odom_publish_{true};  // ... and this one by the reader thread
   std::atomic<bool> imu_bias_tracking_{true};  // ... and this one by the IMU thread too
+  std::atomic<bool> odom_stamp_encoder_{true};  // ... and this one by the reader thread
+  std::atomic<long> odom_lines_{0};             // lines published on /odom
+  std::atomic<long> odom_arrival_stamped_{0};   // ... of them dated on arrival under "encoder"
   TwistFromPose twist_from_pose_{kStateGapMaxS};  // touched from the reader thread only
   RestWitness rest_witness_{kStateGapMaxS};       // ... and so is this one
   // One encoder tick of wheel travel: pi * wheel_diameter_m / ticks_per_rev of config/base.json
