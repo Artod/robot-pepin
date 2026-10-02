@@ -1155,9 +1155,9 @@ def _flags_sh(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[st
 def test_flags_sh_reaches_each_node_in_its_own_container(tmp_path: Path) -> None:
     """The goal server and Nav2 are pepin-macnav's, the camera nodes pepin-vslam's, both by docker
     exec; the board is asked nothing about where they run (no side any more, 2026-10-01)."""
-    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "pose_topic", "true")
+    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "start_needs_placement", "true")
     assert code == 0, out
-    sets = [c for c in calls if "param set /goal_server pose_topic true" in c]
+    sets = [c for c in calls if "param set /goal_server start_needs_placement true" in c]
     assert len(sets) == 1 and sets[0].startswith("docker exec pepin-macnav"), calls
     assert not [c for c in calls if c.startswith("ssh")], calls
 

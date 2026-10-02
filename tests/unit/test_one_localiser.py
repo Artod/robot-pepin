@@ -170,7 +170,7 @@ def test_the_goal_server_s_own_switch_lifts_a_refusal_of_silence() -> None:
     """Rule 19 on the board's side of the word: with the laptop's rtabmap_frame down, respawning
     or on code from before the word, nothing arrives and the laptop's flag cannot be set. The goal
     server's flag of the same name is the switch the refusal answers to, and the refusal says
-    so; a mark is judged by the same rule."""
+    so."""
     from pepin.watch import BY_PLACEMENT
 
     node = _goal_server()
@@ -179,7 +179,6 @@ def test_the_goal_server_s_own_switch_lifts_a_refusal_of_silence() -> None:
     assert not silent.ready and silent.rule == BY_PLACEMENT
     assert "ros/flags.sh set goal_server start_needs_placement false" in silent.reason
     assert "ros/laptop.sh vslam" in silent.reason, "an old pepin-vslam is named, not only dead"
-    assert node.mark("desk")["event"] == "error", "a mark waits for the same word"
     assert node._switches.set("start_needs_placement", False) is True
     assert node._ready().ready, "off: the fresh frame is enough, as before 2026-09-23"
     _placed(node, updates=198, recognised=0)
@@ -357,7 +356,7 @@ def test_the_tape_reads_the_pose_from_the_goal_server_s_topic() -> None:
 
     node = run_recorder.RunRecorderNode()
     recorder = node._recorder
-    assert recorder._tf is None, "no second listener on the board"
+    assert not hasattr(recorder, "_tf"), "no second listener beside the goal server's"
     assert run_recorder.POSE_TOPIC in node.subs, "the pose arrives as a topic"
     node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=0.5, y=-1.5, yaw_deg=90.0))
     records = _loc_rows(recorder)
@@ -368,32 +367,9 @@ def test_the_tape_reads_the_pose_from_the_goal_server_s_topic() -> None:
     assert run_recorder.POSE_TOPIC in " ".join(node.logger.texts()), "the ready line says so"
 
 
-def test_the_old_listener_is_one_flag_away_and_costs_nothing_while_it_is_off() -> None:
-    """CLAUDE.md rule 19: ``loc_from`` tf is the path of before 2026-09-22, reachable live. The
-    listener is built on the first tick that asks for it — never in the constructor — so the
-    switch that is off costs this board no /tf subscription at all."""
-    from pepin_bringup import run_recorder
-
-    node = run_recorder.RunRecorderNode()
-    recorder = node._recorder
-    node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=0.5, y=-1.5, yaw_deg=90.0))
-    assert len(_loc_rows(recorder)) == 1
-    assert node._switches.set("loc_from", "tf") == "pose_topic"
-    node.subs[run_recorder.POSE_TOPIC][1](_pose_msg(x=9.0, y=9.0, yaw_deg=0.0))
-    assert len(_loc_rows(recorder)) == 1, "the topic is ignored while the listener owns the rows"
-    recorder._tf = _FakeTf(x=1.5, y=-0.5, yaw_deg=0.0, age_s=0.0)  # type: ignore[assignment]
-    recorder._last_kept.clear()  # the 5 Hz thinning, not the flag, is what would drop this one
-    recorder._loc_from_tf()
-    records = _loc_rows(recorder)
-    assert len(records) == 2 and records[-1]["source"] == "tf", "the same row, the other reader"
-    assert records[-1]["x"] == 1.5 and records[-1]["y"] == -0.5
-    logger = (REPO / "ros/tools/session_logger.py").read_text()
-    assert "_loc_from_tf" in logger and '"source": "tf"' in logger
-
-
 def test_the_goal_server_republishes_the_pose_it_already_reads() -> None:
-    """The other half of the switch: this node owns navigation and the jump watch, so it keeps
-    the board's one TF listener and puts what it reads on /pose — stamped with the TRANSFORM's
+    """The other half: this node owns navigation, so it keeps the one TF listener and puts what
+    it reads on /pose — stamped with the TRANSFORM's
     own stamp, never with now (2026-09-19, the chair)."""
     from pepin_bringup import goal_server
 
@@ -406,9 +382,6 @@ def test_the_goal_server_republishes_the_pose_it_already_reads() -> None:
     assert sent[0].pose.position.x == -0.25 and sent[0].pose.position.y == 2.77
     assert sent[0].pose.orientation.z == pytest.approx(math.sin(math.pi / 4))
     assert sent[0].header.stamp == _stamp(-0.05), "the edge's own stamp, not this moment"
-    assert node._switches.set("pose_topic", False) is True
-    node._publish_pose()
-    assert len(sent) == 1, "off, nothing is published and the readers fall back to loc_from tf"
 
 
 def test_a_mark_is_taken_from_the_transform_and_refused_when_it_goes_stale() -> None:

@@ -93,7 +93,7 @@ def test_the_cancel_prints_goto_ros_s_own_line(served: FakeGoalServer) -> None:
 
 
 def test_a_server_whose_cancel_reaches_only_its_own_goal_is_not_taken_for_one() -> None:
-    """Before cancel_every_goal the server cancelled the goal IT sent, and goto.sh's drives are
+    """Before 2026-09-25 the server cancelled the goal IT sent, and goto.sh's drives are
     goto_ros.py's: its answer names no navigators, and the caller must take the old path."""
     server = FakeGoalServer({"cancel": [{"event": "cancelled", "had_goal": False}]})
     out = io.StringIO()

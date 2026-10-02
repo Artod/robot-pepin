@@ -647,7 +647,7 @@ def test_the_recorder_is_its_own_node_beside_the_goal_server() -> None:
     republishes on /pose; the goal server only sends it a command."""
     nav = sf.tree(NAV_LAUNCH)
     assert "pepin_bringup.run_recorder" in sf.strings(nav)
-    assert "loc_from:=pose_topic" in sf.strings(nav)
+    assert "TfLookup" not in sf.imported(sf.tree(f"{NODES}/run_recorder.py")), "one listener"
     server = sf.tree(f"{NODES}/goal_server.py")
     assert "RunRecorder" not in sf.calls(server) and "RunRecorder" not in sf.imported(server)
     assert not any("curl" in s for s in sf.strings(server))
@@ -680,8 +680,8 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
 
 def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_served() -> None:
     """One map: rtabmap_frame relays RTAB-Map's grid onto /map and both costmaps' static layers
-    read THAT. The topic is written as a literal in both places and held equal here; the pgm
-    leaves the loop, reachable again with `map_server:=true`."""
+    read THAT. The topic is written as a literal in both places and held equal here; no pgm is
+    served at all."""
     params = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
     layers = [
         params[costmap][costmap]["ros__parameters"]["static_layer"]
@@ -694,8 +694,7 @@ def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_serve
         n.value for n in ast.walk(node) if isinstance(n, ast.Constant) and isinstance(n.value, str)
     }, "rtabmap_frame must carry the same literal"
     launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
-    assert 'DeclareLaunchArgument("map_server", default_value="false"' in launch
-    assert "    if map_server:\n" in launch
+    assert "nav2_map_server" not in launch and '"map_server"' not in launch
 
 
 def test_ctrl_c_cancels_the_goal_before_it_can_do_anything_else() -> None:
@@ -2298,9 +2297,8 @@ def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
         " it no longer is: unsaid it falls back to 0, which disables one-to-many proximity"
     )
     assert table["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
-    # Nav2: no tracker, no retired frame owner; a served pgm answers to its own argument.
+    # Nav2: no tracker, no retired frame owner, no served pgm.
     nav = sf.tree(NAV_LAUNCH)
-    assert "    if map_server:\n" in (REPO / NAV_LAUNCH).read_text()
     assert not {"pepin_bringup.slam_frame", "relocalizer"} & set(sf.strings(nav))
     # The grid the board plans on: the static layer takes /map, latched, and every
     # planner may route through what nobody has looked at yet — a map that is still growing.

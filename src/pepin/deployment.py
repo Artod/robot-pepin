@@ -146,15 +146,12 @@ LAPTOP_SLAM_NODES = (
 
 # Fully qualified names of the ROS nodes of the Mac's navigation container
 # (ros/pepin_bringup/launch/nav.launch.py): the composed container, its lifecycle nodes and the
-# costmaps they create, the map server with its manager when asked for, the navigation manager,
-# and the processes beside them.
+# costmaps they create, the navigation manager, and the processes beside them.
 LAPTOP_NAV_NODES = (
     "/nav2_container",
     *(f"/{node}" for node in NAV_NODES),
     "/local_costmap/local_costmap",
     "/global_costmap/global_costmap",
-    "/map_server",
-    "/lifecycle_manager_localization",
     "/lifecycle_manager_navigation",
     "/goal_server",
     "/run_recorder",

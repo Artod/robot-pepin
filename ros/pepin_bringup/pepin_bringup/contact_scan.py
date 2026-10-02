@@ -81,7 +81,6 @@ LEAN_EPSILON = 0.003  # how far the up vector may move before the floor's geomet
 STAGES = ("pose", "plane", "scan", "publish")
 CAMERA_WAIT_S = 0.2  # how long a frame waits for TF to cover its stamp (on the worker thread)
 CAMERA_MAX_AGE_S = 1.0  # the newest edge of a still head stands in for a frame this much newer
-RANGE_CEILING_M = 10.0  # the widest a drive may open max_range to while measuring a new cap
 
 # The node's flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
 # other declaration; their state is printed in every report line. Nothing is cached from them:

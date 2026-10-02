@@ -143,10 +143,8 @@ def test_a_cell_nothing_can_place_is_counted_and_never_guessed_at(node: MarksAud
 
 def test_the_switches_take_effect_on_the_next_grid_without_a_restart(node: MarksAudit) -> None:
     node._marks = one_beam(*centre_of(*CAMERA_CELL), "base_link")
-    node._switches.set("phantom_cloud", False)
     node._audit(costmap(CAMERA_CELL))
     assert json.loads(node._audit_pub.sent[-1].data)["camera_only"] == 1
-    assert not node._phantom_pub.sent, "the cloud is off; the counts still go out"
 
     node._switches.set("marks_audit", False)
     node._on_costmap(costmap(CAMERA_CELL))

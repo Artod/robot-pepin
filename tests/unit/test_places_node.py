@@ -286,34 +286,11 @@ def test_a_mark_is_refused_where_rtabmaps_services_are_not_there(build: Build) -
     assert answer["ok"] is False and "is not answering" in answer["detail"]
 
 
-# ---- the flags -------------------------------------------------------------------------------
-def test_label_nodes_off_still_asks_which_node_is_current(build: Build) -> None:
-    """``list_labels`` is not the label's readback — it is the only way to learn which node
-    RTAB-Map considers the current one, so it is called either way."""
-    node = build(label_nodes=False)
-    graph(node, {7: (0.0, 0.0, 0.0)})
-    cart(node, 1.0, 0.0)
-    labelled(node, home=7)
-    assert mark(node, "home")["ok"] is True
-    assert not node.service_clients[SET_LABEL_SERVICE].calls, "nothing was labelled"
-    assert node.service_clients[LIST_LABELS_SERVICE].calls
-
-
-def test_publish_places_off_keeps_the_book_and_publishes_nothing(build: Build) -> None:
-    """The A/B between a place that rides its node and a coordinate that does not: off, every
-    consumer falls back to the file beside the map."""
-    node = build(publish_places=False, book={"home": GraphPlace("home", 3, 0.0, 0.0, 0.0)})
-    graph(node, {3: (0.0, 0.0, 0.0)})
-    node._publish()
-    assert not node.pubs[PLACES_TOPIC].sent
-    assert set(node._places) == {"home"}
-
-
-def test_the_flags_are_the_two_the_report_line_prints(build: Build) -> None:
+# ---- the report line -------------------------------------------------------------------------
+def test_the_report_line_says_what_was_marked(build: Build) -> None:
     node = build()
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "publish_places=on" in line and "label_nodes=on" in line
     assert "0 marked, 0 refused" in line and "nothing asked yet" in line
 
 

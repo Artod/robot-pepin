@@ -58,32 +58,6 @@ def test_the_laser_mount_reads_as_planar_and_upside_down() -> None:
     assert msgs.planar_mount(level)[3] is False
 
 
-def test_a_rigid_pose_survives_the_trip_through_a_transform() -> None:
-    c, s = math.cos(0.7), math.sin(0.7)
-    pose = RigidPose(
-        np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]]), np.array([1.0, -2.0, 0.5])
-    )
-    t = msgs.transform_from_pose("map", "rtabmap", pose, ros_stubs.Time(sec=5))
-    assert t.header.stamp.sec == 5 and (t.header.frame_id, t.child_frame_id) == ("map", "rtabmap")
-    back = msgs.pose_from_transform(t)
-    assert np.allclose(back.rotation, pose.rotation) and np.allclose(
-        back.translation, pose.translation
-    )
-    bare = msgs.pose_from_transform(t.transform)  # a Transform without its header reads the same
-    assert np.allclose(bare.rotation, pose.rotation)
-
-
-def test_a_planar_pose_carries_its_sigmas_in_the_covariance() -> None:
-    msg = msgs.pose_with_covariance(1.0, 2.0, math.pi / 2, 0.05, math.radians(5.0), None, "map")
-    assert (msg.pose.pose.position.x, msg.pose.pose.position.y) == (1.0, 2.0)
-    assert msgs.yaw_of(msg.pose.pose.orientation) == pytest.approx(math.pi / 2)
-    cov = msg.pose.covariance
-    assert cov[0] == cov[7] == pytest.approx(0.0025) and cov[35] == pytest.approx(
-        math.radians(5.0) ** 2
-    )
-    assert sum(cov) == pytest.approx(cov[0] + cov[7] + cov[35]) and msg.header.frame_id == "map"
-
-
 def test_a_depth_image_is_float_metres_and_a_picture_is_bytes() -> None:
     depth = np.array([[1.5, np.nan], [0.25, 4.0]], dtype=np.float32)
     msg = msgs.image_from_array(depth, "32FC1", ros_stubs.Time(sec=1), "camera_optical")
