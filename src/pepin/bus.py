@@ -8,7 +8,7 @@ between transports (direct USB via lerobot, TCP bridge via
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 
@@ -19,10 +19,22 @@ class MotorBus(Protocol):
         """Write one register on several motors at once, keyed by motor name."""
         ...
 
+    def sync_write_block(self, data_names: Sequence[str], values: dict[str, Sequence[int]]) -> None:
+        """Write several adjacent registers on several motors in one unacknowledged packet."""
+        ...
+
     def sync_read(
-        self, data_name: str, motors: list[str], *, normalize: bool = True
+        self,
+        data_name: str,
+        motors: list[str],
+        *,
+        normalize: bool = True,
+        optional: Sequence[str] = (),
+        optional_window_s: float = 0.0,
     ) -> dict[str, int]:
-        """Read one register from several motors in a single round trip, keyed by motor name."""
+        """Read one register from several motors in a single round trip, keyed by motor name;
+        ``optional`` motors ride along, waited for ``optional_window_s`` past the others, and
+        are absent from the answer when silent."""
         ...
 
     def enable_torque(self, motors: list[str] | None = None) -> None:

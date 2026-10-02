@@ -211,3 +211,100 @@ def test_reply_of_the_wrong_size_is_not_decoded_as_a_position(client) -> None:
     fake.rx = [status(7, b"")]  # a ping-style reply arriving where a 2-byte position was expected
     with pytest.raises(TimeoutError, match="malformed"):
         c.sync_read("Present_Position", ["left"], normalize=False)
+
+
+# -- the neck rides the wheels' read; one packet writes a whole profile --------------------------
+
+
+@pytest.fixture
+def four() -> tuple[FeetechTcpClient, FakeSocket]:
+    """A client with the wheels and the neck on its bus."""
+    motors = {"left": 7, "right": 8, "neck": 9, "head": 10}
+    c = FeetechTcpClient("host", 1, motors, timeout_s=0.02, retries=1)
+    fake = FakeSocket()
+    c._sock = fake  # type: ignore[assignment]
+    return c, fake
+
+
+def test_optional_ids_ride_after_the_mandatory_ones_and_a_silent_one_costs_no_retry(
+    four: tuple[FeetechTcpClient, FakeSocket],
+) -> None:
+    c, fake = four
+    position = bytes([0x00, 0x08])  # 2048
+    fake.rx = [status(7, position) + status(8, position) + status(9, position)]  # 10 is silent
+    read = c.sync_read(
+        "Present_Position", ["left", "right"], normalize=False, optional=["neck", "head"]
+    )
+    assert read == {"left": 2048, "right": 2048, "neck": 2048}
+    assert fake.sent == [bytes.fromhex("ff ff fe 08 82 38 02 07 08 09 0a 1b")], "one packet"
+
+
+def test_a_silent_mandatory_id_still_raises_whatever_rides_along(
+    four: tuple[FeetechTcpClient, FakeSocket],
+) -> None:
+    c, fake = four
+    fake.rx = [status(9, bytes([0x00, 0x08])) + status(10, bytes([0x00, 0x08]))]
+    with pytest.raises(TimeoutError, match=r"\[7, 8\]"):
+        c.sync_read("Present_Position", ["left", "right"], normalize=False, optional=["neck"])
+
+
+def test_a_read_of_optional_ids_alone_answers_what_answered(
+    four: tuple[FeetechTcpClient, FakeSocket],
+) -> None:
+    """The neck's operating mode: no mandatory id, no retry, whoever answered in the window."""
+    c, fake = four
+    fake.rx = [status(9, b"\x00")]
+    read = c.sync_read(
+        "Operating_Mode", [], normalize=False, optional=["neck", "head"], optional_window_s=0.03
+    )
+    assert read == {"neck": 0}
+    assert fake.sent == [bytes.fromhex("ff ff fe 06 82 21 01 09 0a 44")]
+
+
+def test_a_malformed_optional_reply_is_dropped_not_decoded(
+    four: tuple[FeetechTcpClient, FakeSocket],
+) -> None:
+    c, fake = four
+    position = bytes([0x10, 0x00])
+    fake.rx = [status(7, position) + status(8, position) + status(9, b"")]
+    read = c.sync_read("Present_Position", ["left", "right"], normalize=False, optional=["neck"])
+    assert read == {"left": 16, "right": 16}
+
+
+def test_a_block_write_is_one_packet_over_adjacent_registers(
+    four: tuple[FeetechTcpClient, FakeSocket],
+) -> None:
+    """Torque on, ramp 114, goal 2029, time 0, speed 1365, at address 40, eight bytes a servo."""
+    c, fake = four
+    names = ["Torque_Enable", "Acceleration", "Goal_Position", "Goal_Time", "Goal_Velocity"]
+    c.sync_write_block(names, {"neck": [1, 114, 2029, 0, 1365]})
+    assert fake.sent == [bytes.fromhex("ff ff fe 0d 83 28 08 09 01 72 ed 07 00 00 55 05 77")]
+    with pytest.raises(ValueError, match="contiguous"):
+        c.sync_write_block(["Torque_Enable", "Goal_Position"], {"neck": [1, 2029]})
+    with pytest.raises(ValueError, match="2 values for 5 registers"):
+        c.sync_write_block(names, {"neck": [1, 2]})
+
+
+class TimedSocket(FakeSocket):
+    """Records every timeout the client sets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.timeouts: list[float] = []
+
+    def settimeout(self, value: float) -> None:
+        self.timeouts.append(value)
+
+
+def test_a_write_drops_what_arrived_without_waiting_for_a_quiet_line(client) -> None:
+    """Nothing comes back for a write; waiting out a quiet window before each one cost the
+    wheels' twist 5 ms of a 20 ms tick. A read still waits for it."""
+    c, _ = client
+    fake = TimedSocket()
+    c._sock = fake  # type: ignore[assignment]
+    c.sync_write("Goal_Velocity", {"left": 0, "right": 0}, normalize=False)
+    assert fake.timeouts[0] == 0.0 and 0.005 not in fake.timeouts
+    fake._armed = False  # nothing answers a write
+    fake.rx = [status(7, bytes([0x10, 0x00]))]
+    c.sync_read("Present_Position", ["left"], normalize=False)
+    assert 0.005 in fake.timeouts, "the read's flush waits for a quiet line"
