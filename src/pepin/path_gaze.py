@@ -1,0 +1,154 @@
+"""Where the head looks while the cart drives: along the path ahead, or back when it reverses.
+
+PATH GAZE (:func:`path_aim`): the point of the plan at an arc length of ``lookahead_s`` seconds of
+the current speed, clamped to ``min_m``..``max_m`` from the plan's vertex nearest the cart — the
+controllers' own lookahead idea — is the pan; the tilt stays at home while that point is
+``near_m`` or farther and dips below it nearer (``atan(lens height / L) - near_offset_deg``), so
+the floor under the point stays in the lower third of the picture. The pan is clamped to
+``pan_clamp_deg``: a goal behind starts with a turn, the clamp holds the head toward the turn and
+the body brings the rest, so the head never swings backwards for nothing. :func:`settle` keeps
+the current aim while the new one is within ``deadband_deg``: the head saccades and holds, it
+does not creep.
+
+REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that has lasted
+``min_s``, or any reverse with lethal cells within ``rear_m`` behind the hull
+(:func:`tight_rear`), turns the head to ``pan_deg`` on the side the rear swings to (with the cart
+turning left, w > 0, the rear swings right), at ``tilt_deg``.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+
+import numpy as np
+import numpy.typing as npt
+
+from pepin.footprint import HULL, Footprint
+from pepin.gaze import Aim, Reach
+from pepin.marks_audit import LETHAL
+from pepin.stall_look import path_ahead
+
+Array = npt.NDArray[np.float64]
+
+
+@dataclass(frozen=True)
+class PathGazeLaw:
+    """Path gaze's numbers (config/knobs.json's ``gaze`` block)."""
+
+    lookahead_s: float = 2.0
+    min_m: float = 0.6
+    max_m: float = 1.5
+    deadband_deg: float = 8.0
+    pan_clamp_deg: float = 60.0
+    near_m: float = 1.0
+    near_offset_deg: float = 15.0
+
+
+def lookahead_m(speed_m_s: float, law: PathGazeLaw) -> float:
+    """How far along the plan the head looks at this speed."""
+    return min(max(law.lookahead_s * abs(speed_m_s), law.min_m), law.max_m)
+
+
+def path_aim(
+    path_xy: Array,
+    pose: tuple[float, float, float],
+    speed_m_s: float,
+    law: PathGazeLaw,
+    *,
+    lens_z_m: float,
+    home: Aim,
+    reach: Reach,
+) -> Aim | None:
+    """The aim at the plan's point ``lookahead_m`` ahead of the cart (pose: x, y, yaw in the
+    plan's frame); ``None`` when the plan has nothing ahead."""
+    ahead = lookahead_m(speed_m_s, law)
+    poses, arc = path_ahead(path_xy, (pose[0], pose[1]), ahead, step_m=ahead / 8.0)
+    if len(poses) == 0 or arc[-1] <= 0.0:
+        return None
+    x, y = poses[-1, 0], poses[-1, 1]
+    bearing = math.atan2(y - pose[1], x - pose[0]) - pose[2]
+    bearing = math.atan2(math.sin(bearing), math.cos(bearing))
+    clamp = math.radians(law.pan_clamp_deg)
+    pan = min(max(bearing, -clamp), clamp)
+    distance = float(arc[-1])
+    tilt = home.tilt_rad
+    if distance < law.near_m:
+        tilt = max(
+            home.tilt_rad, math.atan2(lens_z_m, distance) - math.radians(law.near_offset_deg)
+        )
+    return reach.clamp(Aim(pan, tilt))
+
+
+def settle(current: Aim | None, wanted: Aim, deadband_deg: float) -> Aim:
+    """``current`` while ``wanted`` is within the dead-band of it, else ``wanted``."""
+    if current is not None and current.off(wanted) <= math.radians(deadband_deg):
+        return current
+    return wanted
+
+
+@dataclass(frozen=True)
+class ReverseLaw:
+    """Reverse gaze's numbers (config/knobs.json's ``gaze`` block)."""
+
+    pan_deg: float = 150.0
+    tilt_deg: float = 23.8
+    min_s: float = 1.0
+    rear_m: float = 0.30
+    min_speed_m_s: float = 0.02
+
+
+class ReverseWatch:
+    """How long the cart has been reversing without a break, and which side its rear last swung
+    to (+1 left, -1 right)."""
+
+    def __init__(self) -> None:
+        self._since: float | None = None
+        self.side = 1
+
+    def update(self, v: float, w: float, now: float, law: ReverseLaw) -> None:
+        """One commanded twist."""
+        if v < -law.min_speed_m_s:
+            if self._since is None:
+                self._since = now
+            if w > 0.0:
+                self.side = -1
+            elif w < 0.0:
+                self.side = 1
+        else:
+            self._since = None
+
+    def reversing_for(self, now: float) -> float:
+        """Seconds of this reverse leg so far (0 when not reversing)."""
+        return 0.0 if self._since is None else now - self._since
+
+    @property
+    def reversing(self) -> bool:
+        """Whether the last twist reversed."""
+        return self._since is not None
+
+
+def reverse_aim(side: int, law: ReverseLaw, reach: Reach) -> Aim:
+    """The head toward the rear on ``side`` (+1 left), inside the reach."""
+    return reach.clamp(Aim(side * math.radians(law.pan_deg), math.radians(law.tilt_deg)))
+
+
+def tight_rear(
+    grid: npt.NDArray[np.integer],
+    origin: tuple[float, float],
+    resolution: float,
+    pose: tuple[float, float, float],
+    rear_m: float,
+    hull: Footprint = HULL,
+) -> bool:
+    """Whether a lethal cell stands within ``rear_m`` behind the hull (and as wide as it)."""
+    values = np.asarray(grid)
+    rows, cols = np.nonzero(values >= LETHAL)
+    if len(rows) == 0:
+        return False
+    dx = origin[0] + (cols + 0.5) * resolution - pose[0]
+    dy = origin[1] + (rows + 0.5) * resolution - pose[1]
+    cos, sin = math.cos(pose[2]), math.sin(pose[2])
+    along, across = cos * dx + sin * dy, -sin * dx + cos * dy
+    behind = (along <= -hull.rear_m) & (along >= -hull.rear_m - rear_m)
+    return bool(np.any(behind & (np.abs(across) <= hull.half_width_m)))

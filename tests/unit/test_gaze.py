@@ -20,6 +20,7 @@ from pepin.gaze import (
     Aim,
     Arbiter,
     BaseServerHead,
+    EitherHead,
     GazeSettings,
     HeadReading,
     Look,
@@ -491,23 +492,47 @@ def test_a_dead_link_is_a_transient_refusal() -> None:
     assert head.blocked(0.1) is None
 
 
+def target_head(wire: Wire) -> NeckTargetHead:
+    return NeckTargetHead(CFG, wire.send, slow_deg_s=lambda: 20.0, renew_s=lambda: 0.5)
+
+
 def test_the_neck_target_driver_renews_its_lease_while_it_holds() -> None:
     wire = Wire()
-    head = NeckTargetHead(CFG, wire.send, speed_deg_s=lambda s: 35.0, lease_s=2.0)
+    head = target_head(wire)
     head.on_line({"type": "state", "moving": True}, 0.0)
     assert head.blocked(0.0) is None  # the wheels turning do not matter here
     head.write(LEFT, speed="saccade", hold=True, now=0.0)
     first = wire.lines[-1]
-    assert first["cmd"] == "neck_target" and first["lease_s"] == 2.0
-    assert first["speed"] == round(math.radians(35.0) / (2 * math.pi / 4096))
-    head.keep(0.5)
+    assert first == {"cmd": "neck_target", "pan_rad": LEFT.pan_rad, "tilt_rad": LEFT.tilt_rad}
+    head.keep(0.3)
     assert len(wire.lines) == 1
-    head.keep(1.0)
+    head.keep(0.5)
     assert len(wire.lines) == 2 and wire.lines[-1] == first
+    head.write(RIGHT, speed="slow", hold=True, now=0.6)
+    assert wire.lines[-1]["speed_deg_s"] == 20.0
     head.write(None, speed="saccade", hold=False, now=1.2)
-    assert wire.lines[-1]["pan_ticks"] == CFG.reference.pan_ticks
+    assert wire.lines[-1]["pan_rad"] == 0.0
+    assert wire.lines[-1]["tilt_rad"] == pytest.approx(HOME.tilt_rad)
     head.keep(5.0)
-    assert len(wire.lines) == 3  # a released head renews nothing
-    head.on_line({"type": "neck_target", "error": "out of limits"}, 5.0)
-    assert head.take_refusal() == Refusal("out of limits", False)
+    assert len(wire.lines) == 4  # home is not renewed: the lease lapses and the board lets go
+    head.on_line({"type": "neck_target", "error": "an operator jog holds the head"}, 5.0)
+    assert head.take_refusal() == Refusal("an operator jog holds the head", True)
+    head.on_line({"type": "neck_target", "error": "tilt target is outside its limits"}, 5.0)
+    assert head.take_refusal() == Refusal("tilt target is outside its limits", False)
     assert head.take_arrival() is None
+
+
+def test_either_head_picks_neck_target_once_a_state_line_carries_the_neck() -> None:
+    wire = Wire()
+    either = EitherHead(BaseServerHead(CFG, wire.send), target_head(wire))
+    either.on_line({"type": "state", "moving": True, "v": 0.2, "w": 0.0}, 0.0)
+    assert not either.moves_while_driving and either.wheels_moving and either.twist == (0.2, 0.0)
+    assert either.blocked(0.0) is not None
+    either.on_line({"type": "state", "moving": True, "pan_ticks": 2029, "tilt_ticks": 2311}, 0.1)
+    assert either.moves_while_driving and either.blocked(0.1) is None
+    either.write(LEFT, speed="saccade", hold=True, now=0.1)
+    assert wire.lines[-1]["cmd"] == "neck_target"
+    either.on_line({"type": "state", "moving": False}, 0.2)  # a tick the neck missed
+    assert either.speaks_target and either.take_refusal() is None
+    either.keep(1.0)
+    assert len(wire.lines) == 2 and either.take_arrival() is None

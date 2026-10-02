@@ -874,9 +874,9 @@ class BaseServerHead(_BaseLink):
 
 
 class NeckTargetHead(_BaseLink):
-    """:class:`HeadDriver` over ``neck_target``, written while driving; each write renews the
-    board's lease, whose expiry sends the head home, so a held target is re-sent at half the
-    lease."""
+    """:class:`HeadDriver` over ``neck_target`` (joint angles, written while driving): every
+    target renews the board's lease, whose lapse sends the head home and lets it go, so a held
+    target is re-sent every ``renew_s()`` and home is one target that is not renewed."""
 
     moves_while_driving = True
 
@@ -885,14 +885,14 @@ class NeckTargetHead(_BaseLink):
         cfg: NeckConfig,
         send: Callable[[bytes], bool],
         *,
-        speed_deg_s: Callable[[Speed], float],
-        lease_s: float = 2.0,
+        slow_deg_s: Callable[[], float],
+        renew_s: Callable[[], float],
     ) -> None:
         super().__init__()
         self._cfg = cfg
         self._send = send
-        self._speed_deg_s = speed_deg_s
-        self.lease_s = lease_s
+        self._slow_deg_s = slow_deg_s
+        self._renew_s = renew_s
         self._held: dict[str, Any] | None = None
         self._sent_at = 0.0
         self._refusal: Refusal | None = None
@@ -904,7 +904,8 @@ class NeckTargetHead(_BaseLink):
             if kind == "state":
                 self._on_state(message, now)
             elif kind == "neck_target" and message.get("error"):
-                self._refusal = Refusal(str(message["error"]), False)
+                why = str(message["error"])
+                self._refusal = Refusal(why, "jog" in why)
 
     def blocked(self, now: float) -> Refusal | None:
         """Only a base server that has gone quiet."""
@@ -912,17 +913,15 @@ class NeckTargetHead(_BaseLink):
             return self._quiet(now)
 
     def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
-        """One ``neck_target`` in ticks at the speed's rate, carrying the lease."""
+        """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` else."""
         where = aim if aim is not None else home_aim(self._cfg)
-        pan, tilt = ticks_for(self._cfg, NeckAngles(where.pan_rad, where.tilt_rad))
-        message = {
+        message: dict[str, Any] = {
             "cmd": "neck_target",
-            "pan_ticks": pan,
-            "tilt_ticks": tilt,
-            "speed": round(math.radians(self._speed_deg_s(speed)) / RAD_PER_TICK),
-            "lease_s": self.lease_s,
-            "hold": hold,
+            "pan_rad": where.pan_rad,
+            "tilt_rad": where.tilt_rad,
         }
+        if speed == "slow":
+            message["speed_deg_s"] = self._slow_deg_s()
         with self._lock:
             self._held = message if hold else None
             self._sent_at = now
@@ -941,11 +940,73 @@ class NeckTargetHead(_BaseLink):
         return None
 
     def keep(self, now: float) -> None:
-        """Re-send a held target at half the lease, so a live laptop never lets it lapse."""
+        """Re-send a held target every ``renew_s()``, so a live laptop never lets it lapse."""
         with self._lock:
             held = self._held
-            due = held is not None and now - self._sent_at >= self.lease_s / 2.0
+            due = held is not None and now - self._sent_at >= self._renew_s()
             if due:
                 self._sent_at = now
         if due and held is not None:
             self._send((json.dumps(held) + "\n").encode())
+
+
+def speaks_target(state: dict[str, Any]) -> bool:
+    """Whether a base server's state line carries the neck's encoders: the server that reads
+    them in the wheels' tick is the one that takes ``neck_target`` while driving."""
+    return "pan_ticks" in state and "tilt_ticks" in state
+
+
+class EitherHead:
+    """:class:`HeadDriver` that speaks ``neck_target`` to a base server whose state lines carry
+    the neck (:func:`speaks_target`, once seen) and ``neck_goto`` to any other."""
+
+    def __init__(self, goto: BaseServerHead, target: NeckTargetHead) -> None:
+        self.goto, self.target = goto, target
+        self.speaks_target = False
+
+    @property
+    def chosen(self) -> BaseServerHead | NeckTargetHead:
+        """The driver in use."""
+        return self.target if self.speaks_target else self.goto
+
+    @property
+    def moves_while_driving(self) -> bool:
+        """The chosen driver's."""
+        return self.chosen.moves_while_driving
+
+    @property
+    def wheels_moving(self) -> bool:
+        """Whether the newest state line said the wheels turn."""
+        return self.chosen.wheels_moving
+
+    @property
+    def twist(self) -> tuple[float, float]:
+        """The newest state line's commanded (v, w)."""
+        return self.chosen.twist
+
+    def on_line(self, message: dict[str, Any], now: float) -> None:
+        """Both drivers read every line; a state line with the neck in it picks ``neck_target``."""
+        if message.get("type") == "state" and speaks_target(message):
+            self.speaks_target = True
+        self.goto.on_line(message, now)
+        self.target.on_line(message, now)
+
+    def blocked(self, now: float) -> Refusal | None:
+        """The chosen driver's."""
+        return self.chosen.blocked(now)
+
+    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
+        """The chosen driver's."""
+        self.chosen.write(aim, speed=speed, hold=hold, now=now)
+
+    def take_refusal(self) -> Refusal | None:
+        """The chosen driver's."""
+        return self.chosen.take_refusal()
+
+    def take_arrival(self) -> HeadReading | None:
+        """The chosen driver's."""
+        return self.chosen.take_arrival()
+
+    def keep(self, now: float) -> None:
+        """The chosen driver's."""
+        self.chosen.keep(now)
