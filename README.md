@@ -1,608 +1,217 @@
 # Pepin
 
-A differential-drive indoor cart that drives itself to a named place on a saved map —
-localisation, planning, control and recording all on a $35 single-board computer.
+A home robot on an IKEA cart that drives itself to a named place in the flat, maps the rooms
+with a stereo head and takes spoken orders. A $35 board on the cart streams the sensors and owns
+the wheels; navigation, mapping and the language model run on the MacBook beside it.
 
-![Pepin sees the room: the camera's coloured voxels over the lidar's map, the tracked pose and the sensor frames in Foxglove](docs/figures/voxels_live.png)
+![The camera's fused voxels over the occupancy grid in Foxglove, with the cart's sensor frames](docs/figures/voxels_live.png)
 
-*One goal in flight: the static map underneath, the live scan on top of it, the three ToF cones
-marked into the local costmap, and the pose the scan matcher is holding.*
+*Foxglove on the laptop: the camera's fused voxels over the occupancy grid, with the cart's
+camera, ToF and odometry frames.*
+
+Type `ros/goto.sh printer`, or say "Pepin, go to the printer", and the cart plans around the
+furniture and drives there at up to 0.45 m/s. Every drive is recorded.
 
 ## What it is
 
-Say `ros/goto.sh printer` and the cart goes to the printer. It knows where it is because it
-matches every lidar revolution against a map of the flat; it knows what is in front of it
-because the lidar and three time-of-flight sensors write into the costmaps ten times a second;
-it stops with its bumper against the furniture, because that is where a manipulator has to
-reach.
+Pepin is the mobility part of a companion robot. It is built first because everything else
+needs it: a frame that stays true, a body that fits through doorways, a name for every place in
+the flat and a recording of every drive.
 
-Pepin is the mobility organ of a companion robot that does not exist yet. Everything the arm
-and the face will one day need — a frame that stays true, a body that fits through doorways,
-a name for every place in the flat, a recording of every drive — is being built here first,
-on an IKEA cart with two servos for wheels.
+The board (Orange Pi Zero 3: four Cortex-A53 cores, 1.5 GB) is a **sensor box**. It reads the
+lidar, three time-of-flight rangers, the wheel encoders, the IMU and the neck encoders. It fuses
+them into `odom -> base_link` with an EKF and serves the stereo camera and the microphone array.
+It owns the wheels with a 0.5 s deadman, so a WiFi stall stops the cart.
 
-Everything that closes a loop runs on the robot: the board is an Orange Pi Zero 3 with four
-Cortex-A53 cores and 1.5 GB of RAM, and it carries ROS 2 Jazzy, the EKF, the scan-matching
-tracker, the local costmap, the controller and the behaviour tree. The laptop is never in the
-stop reflex, and every drive's tape is written on the board. The laptop reaches the robot over
-one TCP link between two zenoh routers: it can take the planner with its global costmap and the
-goal server, or — the daily mode — leave the whole drive to the board and run the camera SLAM
-beside it, since a map can wait a second and a drive cannot. Either
-way the operator watches through Foxglove and sends one line of JSON when the robot should go
-somewhere.
+The Mac runs everything that consumes the camera, and the navigation:
+
+- **Nav2** with the MPPI controller and Smac planners
+- **RTAB-Map**, the one map and the one owner of `map -> odom`
+- **stereo depth** from RAFT-Stereo on the Apple GPU, and **stereo visual odometry**
+- a TSDF volume as the costmaps' obstacle memory
+- **XFeat + LighterGlue + BoQ** for place recognition
+- the **LLM tools** (`pepin.tools`, also an MCP server) behind a voice loop
+
+The two machines talk over one zenoh router-to-router link.
 
 ## Numbers
 
-Measured on the robot, on the board, during real drives.
+Measured on the robot unless marked otherwise.
 
 | What | Value |
 | --- | --- |
-| Scan match against the map, on the board | 37–40 ms mean |
-| Scan-to-odometry wait (EKF latency) | 43–50 ms mean |
-| Heading-rate residual vs commanded, p90 | 6 °/s (26 °/s before the timeline module) |
-| Cross-track error, p90 | 6 cm under Hybrid-A*, 4 cm under the point planners |
-| Top speed | 0.30 m/s — the base's own cap, and the wheels reach it |
-| A 2.5 m printer → home leg | 16–21 s |
-| A 3.9 m leg to the printer, Hybrid-A* | 34 s, 1% of it turning in place — 35% under the point planners |
-| Localisation confidence | 0.68–0.70 standing, 0.84 driving |
-| Loop closure over a 33 m lap (mapping) | 5 cm |
+| Wheel odometry / EKF, as received on the Mac | 49.5 / 48.3 Hz |
+| IMU on the shared I2C bus | 99.4 Hz at 400 kHz (53 Hz at the default 100 kHz, which the ToF crowded out) |
+| Stereo visual odometry | 8-10 poses/s, 0.15-0.21 s behind the picture |
+| RAFT-Stereo on the Mac's GPU, 800x600 pair | 89 ms (OpenCV SGBM: 17 ms) |
+| Airborne phantom blobs on glossy parquet, 8 pairs | 94 with RAFT-Stereo, 450 with SGBM |
+| A stereo pair's disparity through Docker | 206 ms with the compressed reply (295 ms raw) |
+| Place recognition, run 0457 replayed in RTAB-Map | BoQ descriptors: 16 of 23 camera updates localised, 15 of 15 judged right; stock ORB words: 0 |
+| XFeat + LighterGlue registration, one replay | 454 ms through the model service, 1879 ms on the Docker VM's CPU |
+| Top speed | 0.45 m/s (base cap = MPPI `vx_max`) |
 | Goal tolerance | 0.10 m / 0.20 rad |
-| Board memory with the whole stack up | 590 MB used, 5 MB swap (1.08 GB and a full 734 MB swap before tracetools was rebuilt without LTTng) |
-| Unit tests | 1,610, mypy strict |
-
-## One map, three sensor modes
-
-Since September 2026 the robot has ONE map and one owner of `map → odom`, and it drives with
-whatever sensors are alive: lidar + camera, lidar only, or the head camera alone.
-
-```
- LAPTOP (Docker, Apple-silicon GPU)                        │ BOARD (Orange Pi Zero 3)
-                                                           │
- head camera ◄── MJPEG over HTTP, stamped at capture ──────┼── ustreamer
-   ├─► depth network (Depth Anything V2, metric) ──► depth │
-   │      └─► depth scan + contact scan ───────────────────┼─► Nav2 costmap layers (camera, contact)
-   ├─► visual odometry ────────────────────────────────────┼─► EKF: wheels + gyro (+ VO) ─► odom→base_link
-   └─► sensor_pack: ONE snapshot per moment ◄──────────────┼── /scan (while the lidar lives), /tf
-          full │ lidar-only │ camera-only — whatever is alive
-          ▼                                                │
-     RTAB-Map — THE map: loop-closed graph + occupancy     │
-     grid, multi-session; places ride graph nodes          │
-       · registration follows the snapshot (ICP / visual)  │
-       · the database learns only from a pose sharper than │
-         3 cm / 1° that the graph itself does not hold     │
-       ├─► grid ── only once this start is tied to the ────┼─► tracker adopts it, caches it on disk,
-       │           graph it loaded                         │   republishes it for the costmaps
-       └─► "words": recognised pose + covariance, ─────────┼─► tracker
-           stamped with the PICTURE's moment               │     ├─ lidar scan match, 10 Hz, 1–2 cm,
-                                                           │     │  whole-map FFT search when lost
-                                                           │     ├─ information-filter fusion; a late
-                                                           │     │  word is carried over odometry to now
-                                                           │     └─► map→odom, 20 Hz — one owner, and it
-                                                           │         keeps driving with the laptop gone
-```
-
-Measured on the robot, 19–20 September 2026, one flat, legs of 2–4 m between three named places:
-
-| Mode | What holds the pose | Result | Leg time |
-| --- | --- | --- | --- |
-| lidar + camera | scan match; the graph's words ride along | arrival 5–7 cm, 1–6° from the mark | 15–34 s |
-| lidar only | scan match | arrival 2–7 cm | 14–28 s |
-| camera only — lidar out of the tracker and the costmaps | RTAB-Map's words (claimed floor 0.20 m / 8°) over wheel + gyro odometry | a 3-leg tour, 8.8 m: **1.4 cm / 1°** from the lidar's re-seat at the end; every tracker update came from the graph, 49 words, none of the tour on dead reckoning after a last word | 18–20 s |
-| no word at all (6 m, from a sharp start) | wheels + gyro alone | 14 cm / 4° at the end | — |
-
-What made the camera-only mode work was mostly not the camera:
-
-- **The gyro's bias is tracked at rest.** Heading creep is −0.01 °/min parked; with the bias frozen
-  at boot it was 0.2–0.7 °/min, which the lidar matcher had been silently absorbing ten times a
-  second. Over turns of 30–180° the EKF heading is 2.2–3.6° RMS against the lidar (539 scans),
-  about 2° of that being the scan matcher's own noise.
-- **A word is stamped with the moment its picture was taken.** A localisation leaves RTAB-Map
-  0.13–1.35 s after its picture (median 0.93 s). Stamped "now", every word taken in a turn lagged
-  the truth by the turn rate times that age — 12–35° — and one such word put the cart into a
-  chair. The camera's own stamp is good to 0.05 s against the gyro.
-- **The grid reaches the tracker only when it is tied to the loaded graph.** Before its first
-  recognition RTAB-Map's grid is one scan drawn where the odometry puts the cart; a tracker that
-  adopts it matches the live scan on a picture of itself (fit 1.00, 1.26 m off). Until the tie the
-  board tracks on the grid it cached.
-- **A goal starts on any pose the cart has.** Certainty is one number — the pose covariance,
-  grown along the odometry (2 % of the distance, 5 % of a turn, measured) and shrunk by every
-  accepted word; a drive is cut when it passes 0.40 m. A cart parked facing a bookshelf, where the
-  camera recognises nothing, used to refuse every goal while knowing its pose to 26 cm.
-
-**Transport between the two machines.** Since 20 September 2026 the stack speaks `rmw_zenoh`
-natively: one `rmw_zenohd` router per machine, every node a peer of its own machine's router, and
-the only link over WiFi is router to router, dialled from the laptop (Docker Desktop's NAT). Measured
-on the robot against the previous arrangement (CycloneDDS plus two `zenoh-bridge-ros2dds`
-processes): the board's CPU is the same parked (idle 41.6 % against 42.2 %) and under a drive-like
-load (13.5 % against 13.9 %); `map → odom` reaches the laptop at 20 Hz instead of a capped 7.7 Hz;
-the start order of the halves stopped mattering; a restart of either half, of one node or of a
-router heals by itself — the laptop half was stopped six seconds into a leg, the cart finished
-alone, and the link came back without touching the board. The price is about 200 MB of board
-memory. The previous transport is kept whole on the tag `alt/cyclone-bridges-2026-09-20`.
-
-Honest limits: the mono depth network gives a noisy obstacle fan (10–20 recoveries per camera-only
-leg); after a laptop restart the first tie to the loaded graph needs the cart within 0.2 m of a
-recorded node while the lidar drives the registration; waking up in an unknown room with a dead
-lidar is not supported yet.
+| Board memory, sensor stack up | 615 MB of 1.5 GB |
+| Board image | 0.35 GB compressed, 1.32 GB unpacked (1.08 / 3.85 GB while it carried Nav2) |
+| Loop closure over a 33 m lap, offline pose graph | 5 cm (wheel odometry alone: 8 m) |
+| Unit tests | over 1,600, mypy strict, no hardware needed |
 
 ## Architecture
 
 ```
- LAPTOP                                  │ BOARD — Orange Pi Zero 3 (4x Cortex-A53, 1.5 GB)
-                                         │ one Docker container: ROS 2 Jazzy + Nav2 1.3.12
- ros/goto.sh printer ─ TCP 3337 ─────────┼─► goal_server ──► bt_navigator ──► planner_server
-        (JSON lines: run number,         │        │              │            global costmap 2 Hz
-         events, tape path)              │        │              │ /plan
-                                         │        │              ▼
- Foxglove ◄── ws 8765 ── foxglove_bridge │   (on the laptop; the board's is off)        │        controller_server   RPP 10 Hz
-                                         │        │        local costmap 3x3 m @ 5 cm, 5 Hz
- rsync   ◄── camera clip (curl on board) │        │              │ /cmd_vel_nav
- rsync   ◄── run .jsonl, board log ──────┼─ run_recorder         ▼
-                                         │        ▲        velocity_smoother   10 Hz
-                                         │        │              │ /cmd_vel
-                                         │        │        base_bridge (C++)
-                                         │        │              │ TCP 3336, JSON lines
-                                         │        │        pepin-base   50 Hz, deadman 0.5 s
-                                         │        │              │ ser2net :3333
-                                         │        │        2x Feetech STS3215
-                                         │        │
-                                         │ ─── sensing ─────────────────────────────────────
-                                         │ LD19 ─► ldlidar ─► hull box filter ─► /scan  10 Hz
-                                         │ encoders ─► pepin-base ─────────────► /odom  16 Hz
-                                         │ MPU6050 ─► base_bridge ──────► /imu/data_raw  44 Hz
-                                         │ /odom + /imu ─► ekf_node ─► odom→base_link    20 Hz
-                                         │ laptop RTAB-Map ─► map→odom (over the link)  20 Hz
-                                         │ 3x VL53L1X ─► pepin-tof :3335 ─► tof_bridge
-                                         │              ─► /tof/{front,left,right}       14 Hz
-                                         │              ─► /tof/*/scan (the cone as a fan,
-                                         │                 what the local costmap marks on)
+ BOARD  Orange Pi Zero 3                         │  MAC  MacBook Pro (Docker + Apple GPU)
+                                                 │
+ pepin-base   wheels, encoders, 50 Hz, deadman   │  pepin-macnav  Nav2 (MPPI, Smac, costmaps,
+ pepin-tof    3x VL53L1X, 15 Hz                  │                behaviour tree), goal server
+ ustreamer    stereo camera as MJPEG             │                :3337, run recorder
+ pepin-audio  XVF3800 array + speaker            │  pepin-vslam   RTAB-Map (map -> odom), stereo
+ pepin-ros    LD19 lidar, C++ base bridge,       │                depth + odometry, TSDF volume,
+              IMU 100 Hz, EKF (odom->base_link), │                Foxglove bridge :8765
+              rf2o laser odometry, ToF fans,     │  host          RAFT-Stereo :8790; XFeat,
+              neck encoders                      │                LighterGlue, BoQ :8791
+                                                 │  tools         pepin.tools (MCP), voice loop
+         ◄── /cmd_vel ──── zenoh, router to router over WiFi ─────
+         ──── /scan /odom /imu /tof /tf ──►
 ```
 
-The sensor nodes and the base bridge are composed into one container process at `nice -10`; Nav2
-runs in a second one at `nice +5`, so a busy planner can never starve the lidar. Every process
-that could be a separate node and is not saves about 140 MB on a 1.5 GB board.
+On the board: what is real-time, what must survive a WiFi loss, what is wired to its pins.
+Every board process has a budget in `config/board_manifest.json`, and `ros/board.sh census`
+checks it.
 
-### Timing
+On the laptop: everything else. One `rmw_zenohd` router per machine; only the router link
+crosses the radio.
 
-| Loop | Rate |
-| --- | --- |
-| Lidar revolution | 10 Hz, 455 beams |
-| Wheel odometry (`/odom`) | 16 Hz |
-| Gyro (`/imu/data_raw`) | 44 Hz |
-| EKF, `odom → base_link` | 20 Hz |
-| Scan match | every scan while moving, ≥1 Hz standing still |
-| `map → odom` broadcast | 20 Hz |
-| Lost check (is the pose still trustworthy?) | 1 Hz |
-| Tracker timing report | every 30 s |
-| Controller (Regulated Pure Pursuit) | 10 Hz |
-| Velocity smoother | 10 Hz |
-| Local costmap | update 5 Hz, publish 1 Hz |
-| Global costmap | update 2 Hz, publish 1 Hz |
-| Planner | up to 2 Hz |
-| ToF, per sensor | 14 Hz |
-| Wheel loop on the board | 50 Hz, 0.5 s deadman |
-| Laptop heartbeat (split mode) | 2 Hz |
+## Running it
 
-## How it drives
+Once per clone:
 
-One command, end to end:
+```bash
+uv sync
+git config core.hooksPath .githooks
+uv run pytest tests/unit -q -n 6
+```
 
-1. **`ros/goto.sh printer`** opens a socket to the goal server beside Nav2 on the Mac and writes
-   one JSON line. No client boots, no ROS process starts: a goal costs a socket write, not the 8–15 s
-   an ssh-and-import client used to cost.
-2. **The goal server** looks the name up in the map's own places book (`<map>.places.yaml`),
-   takes the next run number, opens the tape — which already holds the last 15 s of every topic,
-   so the file begins *before* the command did — starts the camera clip beside it, and sends the
-   pose to Nav2. It answers with one JSON line per event: accepted, feedback, arrival, done.
-3. **The behaviour tree** asks the selected planner for a path — that planner and no other. Stale
-   cells are forgotten on a timer (local 1 Hz, global 0.1 Hz); a refused plan is answered by
-   retreating 0.15 m, then by three seconds of waiting, then by a spin, one answer per retry and
-   five retries, and a failed drive by a longer round robin — twenty attempts before giving up.
-4. **Regulated Pure Pursuit** follows the path at 10 Hz, slowing on curvature and on costmap cost.
-5. **The velocity smoother** limits acceleration, and **the C++ base bridge** turns `/cmd_vel`
-   into a twist on a TCP socket.
-6. **`pepin-base`** on the host owns the wheels: it applies the twist and reads the encoders at
-   50 Hz next to the UART, and a 0.5 s deadman cuts the motors if anything upstream goes quiet.
-   The two **Feetech STS3215** run in wheel mode on a single serial bus.
+The board is set up by hand once ([board/README.md](board/README.md)). The images are built on
+the Mac: `ros/build-image.sh --ship` for the board, `ros/laptop-build.sh` and
+`ros/laptop-build.sh xfeat` for the laptop.
 
-And back:
+**Start**
 
-- Encoders → **wheel odometry** (16 Hz) and the MPU6050 → **gyro yaw rate** (44 Hz) are fused by
-  `robot_localization`'s EKF at 20 Hz into `odom → base_link`. The filter takes the wheels'
-  forward speed and the gyro's yaw rate — and nothing else. On carpet the wheels over-report
-  rotation by 10–25% and their integrated x/y carries that error with it, so fusing the wheel
-  *position* would drag the filter back onto the very trajectory the gyro exists to correct.
-- Lidar → **hull box filter** (the cart's own posts and cables, +5 cm, cut out of every scan) →
-  **the tracker**, which publishes `map → odom` at 20 Hz.
+```bash
+ros/restart.sh both     # board sensors and router, then vslam and Nav2 here; ends green or red
+ros/ready.sh            # the cart on its base: seeded, costmaps emptied, one plan proven
+ros/preflight.sh        # ready for a goal? pose, lidar, planner, recognition, Foxglove, one plan
+```
 
-## Localisation
+**Drive**
 
-The section above says who owns what since September 2026; this one is the board's tracker in
-detail. There is no AMCL in the loop. AMCL's parameters are still in the file and it can be run for
-comparison, but `tf_broadcast` is false: the frame belongs to our own tracker, because AMCL only
-searches where its particles already are, and a cart that gets carried across the room needs to
-find itself again with nobody's help.
+```bash
+ros/goto.sh printer                      # to a named place; Ctrl-C cancels; exit 0 = reached
+ros/goto.sh -1.0 0.3 90                  # to map coordinates and a heading
+ros/goto.sh mark sofa                    # name the spot the cart stands on
+ros/goto.sh where | places | cancel
+ros/stop.sh                              # the red button
+uv run python -m pepin.teleop --game     # keys held: wheels and head (not recorded)
+```
 
-**The tracker** is a correlative scan matcher against the static map: a brute-force search over
-a ±9 cm / ±9° window in 3 cm and 1.5° steps, 120 beams, about 40 ms per match on an A53 core.
-The best pose is not adopted whole — only half of the residual is (correction gain 0.5), because
-at full gain the matcher's own noise reached the wheels through `map → odom` ten times a second
-and the cart weaved.
+Every goal leaves its tape, Nav2's reasons, the behaviour tree's transitions and a camera clip
+under `ros/maps/rec/`.
 
-**Time is fixed before the match, not after** (`src/pepin/timeline.py`). A lidar revolution is not
-a photograph:
+**Talk**
 
-- The odometry history is interpolated **at the scan's own timestamp**, never at the newest pose.
-  The EKF runs 43–50 ms behind the scan, and in a pivot that gap is a degree or two of heading
-  that used to go straight into the correction.
-- Every beam is **deskewed** to its own instant. The LD19 stamps the *end* of the revolution and
-  the newest beam sits at index 0; over 100 ms of turning the first and last beams are 3–4°
-  apart.
-- A **scan gate** releases a scan only once odometry covers its whole revolution — a scan is
-  matched against the pose it was taken at, or not at all.
-- A **motion filter** rests the matcher while the cart stands still.
+```bash
+uv run python scripts/voice.py           # GEMINI_API_KEY in the environment or .env
+uv run python -m pepin.tools.mcp         # the same tools as an MCP server (Claude Code / Desktop)
+```
 
-Together these took the heading-rate residual against the commanded rate from 26 °/s to 6 °/s
-at p90.
+The tools are `where_am_i`, `list_places`, `go_to`, `go_to_pose`, `cancel`, `look`,
+`look_around`, `see`, `find`, `recall`, `map_tree`, `remember`, `say` and `status`. They are
+defined once in `src/pepin/tools`. A drive the model abandons halts the cart.
 
-**When the pose is wrong, it says so.** A fit score is computed every second: above 0.50 the
-robot drives, and three consecutive checks below 0.55 (or a collapse, which is what being lifted
-looks like) trigger a whole-map FFT search in a worker thread. A candidate is never adopted on
-its own word — it must be confirmed by a second search on a *new* scan before the pose is
-allowed to move. Failed searches back off exponentially so a lost robot does not saturate a
-board that is also driving. A separate check watches for **slip**: the wheels report motion and
-two consecutive scans show the same picture, which on this cart is the only honest slip signal
-there is.
+**Calibrate**
 
-`map → odom` is future-dated by 0.5 s, the way AMCL does it, so consumers always have a
-transform for "now".
+```bash
+ros/calibrate.sh --print                               # the checkerboard, A4 at 100 %
+ros/calibrate.sh stereo                                # both lenses and the baseline
+ros/calibrate.sh stereo --images DIR --refit-rotation  # after a remount: the eyes' rotation only
+```
 
-## The map it runs on
+**Watch**: Foxglove on `ws://localhost:8765` with `ros/foxglove/pepin_slam.json`
+(`ros/foxglove.sh check`). The menu-bar app ([apps/macos](apps/macos/README.md)) shows both
+halves' health and has the red button.
 
-The live map is RTAB-Map's loop-closed grid (see *One map, three sensor modes*); the board keeps
-the last grid it adopted on disk. What follows is the offline pipeline the first maps were built
-with, and the measurement of what each stage is worth. That map was built once, from a recorded
-drive, and then frozen. The 33 m lap below returned to
-its exact starting point, so the distance between the end of each estimated path and its start
-is that method's honest error.
+The full operating manual is [ros/README.md](ros/README.md): deploying a change, the restart
+checks, the feature flags, recording, the model services and the board's budget.
+
+## How a goal runs
+
+1. `ros/goto.sh` writes one JSON line to the goal server beside Nav2. No process starts on the
+   board, so the cart leaves at once.
+2. The goal server looks the name up in the places book, which rides RTAB-Map's graph nodes. It
+   numbers the run, opens the tape (which already holds the last 15 s of every topic) and sends
+   the pose to Nav2.
+3. Smac Hybrid-A* (the saved pick; `ros/goto.sh planner NAME` swaps it) plans with the cart's
+   true footprint, and MPPI follows the plan at 10 Hz. The local costmap is in `odom`; the
+   global costmap reads RTAB-Map's `/map`.
+4. `/cmd_vel` crosses to the board. The C++ base bridge hands it to the base server, which
+   applies it at 50 Hz next to the UART.
+5. Coming back: the EKF fuses the wheels, the gyro, the stereo odometry and the lidar's
+   scan-to-scan odometry into `odom -> base_link`. RTAB-Map's `map -> odom` corrects it.
+
+The costmaps hear the lidar, the three ToF fans and the camera. The camera reaches them through
+the TSDF volume, so a single bad stereo frame cannot paint a wall.
+
+## The map it started from
+
+The first map was built offline from one recorded 33 m lap that returned to its start. Each
+stage cut the closing error: wheel odometry alone ended 8 m away, correlative scan matching
+0.73 m, and pose-graph loop closure 5 cm (`scripts/build_map.py`, `src/pepin/slam.py`,
+`posegraph.py`). The live map is RTAB-Map's now.
 
 | Wheel odometry only | + correlative scan matching | + pose-graph loop closure |
 | --- | --- | --- |
 | ![lap3, odometry only](docs/figures/lap3_odometry_only.png) | ![lap3, scan matched](docs/figures/lap3_scan_matched.png) | ![lap3, loop closed](docs/figures/lap3_loop_closed.png) |
-| path ends 8 m from the start | 0.73 m | **0.05 m** |
-
-Left: every scan placed where the encoders say the robot was — carpet slip over-counts turns and
-dead reckoning wanders off by metres. Middle: each keyframe corrected by the correlative matcher
-against the map built so far (`src/pepin/scanmatch.py`) — straight walls, rooms, doorways, and
-the accumulated drift still there. Right: keyframes as pose-graph nodes, matches as edges,
-revisits detected and verified (`src/pepin/slam.py`), Gauss-Newton over SE(2) with the start
-pinned (`src/pepin/posegraph.py`) — 5 cm.
-
-## Perception and costmaps
-
-**LD19 lidar**, 10 Hz, 455 beams, mounted upside down at the height `config/lidar.json` carries
-(0.383 m, floor to the middle of the window, tape-measured 2026-09-12) with a yaw of −87.5°. That
-file is the only place the height is written: every band derived from it reads the mount. The
-driver
-emits a counter-clockwise scan for an upright sensor, so the static transform carries a roll of
-π to mirror it back. A box filter removes the cart's own hull plus the contact band — those
-returns are its posts and cables, they travel with it, and the costmap used to turn them into a
-wall that made every in-place turn a collision.
-
-**Three VL53L1X time-of-flight sensors** (front, left, right) look where the lidar's single
-horizontal slice cannot: at the height of a shoe, a cable, a cat. Medium ranging, ~14 Hz each.
-Each is believed only as far as its own 27° cone stays off the floor — 0.96 m for the front
-sensor at 0.27 m — because beyond that a grazing return off the carpet is indistinguishable from
-a wall. A real return is held for 1.2 s so one dropped frame cannot erase a mark the sensor just
-made, and a sensor that dies is re-addressed and re-initialised by systemd before every restart.
-
-**The footprint is the true polygon**: 0.0625 m front, 0.30 m rear, 0.275 m half-width, with
-`footprint_padding: 0.0`. Nav2's 1 cm default padding was silently in force and it is what made
-the cart timid — a centimetre of phantom hull in front of a bumper that is only 6.25 cm ahead of
-`base_link` turned "parked against the table" into "in collision". Bumper-to-furniture parking is
-the working case, not the edge case.
-
-**An 8 cm contact band** around that polygon is hidden from the costmaps by both sensors that
-could fill it: the lidar's box filter cuts it out, and the ToF publish anything inside it below
-their own `min_range`, which the range layer neither marks nor clears
-(`pepin.footprint.CONTACT_BAND_M`). What the cart is parked against is contact, not an obstacle —
-a mark inside the band lands in the very cells of the footprint outline that the controller checks
-first, and one such cell refused every command, including the one that drives away (231 s beside
-the printer, run 0087). 8 cm is 1.5 cells at 5 cm, so a mark just outside the band never shares a
-cell with the outline, and anything beyond is still a wall.
-
-**Local costmap**: 3×3 m rolling window at 5 cm, updated at 5 Hz in the *map* frame (a slipping
-wheel feeds `odom` a metre of motion the robot never made). Layers: the lidar obstacle layer,
-then one range layer *per ToF sensor* — one shared layer let the front sensor clear the marks the
-side sensors had just written wherever the cones overlap — then inflation at 0.45 m / 5.0.
-
-**Global costmap**: the static map at 2 Hz — at 0.5 the plan still ran through a person for two
-seconds after they walked in — inflation 0.55 m / 2.0, and the ToF layers are in here too,
-because a plan is what routes *around* an obstacle and a sensor whose returns never
-reach the planner can only ever stop the robot. `track_unknown_space` is false and planners may
-cross unknown cells: the survey does not cover every corner of the flat, and a cell nobody
-looked at is floor until the lidar says otherwise — a robot must always be able to plan its way
-out of where it already stands.
-
-**What the map cannot explain is not a costmap's business** (`src/pepin/dynamic.py`). The tracker
-holds the pose and the map, so it is what can tell a return the map accounts for from one it
-does not — a person, a moved chair, a bag on the floor. That answer is spent on the pose and
-nowhere else: those returns do not score the scan match (`explained_vote`), and a near scan full
-of them while the walls beyond still fit is a person beside the cart rather than a lost cart.
-How far a mapped obstacle's explanation reaches is the `map_grow` flag, 0.15 m.
-
-For the costmaps a new object is simply the cell the beam found: the lidar's own layer marks it
-and the lidar's own rays clear it when it leaves. Until 2026-09-14 the tracker also painted a
-lethal ring of a standing person's toe reach around every such return and published it as
-`/dynamic_obstacles`. It was an overfit to one obstacle and it was redundant besides — the marks
-went into the lidar's own layer, at cells the scan had already marked from the same returns —
-and it cost real driving: a 70 cm gap between two strips of tape read 58 cm lethal-to-lethal and
-took four minutes of recoveries, where the same gap with the rings off took 36 s.
-
-## Planning and control
-
-**Hybrid-A\*** plans the cart, not a point, and that is why it drives. `base_link` sits at the
-front axle, so the hull reaches 6.25 cm ahead of it and 27.5 cm to either side; Nav2's point
-planners — NavFn, Smac 2D, Theta\* — keep their path the inflation's inscribed radius from a lethal
-cell and no farther, which on this shape is 6 cm. The plan read as clear while it routed the
-centre of a 55 cm cart past a standing person's shins at 6 cm, and a wheel took their toes.
-Widening that band is not the fix: it makes every start parked against furniture unplannable, and
-parked against furniture is the working case here. Smac's Hybrid-A\* checks the true polygon at its
-own heading on every expansion, so the width is in the plan itself and a docked start stays legal.
-
-It searches a Reeds-Shepp motion model with a 0.20 m minimum turning radius: arcs instead of
-pivots, and a plan may leave a dock with a short reverse cusp — which is why it runs with its own
-controller, `FollowPathRS`, the same RPP with `allow_reversing` on, since plain RPP will not drive
-a cusp. A 3.9 m leg to the printer took 34 s with 1% of the time spent turning in place, against
-35% under the point planners.
-
-**The rest stay selectable per run** — `ros/goto.sh planner navfn|theta|smac|lattice|hybrid` picks
-the planner (under the goal server's default `mppi` controller one controller follows them all;
-the `rpp` flag value pairs each with its own RPP), and the goal server remembers the choice across
-a restart, so no drive is credited to a planner that never ran:
-
-| Plugin | What it gives |
-| --- | --- |
-| `Hybrid` — Smac Hybrid-A* (in use) | the true polygon checked at every expansion, Reeds-Shepp arcs, a reverse out of a dock |
-| `GridBased` — NavFn | grid search, a point robot, never refuses a start cell |
-| `Smac2D` | A* with costmap cost in the metric and a smoother after |
-| `ThetaStar` | any-angle: long straight segments, which is what a cart that turns in place wants |
-| `SmacPlannerLattice` | a state lattice on the diff-drive control set — real motions, including turning on the spot |
-
-**Behaviour tree** (`ros/params/pepin_nav_to_pose.xml`): the stock replanning-and-recovery tree
-with three changes. The chosen planner is the **only** planner — NavFn used to stand behind it and
-took over whenever Hybrid-A* refused, and Hybrid refuses exactly when the cart does not fit: NavFn
-then squeezed a 12 cm disc through the gap and the wheel went over the toes five times in one leg
-(run 0113). A refusal now buys a recovery, or a wait for the person to move, never a smaller
-robot: retreat 0.15 m, then wait three seconds, then spin, one answer per retry and five retries
-before the goal goes to the outer round robin. Retreat comes first because a start the planner
-refuses is a cart parked on the map's own furniture, which waiting does not move — and because a
-cart wedged between the sofa and the table cannot spin, while the spin is exactly the move that
-slips the wheels on carpet. Stale costmap cells are cleared on a timer, local and global.
-
-**Progress** is judged by `PoseProgressChecker`: 0.15 m *or* 0.5 rad within 6 s. A legal pivot in
-place is progress; a translation-only checker aborted goals mid-turn. Goal tolerance is 0.10 m
-and 0.20 rad.
-
-**Controller: Regulated Pure Pursuit** at 10 Hz — a fraction of MPPI's CPU on four A53 cores, and
-enough for a cart at 0.30 m/s. Lookahead 0.40–0.80 m, velocity-scaled. Speed is regulated by
-curvature and by costmap cost, with the controller's cost model carrying the local inflation
-layer's own scaling factor (5.0) so it reads its own clearance correctly instead of crawling past
-walls for no reason. **It keeps its own collision check** (`use_collision_detection: true`), and
-that took two failures to settle: RPP judges the current pose first, so one lethal cell against
-the footprint outline refuses every command including the one that drives away, and turning the
-check off cured that and drove the cart into a person standing in its path (runs 0090–0091) —
-the planner replans at 1–2 Hz and cost regulation only crawls, neither stops. The check stays;
-the deadlock is gone at its source, the contact band that keeps what the cart is parked against
-out of the outline's own cells. Beyond that band obstacles are cost: the planner routes around
-lethal cells, the regulated speed crawls near them, and the recovery behaviours keep their own
-collision checks, each with a time allowance of about twice its nominal duration so a blocked
-retreat fails instead of pushing.
-`rotate_to_heading_min_angle` is 1.2 rad: anything under 69° is driven out
-as an arc rather than pivoted, because `base_link` sits 0.30 m ahead of the rear corners and a
-pivot sweeps 0.41 m — the arc is what a person does in a tight corner. Pivots, when they happen,
-run at 0.5 rad/s.
-
-**Velocity smoother**: 0.30 m/s ceiling, 0.5 m/s² acceleration, 1.0 m/s² braking. The base's cap,
-the controller's target and the smoother's ceiling are one number, held equal by a test.
-
-## Every drive is recorded
-
-There is no "record this run" flag. Runs are numbered (`0001`, `0002`, …) and every goal writes
-a tape, because any run may turn out to be the one worth showing.
-
-A tape is a `.jsonl` file that opens with a **15 s prelude** — the recorder keeps the last seconds
-of every topic in memory, so the file starts before the command did and the initial turn, the
-part actually worth watching, is on it. It carries the raw lidar scans, wheel odometry, EKF
-odometry, gyro, the tracker's pose and fit, the plan, the local costmap, the three ToF ranges and
-the commanded twist. The costmap matters: it is the proof of what the robot itself believed —
-which cells it held for occupied when it refused to move.
-
-`ros/goto.sh` leaves every drive on the Mac: the numbered tape the recorder beside Nav2 wrote,
-the goal's own log, Nav2's reasons and the behaviour tree's transitions as they happened, and the
-camera clip (`ros/clip.sh`: ffmpeg copying ustreamer's MJPEG stream into mkv, no re-encoding). A
-clip that does not start is said aloud and started once more, and the drive ends with the clip's
-size or with a loud line saying there is none. The exit status is the verdict: 0 only for a goal
-reached.
 
 ## Hardware
 
-- **IKEA RASKOG cart**, differential drive: 2× Feetech STS3215 in wheel mode, 0.125 m wheels,
-  0.505 m track, 4096 ticks/rev, one serial bus
-- **Orange Pi Zero 3** (Armbian, Debian trixie): 4× Cortex-A53 at 1.4 GHz, 1.5 GB RAM — the whole
-  autonomy runs here
-- **LDRobot LD19** 360° lidar under the mid shelf, upside down at 0.383 m (tape, 2026-09-12)
-- **3× VL53L1X** time-of-flight sensors: front at 0.27 m, left and right at ~0.16 m, all level
-  and facing forward
-- **MPU6050** IMU on I²C, bolted flat over `base_link`; only its yaw rate is used
-- **Overview camera** served as MJPEG by ustreamer
-- Single 18 V tool battery → 12 V servo rail + two isolated 5 V converters, inline XT60 switch
+- IKEA RASKOG cart, differential drive: 2x Feetech STS3215 in wheel mode, 0.125 m wheels, 0.505 m
+  track, one serial bus
+- Orange Pi Zero 3 (Armbian), 4x Cortex-A53, 1.5 GB
+- LDRobot LD19 360° lidar, mounted upside down at 0.383 m
+- 3x VL53L1X time-of-flight rangers (front, left, right) and an MPU6050 IMU, on one I2C bus
+- Global-shutter stereo module (2x 800x600, 61 mm baseline) on a 2-DoF pan/tilt neck
+- reSpeaker XVF3800 microphone array, with the speaker on its jack
+- 18 V tool battery: a 12 V servo rail and two isolated 5 V rails
+- A 6-DoF SO-ARM101, not yet part of the stack
 
-The cart also carries a 6-DoF SO-ARM101 and a 2-DoF neck for the phone that will be the robot's
-face; neither is part of the navigation stack described here.
+Footprint 0.0625 m ahead of the axle, 0.30 m behind it, 0.275 m half-width. The planners use
+it with zero padding, because parking against furniture is the normal case.
 
-## Software
-
-**On the board**, one Docker container (`ros:jazzy-ros-base`, pinned by digest) with Nav2 1.3.12,
-`slam_toolbox`, `robot_localization`, `laser_filters`, `foxglove_bridge`, the LD19 driver built
-from source, and our `pepin_bringup` (Python) and `pepin_base_cpp` (C++, ~25 MB against the Python
-bridge's ~190) packages. Host systemd units outside the container: `pepin-base` (wheels, :3336),
-`pepin-tof` (:3335), `pepin-camera` (ustreamer, :8080), `pepin-ros` (the container itself),
-`ser2net` (:3333, the servo bus) and `tof-init`.
-
-**On the laptop**: Nav2 with the goal server (`ros/laptop.sh nav`), Foxglove Studio, and
-`ros/goto.sh` and its siblings — short shell scripts, one job each, no client to boot.
-
-**The Python library** (`src/pepin`, Python 3.12, numpy) is imported by the ROS package and never
-imports it back. It holds the board servers, the algorithms (scan matching, occupancy mapping,
-pose graph, localisation, the timeline, slip detection, ToF horizon, the hull, what the map
-cannot explain, places) and the tape. Every
-decision that can be pure is pure, which is why it can be tested without a robot: the unit tests
-need no hardware. A pre-commit hook runs `bash -n`, `ruff` and `mypy --strict` in seconds; a
-pre-push hook runs the whole unit suite in parallel with an 86% coverage floor; hardware tests
-live in `tests/hardware` behind `--hardware`.
-
-## Quick start
-
-```bash
-# once per clone
-uv sync
-git config core.hooksPath .githooks
-uv run pytest && uv run mypy && uv run ruff check .
-
-# the robot
-ros/build-image.sh --ship               # build the board's sensor image on this Mac, load it on the board
-ros/push.sh src/pepin/x.py              # a change to the running robot: rsync it, kick the nodes that import it (--dry-run: the plan)
-ros/sync.sh                             # the whole code tree to the board, nothing restarted (--restart: the stack too)
-ros/board.sh kick tof_bridge           # one board node from the synced sources (~10 s), the stack untouched
-ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
-ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
-
-# driving
-ros/laptop.sh nav                       # Nav2 on this Mac, the goal server on 127.0.0.1:3337
-ros/preflight.sh                        # ready for a goal? pose, lidar, planner, snapshots, one plan
-ros/goto.sh printer                     # go to a named place; Ctrl-C cancels
-ros/goto.sh -1.0 0.3 90                 # ...or to map coordinates, with a heading
-ros/goto.sh mark sofa                   # name the spot the robot is standing on
-ros/goto.sh where | places | cancel
-ros/goto.sh planner hybrid              # swap the planner for the next run
-ros/goto.sh printer && ros/goto.sh home # printer, then home
-ros/stop.sh                             # the red button: the base's stop, the cancel, believed from the wheels
-
-# a new map
-ros/teleop.sh lap                       # a recorded drive by hand, fetched here when it ends
-ros/map.sh save flat3                   # freeze RTAB-Map's grid into ros/maps/flat3.{pgm,yaml}
-```
-
-Watch it in Foxglove (`brew install --cask foxglove-studio`) on `ws://localhost:8765`, the laptop's bridge: a 3D panel
-with `/map`, `/scan`, `/tf`, both costmaps and `/plan`.
+Compute cost: the $35 board on the cart and the MacBook. No cloud GPU; the voice loop calls the
+Gemini API.
 
 ## Repo layout
 
 ```
-src/pepin/     the Python library: board servers (base, ToF), drivers and links, and the
-               algorithms — mapping, scanmatch, posegraph, slam, timeline,
-               watch, tof_horizon, dynamic, footprint, places, tape, deployment
-ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, goal server,
-               run recorder, launch files), pepin_base_cpp, params/, maps/,
-               tools/, Dockerfile, and the shell scripts that drive the robot
-board/         Orange Pi: systemd units, ser2net, udev rules, ToF init
-config/        base geometry and speed caps, lidar and ToF mounts (JSON)
-scripts/       laptop entry points: build_map, dashboard, health_check, calibration
-tests/         unit (fast, no robot) and hardware (--hardware) tiers
-docs/          figures
+src/pepin/     the Python library: board servers (base, ToF, audio), clients, the depth,
+               volume and lean models, places, tapes, the LLM tools; imported by ros/, never
+               the reverse
+ros/           pepin_bringup (nodes, launch files), pepin_base_cpp (the C++ base bridge),
+               params/, Dockerfiles, the shell one-liners, tools/, replay/, sim/, xfeat/
+board/         the board's systemd units, udev rules, ser2net, ToF init, chrony, overlays
+apps/macos/    the menu-bar app
+config/        geometry, mounts, calibrations, knobs and the board's process manifest (JSON)
+scripts/       laptop entry points: voice, health check, dashboard, calibration, map building
+tests/         unit (fast, no robot) and hardware (--hardware)
 ```
 
-## Status
-
-**Working**: the cart drives between marked places on a static map of a real flat, parks against
-furniture, recovers from being carried or pushed by searching the whole map for itself, and
-records every drive with its scans, poses, plan, costmap, log and video.
-
-**Stop reflex**, measured: a person who stepped in 0.51 m ahead at 0.30 m/s was passed to the
-controller within 0.3 s and the cart stopped 0.14 m short; the budget is now a 5 Hz local
-costmap, a 1.5 s collision look-ahead (0.45 m) and 1.5 m/s² braking, so the refusal comes at
-the first sight of the obstacle.
-
-**Nav2 on the Mac** (2026-10-01): the planner, the controller, the costmaps, the behaviour tree
-and the goal server run in one container on the laptop (`ros/laptop.sh nav`); the board is a
-sensor box whose scans, ToF and odometry cross the WiFi to them, and the velocity comes back on
-`/cmd_vel`. The thin-client split before it (the board's reflexes, the laptop's planner, a link
-watch between them) is in the git history.
-
-**The board's memory**: ROS 2 Jazzy's binaries load `liblttng-ust` into every node through
-`tracetools`, and it takes 128 MB per process before a single tracepoint fires; nine processes on
-a 1.5 GB board lived in a full zram swap and froze under load. The image rebuilds `tracetools`
-with its tracepoints excluded, and the stack now leaves 890 MB free.
-
-**Camera SLAM** (in progress): RTAB-Map runs on the laptop (`ros/laptop.sh vslam`; its database
-survives restarts, `--fresh` deletes it first) from the
-neck camera's MJPEG stream and the lidar scans over the bridge, registers with ICP on the scans
-and closes loops on what the camera sees, in its own `rtabmap` frame beside the tracker's map;
-its grid grows in Foxglove while the cart drives on the static map.
-
-**Camera SLAM beside the tracker** (`ros/laptop.sh vslam`, on the laptop): RTAB-Map builds a
-pose graph from the lidar scans (ICP), the tracker's pose (its "odometry": a node lands where the
-lidar says the cart is, to a centimetre) and the camera. The camera does two
-things a 2D lidar cannot. It recognises places: a bag of ORB words names the node a frame looks
-like, ICP on the two scans gives the transform, and the graph closes the loop (nine closures on
-one printer-home-printer round trip). And it measures height: a monocular depth network (Depth
-Anything V2, metric, on the laptop's CPU at three to four frames a second) turns each frame into
-a depth image, and the lidar sets its scale — the scan, carried to the frame's moment through
-the odometry (a 100 ms older scan is 2 degrees stale at 20 deg/s), projected into the image names the true
-depth at a hundred pixels a frame, and those pixels fit the network's error as an affine law in
-inverse depth (1/z = a/D + b), fitted on the beams of the last few minutes of frames together (one
-frame's beams span too little depth to tell a shift from a scale, and a law that follows the view
-layers a wall) and applied to the whole image — the
-network sees the far end of a room too far by more than the near end, which one scale cannot say
-and a shift can: scaled at the beams' row alone, the wall a metre higher was off by half a metre
-(the network alone saw the
-room 1.5-2x too far). The camera's tilt and field of view are measured, not read off a
-datasheet: the lens with a checkerboard (45 views, 0.23 px RMS: 82.9 degrees, and the datasheet's
-70 placed the image's edges 8 degrees wrong), the tilt off the neck's own encoder against four
-still frames of one room (23.8 degrees), the height with a tape (1.203 m). Frames carry the board's capture
-time (ustreamer's own stamp, the lidar's clock), not the moment the laptop decoded them. RTAB-Map
-fuses the depth with the scans into 5 cm voxels: table tops, seats, cables on the floor enter the
-map the lidar's plane misses; its loop-closure correction is published as `odom -> rtabmap`, so
-the voxels and the cart stay together. The operator's Foxglove connects to the laptop
-(`ws://localhost:8765`, layout `ros/foxglove/pepin_3d.json`) for the 3D view; the board's topics
-reach it over the bridge, so the cloud never crosses the WiFi.
-
-**The depth drives too**: the same depth, cut between 8 cm and 1.3 m above the floor and folded
-onto the plane, goes to the board as a laser scan (`/depth_scan`, ±40 degrees, three times a
-second, a few kilobytes) and feeds a costmap layer of its own, marking and clearing like the
-lidar: a table top stops the cart the way a wall does. One layer per sensor, so the lidar's rays
-can no longer erase what only the camera saw — and because nothing else can erase it either, the
-camera layer is switched off until a drive measures the difference (`ros2 param set
-/local_costmap/local_costmap camera_layer.enabled true`, live, no restart).
-
-**One surface, not a pile of clouds**: RTAB-Map assembles its map by concatenating one cloud per
-node, so two frames of a wall that disagree by a few centimetres are two walls. The frames are
-therefore also fused on the laptop into a truncated signed distance field (`pepin.tsdf`, plain
-numpy: 5 cm voxels over the served map, a frame in 30 ms): each voxel keeps one distance to the
-nearest surface and a weight, an observation moves it by a weighted average, and near
-observations weigh more than far ones ((2 m / d)², capped), so the model sharpens when the cart
-comes close and does not blur back when it leaves. Before a frame is fused, its points in the
-lidar's height band — exact by construction — are turned about the cart by the yaw that seats
-them best on the model (frame-to-model, ±4 degrees, sub-degree), so the tracker's heading jitter
-at rest never reaches the model. (A slowed copy of the tracker's map-to-odom correction can
-place the frames instead — it keeps a turn in place clean, but lags after a drive across the
-room and lands the drive's frames rotated against the lidar, so it is off by default.) Pixels on an object's edge — where the network blurs the object
-into what stands behind it and the pixel lands in mid-air — are dropped before anything else
-sees them. The floor is a second anchor: pixels whose depth agrees with the
-floor plane (the camera's height and tilt, the cart's lean from the accelerometer) snap to it.
-`/fusion/surface` is the field's zero-crossing, read between voxels; it sits in the 3D layout
-beside RTAB-Map's cloud, and every piece is a live switch (`ros2 param set /depth_fusion align
-false`, `/depth_stream floor_anchor false`) so each can be judged alone.
-
-**Next**: the tracker's heading refined below its 5 cm cells and held at rest, the depth scan
-into the global costmap as well, localisation by picture at start-up and in the tracker's
-symmetric corners, and places named from what the camera sees.
+pre-commit runs `bash -n`, ruff and `mypy --strict`. pre-push runs the whole unit suite in
+parallel, with a coverage floor and the flags-doc check.
 
 ## Credits
 
 Built on the open-source [XLeRobot](https://github.com/Vector-Wangel/XLeRobot) platform
-(dual-wheel variant) and the [LeRobot](https://github.com/huggingface/lerobot) ecosystem
-for arm calibration.
+(dual-wheel variant) and the [LeRobot](https://github.com/huggingface/lerobot) ecosystem for arm
+calibration. RAFT-Stereo is vendored from
+[princeton-vl/RAFT-Stereo](https://github.com/princeton-vl/RAFT-Stereo) (MIT).
 
 License: to be added.
