@@ -30,6 +30,7 @@ from pepin.stereo_depth import (
 )
 from pepin.stereo_host import (
     CONTENT_DISPARITY,
+    CONTENT_DISPARITY_Z,
     CONTENT_PAIR,
     PairError,
     RaftSettings,
@@ -80,6 +81,23 @@ def test_a_nan_disparity_stays_a_nan() -> None:
     disparity[0, 0] = 10.0
     back = unpack_disparity(*pack_disparity(disparity))
     assert back[0, 0] == pytest.approx(10.0) and np.isnan(back[0, 1:]).all()
+
+
+def test_the_compressed_disparity_is_the_same_bits_in_a_third_of_the_bytes() -> None:
+    """CONTENT_DISPARITY_Z is lossless: every float16, NaN included, comes back bit for bit as the
+    plain reply carries it, and a smooth field (what RAFT answers) shrinks well under half."""
+    rows = np.linspace(2.0, 90.0, 60, dtype=np.float32)[:, None]
+    disparity = np.repeat(rows, 80, axis=1) + np.linspace(0.0, 1.0, 80, dtype=np.float32)[None, :]
+    disparity[5, 7] = np.nan
+    plain_headers, plain = pack_disparity(disparity)
+    headers, body = pack_disparity(disparity, compress=True)
+    assert headers["Content-Type"] == CONTENT_DISPARITY_Z and len(body) < 0.5 * len(plain)
+    a, b = unpack_disparity(plain_headers, plain), unpack_disparity(headers, body)
+    assert np.array_equal(a.view(np.uint32), b.view(np.uint32)) and np.isnan(b[5, 7])
+    with pytest.raises(StereoHostError, match="does not inflate"):
+        unpack_disparity(headers, body[:-4] + b"junk")
+    with pytest.raises(StereoHostError, match="float16"):
+        unpack_disparity({**headers, "X-Width": "81"}, body)
 
 
 def test_what_the_host_refuses_and_what_the_client_refuses() -> None:
@@ -215,6 +233,36 @@ def test_a_pair_goes_through_the_host_and_comes_back_as_a_disparity(
     assert set(health["stereo"]["ms"]) == {"decode", "infer", "pack", "total"}
     assert "stereo (fake/7 on mps, ready): 2 pairs" in server.report()
     client.close()
+
+
+@pytest.mark.slow
+def test_the_host_compresses_only_for_a_client_that_asks(
+    host: tuple[str, FakeRaft, DepthServer],
+) -> None:
+    """Either side may be the older one: a request without the Accept gets the plain float16 it
+    always got, and the client that asks gets CONTENT_DISPARITY_Z — the same disparity."""
+    import http.client
+
+    url, _net, server = host
+    headers, body = encode_pair(_eye(6, 9), _eye(6, 9))
+    kinds = []
+    for accept in (None, CONTENT_DISPARITY_Z):
+        conn = http.client.HTTPConnection("127.0.0.1", server.server_address[1], timeout=2.0)
+        conn.request(
+            "POST",
+            "/disparity",
+            body=body,
+            headers=headers | ({"Accept": accept} if accept else {}),
+        )
+        response = conn.getresponse()
+        response.read()
+        kinds.append(response.getheader("Content-Type"))
+        conn.close()
+    assert kinds == [CONTENT_DISPARITY, CONTENT_DISPARITY_Z]
+    plain, packed = RemoteDisparity(url, compressed=False), RemoteDisparity(url)
+    assert np.array_equal(plain(_eye(6, 9), _eye(6, 9)), packed(_eye(6, 9), _eye(6, 9)))
+    plain.close()
+    packed.close()
 
 
 @pytest.mark.slow
