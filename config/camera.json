@@ -72,6 +72,12 @@
       "link": "camera_link",
       "optical": "camera_optical"
     },
+    "exposure": {
+      "mode": "auto",
+      "exposure_ms": 8.0,
+      "gain": null,
+      "note": "What the board's camera service sets with v4l2-ctl before ustreamer starts (pepin.camera_controls, board/pepin-camera.service ExecStartPre; ustreamer itself changes no exposure). auto: the camera's own defaults, as it ran before this block existed. manual: exposure_ms fixed (the control counts 100 us) and gain when not null (the camera's raw units; ros/exposure.sh shows its range). capped: auto, never longer than exposure_ms where the camera offers shutter priority, else one frame period (it says which). Values the camera does not offer are refused, never clamped. Try one live, nothing restarted: ros/exposure.sh show | auto | manual MS [GAIN] | capped MS; then write it here, copy this file to /opt/pepin/config/ and restart pepin-camera. With a manual exposure set every gated node's gate_exposure_s to it (ros/gaze_gate.sh gate_exposure_s SECONDS). Unmeasured: the module's control set (read it with ros/exposure.sh show), its auto exposure indoors, and the blur at a known head rate."
+    },
     "net": {
       "weights": "models/raftstereo-realtime.pth",
       "iters": 7,

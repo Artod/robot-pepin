@@ -90,6 +90,7 @@ HOST_SERVICES: dict[str, str] = {
 
 # Modules started per call by a script or by hand (nothing long-lived holds them).
 PER_CALL = (
+    "pepin.camera_controls",  # pepin-camera's ExecStartPre and ros/exposure.sh, once each
     "pepin.census",
     "pepin.goal_link",
     "pepin.push",
