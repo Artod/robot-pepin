@@ -66,7 +66,7 @@ check() {
         [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
         line true "$CONTAINER is up since $started (it carries the bridge)"
     else
-        line false "$CONTAINER is not running — nothing serves Foxglove (ros/laptop.sh vslam --neck)"
+        line false "$CONTAINER is not running — nothing serves Foxglove (ros/laptop.sh vslam)"
         started=""
     fi
 

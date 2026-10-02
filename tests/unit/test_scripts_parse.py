@@ -1,7 +1,7 @@
 """Every entry point answers --help: its imports resolve and its parser builds.
 
-The servo bench tools (jog, setup_motor_id) import lerobot, which pulls torch; they are left
-out to keep the unit tier fast.
+The servo bench tools (jog, calibrate_neck, setup_motor_id) import lerobot, which pulls torch;
+they are left out to keep the unit tier fast.
 """
 
 import json
@@ -15,7 +15,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PAN_REFERENCE = json.loads((REPO / "config/neck.json").read_text())["reference"]["pan_ticks"]
-BENCH = {"jog.py", "setup_motor_id.py"}
+BENCH = {"jog.py", "calibrate_neck.py", "setup_motor_id.py"}
 SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
 

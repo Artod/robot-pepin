@@ -44,8 +44,8 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 The lidar belongs to the ROS container; its ser2net port (3334) stays commented out in
 `ser2net.yaml`, for bench work with the container stopped. The base server is the only client of
 :3333 while it runs: bench tools that talk to the servo bus directly (`scripts/jog.py`,
-`scripts/setup_motor_id.py`) need `systemctl stop pepin-base` before and `systemctl start
-pepin-base` after.
+`scripts/setup_motor_id.py`, `scripts/calibrate_neck.py`) need `systemctl stop pepin-base` before
+and `systemctl start pepin-base` after.
 
 ## Files and where they go
 
