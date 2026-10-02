@@ -42,7 +42,7 @@ odometry and the map stay). See ros/README.md, "Driving".
 Read-only asks, each answered as a notification: **Where** (the goal server's `where`: the
 cart's pose from `map -> base_link`, the planner, the lidar rate) and **Neck home**
 (`{"cmd": "neck_home"}` to the base server on the board, port 3336: the head returns to the
-reference pose of `config/neck.json`, then torque off; refused while the wheels turn —
+reference pose of `config/neck.json`, then torque off —
 `ros/neck.sh home` from the terminal).
 
 Three actions move the cart or the head, each in its own Terminal window so the output is

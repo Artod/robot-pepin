@@ -41,9 +41,9 @@ built for, and a resized picture would cost the baseline its meaning.
 It also broadcasts the static ``base_link -> camera_link -> camera_optical`` and
 ``base_link -> laser`` transforms from the mounts of ``config/`` (:class:`pepin.mounts.Mounts`),
 so RTAB-Map knows where the pictures were taken from — the camera's own edge only while
-``static_camera_tf`` is true (``ros/laptop.sh vslam --fixed-head``): by default the board's neck
-node publishes base_link -> camera_link live from the servo encoders (pepin_bringup.neck_state,
-ros/feature.sh neck on) and this side must not publish the same edge.
+``static_camera_tf`` is true (``ros/laptop.sh vslam --fixed-head``): by default the board's base
+bridge publishes base_link -> camera_link live from the neck's encoders, at every state line of
+the base server, and this side must not publish the same edge.
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
@@ -151,15 +151,14 @@ FLAGS = FlagSet(
         "static_camera_tf",
         False,
         description="base_link -> camera_link is broadcast from here (ros/laptop.sh vslam"
-        " --fixed-head); off, the board's neck node publishes that edge live from the servo"
-        " encoders (neck_state, flag neck_tf), because two publishers of one edge fight",
-        why="off since 2026-10-02 because the neck node runs on the board by default"
-        " (PEPIN_NECK=true, every vslam start since was --neck); an ownership rule rather than a"
-        " tuning — one edge, one publisher. Not live because a static transform cannot be"
-        " withdrawn once it is sent, so the choice is made at start",
-        on_when="when the neck does not publish the edge: a fixed head, or the neck node down",
-        off_when="whenever neck_state runs with neck_tf on — at start, since this one cannot be"
-        " taken back",
+        " --fixed-head); off, the board's base bridge publishes that edge live from the neck's"
+        " encoders, because two publishers of one edge fight",
+        why="off since 2026-10-02 because the board publishes the edge whenever the neck"
+        " answers (in the base bridge since the same day, before that the neck_state node); an"
+        " ownership rule rather than a tuning — one edge, one publisher. Not live because a"
+        " static transform cannot be withdrawn once it is sent, so the choice is made at start",
+        on_when="when the board does not publish the edge: a fixed head with no neck servos",
+        off_when="whenever the robot has its neck — at start, since this one cannot be taken back",
         live=False,
     ),
 )
@@ -435,7 +434,8 @@ class CameraStream(Node):
             )
         else:
             self.get_logger().info(
-                "base_link -> camera_link is the board's (neck_state): not broadcast from here"
+                "base_link -> camera_link is the board's (the base bridge, from the neck's"
+                " encoders): not broadcast from here"
             )
         return transforms
 

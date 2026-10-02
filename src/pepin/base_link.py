@@ -73,7 +73,7 @@ DEADMAN_S = 0.5  # the board stops the wheels when no twist arrived for this lon
 # How often the base server broadcasts a state line: every tick of its 50 Hz loop since 2026-10-01
 # (20 before, which its scheduler delivered as 16.7). Each line becomes one /odom on the board.
 STATE_HZ = 50.0
-NECK_MOVE_WAIT_S = 8.0  # a neck move gives up after 3 s on the board; its reply comes a bit later
+NECK_MOVE_WAIT_S = 8.0  # the board gives a move 3-5 s at 120 deg/s; its reply comes a bit later
 NECK_ERROR_SHOWN_S = 2.0  # a refused jog is reported for this long after it arrived
 
 
