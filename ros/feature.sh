@@ -17,12 +17,16 @@
 #   ros/feature.sh neck on|off   the neck's encoders as /neck/state and the live base_link -> camera_link
 #                                (a Python node, ~150 MB); the laptop's SLAM must then run with
 #                                `ros/laptop.sh vslam --neck`, or two nodes publish that one edge
+#   ros/feature.sh board_bag on|off
+#                                the board's raw sensors recorded on the board, always, in minute
+#                                MCAP files under maps/board_rec (pepin.board_bag): 20 GB cap,
+#                                10 GB of the card kept free; off by default
 # Each change restarts the one launch process (about 60 s); the robot does not move.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck}"; STATE="${2:?on | off}"
-case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck | board_bag}"; STATE="${2:?on | off}"
+case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; board_bag) VAR=PEPIN_BOARD_BAG ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
 case "$STATE" in
     on) VAL=true ;;
     off) VAL=false ;;

@@ -34,7 +34,7 @@ namespace pepin
 /// One state line from the base server: where the wheels think they are, and how they feel.
 struct BaseState
 {
-  double stamp_s;    ///< board clock (its time.monotonic) when the line was made
+  double stamp_s;    ///< board clock (its time.monotonic): the middle of the encoder read
   double x;          ///< wheel odometry integrated on the board, odometry frame, metres
   double y;
   double theta;      ///< radians, counter-clockwise from x

@@ -1040,12 +1040,12 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *What:* the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip
   - *Default:* on — on, because the gyro is the heading: the wheels over-report a turn in place by 10-25 % on carpet, and odom0's vyaw — the only other yaw-rate source, live since 2026-09-15 — carries about 4 % of the weight beside it (ros/params/ekf.yaml)
   - *On when:* always, unless the point of the run is what the stack does without a gyro
-  - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (50 Hz)
+  - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (100 Hz)
 - **`odom_publish`** — bool, default on
   - *What:* the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces
   - *Default:* on — on, because /odom is the only source of speed this filter has: odom0 fuses vx and vy at 0.001 (m/s)^2 and, since 2026-09-15, vyaw; ax and ay are off (a mount bias of -0.229 to +0.066 m/s^2 that no covariance can answer), so with /odom silent past the EKF's sensor_timeout of 0.5 s the filter has no velocity measurement left at all
   - *On when:* always, unless the run is about what the stack does with dead wheel odometry
-  - *Off when:* to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's TF lookups, the tracker's dead reckoning — without stopping the base server; unmute and /odom is back on the next state line (20 Hz)
+  - *Off when:* to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's TF lookups, the tracker's dead reckoning — without stopping the base server; unmute and /odom is back on the next state line (50 Hz)
 
 #### `camera_stream`
 
@@ -1510,8 +1510,8 @@ The reasons for each default and each range are in
 `ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (its contract: `test/zupt_contract.cpp`).
 Two numbers stay fixed, because they are structural: the variance on the three velocities the
 update does not claim (1e6: `odom2` fuses none of them, so the EKF never reads it), and how old
-the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 50 Hz a sample
-is that old only after ~50 failed reads in a row).
+the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 100 Hz a sample
+is that old only after ~100 failed reads in a row).
 
 **What the bridge says.** Each change is one log line (`zupt: zupt_rate_hz 10 -> 50, in force at
 the next tick`), each refusal a warning with its reason, and each start or stop of the update a
@@ -1581,6 +1581,30 @@ estimates, marked as such, and a census during a bag drive is what replaces them
 carry `ros-jazzy-ros2bag` and `ros-jazzy-rosbag2-storage-mcap` ([`ros/Dockerfile`](Dockerfile));
 an image built before they were added logs `ros2 bag record` as not found at the first goal and
 the drive goes on unrecorded.
+
+### The board's own recording (`board_bag`, off by default)
+
+Both recorders above write on the laptop, out of what crossed the WiFi, so a stalled link leaves
+its hole in the drive's bag. `ros/feature.sh board_bag on` adds a third, on the board, beside the
+sensors: [`pepin.board_bag`](../src/pepin/board_bag.py) keeps one `ros2 bag record` running for
+as long as the stack does (one zenoh session opened once: a session opened per goal stalled the
+board's delivery, 2026-09-25) and writes one uncompressed MCAP file a minute under
+`/root/pepin-ros/maps/board_rec/<UTC start>/` (`/maps/board_rec` in the container).
+
+- **What**: `/scan`, `/odom`, `/imu/data_raw`, `/odom_laser`, `/zupt`, `/tof/<n>` and
+  `/tof/<n>/scan`, `/neck/state`, `/tf_static`, and `/cmd_vel` and `/vo` as they arrived — every
+  input of the board's EKF, so its output replays from them. No `/tf` (it would pull the laptop's
+  `map -> odom` across the WiFi) and no camera.
+- **The cap**: every 30 s the oldest minute files go while the directory holds more than 20 GB or
+  the card has under 10 GB free; the file being written is never touched, and a card still under
+  the floor with nothing left to delete stops the recorder until there is room. 20 GB is ~38 h at
+  the 0.14 MB/s these topics measure.
+- **Cost** (a network-isolated replica on the laptop, drive 0576 replayed with the wheels at
+  50 Hz and the gyro at 100, scaled by the EKF's measured board/laptop ratio of 4.4): the
+  recorder ~25 % of one A53 core and 70 MB, its supervisor ~0 % and 15 MB. Niced 10, under every
+  sensor. A census with it on replaces these numbers.
+- **Reading it**: each minute file is a whole MCAP (`ros2 bag info FILE.mcap`); fetch with
+  `rsync -a root@10.0.0.187:/root/pepin-ros/maps/board_rec/ ros/maps/board_rec/`.
 
 ## Replay
 
@@ -1745,7 +1769,7 @@ is the whole board.
 | `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `neck_state` | the neck's encoders, and `base_link -> camera_link` behind its flag | hardware-attached | 16 % / 99 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `base_server` | wheels, odometry and the deadman next to the UART (TCP 3336) | real-time, wifi-loss, hardware-attached | 16 % / 27 MB | `pepin-base.service` |
-| `ekf_node` | wheels + gyro + the camera's odometry + the lidar's scan-to-scan odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |
+| `ekf_node` | wheels + gyro + the camera's odometry + the lidar's scan-to-scan odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 35 % / 75 MB (50 Hz, gyro at 100: an estimate, to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `laser_odometry` | each LD19 scan matched against the one before it (rf2o, no map) as `/odom_laser` for the filter | real-time, wifi-loss | 30 % / 105 MB **(estimate, to measure)** | `pepin-ros.service` -> `robot.launch.py` |
 | `tof_server` | the ToF sensors on I2C as a TCP stream (3335) | real-time, hardware-attached | 13 % / 22 MB | `pepin-tof.service` |
 | `ros2_launch` | the launch process that started and respawns the ROS nodes | wifi-loss | 10 % / 105 MB | `pepin-ros.service` ExecStart |
@@ -1753,7 +1777,8 @@ is the whole board.
 | `ustreamer` | the overview camera as MJPEG on 8080 — frames copied, never decoded | hardware-attached | 3 % / 19 MB | `pepin-camera.service` |
 | `docker` | dockerd, containerd and one supervisor per container | wifi-loss | 3 % / 225 MB | `docker.service`, `containerd.service` |
 | `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/teleop.sh` |
-| `bag_record` | `ros2 bag record` writing a recorded drive's MCAP bag (`sometimes`, an estimate) | wifi-loss | 30 % / 120 MB | `ros/teleop.sh NAME` |
+| `bag_record` | `ros2 bag record`: the board's raw-sensor recording (`board_bag`), or a recorded drive's MCAP bag (`sometimes`, an estimate) | wifi-loss | 38 % / 110 MB | `pepin.board_bag`, `ros/teleop.sh NAME` |
+| `board_bag` | the supervisor of that recording: one recorder, minute files capped at 20 GB with 10 GB of the card kept free (`sometimes`) | wifi-loss | 1 % / 25 MB | `pepin-ros.service` -> `robot.launch.py` (`board_bag:=true`) |
 | `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |
 | `foxglove_bridge` | **not expected**: the websocket is being removed, the laptop reads the board through zenoh | - | 0 % | was a component of `sensors_container` |
 

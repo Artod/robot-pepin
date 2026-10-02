@@ -3,7 +3,10 @@
 It talks to the servo bus over the board's own loopback (ser2net on
 127.0.0.1:3333, a stable sub-millisecond hop), ticks at 50 Hz — read the
 encoders, integrate odometry, apply the latest twist — and publishes its
-state to every connected laptop client as JSON lines (:mod:`pepin.base_link`).
+state to every connected client as JSON lines (:mod:`pepin.base_link`), once a
+tick: the board's base bridge turns each line into one /odom, so this is the
+odometry's rate. A state line costs no bus read of its own (the tick read the
+encoders; the servos' temperature rides along at most every 5 s).
 
 Safety lives here, not on the laptop: a deadman stops the wheels when no
 twist has arrived for half a second (wifi froze, the script crashed, the
@@ -48,11 +51,12 @@ import math
 import signal
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
 from pepin.base import LEFT, RIGHT, BusWatchdog, DiffDriveBase, with_suppressed_timeout
-from pepin.base_link import BASE_PORT, DEADMAN_S
+from pepin.base_link import BASE_PORT, DEADMAN_S, STATE_HZ
 from pepin.bus import MotorBus, verify_motors
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
@@ -77,6 +81,10 @@ NECK_JOG_SLOW_DEG_S = 8.0  # a held key with Shift: aiming
 NECK_JOG_DEADMAN_S = DEADMAN_S  # no jog message for this long: the head stops, torque off
 NECK_JOG_LAG_TICKS = 120  # ~10 deg: a goal this far ahead of the head waits for it
 NECK_TICK_S = 0.02  # the board's 50 Hz tick: a stalled tick advances a jog by at most two of these
+# A client's outbox in state lines: ~1.3 s of the 50 Hz stream before a peer that stopped reading is
+# dropped (pepin.streams' default of 24 was "about a second" at 20 Hz).
+STATE_OUTBOX_LINES = 64
+P95_EVERY_S = 1.0  # bus_p95_ms is re-sorted out of its 512-sample window at most this often
 
 
 def jog_ticks_s(deg_s: float) -> float:
@@ -514,10 +522,13 @@ class BaseServerCore:
         latency: LatencyTracker | None = None,
         neck: NeckReader | None = None,
         mover: NeckMover | None = None,
+        clock: Callable[[], float] | None = None,
     ) -> None:
         """``servo_names``: the roster :meth:`command` pings; ``latency`` feeds ``bus_p95_ms``;
         ``neck`` answers the ``neck`` command and ``mover`` the two move commands (None for
-        either: that command answers an error).
+        either: that command answers an error); ``clock`` (the tick's own, time.monotonic on
+        the board) stamps each state line with the middle of its encoder read, None with the
+        time the line is asked for.
 
         ``disarm_without_travel`` releases the wheels after ``disarm_after_s`` in which the
         ENCODERS moved less than ``idle_travel_m``, whatever the commands claim; False is the
@@ -552,6 +563,15 @@ class BaseServerCore:
         self._primed = False
         self._temperature: dict[str, int] | None = None
         self._temperature_at = float("-inf")  # the first state line reads it
+        self._p95_ms = 0.0
+        self._p95_at = float("-inf")  # the first state line computes it
+        # WHEN THE ENCODERS WERE READ, which is what a state line's "t" says and what the bridge
+        # differences two poses over (its measured twist). The tick's start is not that moment: a
+        # twist that arrived first is written to the bus before the read, a few milliseconds the
+        # tick start does not see. Over the 60 ms between lines at 16.7 Hz that was a few per cent
+        # of the measured speed; over 20 ms it is three times that, both ways on alternate lines.
+        self._clock = clock
+        self._read_at: float | None = None
 
     @property
     def moving(self) -> bool:
@@ -618,9 +638,11 @@ class BaseServerCore:
         return replies
 
     def _tick_wheels(self, now: float) -> None:
+        before = self._clock() if self._clock is not None else now
         try:
             travel = self._base.read_wheel_travel()
         except TimeoutError as exc:
+            self._read_at = now
             verdict = self._watchdog.failed(now)
             self.bus_ok = False
             if verdict == "stop":
@@ -632,6 +654,7 @@ class BaseServerCore:
                     f"servos silent for {self._watchdog.give_up_after_s:.0f} s: {exc}"
                 ) from exc
             return
+        self._read_at = (before + self._clock()) / 2.0 if self._clock is not None else now
         if self._watchdog.recovered(now) is not None:
             self._base.reprime()  # an unseen half turn must not alias into a jump
             travel = (0.0, 0.0)
@@ -667,12 +690,13 @@ class BaseServerCore:
             self._disarm(f"no travel for {now - self._last_travel_at:.0f} s")
 
     def snapshot(self, now: float) -> dict[str, Any]:
-        """The ``state`` message for the clients; resets the accumulated wheel travel."""
+        """The ``state`` message for the clients; resets the accumulated wheel travel. Its ``t``
+        is the middle of the last encoder read when the core has a clock, else ``now``."""
         pose = self._odom.pose
-        p95 = self._latency.summary().p95_ms if self._latency is not None else 0.0
+        stamp = self._read_at if self._clock is not None and self._read_at is not None else now
         message = {
             "type": "state",
-            "t": now,
+            "t": stamp,
             "x": pose.x,
             "y": pose.y,
             "theta": pose.theta,
@@ -684,7 +708,7 @@ class BaseServerCore:
             "armed": self.armed,
             "deadman": self.deadman,
             "bus_ok": self.bus_ok,
-            "bus_p95_ms": p95,
+            "bus_p95_ms": self._bus_p95_ms(now),
         }
         self._acc = [0.0, 0.0]
         # The wheel servos' temperature, read at most every 5 s and only while the bus answers:
@@ -699,6 +723,15 @@ class BaseServerCore:
                 logger.debug("temperature read failed: %r", exc)
         message["temp_c"] = self._temperature
         return message
+
+    def _bus_p95_ms(self, now: float) -> float:
+        """The bus round trip's p95 over the tracker's window, re-sorted at most once a
+        ``P95_EVERY_S``: a 512-sample statistic moves over seconds, and sorting it for every
+        50 Hz state line would cost the board's Python more than the line itself."""
+        if self._latency is not None and now - self._p95_at >= P95_EVERY_S:
+            self._p95_at = now
+            self._p95_ms = self._latency.summary().p95_ms
+        return self._p95_ms
 
     def release(self) -> None:
         """Stop and free the wheels, and the neck with them (shutdown)."""
@@ -771,6 +804,32 @@ class BaseServerCore:
         self.twist = STOP
 
 
+class PublishGrid:
+    """When a state line is due: on a fixed grid of ``1 / publish_hz`` seconds, asked once a tick.
+
+    A tick counts as on time up to half a tick before its grid point, so a publish rate equal to
+    the tick rate publishes on every tick and a lower one averages out to exactly its rate. The
+    rule this replaces (the next line one publish period after the last) waited for the first
+    tick PAST that point, and a 20 Hz stream on 20 ms ticks came out every third tick: 16.7 Hz.
+    A loop that stalls resumes on a fresh grid instead of bursting out the lines it missed.
+    """
+
+    def __init__(self, publish_hz: float, tick_hz: float, start: float) -> None:
+        """``start`` is the first tick's time, which is due at once."""
+        self._every = 1.0 / publish_hz
+        self._slack = 0.5 / tick_hz
+        self._next = start
+
+    def due(self, now: float) -> bool:
+        """Whether the tick at ``now`` publishes; a True moves the grid on by one period."""
+        if now + self._slack < self._next:
+            return False
+        self._next += self._every
+        if self._next <= now:  # a stall: a new grid from here
+            self._next = now + self._every
+        return True
+
+
 def serve(
     core: BaseServerCore,
     server: JsonLinesServer,
@@ -779,8 +838,8 @@ def serve(
     stop: threading.Event | None = None,
 ) -> None:
     """Clock around the core: apply commands, tick, publish state; release when left alone."""
-    period, publish_every = 1.0 / tick_hz, 1.0 / publish_hz
-    next_publish = time.monotonic()
+    period = 1.0 / tick_hz
+    grid = PublishGrid(publish_hz, tick_hz, time.monotonic())
     try:
         while stop is None or not stop.is_set():
             started = time.monotonic()
@@ -796,8 +855,7 @@ def serve(
             core.tick(started)
             for late in core.take_replies():
                 server.broadcast(late)  # a move's answer: the asking client reads it like a state
-            if started >= next_publish:
-                next_publish = started + publish_every
+            if grid.due(started):
                 server.broadcast(core.snapshot(started))
             time.sleep(max(0.0, period - (time.monotonic() - started)))
     finally:
@@ -854,7 +912,12 @@ def main() -> None:
     parser.add_argument("--bus-port", type=int, default=3333)
     parser.add_argument("--port", type=int, default=BASE_PORT)
     parser.add_argument("--tick-hz", type=float, default=50.0)
-    parser.add_argument("--publish-hz", type=float, default=20.0)
+    parser.add_argument(
+        "--publish-hz",
+        type=float,
+        default=STATE_HZ,
+        help="state lines a second, at most the tick rate; each one is an /odom",
+    )
     parser.add_argument(
         "--servos", default="1-10", help="bus ids the ping command checks, e.g. 1-10"
     )
@@ -895,9 +958,13 @@ def main() -> None:
             disarm_after_s=config.disarm_after_s,
             disarm_without_travel=config.disarm_without_travel,
             idle_travel_m=config.idle_travel_m,
+            clock=time.monotonic,  # serve()'s clock: "t" stays on the board's monotonic scale
         )
         server = JsonLinesServer(
-            args.port, on_last_client_left={"cmd": "release"}, driving_commands=DRIVING_COMMANDS
+            args.port,
+            on_last_client_left={"cmd": "release"},
+            driving_commands=DRIVING_COMMANDS,
+            outbox_size=STATE_OUTBOX_LINES,
         ).start()
         serve(core, server, args.tick_hz, args.publish_hz, stop)
 

@@ -77,22 +77,37 @@
         "cpu_percent": 15.0,
         "rss_mb": 60.0
       },
-      "note": "Measured 5-6 % / 43-54 MB on 2026-09-24; split from sensors_container. Each process carries its own zenoh session (~40 MB)."
+      "note": "Measured 5-6 % / 43-54 MB on 2026-09-24, 5.4 % on 2026-10-01 (state lines at 16.7 Hz, gyro at 50); split from sensors_container. Each process carries its own zenoh session (~40 MB). With 50 state lines and 100 gyro reads a second, AN ESTIMATE until a census: ~11 % (the lines +0.76 % of a laptop core in a replica, x4.4; the gyro loop doubled)."
     },
     {
       "name": "bag_record",
       "match": "ros2 bag record|rosbag2_transport",
-      "role": "rosbag2 writing a recorded drive's MCAP bag in /maps/rec (ros/teleop.sh NAME): generic subscriptions, so the messages are copied as serialised bytes and nothing on this board deserialises a scan. Lives only while that drive does.",
+      "role": "rosbag2 writing MCAP: the board's own always-on recording of its raw sensors under /maps/board_rec when PEPIN_BOARD_BAG=true (pepin.board_bag, started and capped by the board_bag entry), or a recorded drive's bag in /maps/rec (ros/teleop.sh NAME). Generic subscriptions: messages are copied as serialised bytes and nothing on this board deserialises a scan.",
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "ros/teleop.sh NAME (docker exec in pepin-ros)",
+      "owner": "pepin.board_bag (pepin-ros.service -> robot.launch.py board_bag:=true, nice 10); ros/teleop.sh NAME (docker exec in pepin-ros)",
       "when": "sometimes",
       "budget": {
-        "cpu_percent": 30.0,
-        "rss_mb": 120.0
+        "cpu_percent": 38.0,
+        "rss_mb": 110.0
       },
-      "note": "AN ESTIMATE: a Python CLI process (~60 MB like every ros2 CLI here) plus rosbag2's writer cache and the serialised copies of a 55 kB/s scan stream; wide enough not to go red on the first try until a census during a recorded drive measures it."
+      "note": "The board recording (board_bag), AN ESTIMATE until a census with it on: 5.1-6.4 % of a laptop core and 70 MB in a network-isolated replica (drive 0576 replayed, the wheels at 50 Hz, the gyro at 100, ~300 messages and 0.14 MB/s), x4.4 the EKF's board/laptop ratio: ~25 %. Per message, not per byte: MCAP's fastwrite preset changed nothing, 50 messages a second fewer (/odometry/filtered, dropped) took 15 %. A teleop drive's bag was never measured."
+    },
+    {
+      "name": "board_bag",
+      "match": "pepin\\.board_bag",
+      "role": "The supervisor of the board's raw-sensor recording: keeps one `ros2 bag record` running (minute MCAP files under /maps/board_rec) and deletes the oldest minutes past 20 GB or when the card has under 10 GB free; a card still under the floor stops the recorder.",
+      "on_board_because": [
+        "wifi-loss"
+      ],
+      "owner": "pepin-ros.service -> robot.launch.py (board_bag:=true, ros/feature.sh board_bag on), nice 10, respawned",
+      "when": "sometimes",
+      "budget": {
+        "cpu_percent": 1.0,
+        "rss_mb": 25.0
+      },
+      "note": "Measured 0.02 % of a laptop core / 15 MB in a network-isolated container: a stdlib Python loop that lists a directory every 30 s."
     },
     {
       "name": "tof_bridge",
@@ -148,10 +163,10 @@
       ],
       "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (imu:=true and base_bridge_cpp:=true), ros/params/ekf.yaml, nice -5",
       "budget": {
-        "cpu_percent": 14.0,
+        "cpu_percent": 35.0,
         "rss_mb": 75.0
       },
-      "note": "Measured 9 % / 28 MB."
+      "note": "Measured 9 % / 28 MB; 12 % on 2026-10-01 at 20 Hz with the wheels at 16.7 Hz and the gyro at 50 (sensors-only board, ps over 38 min). 50 Hz with the wheels at 50 and the gyro at 100 is AN ESTIMATE until a census measures it: 1.9x in a network-isolated replica of its inputs (2.78 -> 5.28 % of a laptop core; 1.34x for the 50 Hz filter and wheels alone, 2.9x with a 200 Hz gyro), so ~23 %."
     },
     {
       "name": "ros2_launch",
@@ -178,9 +193,10 @@
       "owner": "pepin-zrouter.service (docker run pepin-ros:zenoh rmw_zenohd, --network host)",
       "when": "always",
       "budget": {
-        "cpu_percent": 20.0,
+        "cpu_percent": 28.0,
         "rss_mb": 100.0
-      }
+      },
+      "note": "Measured 12 % on 2026-10-01 (sensors-only board, ps over 38 min). The 50 Hz wheels, the 50 Hz filter and the 100 Hz gyro add ~7 % more to what it forwards to the laptop, AN ESTIMATE until a census: 1.7 -> 3.4 % of a laptop core in a replica (a board router forwarding /odom, /imu/data_raw, /tf and /odometry/filtered to a laptop router and its client), x4.4."
     },
     {
       "name": "chronyd",
@@ -211,7 +227,7 @@
         "cpu_percent": 16.0,
         "rss_mb": 27.0
       },
-      "note": "Measured 10 % / 18 MB. Outside Docker on purpose: it must survive a container restart."
+      "note": "Measured 10 % / 18 MB; 8.5 % on 2026-10-01 at 16.7 state lines a second. 50 a second (every tick) adds an estimated 2-3 %: +0.56 % of a laptop core for the lines and two readers over a fake bus (scratch bench, x4.4 the EKF's board/laptop ratio). Outside Docker on purpose: it must survive a container restart."
     },
     {
       "name": "tof_server",

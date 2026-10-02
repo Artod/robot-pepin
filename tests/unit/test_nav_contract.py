@@ -2066,9 +2066,9 @@ def _launch_processes(name: str) -> dict[str, dict[str, object]]:
             for n in ast.walk(call)
             if isinstance(n, ast.Constant) and isinstance(n.value, str)
         ]
-        modules = [s for s in strings if s.startswith("pepin_bringup.")]
+        modules = [s for s in strings if s.startswith(("pepin_bringup.", "pepin."))]
         module = next(iter(modules), None)
-        key = module.removeprefix("pepin_bringup.") if module else str(keywords["executable"])
+        key = module.split(".", 1)[1] if module else str(keywords["executable"])
         found[key] = keywords
     return found
 
@@ -2128,7 +2128,14 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     # sensor that silently never comes back is worse than one that was never on.
     # ...and, since 2026-09-22, the lidar's own odometry: a third-party binary, respawned like
     # ours because the EKF reads its topic.
-    assert _respawning(robot) == {"neck_state", "tof_bridge", "rf2o_laser_odometry_node"}
+    # ...and the board's own recording's supervisor (pepin.board_bag, board_bag:=true): a dead
+    # one takes its recorder with it, and the respawn starts both on a new directory.
+    assert _respawning(robot) == {
+        "neck_state",
+        "tof_bridge",
+        "rf2o_laser_odometry_node",
+        "board_bag",
+    }
     for launch in (vslam, nav, robot):
         for name, keywords in launch.items():
             if keywords.get("respawn"):
@@ -2273,8 +2280,9 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     # Everything of OURS the board respawns is kickable: the sensor launch's own nodes (a code
     # change on the board is one kicked process, never a restart). rf2o's binary is not ours and
     # not a "pepin_bringup.<module>" command line — it changes only when the image is rebuilt, so
-    # there is nothing to kick it for.
-    assert known["board.sh"] == _respawning(robot) - {"rf2o_laser_odometry_node"}
+    # there is nothing to kick it for. Nor the recording's supervisor: a kick would only close one
+    # recording and open the next, which the next stack restart does anyway.
+    assert known["board.sh"] == _respawning(robot) - {"rf2o_laser_odometry_node", "board_bag"}
 
 
 def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:

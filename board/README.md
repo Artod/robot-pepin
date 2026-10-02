@@ -41,6 +41,7 @@ board.
 | 3333 | ser2net | `ser2net.service` | raw TCP to `/dev/servo-bus` (Feetech bus, 1 Mbit/s); `kickolduser` hands the port to the newest client |
 | 3334 | ser2net | `ser2net.service` | raw TCP to `/dev/lidar` (LD19, 230400 baud) |
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
+| 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, publishes odometry state at 50 Hz (every tick) |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, publishes odometry state at 20 Hz |
 | 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status` |
 | 8080 | ustreamer | `pepin-camera.service` | MJPEG stream and `/snapshot` of the overview camera |

@@ -66,7 +66,7 @@ FLAGS = FlagSet(
         on_when="always, unless the point of the run is what the stack does without a gyro",
         off_when="for one test of the heading on the wheels alone, or to see an EKF meet its"
         " sensor_timeout on a source that is simply gone; unmute and the rate is back within"
-        " one IMU period (50 Hz)",
+        " one IMU period (100 Hz)",
     ),
     Flag(
         "odom_publish",
@@ -82,7 +82,7 @@ FLAGS = FlagSet(
         on_when="always, unless the run is about what the stack does with dead wheel odometry",
         off_when="to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's"
         " TF lookups, the tracker's dead reckoning — without stopping the base server; unmute"
-        " and /odom is back on the next state line (20 Hz)",
+        " and /odom is back on the next state line (50 Hz)",
     ),
 )
 
