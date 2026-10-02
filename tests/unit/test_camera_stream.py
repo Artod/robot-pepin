@@ -659,7 +659,9 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
     link = node._static.sent[0].transform.translation
     assert (link.x, link.y, link.z) == (0.0, 0.0, 1.203)
     eye = node._static.sent[1].transform.translation
-    assert eye.y == pytest.approx(0.0305) and eye.z > 0.0
+    # the eye block as measured: y half the baseline (never measured), z the lens against the
+    # link's height (+0.025 under the 09-21 tape, 0.0 since the module was re-taped 2026-09-30)
+    assert eye.y == pytest.approx(0.0305) and eye.z == pytest.approx(0.0, abs=1e-9)
     mono, _ = build()
     assert mono._static.sent[0].transform.translation.y == 0.0
     lens = mono._static.sent[1].transform.translation
