@@ -702,22 +702,13 @@ def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> No
     assert "no proof and no checks" in out
 
 
-def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_aside(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    """One frame (World R): the graph's map frame IS ``map`` and the fused volume is painted in it.
-    An empty database starts a new frame, so --fresh-graph moves the old frame's volume aside —
-    moved, never deleted — and says so. The file names are literals on purpose."""
-    world = tmp_path / "ros/maps/rtabmap.world.npz"
-    world.parent.mkdir(parents=True, exist_ok=True)
-    world.write_bytes(b"the old frame")
+def test_fresh_graph_empties_the_database(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """--fresh-graph is laptop.sh vslam --fresh: an empty RTAB-Map database, nothing else. The
+    fused volume is the odometry's rolling window, born empty at every start, so no file beside
+    the database is moved."""
     code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
     assert code == 0, out
     assert "laptop.sh vslam --neck --fresh" in sent
-    assert not world.exists(), out
-    kept = list(world.parent.glob("rtabmap.world.npz.before-fresh-*"))
-    assert len(kept) == 1 and kept[0].read_bytes() == b"the old frame", out
-    assert "moved aside" in out
 
 
 def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -754,13 +745,9 @@ def _planner_answers(tmp_path: Path, *answers: str) -> str:
     ],
 )
 def test_a_dry_run_prints_the_order_and_touches_nothing(tmp_path, args, first, absent) -> None:  # type: ignore[no-untyped-def]
-    world = tmp_path / "ros/maps/rtabmap.world.npz"
-    world.parent.mkdir(parents=True, exist_ok=True)
-    world.write_bytes(b"kept")
     code, out, sent = _restart(tmp_path, *args, "--dry-run")
     assert code == 0, out
     assert sent == [], "a dry run asks no host anything and restarts nothing"
-    assert world.read_bytes() == b"kept", "--fresh-graph moves nothing aside in a dry run"
     steps = [line for line in out.splitlines() if line[:3].strip().rstrip(".").isdigit()]
     assert steps[0].split(". ", 1)[1].startswith(first), out
     assert absent not in out, out
@@ -1161,7 +1148,7 @@ def test_flags_sh_reaches_each_node_in_its_own_container(tmp_path: Path) -> None
     assert len(sets) == 1 and sets[0].startswith("docker exec pepin-macnav"), calls
     assert not [c for c in calls if c.startswith("ssh")], calls
 
-    code, out, calls = _flags_sh(tmp_path, "get", "depth_fusion", "align")
+    code, out, calls = _flags_sh(tmp_path, "get", "depth_fusion", "lidar_layer")
     assert code == 0, out
     assert [c for c in calls if c.startswith("docker exec pepin-vslam") and "param get" in c]
 

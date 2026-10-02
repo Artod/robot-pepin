@@ -21,8 +21,6 @@ from pepin.watch import (
     GRAPH_AGREE_M,
     LOST_FIT,
     LOST_SIGMA_M,
-    PAINT_EDGE_FRESH_S,
-    PAINT_SIGMA_M,
     PLACEMENT_TOPIC,
     PROVISIONAL_FIT_CAP,
     SIGMA_MEDIAN_S,
@@ -33,7 +31,6 @@ from pepin.watch import (
     Correction,
     GoalGate,
     LostWatch,
-    PaintTrust,
     Placement,
     PoseSpread,
     Preflight,
@@ -343,38 +340,6 @@ def test_the_switch_off_reports_the_silence_and_publishes_the_fit_anyway() -> No
     assert silence.reported(0.70, 141.0) == 0.70
     assert silence.silent(141.0) and not silence.held_at_zero(141.0)
     assert silence.phrase(141.0) == "no source for 141.0 s"
-
-
-def test_a_pose_is_painted_with_only_while_every_half_of_it_holds() -> None:
-    """What may be written into a map frame. The volume is painted in map coordinates and a TSDF
-    cannot be un-integrated, so each half is a veto: the fit, WHEN it was measured, the tracker's
-    own sigma where it publishes one, and the age of the correction the pose stands on."""
-    trust = PaintTrust()
-    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=0.05) is None
-
-    assert "fit 0.31" in (trust.refusal(fit=0.31, fit_age_s=0.1, edge_age_s=0.0) or "")
-    # The failure of 2026-09-15: the topic stopped and the last good number stayed behind.
-    stopped = trust.refusal(fit=0.90, fit_age_s=141.0, edge_age_s=0.0) or ""
-    assert stopped == "the fit stopped 141.0 s ago"
-    assert trust.refusal(fit=0.90, fit_age_s=SOURCE_PATIENCE_S + 0.1, edge_age_s=0.0) is not None
-
-    wide = trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=0.42, edge_age_s=0.0) or ""
-    assert wide == f"sigma 0.42 m over {PAINT_SIGMA_M:.2f} m"
-    assert trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=PAINT_SIGMA_M, edge_age_s=0.0) is None
-
-
-def test_an_absent_sigma_is_no_refusal_and_an_absent_correction_is() -> None:
-    """Nothing publishes /localization/sigma yet, and the gate must work without it — while a
-    pose cannot be placed at all on a correction TF does not hold, and one nobody has refreshed
-    for a second places the cart where it WAS."""
-    trust = PaintTrust()
-    assert trust.refusal(fit=0.90, fit_age_s=0.1, sigma_xy_m=None, edge_age_s=0.0) is None
-    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=None) == "no map -> odom edge"
-    stale = trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=PAINT_EDGE_FRESH_S + 0.5) or ""
-    assert stale == "the map -> odom edge is 1.5 s from the scan"
-    # An edge NEWER than the scan is just as far from it: a pose is placed by a correction that
-    # covers the moment, whichever side of it the correction sits.
-    assert trust.refusal(fit=0.90, fit_age_s=0.1, edge_age_s=-2.0) is not None
 
 
 # -- the one uncertainty: the fusion's sigma ------------------------------------------------
@@ -733,20 +698,6 @@ def test_the_holder_is_asked_the_same_two_questions_whoever_it_is() -> None:
         Sigma(0.18, 4.0, 0.1),
     )
     assert Preflight.passed(both) and "graph is holding the pose" in both[2].detail
-
-
-def test_a_small_sigma_vouches_for_a_zero_fit_when_painting() -> None:
-    """Camera-only the tracker publishes fit 0.00 by construction and the pose is held by the
-    camera's words; the sigma is what answers for it, and the volume must keep growing."""
-    from pepin.watch import PAINT_SIGMA_M, PaintTrust
-
-    trust = PaintTrust()
-    assert trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=0.05, edge_age_s=0.1) is None
-    tight = trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=PAINT_SIGMA_M * 3, edge_age_s=0.1)
-    assert tight is not None, "a wide sigma vouches for nothing"
-    blind = trust.refusal(fit=0.0, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1)
-    assert blind is not None and "no sigma" in blind
-    assert trust.refusal(fit=0.9, fit_age_s=0.2, sigma_xy_m=None, edge_age_s=0.1) is None
 
 
 def test_a_word_at_the_right_place_facing_the_wrong_way_does_not_pass_the_gate() -> None:

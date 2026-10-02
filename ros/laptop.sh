@@ -264,7 +264,7 @@ case "${1:-}" in
         # reads which it is and picks the memory mode itself — so this subcommand needs no mode, and
         # asks the board nothing.
         start_check
-        CAMERA_ONLY=false; FRESH=false; RESUME_VOLUME=true
+        CAMERA_ONLY=false; FRESH=false
         # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
         # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
@@ -288,16 +288,11 @@ case "${1:-}" in
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads
-        # that and starts RTAB-Map in mapping mode; the volume is born empty under the cart in the
-        # new frame (no snapshot resumed), and nothing existing is deleted except the database
-        # itself, so a --fresh run is a measurement and not a loss. The volume of the OLD frame is
-        # moved aside by ros/restart.sh --fresh-graph, which passes this flag.
+        # that and starts RTAB-Map in mapping mode. The fused volume is the odometry's rolling
+        # window and is born empty at every start whatever is on disk.
         if [ "$FRESH" = true ]; then
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
-            RESUME_VOLUME=false
-            echo "vslam --fresh: ros/maps/rtabmap.db deleted, so RTAB-Map starts an empty graph and"
-            echo "               the volume is born empty under the cart; the existing"
-            echo "               ros/maps/*.world.npz are left untouched until it saves"
+            echo "vslam --fresh: ros/maps/rtabmap.db deleted, so RTAB-Map starts an empty graph"
         fi
         VSLAM_IMAGE="$(vslam_image)" || exit 2
         pepin_remove_container pepin-vslam
@@ -364,7 +359,7 @@ case "${1:-}" in
             ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
-            "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
+            "camera_only:=$CAMERA_ONLY" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
         echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         # The desktop app's socket died with the old container, and a Foxglove client never
         # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new

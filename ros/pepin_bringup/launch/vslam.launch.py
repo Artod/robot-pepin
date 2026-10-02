@@ -696,7 +696,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     board = LaunchConfiguration("board")
     rig = camera_rig()
     camera_only = _flag(context, "camera_only")
-    resume_volume = _flag(context, "resume_volume")
     database = DATABASE
     # An empty room is a database that is not there yet, and that is the only thing the session
     # still decides (:func:`rtabmap_memory`): a file nobody has written cannot be localised in.
@@ -820,22 +819,10 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # graph, the closures and the place recognition; the voxels the operator looks at come from
     # here, beside RTAB-Map's own cloud for comparison.
     #
-    # Only what that node still declares is passed. Its ``room``, ``world_map`` and ``map_source``
-    # parameters went with the room entity on 2026-09-19 — the volume's file follows the database's
-    # own path, because it is painted in that graph's frame — and its ``mode`` is left at its
-    # default, since the one thing that parameter decided (whether the GRAPH owns map -> odom) has
-    # one answer now: it never does.
+    # It is the odometry's rolling window, born empty at every start: nothing about the map is
+    # passed to it.
     fusion = ExecuteProcess(
-        cmd=[
-            "python3",
-            "-m",
-            "pepin_bringup.depth_fusion",
-            "--ros-args",
-            # The volume resumes its OWN snapshot and reads the saved pair only when there is no
-            # snapshot yet. --fresh passes this false, which is the whole of "an unknown room".
-            "-p",
-            f"resume_volume:={'true' if resume_volume else 'false'}",
-        ],
+        cmd=["python3", "-m", "pepin_bringup.depth_fusion"],
         output="screen",
         **RESPAWN,
     )
@@ -1035,10 +1022,6 @@ def generate_launch_description() -> LaunchDescription:
             # what the SLAM_CAMERA_ONLY table used to say by unsubscribing the scan. Live either
             # way: ros/flags.sh set sensor_pack sources camera / lidar / camera,lidar.
             DeclareLaunchArgument("camera_only", default_value="false"),
-            # The volume resumes the database's own snapshot (pepin.worldmap.world_path_for names
-            # it after the database, since it is painted in that graph's frame). False is
-            # ros/laptop.sh vslam --fresh: a room built from nothing whatever is on disk.
-            DeclareLaunchArgument("resume_volume", default_value="true"),
             # The camera as a third odometry: rtabmap_odom's rgbd_odometry and the node that
             # gates it (pepin_bringup.visual_odometry). On by default because it is measured at
             # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still

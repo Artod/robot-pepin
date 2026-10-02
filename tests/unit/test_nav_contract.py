@@ -18,7 +18,6 @@ import source_facts as sf
 import yaml
 
 from pepin.flags import FlagSet, load_knobs, load_table, with_knobs
-from pepin.watch import PAINT_SIGMA_M
 
 REPO = Path(__file__).resolve().parents[2]
 PARAMS = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
@@ -1088,11 +1087,11 @@ def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> Non
     node = sf.tree(f"{NODES}/depth_fusion.py")
     topic = ast.literal_eval(sf.assignments(node)["MARKS_TOPIC"])
     assert topic == "/depth_marks"
-    assert "marks_ranges" in sf.calls(node) and "/depth_scan" in sf.strings(node)
+    assert "marks_ranges" in sf.calls(node)
+    assert "/depth_scan" not in sf.strings(node), "the frame's fan clears; it never marks"
     assert ast.literal_eval(sf.assignments(node)["FREE_TOPIC"]) == "/depth_free"
     assert "free_ranges" in sf.calls(node), "the clearing half comes from the same walk"
     flags = load_table(REPO / NODES / "depth_fusion.py")
-    assert flags["marks_source"] == "volume", "the volume marks by default"
     # OFF as shipped, and the measurement says why: on the parked cart of 2026-09-23 the volume
     # held an occupied column on 717 of 720 bearings, and where the camera's own frame shared a
     # bearing with a mark it agreed within 0.20 m 96 % of the time (3 % saw past it) — a clearing
@@ -1100,7 +1099,6 @@ def test_the_camera_layer_clears_from_a_frame_and_marks_from_the_volume() -> Non
     # (scratch/one_localiser/live_fan_vs_lidar.py).
     assert flags["marks_clear"] is False, "measured first, defaulted after"
     assert flags.flag("marks_clear").live, "an A/B without a restart, as every flag here"
-    assert flags.flag("marks_source").choices == ("volume", "frame"), "the old way, live"
     for costmap in ("local_costmap", "global_costmap"):
         layer = _p(costmap)["camera_layer"]
         assert layer["observation_sources"].split() == [
@@ -1366,26 +1364,26 @@ def test_the_frames_are_fused_into_one_surface_beside_rtabmap_s_cloud() -> None:
     # The four are flags of the node's table (node_kit.Switches over pepin.flags), so ros2
     # param set reaches them and their state is printed in the report line (CLAUDE.md rule 19).
     fusion_flags = _live_table("depth_fusion")
-    assert {"enabled", "align", "min_weight", "surface_hz"} <= set(fusion_flags.names)
+    assert {"enabled", "min_weight", "surface_hz"} <= set(fusion_flags.names)
     assert fusion_flags.flag("surface_hz").range is not None, "a rate is bounded"
-    assert not fusion_flags.flag("resume_volume").live, "a start-up choice, not a live switch"
     assert "Switches" in sf.imported(node) and "self._switches.state" in sf.calls(node)
     assert {"/fusion/reset", "/fusion/surface"} <= sf.strings(node)
 
 
 def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
-    """pepin.worldmap in the node: /scan is integrated into the same volume the camera writes, the
-    snapshot is what a next run resumes from — and NOTHING localises against it. A tracker matching
-    the slice it is painting has a null space it cannot see out of (2026-09-18: a cart with its
-    wheels blocked walked 7 degrees and 5-7 cm in 35 minutes at fit 0.97-0.99), so the room's own
-    geometry is the graph's grid and this node publishes one thing: the surface cloud."""
+    """pepin.worldmap in the node: /scan is integrated into the same volume the camera writes,
+    the volume is the odometry's rolling window — and NOTHING localises against it. A tracker
+    matching the slice it is painting has a null space it cannot see out of (2026-09-18: a cart
+    with its wheels blocked walked 7 degrees and 5-7 cm in 35 minutes at fit 0.97-0.99), so the
+    room's own geometry is the graph's grid and this node publishes one thing: the surface
+    cloud."""
     node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert {"WorldMap", "PlanarMount", "SnapshotClock", "ViewGate"} <= sf.imported(node)
+    assert {"WorldMap", "PlanarMount", "ViewGate"} <= sf.imported(node)
     assert sf.assignments(node)["LIDAR_CONFIG"] == "'/ws/config/lidar.json'", "the plane is read"
     assert "/scan" in sf.strings(node)
     calls = sf.calls(node)
     assert "self._world.integrate_scan" in calls and "self._world.integrate_depth" in calls
-    assert "self._world.save" in calls
+    assert "self._world.save" not in calls, "a window painted through the odometry is not resumed"
     topics = {s for s in sf.strings(node) if s == "/map" or s.startswith("/map_")}
     # /map is READ, for its lattice alone (grid_map_topic): nothing goes out on a map's name.
     assert topics == {"/map"}, f"the volume reaches no matcher: {topics}"
@@ -1398,84 +1396,14 @@ def test_the_volume_is_open_loop_and_no_slice_of_it_is_published() -> None:
     assert {"map_source", "map_hz", "lidar_map", "camera_map", "map_identity"}.isdisjoint(
         set(flags.names)
     ), "the flags that published the volume went with the publication"
-    # The snapshot belongs to the graph DATABASE whose frame every voxel was painted in, so a
-    # fresh database means a fresh volume rather than a room drawn in coordinates nothing shares.
-    assert sf.assignments(node)["DATABASE"] == "'/maps/rtabmap.db'"
-    assert "world_path_for" in sf.imported(node)
-
-
-def test_nothing_is_painted_at_a_pose_nobody_trusts() -> None:
-    """Every paint path asks one predicate (pepin.watch.PaintTrust) before it writes."""
-    node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert "PaintTrust" in sf.imported(node), "the predicate is the watch's, not a local number"
-    assert "self._paint_refusal" in sf.calls(node), "asked before anything is written"
-    asked = (REPO / NODES / "depth_fusion.py").read_text().count("self._paint_refusal(")
-    assert asked == 3, (
-        "all three paint paths ask it: the camera's frame, the lidar's revolution, a ToF fan"
+    # The volume is painted in odom and nothing in the paint path reads map -> odom: no tracker
+    # word, no graph bend, no snapshot (the map-frame room is on alt/volume-map-2026-10-02).
+    assert {"PaintTrust", "GraphBend", "CorrectionFollower", "world_path_for"}.isdisjoint(
+        sf.imported(node)
     )
-    assert "/localization/sigma" in sf.strings(node), "the tracker's own sigma, where it speaks"
-    flags = _live_table("depth_fusion")
-    assert flags.flag("lidar_fit_gate").default is True, "a revolution is gated like a frame"
-    assert flags.flag("paint_sigma_m").default == PAINT_SIGMA_M
-
-
-def test_the_graphs_bend_moves_the_volume_and_the_carts_recovery_never_does() -> None:
-    """The map follows the loop closure: the node carries the volume by the graph's own bend
-    before it paints into it, on both paint paths (a camera frame and a revolution).
-
-    THE BEND AND NOT ``map -> odom``, in every mode, and that is World R's own correction to
-    itself. The volume is painted at the BOARD TRACKER's pose now, and that edge moves for two
-    opposite reasons — the room bent (follow it) and the CART was found after drifting (do not,
-    or the painted room is dragged off the real one by the whole size of the recovery). Only the
-    optimised node poses separate the two, because a re-localisation leaves every node where it
-    was, so the signal is their change between two ``/rtabmap/mapGraph`` messages
-    (:class:`pepin.graphbend.GraphBend`). There is no loop: nothing localises against the volume.
-    """
-    node = sf.tree(f"{NODES}/depth_fusion.py")
-    assert "CorrectionFollower" in sf.imported(node)
-    assert "GraphBend" in sf.imported(node), "the room's own movement, not the cart's"
-    assert "/rtabmap/mapGraph" in sf.strings(node), "the optimised node poses come from there"
-    body = {f.name: f for f in ast.walk(node) if isinstance(f, ast.FunctionDef)}
-    follow = body["_follow"]
-    assert "self._world.shift" in sf.calls(follow), "the move lives in pepin.worldmap"
-    assert "self._world.shift" not in sf.calls(node) - sf.calls(follow), "and nowhere else"
-    assert "self._bend.drift" in sf.unparsed(follow, ast.Attribute), "the graph's accumulated bend"
-    assert "self._tf.pose" not in sf.calls(follow), (
-        "map -> odom moves when the CART is found, so it is never what the volume follows"
+    assert "/rtabmap/mapGraph" not in sf.strings(node) and "/localization_fit" not in sf.strings(
+        node
     )
-    assert "self._bend.observe" in sf.calls(body["_on_graph"]), "one graph in, one increment out"
-    assert "map_to_odom" not in sf.unparsed(body["_on_graph"], ast.Attribute), (
-        "the message carries it and this node deliberately does not read it"
-    )
-    for path in ("_fuse", "_on_scan_work"):
-        assert "self._follow" in sf.calls(body[path]), f"{path} follows before it paints"
-        # ...and refuses to paint while a move is owed: an observation placed under the new
-        # correction and fused into a volume still standing in the old one is carried past the
-        # truth by the whole of that move when it lands (30 cm closure -> a wall 20 cm out,
-        # scratch/follow_refute.py, 2026-09-14)
-        guards = [
-            n
-            for n in ast.walk(body[path])
-            if isinstance(n, ast.If) and "self._follow(" in ast.unparse(n.test)
-        ]
-        assert guards, f"{path} paints only when the follower lets it"
-        assert all(any(isinstance(b, ast.Return) for b in guard.body) for guard in guards), (
-            f"{path} returns when the volume owes the graph a move"
-        )
-    flags = _live_table("depth_fusion")
-    assert flags.flag("follow_correction").default is True
-    for name in ("follow_correction_min_m", "follow_correction_min_deg", "follow_correction_min_s"):
-        assert flags.flag(name).range is not None, f"{name}: a threshold is bounded"
-        assert flags.flag(name).live, f"{name}: tunable while a map is being built"
-    # ...and the resample law is a live switch whose default REVERSED on 2026-09-18, when
-    # LidarLaw.beam_footprint took away blend's reason for being it: with the free space in front
-    # of a wall weakly weighted, the weighted average is pulled into the wall and widens it — 430
-    # occupied cells to 516, worst cell 5.85 cm out, against nearest's 431 and exactly half a
-    # voxel (tests/unit/test_follow_correction.py, scratch/volume_shift_cost.py for the ms).
-    law = flags.flag("follow_correction_law")
-    assert law.choices == ("blend", "nearest") and law.live and law.default == "nearest"
-    reads = sf.unparsed(follow, ast.Subscript)
-    assert "self._switches['follow_correction_law']" in reads, "the move reads the law it uses"
 
 
 def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
@@ -1522,11 +1450,8 @@ def test_the_cart_s_lean_is_one_thing_every_consumer_takes_from() -> None:
     # when imu_lean says so), and a revolution taken too far from level is dropped and counted
     fusion = sf.tree(f"{NODES}/depth_fusion.py")
     assert "LeanGate" in sf.imported(fusion) and "self._gate.admits" in sf.calls(fusion)
-    # The scan's pose is the poser's — of whichever frame the volume is painted in: one poser per
-    # frame (volume_frame), sharing one TF history and one lean, so the lean switch above reaches
-    # both and the paint path picks a frame instead of threading a frame name through every lookup.
-    assert "poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
-    assert "self._poser_now" in sf.unparsed(fusion, ast.Attribute), "one poser per volume_frame"
+    # The scan's pose is the poser's: the odometry's, the frame the volume is painted in.
+    assert "self._poser.base_in_map" in sf.calls(fusion), "the scan's pose is the poser's"
     gate = _live_table("depth_fusion").flag("lean_gate_deg")
     assert gate.live
     # and a lean gravity never voted for is no lean: one floor, in both nodes that place a
@@ -1806,18 +1731,15 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
 
 
 def test_a_reset_empties_the_volume_and_nothing_falls_back_to_a_picture() -> None:
-    """``/fusion/reset`` and the self-heal empty the volume, and with no pgm in the loop "empty"
-    means empty. Nothing outside this node reads it, so emptying it costs no tracker anything — it
-    costs the surface cloud until the sensors have painted one again."""
+    """``/fusion/reset`` empties the volume, and with no pgm in the loop "empty" means empty.
+    Nothing outside this node reads it, so emptying it costs no tracker anything — it costs the
+    surface cloud until the sensors have painted one again."""
     src = (REPO / NODES / "depth_fusion.py").read_text()
     assert src.count("WorldMap(self._spec, self._mount") == 3, (
         "the volume is built in three places only: the placeholder __init__ holds until the"
         " starting state is known, the starting state's own, and the reset's"
     )
-    assert src.count("self._world = self._fresh_world()") == 3, (
-        "the reset, the self-heal, and a change of volume_frame — voxels painted in the other"
-        " frame are a room drawn in coordinates nothing there shares, so they are dropped too"
-    )
+    assert src.count("self._world = self._fresh_world()") == 1, "the reset alone"
     assert "self._fresh_world" in sf.calls(sf.tree(f"{NODES}/depth_fusion.py"))
 
 
@@ -2324,9 +2246,8 @@ def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> Non
     vslam_run = next(
         c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-vslam" in c
     )
-    for passed in ('"camera_only:=$CAMERA_ONLY"', '"resume_volume:=$RESUME_VOLUME"'):
-        assert passed in vslam_run, passed
-    for gone in ("slam:=", "resume:=", "world_map:=", "room:="):
+    assert '"camera_only:=$CAMERA_ONLY"' in vslam_run
+    for gone in ("slam:=", "resume:=", "world_map:=", "room:=", "resume_volume:="):
         assert gone not in vslam_run, f"{gone} selected a mode that no longer exists"
     save = (REPO / "ros/map.sh").read_text()
     assert "map_saver_cli" in save and "-t /map" in save and "pepin-vslam" in save

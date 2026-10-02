@@ -29,14 +29,11 @@ from pepin.worldmap import (
     OccupancySlice,
     PlanarMount,
     SliceLaw,
-    SnapshotClock,
-    SnapshotTrust,
     ViewGate,
     WorldMap,
     bearings_in_base,
     export_path_for,
     trinary_from_log_odds,
-    world_path_for,
 )
 
 ROOM_M = 2.0  # the box: walls at x, y = +-2 m
@@ -153,10 +150,10 @@ def test_a_beam_past_the_sensor_reach_carves_free_space_and_marks_nothing() -> N
 
 
 @pytest.mark.slow
-def test_a_beam_with_no_return_writes_nothing_until_the_flag_opens_the_door() -> None:
+def test_a_beam_with_no_return_writes_nothing() -> None:
     """What the lidar really delivers for an open door is NaN, not a long range: everything
-    past ``range_max`` comes back as no return at all. Off by default it writes nothing (a
-    mirror and a black chair leg say NaN too); on, it carves free space to the reach."""
+    past ``range_max`` comes back as no return at all. It writes nothing (a mirror and a black
+    chair leg say NaN too)."""
     angles, ranges = box_scan()
     doorway = np.abs(angles) < 0.2  # a wedge of beams that came back with nothing
     open_door = np.where(doorway, np.nan, ranges)
@@ -167,14 +164,6 @@ def test_a_beam_with_no_return_writes_nothing_until_the_flag_opens_the_door() ->
     view = shut.lidar_slice()
     assert cell_of(view, 1.0, 0.0) == UNKNOWN, "no return, no claim: nothing is written"
     assert cell_of(view, 0.0, 1.0) == FREE, "the beams that did return still carve"
-
-    carving = WorldMap(spec(), mount(), LidarLaw(no_return_free=True))
-    for _ in range(20):
-        carving.integrate_scan(angles, open_door, at())
-    through = carving.lidar_slice()
-    assert cell_of(through, 1.0, 0.0) == FREE, "the door is open all the way out"
-    assert not wall_at(through, ROOM_M, 0.0), "and nothing is marked at the end of the beam"
-    assert wall_at(through, 0.0, ROOM_M), "the walls the other beams found are still there"
 
 
 def test_a_scan_that_misses_the_volume_changes_nothing() -> None:
@@ -587,60 +576,6 @@ def test_the_exported_pair_is_read_back_by_the_existing_map_loader(tmp_path: Pat
 
 
 # ---- the snapshot --------------------------------------------------------------------------
-def test_a_snapshot_round_trip_is_the_same_map(tmp_path: Path) -> None:
-    world = room()
-    intr, pose = looking_ahead(0.8)
-    rgb = np.zeros((intr.height, intr.width, 3), dtype=np.uint8)
-    rgb[:] = (10, 20, 30)
-    world.integrate_depth(flat_depth(intr, 1.0), rgb, intr, pose, stamp=300.0)
-    path = world.save(tmp_path / "world_room.npz")
-    back = WorldMap.load(path, mount())
-    assert back.spec == world.spec
-    assert np.array_equal(back.volume.sdf, world.volume.sdf)
-    assert np.array_equal(back.volume.weight, world.volume.weight)
-    assert np.array_equal(back.lidar_weight, world.lidar_weight)
-    assert np.array_equal(back.volume.rgb, world.volume.rgb)
-    assert back.stamp == 300.0
-    assert back.lidar_plane_m == pytest.approx(PLANE_M)
-    assert np.array_equal(back.lidar_slice().values, world.lidar_slice().values)
-    # the frame index a loop closure would replay: stamp, sensor and the pose each frame went in at
-    assert [f[1] for f in back.frames] == ["lidar"] * 8 + ["camera"]
-    assert [f[0] for f in back.frames] == [*range(100, 108), 300.0]
-    assert np.allclose(back.frames[-1][2][:, 3], pose.translation)
-    # the loaded volume keeps defending the lidar's layer
-    intr, flat = looking_ahead(PLANE_M)
-    before = back.lidar_slice().values.copy()
-    back.integrate_depth(flat_depth(intr, 1.0), None, intr, flat)
-    assert np.array_equal(back.lidar_slice().values, before)
-    assert back.protected_rows == world.protected_rows, "and defends that layer, not more"
-
-
-def test_a_snapshot_does_not_bring_back_a_tips_claim_on_the_cameras_band(tmp_path: Path) -> None:
-    """The band is rebuilt from the saved plane, not from every row a beam ever reached: a
-    restart after a tip must not hand the lidar the camera's band for the next run either."""
-    pose = tipped(-TIP_DEG)
-    angles, ranges, _points = fan_scan(pose, mount())
-    world = WorldMap(tilt_spec(), mount())
-    world.integrate_scan(angles, ranges, pose, stamp=100.0)
-    back = WorldMap.load(world.save(tmp_path / "tipped.npz"), mount())
-    written = np.flatnonzero(back.lidar_weight.any(axis=(0, 1)))
-    rows = world.protected_rows
-    assert rows is not None
-    assert back.protected_rows == rows, "the plane's layer, as before the snapshot"
-    assert written[-1] + 1 > rows[1], "though the tipped beams wrote well above it"
-
-
-def test_a_snapshot_of_another_version_is_refused(tmp_path: Path) -> None:
-    world = WorldMap(spec(), mount())
-    path = world.save(tmp_path / "old.npz")
-    data = dict(np.load(path))
-    data["version"] = np.array(99)
-    np.savez_compressed(path, **data)
-    with pytest.raises(ValueError, match="version 99"):
-        WorldMap.load(path)
-
-
-@pytest.mark.slow
 def test_a_saved_map_seeds_the_layer_as_the_starting_state() -> None:
     """A known room is a loaded map written into the volume — after that nothing in the stack
     can tell it from a room the cart discovered itself."""
@@ -709,15 +644,6 @@ def test_bearings_in_base_undoes_an_upside_down_mount() -> None:
     assert np.allclose(bearings_in_base(angles, 0.25, True), [0.25, -0.25])
 
 
-def test_the_snapshot_clock_fires_on_the_period() -> None:
-    clock = SnapshotClock(every_s=60.0)
-    assert clock.due(10.0) and clock.age_s(10.0) == math.inf
-    clock.done(10.0)
-    assert not clock.due(30.0)
-    assert clock.age_s(30.0) == 20.0
-    assert clock.due(70.0)
-
-
 def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
     """The row order of an occupancy grid and of the exported pgm, pinned.
 
@@ -762,21 +688,7 @@ def test_the_message_packs_the_slice_the_way_map_server_decodes_it() -> None:
     assert pixels[2, 1] < 64, "the occupied cell sits in the pgm's LAST row: row 0 is the top"
 
 
-# ---- the volume's own file, and whether it may be replaced --------------------------------
-def test_the_volume_is_named_after_the_graph_database_whose_frame_it_holds() -> None:
-    """THE FRAME IS THE DATABASE'S. Every voxel was painted at a pose in RTAB-Map's own optimised
-    frame, so a volume resumed beside another database is a room drawn in coordinates nothing
-    shares — and the file name is what makes a fresh database mean a fresh volume, not a silent
-    mismatch."""
-    assert world_path_for("/maps/rtabmap.db") == Path("/maps/rtabmap.world.npz")
-    bare = world_path_for("rtabmap.db")
-    assert bare == Path("/maps/rtabmap.world.npz"), "a bare name lands in the maps directory"
-    assert export_path_for("/maps/rtabmap.world.npz") == Path("/maps/rtabmap.world")
-    # ...and the pair an offline export writes is what world_path_for would point back at
-    exported = export_path_for(world_path_for("/maps/slam.db")).with_suffix(".yaml")
-    assert world_path_for(exported) == Path("/maps/slam.world.npz")
-
-
+# ---- the offline export --------------------------------------------------------------------
 def test_an_offline_export_reads_back_as_the_slice_it_was_written_from(tmp_path: Path) -> None:
     """The pair is for an operator's eyes and for the instruments in scratch/, so what matters is
     that map_server's own reader gets the volume back cell for cell and origin for origin."""
@@ -798,7 +710,7 @@ def test_the_export_never_lands_on_another_file_of_the_same_stem(tmp_path: Path)
     other_pgm.write_bytes(b"not the volume")
     other_yaml.write_text("image: rtabmap.pgm\n")
     world = room()
-    for target in (export_path_for(world_path_for(other_yaml)), world_path_for(other_yaml)):
+    for target in (export_path_for(tmp_path / "rtabmap.world.npz"), tmp_path / "rtabmap.world"):
         written = world.export_pgm_yaml(target)
         assert written == tmp_path / "rtabmap.world.yaml"
         assert "image: rtabmap.world.pgm" in written.read_text()
@@ -820,23 +732,6 @@ def test_the_export_leaves_the_previous_pair_whole_when_it_cannot_finish(tmp_pat
     world.export_pgm_yaml(base)  # a rename over a read-only file still replaces it
     assert pgm.read_bytes() == kept[0]
     assert first.read_text() == kept[1]
-
-
-def test_a_snapshot_is_not_written_once_the_painting_has_stopped_being_trusted() -> None:
-    """The snapshot replaces the last one, so a run that has stopped painting at a pose the gate
-    vouches for must leave the last good map alone (ros/maps/world_live.npz.mess-20260917)."""
-    trust = SnapshotTrust(patience_s=3.0)
-    assert trust.refusal(0.0) is not None, "nothing painted yet: nothing to save"
-    assert "nothing has been painted yet" in str(trust.refusal(0.0))
-    trust.painted(10.0)
-    assert trust.refusal(11.0) is None
-    assert trust.refusal(13.0) is None, "inside the patience the feed is still speaking"
-    trust.withheld("fit 0.10 under 0.50 and no sigma to vouch for it")
-    refusal = trust.refusal(20.0)
-    assert refusal is not None and "fit 0.10" in refusal and "nothing for 10 s" in refusal
-    assert trust.refused == 3, "every refusal is counted for the report line"
-    trust.painted(21.0)
-    assert trust.refusal(21.5) is None, "a trusted revolution puts the file back in play"
 
 
 # ---- the closed loop: a view is evidence once, and only from somewhere else ------------------

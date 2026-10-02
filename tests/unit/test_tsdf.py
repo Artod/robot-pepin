@@ -10,16 +10,11 @@ import pytest
 
 from pepin.depth import Intrinsics
 from pepin.tsdf import (
-    ALIGN_MIN_GAIN,
-    Alignment,
-    AlignReason,
     DepthLaw,
     GridSpec,
     ObservedReach,
     RigidPose,
     Tsdf,
-    align_yaw,
-    backproject,
 )
 
 INTR = Intrinsics(fx=200.0, fy=200.0, cx=80.0, cy=45.0, width=160, height=90)
@@ -66,27 +61,6 @@ def _render_plane(pose: RigidPose, normal: tuple[float, float, float], offset: f
     # depth = t because dirs z == 1; a ray grazing the plane runs off to infinity, not to a room
     depth = np.where((t > 0) & (t < 50.0), t, np.nan)
     return depth.reshape(INTR.height, INTR.width)
-
-
-OBLIQUE = (math.cos(math.radians(40.0)), math.sin(math.radians(40.0)), 0.0)
-
-
-def _oblique_model(frames: int = 8) -> tuple[Tsdf, RigidPose, np.ndarray]:
-    """A model of a wall seen obliquely (its normal 40 degrees off the view) from the origin,
-    fed ``frames`` times so the whole wall carries ``min_weight`` — with three frames the far
-    end (a frame from 3 m weighs 0.44) stays unknown and the score's edge noise decides."""
-    model = Tsdf(_spec())
-    true_pose = _optical_pose(0.0, 0.0, 0.0)
-    depth = _render_plane(true_pose, OBLIQUE, 2.0)
-    for _ in range(frames):
-        model.integrate(depth, None, INTR, true_pose)
-    return model, true_pose, backproject(depth, INTR, stride=2, range_max=RANGE_M)
-
-
-def _turned(model: Tsdf, true_pose: RigidPose, band: np.ndarray, error_deg: float) -> Alignment:
-    """The alignment of ``band`` when the tracker's heading is ``error_deg`` off the truth."""
-    wrong = true_pose.turned_about((0.0, 0.0), math.radians(error_deg))
-    return align_yaw(model, band @ wrong.rotation.T + wrong.translation, (0.0, 0.0))
 
 
 def test_two_frames_of_one_wall_make_one_surface_on_the_wall() -> None:
@@ -184,137 +158,11 @@ def test_colour_stays_on_its_own_surface() -> None:
     assert model.rgb.dtype == np.uint8
 
 
-def test_the_frame_turns_itself_to_fit_the_model() -> None:
-    """A wall seen obliquely: a heading error slides the frame's points off the plane, and the
-    alignment turns them back; a frame that already fits asks for no turn."""
-    model, true_pose, band = _oblique_model()
-    # the tracker says the cart faces 2 degrees left of where it really does
-    found = _turned(model, true_pose, band, 2.0)
-    assert found.reason is AlignReason.ALIGNED and found.aligned
-    assert found.judged >= 200 and found.gain > ALIGN_MIN_GAIN
-    assert found.yaw == pytest.approx(math.radians(-2.0), abs=math.radians(0.15))
-    fits = _turned(model, true_pose, band, 0.0)
-    assert fits.reason is AlignReason.FITS and fits.yaw == 0.0 and not fits.aligned
-
-
-def test_the_refinement_lands_between_the_lattice_points() -> None:
-    """A 2.25 degree error lies halfway between two candidates (0.5 degree lattice): the
-    parabola through the best three must answer near -2.25, not the lattice's -2.5 nudged
-    away from the truth (the sign of the vertex formula)."""
-    model, true_pose, band = _oblique_model()
-    for error in (2.25, -2.25, 1.1):
-        found = _turned(model, true_pose, band, error)
-        assert found.reason is AlignReason.ALIGNED
-        assert found.yaw == pytest.approx(math.radians(-error), abs=math.radians(0.15))
-
-
-def test_a_far_wall_decides_the_turn_over_a_near_cluster() -> None:
-    """A sofa 0.5 m ahead fills seven eighths of the view and only slides along itself when
-    the frame turns; the far oblique wall in the rest is what the turn moves. Weighted by lever
-    arm the wall decides, and its gain is about twice what a plain mean over the points gives
-    (0.12 against 0.07 here; a longer sofa would push the plain mean under the 0.02 gate)."""
-    model = Tsdf(_spec())
-    true_pose = _optical_pose(0.0, 0.0, 0.0)
-    sofa = _render_wall(true_pose, 0.5)
-    wall = _render_plane(true_pose, OBLIQUE, 2.0)
-    cols = np.arange(INTR.width)[None, :]
-    on_wall = cols < INTR.width // 8  # a fifth of the pixels, four times farther out
-    depth = np.where(on_wall, wall, sofa)
-    for _ in range(8):
-        model.integrate(depth, None, INTR, true_pose)
-    band = backproject(depth, INTR, stride=2, range_max=RANGE_M)
-    error = 1.5
-    wrong = true_pose.turned_about((0.0, 0.0), math.radians(error))
-    band_map = band @ wrong.rotation.T + wrong.translation
-    found = align_yaw(model, band_map, (0.0, 0.0))
-    assert found.reason is AlignReason.ALIGNED
-    assert found.yaw == pytest.approx(math.radians(-error), abs=math.radians(0.3))
-    # the same band, every point counting alike: the sofa's points halve the wall's signal
-    plain_gain = (
-        model.score(band @ true_pose.rotation.T + true_pose.translation)[0]
-        - model.score(band_map)[0]
-    )
-    assert ALIGN_MIN_GAIN < plain_gain < found.gain / 1.5
-
-
-def test_a_turn_cannot_win_by_dropping_points_off_the_model() -> None:
-    """The score's denominator is the whole band: a point carried off known ground counts
-    zero, so leaving the model costs, and points on known ground alone would have hidden it."""
-    model = Tsdf(_spec())
-    model.weight[20:60, 40:80, :] = 10.0  # a known slab of zero field: every point fits
-    model.sdf[:] = 0.0
-    on = np.array([[1.5, 0.0, 0.3], [1.6, 0.1, 0.3]])
-    off = np.array([[-0.5, 2.5, 0.3], [-0.6, 2.4, 0.3]])
-    assert model.score(on) == (1.0, 2)
-    assert model.score(np.vstack([on, off])) == (0.5, 2)
-    fit, known = model.fit_per_point(np.vstack([on, off]))
-    assert float(fit[known].mean()) == 1.0  # the biased mean would not have told them apart
-    # and a frame of a wall that fits already: no turn improves it, even where a turn would
-    # only slide points along the wall
-    wall_model, true_pose, band = _oblique_model()
-    exact = align_yaw(wall_model, band @ true_pose.rotation.T + true_pose.translation, (0.0, 0.0))
-    assert exact.reason is AlignReason.FITS
-
-
-def test_a_heading_error_past_the_search_is_refused_with_its_reason() -> None:
-    """Past +-4 degrees the best candidate is the last one tried: the true turn may lie beyond
-    the search, and a turn to the bound would bake the remainder into the model, so the verdict
-    is AT_BOUND. Further out the model stops knowing the band's voxels at all. Inside, it
-    answers."""
-    model, true_pose, band = _oblique_model()
-    at_bound = _turned(model, true_pose, band, 5.0)
-    assert at_bound.reason is AlignReason.AT_BOUND and not at_bound.aligned
-    assert at_bound.yaw == pytest.approx(math.radians(-4.0))
-    assert _turned(model, true_pose, band, 9.0).reason is AlignReason.UNJUDGED
-    inside = _turned(model, true_pose, band, 3.0)
-    assert inside.reason is AlignReason.ALIGNED
-    assert inside.yaw == pytest.approx(math.radians(-3.0), abs=math.radians(0.15))
-
-
-def test_the_candidates_must_include_no_turn() -> None:
-    model = Tsdf(_spec())
-    with pytest.raises(ValueError):
-        align_yaw(model, np.zeros((1, 3)), (0.0, 0.0), candidates=(-0.1, 0.1))
-    # a zero that is not an exact float zero still counts as no turn
-    assert align_yaw(model, np.zeros((1, 3)), (0.0, 0.0), candidates=(-0.1, 1e-15, 0.1)).reason is (
-        AlignReason.UNJUDGED
-    )
-
-
-def test_turned_about_a_pivot_away_from_the_origin() -> None:
-    """The cart at (2, 1) with its camera 0.1 m ahead: a turn of 90 degrees about the cart
-    moves the camera to the cart's left, not around the map's origin."""
-    pose = _optical_pose(2.1, 1.0, 0.0)
-    turned = pose.turned_about((2.0, 1.0), math.radians(90.0))
-    assert turned.translation == pytest.approx([2.0, 1.1, 0.6], abs=1e-9)
-    forward = turned.rotation[:, 2]  # optical z in the map
-    assert forward == pytest.approx([0.0, 1.0, 0.0], abs=1e-9)
-    assert pose.turned_about((0.0, 0.0), math.radians(90.0)).translation == pytest.approx(
-        [-1.0, 2.1, 0.6], abs=1e-9
-    )
-
-
-def test_an_empty_model_has_no_surface_and_judges_nothing() -> None:
+def test_an_empty_model_has_no_surface() -> None:
     """The publisher runs once a second from the first one, before any frame is in."""
     model = Tsdf(_spec())
     points, colours = model.surface()
     assert points.shape == (0, 3) and colours.shape == (0, 3) and colours.dtype == np.uint8
-    assert model.score(np.array([[0.0, 0.0, 0.5]])) == (0.0, 0)
-    assert align_yaw(model, np.zeros((300, 3)), (0.0, 0.0)).reason is AlignReason.UNJUDGED
-
-
-def test_the_trilinear_read_stops_at_the_grid_s_edge() -> None:
-    """A point in the outermost voxel has no eight neighbours: it must be dropped, not wrapped."""
-    spec = _spec()
-    model = Tsdf(spec)
-    model.weight[:] = 10.0
-    model.sdf[:] = 0.0
-    nx, ny, nz = spec.shape
-    far = np.array(spec.origin) + np.array([nx, ny, nz]) * spec.voxel_m
-    outside = np.array([far, np.array(spec.origin) - 0.01, far - 0.4 * spec.voxel_m])
-    assert model.score(outside) == (0.0, 0)
-    inside = np.array([np.array(spec.origin) + np.array([nx, ny, nz]) * spec.voxel_m / 2])
-    assert model.score(inside)[1] == 1
 
 
 def test_the_snapshot_carries_what_the_surface_reads() -> None:

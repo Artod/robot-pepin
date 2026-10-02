@@ -43,27 +43,22 @@ tape, which is where they already live; the snapshot is a warm cache, never the 
 
 from __future__ import annotations
 
-import json
 import math
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 import numpy.typing as npt
 
 from pepin.depth import Intrinsics
 from pepin.tsdf import (
-    BLEND,
-    NEAREST,
     Array,
     DepthLaw,
     Float32,
     GridSpec,
-    PlanarShift,
     RigidPose,
-    ShiftedColumns,
     Tsdf,
     Uint8,
     WindowShift,
@@ -79,40 +74,11 @@ Ints = npt.NDArray[np.intp]
 FREE, OCCUPIED, UNKNOWN = 0, 100, -1
 PGM_FREE, PGM_OCCUPIED, PGM_UNKNOWN = 254, 0, 205
 
-LIDAR, CAMERA, TOF = "lidar", "camera", "tof"  # the sensors a snapshot's frame list names
-# 4 dropped the minted map identity: a volume no longer claims to be a room, because the room's
-# geometry is the graph database's and this is the surface painted in that database's frame. A
-# snapshot of any other version is refused by :meth:`WorldMap.load` and the caller starts empty —
-# which is what "the snapshot is a warm cache, never the only copy" has always meant.
-SNAPSHOT_VERSION = 4
+LIDAR, CAMERA, TOF = "lidar", "camera", "tof"  # the sensors a frame list names
 
-# The suffixes of the volume's own files: the snapshot, and the map_server pair an offline export
-# writes from its lidar layer for whoever cannot read a volume (the operator's tools, the
-# instruments in scratch/). ``rtabmap.world.npz`` + ``rtabmap.world.pgm``/``.yaml``.
-WORLD_SUFFIX = ".world.npz"
+# The stem of the map_server pair an offline export writes from a volume's lidar layer for
+# whoever cannot read a volume (the operator's tools, the instruments in scratch/).
 EXPORT_STEM = ".world"
-# Where a volume lives: ros/maps, mounted at /maps in the containers that write one.
-MAPS_DIR = "/maps"
-
-
-def world_path_for(database: str | Path, maps: str | Path = MAPS_DIR) -> Path:
-    """The volume that belongs to one graph database: ``rtabmap.db`` ->
-    ``/maps/rtabmap.world.npz``.
-
-    THE FRAME IS THE DATABASE'S, SO THE VOLUME IS NAMED AFTER THE DATABASE. Every voxel in here
-    was painted at a pose expressed in the frame RTAB-Map's optimised graph defines, so a volume
-    resumed beside ANOTHER database is a room drawn in coordinates nothing shares — which is why a
-    fresh database means a fresh volume, and the file name is what makes that visible instead of
-    silent.
-
-    A ``database`` that already looks like a path is used as one, so an explicit file still works;
-    a bare name lands in ``maps``. The suffix is APPENDED to the stem, never through
-    ``with_suffix``: pathlib reads ``.world`` as a suffix and would replace it, which is exactly
-    how the first live export wrote itself over a seed's own pgm (2026-09-18).
-    """
-    named = Path(database)
-    home = named.parent if named.parent != Path(".") else Path(maps)
-    return home / (named.stem + WORLD_SUFFIX)
 
 
 def export_path_for(world_path: str | Path) -> Path:
@@ -163,11 +129,9 @@ class LidarLaw:
     a cell the lidar owns saturates in a couple of seconds and a chair that moves is cleared in
     a couple more, which is what keeps the map alive instead of frozen.
 
-    ``no_return_free`` is the open door: a beam that came back with nothing carves free space
-    out to the mount's reach and marks nothing there. It is off by default because a beam comes
-    back with nothing from a mirror, from a black chair leg and from anything closer than the
-    sensor's minimum too — carrying any of those out to twelve metres would rub out the wall
-    behind them.
+    A beam that came back with nothing writes nothing: a mirror, a black chair leg and anything
+    closer than the sensor's minimum all say that same nothing, and carving any of them out to
+    twelve metres would rub out the wall behind them.
 
     ``return_wins`` is one sentence with two halves: A CROSSING IS WORTH A CROSSING, AND A
     CELL'S OWN RETURN IS ITS WITNESS.
@@ -208,7 +172,6 @@ class LidarLaw:
     max_weight: float = 20.0
     layer_half_m: float = 0.05  # the plane plus or minus this: one voxel either side
     step_voxels: float = 0.5  # how finely a beam is sampled, in voxels
-    no_return_free: bool = False  # a beam with no return carves to the reach, or writes nothing
     return_wins: bool = True  # a cell's own return outvotes the crossings of the same revolution
     beam_footprint: bool = True  # a crossing far away speaks for a tube, not for one voxel
 
@@ -423,8 +386,7 @@ class WorldMap:
         whose range is beyond the mount's reach carves free space out to that reach and marks
         nothing, because the reach is how far this sensor may be believed; a beam that leaves
         the volume's height is carved as far as it stays inside. A beam with no return at all
-        (NaN) writes nothing, unless ``LidarLaw.no_return_free`` is on — then it too carves to
-        the reach and marks nothing, which is how an open door stays open. Every sample is
+        (NaN) writes nothing. Every sample is
         written on the lidar's weight channel, at its own height and one voxel either side, and
         one scan speaks at most once about a voxel however many of its beams cross it.
 
@@ -503,40 +465,6 @@ class WorldMap:
         self._note(stamp, sensor, pose)
         return touched
 
-    def shift(self, shift: PlanarShift, law: str = NEAREST) -> None:
-        """Move the whole map by a rigid planar ``shift``: the volume, the lidar's own weight
-        channel and the index of the frames that painted it. ``law`` is how the content is
-        resampled (:meth:`pepin.tsdf.Tsdf.shift`): the fusion's weighted average, or the
-        nearest source column.
-
-        This is how the map follows a graph correction. Every frame in here was placed through
-        ``map -> odom`` at its own stamp; when the graph optimises and that edge jumps, the same
-        observations belong ``shift`` away — the room is not re-measured, it is carried, as one
-        body. The lidar's weight travels through the very same column map as the field, so the
-        layer the camera must hand back stays the layer the lidar wrote, cell for cell.
-
-        What does not move: the grid (the box and its lattice are the frame everything is cut
-        on), the plane and the rows the lidar's layer occupies (a planar move has no z in it),
-        and the stamp. The move also re-seeds nothing and re-publishes nothing by itself — the
-        trackers follow ``map -> odom`` already, and the next slice out of this volume is simply
-        the moved one.
-        """
-        if shift.nothing:
-            return
-        columns = self.volume.shift(shift, law)
-        self.lidar_weight = self._moved_claim(columns, law)
-        # A viewpoint count is a fact about a cell, carried the way the lidar's claim is: nearest
-        # for a nearest move, and the same majority vote for a blend, so a move cannot invent a
-        # second viewpoint for a cell that only ever had one.
-        moved_views = columns.nearest(self.views) if law == NEAREST else columns.blend(self.views)
-        if law != NEAREST:
-            share = columns.blend((self.views > 0.0).astype(np.float32))
-            moved_views[share < 0.5] = 0.0
-        self.views = moved_views
-        self.frames = [
-            (stamp, sensor, self._shifted_frame(shift, pose)) for stamp, sensor, pose in self.frames
-        ]
-
     def recentre(self, at: tuple[float, float]) -> WindowShift:
         """Slide the window onto the cart at ``at`` (:meth:`pepin.tsdf.Tsdf.recentre`), carrying
         the lidar's own weight channel and the viewpoint count through the very same copy, so the
@@ -556,34 +484,6 @@ class WorldMap:
         self.lidar_weight = move.rolled(self.lidar_weight)
         self.views = move.rolled(self.views)
         return move
-
-    def _moved_claim(self, columns: ShiftedColumns, law: str = BLEND) -> Float32:
-        """The lidar's weight channel after the move: its magnitude by the same weighted average
-        as the field, its EXTENT by the majority of what the cell was made of.
-
-        Where the lidar has spoken is a fact, not a quantity, and a blend of a non-negative
-        channel spreads a fact: every cell with one owned column among its four sources comes
-        back owned, so the claim grows by a ring at every move and :meth:`integrate_depth` then
-        hands the camera's work to a lidar that never wrote there. Measured on the synthetic box
-        (scratch/follow_refute.py, 2026-09-14): 7058 owned cells of the layer became 8305 over
-        ten corrections of 10 cm / 3 deg — +18 % of room nobody swept, and monotone, because
-        ``lidar_weight`` never decays. So the claim is carried by the same bilinear vote as the
-        field and kept where that vote is more than half the lidar's: the count then stands
-        (7058 -> 7060 after one move, and what it loses over ten is the room walking off the
-        grid), and every occupied cell of a moved seeded wall is still the lidar's.
-        """
-        if law == NEAREST:
-            return columns.nearest(self.lidar_weight)  # a nearest move cannot spread anything
-        moved = columns.blend(self.lidar_weight)
-        share = columns.blend((self.lidar_weight > 0.0).astype(np.float32))
-        moved[share < 0.5] = 0.0
-        return moved
-
-    @staticmethod
-    def _shifted_frame(shift: PlanarShift, pose: Array) -> Array:
-        """One row of the frame index (a 3x4 map pose) after the move."""
-        moved = shift.applied_to(RigidPose(pose[:, :3], pose[:, 3]))
-        return np.hstack([moved.rotation, moved.translation.reshape(3, 1)])
 
     def _note(self, stamp: float | None, sensor: str, pose: RigidPose) -> None:
         """Record that a frame went in: its stamp, its sensor and where it was placed."""
@@ -669,10 +569,7 @@ class WorldMap:
         s = self.spec
         r = np.asarray(ranges, dtype=float)
         a = np.asarray(angles, dtype=float)
-        finite = np.isfinite(r)
-        # a beam with no return is a beam to the reach with nothing at its end, or no beam at all
-        empty = ~finite if self.law.no_return_free else np.zeros(r.shape, dtype=bool)
-        valid = (finite & (r >= mount.min_range_m)) | empty
+        valid = np.isfinite(r) & (r >= mount.min_range_m)  # a beam with no return is no beam
         if not np.any(valid):
             return None
         seen = r[valid]
@@ -901,93 +798,6 @@ class WorldMap:
             f" places, mean weight {stats['mean_weight']:.1f})"
         )
 
-    # ---- the snapshot --------------------------------------------------------------------
-    def save(self, path: str | Path) -> Path:
-        """Write the whole volume to one ``.npz``: the field, both weight channels, the colour,
-        the grid it lives on, the newest observation's stamp and the frame index a later
-        re-fusion would replay. Returns the path written."""
-        out = Path(path)
-        out.parent.mkdir(parents=True, exist_ok=True)
-        frames = (
-            np.array([[f[0], f[1] == LIDAR, *f[2].reshape(-1)] for f in self.frames], dtype=float)
-            if self.frames
-            else np.zeros((0, 14))
-        )
-        # Written beside the target and renamed into place: a process killed mid-write (a hard
-        # reset, 2026-09-14) must not leave a truncated snapshot the next start chokes on.
-        final = out if out.suffix else out.with_suffix(".npz")
-        tmp = final.with_name(final.stem + ".writing.npz")
-        np.savez_compressed(
-            tmp,
-            version=np.array(SNAPSHOT_VERSION),
-            spec=np.frombuffer(json.dumps(self._spec_json()).encode(), dtype=np.uint8),
-            sdf=self.volume.sdf,
-            weight=self.volume.weight,
-            lidar_weight=self.lidar_weight,
-            views=self.views,
-            rgb=self.volume.rgb,
-            colour_weight=self.volume.colour_weight,
-            stamp=np.array(self.stamp),
-            plane_m=np.array(self.lidar_plane_m),
-            frames=frames,
-        )
-        os.replace(tmp, final)
-        return final
-
-    def _spec_json(self) -> dict[str, Any]:
-        return {
-            "origin_m": list(self.spec.origin),
-            "shape": list(self.spec.shape),
-            "voxel_m": self.spec.voxel_m,
-            "truncation_m": self.spec.truncation_m,
-            "max_weight": self.spec.max_weight,
-            "range_max_m": self.spec.range_max_m,
-            "weight_ref_m": self.spec.weight_ref_m,
-            "weight_cap": self.spec.weight_cap,
-            "camera_band_m": list(self.spec.camera_band_m),
-        }
-
-    @classmethod
-    def load(
-        cls, path: str | Path, mount: PlanarMount | None = None, law: LidarLaw | None = None
-    ) -> WorldMap:
-        """A volume saved by :meth:`save`, grid and all. Raises ``ValueError`` for a snapshot of
-        another version — including one written before the volume stopped claiming to be a map."""
-        data = np.load(Path(path))
-        version = int(data["version"])
-        if version != SNAPSHOT_VERSION:
-            raise ValueError(f"world snapshot version {version}, not {SNAPSHOT_VERSION}")
-        raw = json.loads(bytes(data["spec"].tobytes()).decode())
-        spec = GridSpec(
-            origin=(raw["origin_m"][0], raw["origin_m"][1], raw["origin_m"][2]),
-            shape=(raw["shape"][0], raw["shape"][1], raw["shape"][2]),
-            voxel_m=raw["voxel_m"],
-            truncation_m=raw["truncation_m"],
-            max_weight=raw["max_weight"],
-            range_max_m=raw["range_max_m"],
-            weight_ref_m=raw["weight_ref_m"],
-            weight_cap=raw["weight_cap"],
-            camera_band_m=(raw["camera_band_m"][0], raw["camera_band_m"][1]),
-        )
-        world = cls(spec, mount=mount, law=law)
-        world.volume.sdf[:] = data["sdf"]
-        world.volume.weight[:] = data["weight"]
-        world.volume.rgb[:] = data["rgb"]
-        world.volume.colour_weight[:] = data["colour_weight"]
-        world.lidar_weight[:] = data["lidar_weight"]
-        world.views[:] = data["views"]
-        world.stamp = float(data["stamp"])
-        world.lidar_plane_m = float(data["plane_m"])
-        world.frames = [
-            (float(row[0]), LIDAR if row[1] else CAMERA, row[2:].reshape(3, 4))
-            for row in data["frames"]
-        ]
-        # The band the camera hands back is the plane's own layer, so it is rebuilt from the
-        # saved plane — not from every row a leaning beam reached, which is what ``lidar_weight``
-        # carries and would hand the lidar the camera's band across a restart.
-        world._rows = world._plane_rows(world.lidar_plane_m) if world.lidar_weight.any() else None
-        return world
-
     def seed_from_grid(
         self, values: Int8, resolution_m: float, origin: tuple[float, float], weight: float = 4.0
     ) -> int:
@@ -1058,67 +868,6 @@ def bearings_in_base(angles: Array, mount_yaw: float, mirrored: bool) -> Array:
 
 
 @dataclass
-class CorrectionFollower:
-    """Which ``map -> odom`` the volume's content is painted under, and the move it owes the
-    graph when that edge has moved on.
-
-    Every frame in the volume was placed through the correction in force at its own stamp, so
-    the volume as a whole stands in one of them — the one this remembers. A graph optimisation
-    replaces the correction, and from that moment the painted room is stale by the difference:
-    :meth:`pending` is that difference as a :class:`pepin.tsdf.PlanarShift` once it is worth the
-    resample, and ``None`` while it is not. A refused difference is not forgotten — it is
-    measured against the same anchor next time, so a run of corrections too small to move the
-    volume one by one accumulates and moves it together.
-    """
-
-    painted_in: RigidPose | None = None
-    applied: int = 0
-    last: PlanarShift = field(default_factory=lambda: PlanarShift(0.0, 0.0, 0.0))
-
-    def anchor(self, correction: RigidPose) -> None:
-        """The correction the content is painted under from now on: the first one ever seen
-        (an empty volume is born in it) and the one in force after every move."""
-        self.painted_in = correction
-
-    def pending(self, correction: RigidPose, min_m: float, min_deg: float) -> PlanarShift | None:
-        """The move the volume owes the graph, or ``None`` when it stands close enough already
-        (below ``min_m`` and ``min_deg``) or when nothing has anchored it yet."""
-        if self.painted_in is None:
-            return None
-        shift = PlanarShift.between(self.painted_in, correction)
-        if shift.translation_m < min_m and abs(shift.yaw_deg) < min_deg:
-            return None
-        return shift
-
-    def moved(self, correction: RigidPose, shift: PlanarShift) -> None:
-        """The volume has just been moved by ``shift``: it is painted under ``correction`` now."""
-        self.anchor(correction)
-        self.applied += 1
-        self.last = shift
-
-
-@dataclass
-class SnapshotClock:
-    """When the volume was last written to disk: the age a report line prints and the alarm a
-    node saves on."""
-
-    every_s: float
-    last_s: float = field(default=0.0)
-
-    def due(self, now: float) -> bool:
-        """True when another ``every_s`` has passed (and the first time it is asked)."""
-        return self.last_s <= 0.0 or now - self.last_s >= self.every_s
-
-    def done(self, now: float) -> None:
-        """A snapshot was just written."""
-        self.last_s = now
-
-    def age_s(self, now: float) -> float:
-        """Seconds since the last snapshot; ``inf`` when there has been none."""
-        return math.inf if self.last_s <= 0.0 else now - self.last_s
-
-
-@dataclass
 class ViewGate:
     """Whether a revolution is a NEW view of the room, or the one already in the volume again.
 
@@ -1162,46 +911,3 @@ class ViewGate:
         """What the gate did this period, for a node's report line."""
         share = 100.0 * self.held / self.seen if self.seen else 0.0
         return f"{self.held}/{self.seen} revolutions ({share:.0f} %) were the same view again"
-
-
-@dataclass
-class SnapshotTrust:
-    """Whether the volume in memory is fit to REPLACE the one on disk.
-
-    A snapshot is not a log, it is the map the next run wakes up on, and it is written over the
-    last one. The paint gate (:class:`pepin.watch.PaintTrust`) already keeps an untrusted pose
-    out of the volume — but the moment it starts refusing, the volume in memory stops being
-    refreshed while the disk copy keeps being overwritten by it, and whatever the last bad
-    minutes did to the cells becomes the map for ever. ``ros/maps/world_live.npz.mess-20260917``
-    is that file: one false camera word, painted, saved, and permanent.
-
-    So the clock says WHEN and this says WHETHER: the volume is written only while painting has
-    been trusted within the same patience a source's word is believed for
-    (``pepin.watch.SOURCE_PATIENCE_S`` — the identical question, "has this feed spoken
-    recently", asked of the paint gate instead of the tracker), and a run that loses trust
-    leaves the last good snapshot exactly where it is. The refusal is counted and named, so a
-    map that has stopped being saved says so in the report line instead of silently ageing.
-    """
-
-    patience_s: float
-    last_trusted_s: float = -math.inf
-    last_refusal: str = ""
-    refused: int = 0
-
-    def painted(self, now: float) -> None:
-        """An observation has just been painted at a pose the gate vouched for."""
-        self.last_trusted_s = now
-        self.last_refusal = ""
-
-    def withheld(self, reason: str) -> None:
-        """An observation was refused, and why: the phrase the snapshot's refusal repeats."""
-        self.last_refusal = reason
-
-    def refusal(self, now: float) -> str | None:
-        """Why the volume may not be written to disk right now, or ``None`` when it may."""
-        age = now - self.last_trusted_s
-        if age <= self.patience_s:
-            return None
-        self.refused += 1
-        since = "nothing has been painted yet" if age == math.inf else f"nothing for {age:.0f} s"
-        return since + (f" (last refusal: {self.last_refusal})" if self.last_refusal else "")

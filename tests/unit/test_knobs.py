@@ -27,7 +27,6 @@ from pepin.marks_audit import MATCH_CELLS, RADIUS_M
 from pepin.snapshot import PAIR_PERIODS
 from pepin.tsdf import band_half_z_m
 from pepin.volume_scan import MARKS_MIN_Z_M
-from pepin.watch import PAINT_SIGMA_M
 
 REPO = Path(__file__).resolve().parents[2]
 NODES = "ros/pepin_bringup/pepin_bringup"
@@ -40,7 +39,6 @@ def _node_constant(node: str, name: str) -> float:
 # (node, knob) -> the number the library or the node already names
 NAMED = {
     ("contact_scan", "max_range"): CONTACT_MAX_RANGE,
-    ("depth_fusion", "paint_sigma_m"): PAINT_SIGMA_M,
     ("depth_fusion", "lean_gate_deg"): SCAN_LEAN_GATE_DEG,
     ("depth_fusion", "lean_min_quality"): LEAN_QUALITY_FLOOR,
     ("depth_fusion", "marks_min_z"): MARKS_MIN_Z_M,

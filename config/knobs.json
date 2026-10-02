@@ -9,8 +9,6 @@
       "note": "metres past which a column is called clear instead of ended; the costmap's contact_layer.obstacle_max_range must match it"}
   },
   "depth_fusion": {
-    "paint_sigma_m": {"default": 0.25, "range": [0.01, 2.0],
-      "note": "how sure of itself the tracker must be, in metres of sigma_xy, before this node paints with its pose — read from /localization/sigma, and ignored entirely while nothing publishes that topic (the fit gate stands on its own until it exists)"},
     "lean_gate_deg": {"default": 3.0, "range": [0.0, 90.0],
       "note": "a scan taken while the cart leans more than this many degrees is not integrated into the map; only with imu_lean on, which is where the lean is known at all"},
     "lean_min_quality": {"default": 0.5, "range": [0.0, 1.0],
@@ -34,15 +32,7 @@
     "no_depth_weight": {"default": 0.5, "range": [0.0, 2.0],
       "note": "what a depthless ray's carve weighs, as a share of what a measurement AT the source's reach weighs (0.67 at the stereo rig's own 2.44 m, so 0.34 by default); 0 carves nothing, 1 makes a NaN as convincing as a measurement"},
     "no_depth_reach_m": {"default": 0.0, "range": [0.0, 12.0],
-      "note": "the reach a depthless ray carves to, metres, when it must be stated; 0 (the default) MEASURES it from the frames themselves — the largest finite depth seen in the last 60 — and the report line prints what it found"},
-    "snapshot_s": {"default": 60.0, "range": [0.0, 3600.0],
-      "note": "how often the volume is written to world_path (0: only at shutdown)"},
-    "follow_correction_min_m": {"default": 0.05, "range": [0.0, 5.0],
-      "note": "how far the graph must have bent before the volume is resampled; smaller bends are kept against the same anchor and move it together when they add up"},
-    "follow_correction_min_deg": {"default": 1.0, "range": [0.0, 180.0],
-      "note": "how far the graph's bend must have TURNED before the volume is resampled: the other half of the threshold, because a turn moves the far end of the flat metres while the origin stands still"},
-    "follow_correction_min_s": {"default": 2.0, "range": [0.0, 60.0],
-      "note": "the shortest time between two moves of the volume: a burst of graph optimisations costs one resample, not one each. The correction is not lost (it is owed against the same anchor and applied at the next move) — but the frames and revolutions of that window are not painted, because a volume that owes a move is not the map they were placed in"}
+      "note": "the reach a depthless ray carves to, metres, when it must be stated; 0 (the default) MEASURES it from the frames themselves — the largest finite depth seen in the last 60 — and the report line prints what it found"}
   },
   "depth_stream": {
     "scale_ceiling": {"default": 5.0, "range": [0.5, 20.0],

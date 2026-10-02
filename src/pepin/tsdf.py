@@ -7,26 +7,14 @@ by a weighted average, so three frames of one wall taken a few degrees apart mak
 (blurred by their disagreement), never three. Observations weigh by their distance: a wall
 measured from 1 m outweighs the same wall measured from 4 m, so the model sharpens when the
 cart comes close and does not blur back when it leaves. The surface is where the number
-crosses zero, read out at sub-voxel positions between neighbouring voxels.
+crosses zero, read out at sub-voxel positions between neighbouring voxels. A frame is placed
+by TF at its own stamp, nothing else.
 
-Frame-to-model: before a frame is integrated, its points in the lidar's height band — exact by
-construction, the lidar's own beams set them (``pepin.depth``) — are turned about the cart by a
-few candidate yaws and scored against the model; the best turn corrects the pose the frame is
-integrated with. The tracker's heading jitter at rest thus never reaches the model. The frame
-is placed by TF at its own stamp, nothing else: a smoothed copy of the tracker's correction was
-tried and lagged behind a drive across the room (2026-09-11).
-
-The model can also be carried. Every frame in it was placed through a correction (``map ->
-odom``), so when a pose graph optimises and that correction jumps, the whole model belongs one
-rigid move away: :class:`PlanarShift` is that move and :meth:`Tsdf.shift` applies it, resampling
-the field through the same weighted average the fusion itself uses. The grid never moves — the
-content does.
-
-And the model can be a WINDOW instead of a room. A volume painted in the odometry frame is local
-obstacle memory: it follows the cart, so :meth:`Tsdf.recentre` slides the box by whole voxels
-(:class:`WindowShift`) and drops what leaves it. That is the opposite operation of the one above
-and costs a copy rather than a resample — nothing moves in the world, the box simply covers
-somewhere else.
+The model is a WINDOW, not a room. A volume painted in the odometry frame is local obstacle
+memory: it follows the cart, so :meth:`Tsdf.recentre` slides the box by whole voxels
+(:class:`WindowShift`) and drops what leaves it — a copy, not a resample: nothing moves in the
+world, the box simply covers somewhere else. (The frame-to-model yaw search and the planar
+resample that carried a map-frame model with the graph are on the tag alt/volume-map-2026-10-02.)
 """
 
 from __future__ import annotations
@@ -35,7 +23,6 @@ import dataclasses
 import json
 import math
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
@@ -236,145 +223,6 @@ class RigidPose:
         r = self.rotation.T
         return RigidPose(r, -(r @ self.translation))
 
-    def turned_about(self, pivot_xy: tuple[float, float], yaw: float) -> RigidPose:
-        """The same pose after the world is turned by ``yaw`` about a vertical axis through
-        ``pivot_xy`` — how a heading correction of the cart moves its camera."""
-        c, s = math.cos(yaw), math.sin(yaw)
-        rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-        pivot = np.array([pivot_xy[0], pivot_xy[1], 0.0])
-        t: Array = rz @ (self.translation - pivot) + pivot
-        return RigidPose(rz @ self.rotation, t)
-
-
-# How a planar move resamples the volume. Neither law has yet been judged by a real graph
-# correction, so the node carries both behind follow_correction_law.
-BLEND, NEAREST = "blend", "nearest"
-
-
-@dataclass(frozen=True)
-class PlanarShift:
-    """A rigid move of everything in the map's plane: metres along x and y, and a turn about
-    the map's origin. What a changed ``map -> odom`` does to every point painted under the old
-    one — the graph optimised, and the room it built moves with it as one body.
-
-    Planar on purpose. A graph correction of a cart on a floor is x, y and yaw; the volume's z
-    lattice is the lidar's plane and the camera's band, and the slices are cut horizontally, so
-    a roll or a pitch in the correction would tilt every one of them. The out-of-plane part is
-    left where it is (a centimetre of z at worst) and reported, not silently baked in.
-    """
-
-    dx: float
-    dy: float
-    dyaw: float
-
-    @classmethod
-    def between(cls, old: RigidPose, new: RigidPose) -> PlanarShift:
-        """The move from one correction to another: ``new`` after the inverse of ``old``, of
-        which the planar part is kept. A point sitting at ``p`` because it was placed under
-        ``old`` belongs at ``moved(p)`` now that ``new`` is in force."""
-        rotation = new.rotation @ old.rotation.T
-        translation = new.translation - rotation @ old.translation
-        return cls(
-            float(translation[0]),
-            float(translation[1]),
-            float(math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))),
-        )
-
-    @property
-    def translation_m(self) -> float:
-        """How far the move carries the map's origin, metres."""
-        return math.hypot(self.dx, self.dy)
-
-    @property
-    def yaw_deg(self) -> float:
-        """The turn, degrees (signed, CCW)."""
-        return math.degrees(self.dyaw)
-
-    @property
-    def nothing(self) -> bool:
-        """True when the move is below a micrometre and a millionth of a degree: nothing to do."""
-        return self.translation_m < 1e-6 and abs(self.dyaw) < 1e-8
-
-    def text(self) -> str:
-        """The move for a report line: centimetres and degrees."""
-        return f"{self.dx * 100:+.1f}, {self.dy * 100:+.1f} cm, {self.yaw_deg:+.2f} deg"
-
-    def moved(self, x: Floats, y: Floats) -> tuple[Floats, Floats]:
-        """Where the map points ``x``, ``y`` land after the move."""
-        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
-        return (c * x - s * y + self.dx, s * x + c * y + self.dy)
-
-    def source_of(self, x: Floats, y: Floats) -> tuple[Floats, Floats]:
-        """Where whatever now belongs at ``x``, ``y`` used to be: the move undone."""
-        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
-        px, py = x - self.dx, y - self.dy
-        return (c * px + s * py, -s * px + c * py)
-
-    def applied_to(self, pose: RigidPose) -> RigidPose:
-        """A pose in the map after the move — how the frame a measurement was placed by
-        travels with the room it painted."""
-        c, s = math.cos(self.dyaw), math.sin(self.dyaw)
-        rz = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
-        t: Array = rz @ pose.translation + np.array([self.dx, self.dy, 0.0])
-        return RigidPose(rz @ pose.rotation, t)
-
-
-class ShiftedColumns:
-    """Where every voxel column of a grid reads from after a :class:`PlanarShift`: the four
-    columns around its source and their bilinear weights, computed once for the grid and used
-    for every channel on it.
-
-    A planar move leaves z alone, so a whole column of voxels travels together: one set of
-    (x, y) indices moves the field, both weights and the colour, and the resample costs four
-    gathers per channel instead of eight. Columns whose source falls off the grid read as
-    nothing at all (weight zero), which is what a map that just grew a new edge should say.
-    """
-
-    def __init__(self, spec: GridSpec, shift: PlanarShift) -> None:
-        nx, ny, _nz = spec.shape
-        cx = spec.origin[0] + (np.arange(nx) + 0.5) * spec.voxel_m
-        cy = spec.origin[1] + (np.arange(ny) + 0.5) * spec.voxel_m
-        x, y = np.meshgrid(cx, cy, indexing="ij")
-        sx, sy = shift.source_of(x, y)
-        gx = (sx - spec.origin[0]) / spec.voxel_m - 0.5
-        gy = (sy - spec.origin[1]) / spec.voxel_m - 0.5
-        i0 = np.floor(gx).astype(np.intp)
-        j0 = np.floor(gy).astype(np.intp)
-        fx = (gx - i0).astype(np.float32)
-        fy = (gy - j0).astype(np.float32)
-        self.inside: npt.NDArray[np.bool_] = (i0 >= 0) & (i0 + 1 < nx) & (j0 >= 0) & (j0 + 1 < ny)
-        keep = self.inside.astype(np.float32)
-        self._i0 = np.clip(i0, 0, max(nx - 2, 0))
-        self._j0 = np.clip(j0, 0, max(ny - 2, 0))
-        self._w = (
-            (1.0 - fx) * (1.0 - fy) * keep,
-            fx * (1.0 - fy) * keep,
-            (1.0 - fx) * fy * keep,
-            fx * fy * keep,
-        )
-        self._ix = np.clip(np.rint(gx).astype(np.intp), 0, nx - 1)
-        self._iy = np.clip(np.rint(gy).astype(np.intp), 0, ny - 1)
-
-    def blend(self, field: Float32) -> Float32:
-        """One channel of the grid after the move: the bilinear average of the four source
-        columns, zero where the source is off the grid."""
-        i0, j0 = self._i0, self._j0
-        i1, j1 = i0 + 1, j0 + 1
-        w00, w10, w01, w11 = self._w
-        out: Float32 = w00[:, :, None] * field[i0, j0]
-        out += w10[:, :, None] * field[i1, j0]
-        out += w01[:, :, None] * field[i0, j1]
-        out += w11[:, :, None] * field[i1, j1]
-        return out
-
-    def nearest[T: np.generic](self, field: npt.NDArray[T]) -> npt.NDArray[T]:
-        """One channel after the move, taken from the nearest source column and zeroed off the
-        grid: what a picture takes (the colour), where half a voxel of blur buys nothing and
-        the bytes would only be rounded back."""
-        taken: npt.NDArray[T] = field[self._ix, self._iy]
-        taken[~self.inside] = 0
-        return taken
-
 
 @dataclass(frozen=True)
 class WindowShift:
@@ -435,7 +283,7 @@ class WindowShift:
 @dataclass(frozen=True)
 class DepthLaw:
     """How a depth frame writes into the volume — and, since 2026-09-22, what a pixel with NO
-    depth is allowed to say (``no_depth_free``, the camera's own ``LidarLaw.no_return_free``).
+    depth is allowed to say (``no_depth_free``).
 
     Until then a NaN pixel touched nothing at all: :meth:`Tsdf.integrate` only moved the voxels
     whose pixel carried a finite depth, so a voxel could only ever be carved by a ray that
@@ -553,24 +401,9 @@ class ObservedReach:
         return len(self._seen)
 
 
-def backproject(
-    depth: Array, intr: Intrinsics, stride: int = 1, range_max: float = math.inf
-) -> Array:
-    """The depth image as (n, 3) points in the optical frame (x right, y down, z forward),
-    every ``stride``-th pixel, only finite depths beyond the lens and within ``range_max``
-    (the model integrates nothing farther, so farther points can never be on known ground)."""
-    d = np.asarray(depth, dtype=float)[::stride, ::stride]
-    rows, cols = np.mgrid[0 : depth.shape[0] : stride, 0 : depth.shape[1] : stride]
-    ok = np.isfinite(d) & (d > NEAR_M) & (d <= range_max)
-    z = d[ok]
-    x = (cols[ok] - intr.cx) / intr.fx * z
-    y = (rows[ok] - intr.cy) / intr.fy * z
-    return np.stack([x, y, z], axis=1)
-
-
 class Tsdf:
     """The fused model: signed distances, weights and colours on a grid, and the operations
-    on it — integrate a frame, read the surface, score a set of points against the model."""
+    on it — integrate a frame, slide the window, read the surface."""
 
     def __init__(self, spec: GridSpec) -> None:
         self.spec = spec
@@ -644,57 +477,6 @@ class Tsdf:
         self.colour_weight = move.rolled(self.colour_weight)
         self.spec = self.spec.moved_by_voxels(move.di, move.dj)
         return move
-
-    def shift(self, shift: PlanarShift, law: str = NEAREST) -> ShiftedColumns:
-        """Move everything in the model by a rigid planar ``shift`` — the volume follows the
-        graph's correction instead of standing where the pose used to be — and return the
-        column map it was resampled through, so another channel on the same grid (the lidar's
-        weight) moves with exactly the same one.
-
-        The grid itself does not move: the box, its origin and its z lattice are what every
-        slice and every seeded cell are cut on. Two laws carry the content through it and
-        neither has yet been judged by a real graph correction, so ``law`` is a switch, not a
-        constant (``follow_correction_law`` on pepin_bringup.depth_fusion):
-
-        ``blend`` is the fusion's own weighted average — the field carried as ``sdf * weight``
-        and divided back out, so an unknown neighbour (weight zero) pulls no surface toward it.
-        It keeps no quantisation bias and pays for it in cells: a surface averaged with the free
-        space in front of it thins, and on the live snapshot of 2026-09-14 (297 k painted
-        voxels) one move of 10 cm / 3 deg cost 108 ms and left the 99th occupied cell 9.7 cm
-        from where the correction points.
-
-        ``nearest`` takes the nearest source column for every channel: 9 ms on the same volume,
-        every cell kept, and a wall put within half a voxel (measured: 2.5 cm at the 99th cell)
-        of where it belongs — sharp, cheap, and systematically quantised.
-
-        The colour is a picture, not a measurement, and always takes its nearest voxel.
-
-        SINCE 2026-09-18 THE DEFAULT IS ``nearest``, AND THE ARGUMENT FOR ``blend`` IS INVERTED.
-        ``blend`` was the default because a weighted average THINS a wall (a surface averaged with
-        the free space in front of it) and a thinned wall is repainted by the sensors, while a
-        quantisation bias is not. ``LidarLaw.beam_footprint`` removed the premise: a far crossing
-        now weighs only the share of its own disc that the voxel covers, so the free space in front
-        of a wall is weakly weighted while the return keeps its full weight — and the average is
-        pulled INTO the wall instead of out of it. Measured on the synthetic box, one move of 10 cm
-        / 3 deg: blend takes 430 occupied cells to 516 (+20 %, a wall two cells thick) with its
-        worst cell 5.85 cm from where the correction points, past the voxel; nearest takes 430 to
-        431 with its worst cell at exactly 5.00 cm, half a voxel, which is its documented
-        quantisation and nothing more. A widened wall is a bias in the one layer the cart drives
-        by, which is the failure class the old default existed to avoid.
-        """
-        columns = ShiftedColumns(self.spec, shift)
-        if law == NEAREST:
-            weight = columns.nearest(self.weight)
-            sdf = columns.nearest(self.sdf)
-            sdf[weight == 0.0] = 1.0
-        else:
-            weight = columns.blend(self.weight)
-            carried = columns.blend(self.sdf * self.weight)
-            sdf = np.where(weight > 0.0, carried / np.maximum(weight, 1e-6), 1.0).astype(np.float32)
-        self.sdf, self.weight = sdf, weight
-        self.rgb = columns.nearest(self.rgb)
-        self.colour_weight = columns.nearest(self.colour_weight)
-        return columns
 
     # ---- geometry helpers ----------------------------------------------------------------
     def _index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
@@ -935,138 +717,3 @@ class Tsdf:
         if not pts:
             return np.zeros((0, 3)), np.zeros((0, 3), dtype=np.uint8)
         return np.concatenate(pts), np.concatenate(cols)
-
-    def fit_per_point(
-        self, points_map: Array, min_weight: float = 2.0
-    ) -> tuple[Array, npt.NDArray[np.bool_]]:
-        """For every map point, 1 - |sdf| with the field read between voxel centres (trilinear,
-        so a centimetre counts) and whether the point is on known ground (at least half of its
-        eight voxels carry ``min_weight``); unknown points read 0."""
-        s = self.spec
-        n = int(np.asarray(points_map).shape[0])
-        fit = np.zeros(n)
-        known = np.zeros(n, dtype=bool)
-        if n == 0:
-            return fit, known
-        g = (np.asarray(points_map, dtype=float) - np.array(s.origin)) / s.voxel_m - 0.5
-        i0 = np.floor(g).astype(int)
-        f = g - i0
-        shape = np.array(s.shape)
-        inside = np.all((i0 >= 0) & (i0 + 1 < shape), axis=1)
-        if not np.any(inside):
-            return fit, known
-        i0, f = i0[inside], f[inside]
-        value = np.zeros(i0.shape[0])
-        mass = np.zeros(i0.shape[0])
-        corners = np.zeros(i0.shape[0], dtype=int)
-        for dx in (0, 1):
-            for dy in (0, 1):
-                for dz in (0, 1):
-                    ix, iy, iz = i0[:, 0] + dx, i0[:, 1] + dy, i0[:, 2] + dz
-                    w = (f[:, 0] if dx else 1.0 - f[:, 0]) * (f[:, 1] if dy else 1.0 - f[:, 1])
-                    w = w * (f[:, 2] if dz else 1.0 - f[:, 2])
-                    here = self.weight[ix, iy, iz] >= min_weight
-                    value += np.where(here, w * self.sdf[ix, iy, iz], 0.0)
-                    mass += np.where(here, w, 0.0)
-                    corners += here
-        on_ground = (corners >= 4) & (mass > 1e-6)
-        sdf = np.where(on_ground, value / np.maximum(mass, 1e-6), 1.0)
-        fit[inside] = np.where(on_ground, np.maximum(0.0, 1.0 - np.abs(sdf)), 0.0)
-        known[inside] = on_ground
-        return fit, known
-
-    def score(
-        self, points_map: Array, min_weight: float = 2.0, weights: Array | None = None
-    ) -> tuple[float, int]:
-        """The mean of ``fit_per_point`` over ALL the points (unknown ones count zero, so a
-        turn that carries points out of the model loses), each point counting ``weights``
-        (equal by default), and how many were on known ground."""
-        fit, known = self.fit_per_point(points_map, min_weight)
-        if fit.size == 0:
-            return 0.0, 0
-        if weights is None:
-            return float(fit.mean()), int(known.sum())
-        total = float(np.sum(weights))
-        if total <= 0.0:
-            return 0.0, int(known.sum())
-        return float(np.dot(fit, weights) / total), int(known.sum())
-
-
-YAW_SEARCH = tuple(math.radians(d) for d in np.arange(-4.0, 4.01, 0.5))
-ALIGN_MIN_POINTS = 200  # fewer band points on known voxels: the model has nothing to say
-ALIGN_MIN_GAIN = 0.02  # the best turn must beat "no turn" by this much of the score
-
-
-class AlignReason(StrEnum):
-    """Why ``align_yaw`` answered what it did. Only ALIGNED carries a turn to apply; AT_BOUND
-    is the one answer a frame must not be integrated on."""
-
-    ALIGNED = "aligned"  # a turn inside the search beat no turn: apply it
-    FITS = "fits"  # no turn beats none by the minimum gain: the frame sits on the model
-    UNJUDGED = "unjudged"  # too few band points on known ground: the model cannot judge
-    AT_BOUND = "at_bound"  # the best turn is the search's edge: the truth may lie beyond
-
-
-@dataclass(frozen=True)
-class Alignment:
-    """The verdict of ``align_yaw``: the turn (radians, 0 unless ALIGNED or AT_BOUND), its
-    score gain over no turn, how many band points the model knew at no turn, and the reason."""
-
-    yaw: float
-    gain: float
-    judged: int
-    reason: AlignReason
-
-    @property
-    def aligned(self) -> bool:
-        return self.reason is AlignReason.ALIGNED
-
-
-def align_yaw(
-    model: Tsdf,
-    band_map: Array,
-    pivot_xy: tuple[float, float],
-    candidates: tuple[float, ...] = YAW_SEARCH,
-) -> Alignment:
-    """The turn about ``pivot_xy`` that seats the frame's band points best on the model,
-    parabola-refined between the best three candidates (``candidates`` must include no turn).
-
-    Every candidate is scored over the whole band, a point off known ground counting zero, so a
-    turn cannot win by dropping points. Each point counts by its lever arm |p - pivot|: a turn
-    of one degree moves a point 4 m out by 7 cm and one 0.5 m out by 9 mm, so the far wall
-    carries the information about the turn and a sofa beside the cart, which only slides along
-    itself, must not dilute it. The score's peak is a kink (a sum of |sdf| tents), so the
-    parabola's vertex under-reaches it by up to a tenth of a degree — half a centimetre at 3 m.
-    """
-    zero = min(range(len(candidates)), key=lambda i: abs(candidates[i]))
-    if abs(candidates[zero]) > 1e-12:
-        raise ValueError("the yaw candidates must include no turn")
-    pivot = np.array([pivot_xy[0], pivot_xy[1], 0.0])
-    rel = band_map - pivot
-    lever = np.hypot(rel[:, 0], rel[:, 1])  # unchanged by any turn about the pivot
-    scores = []
-    judged_at_zero = 0
-    for i, yaw in enumerate(candidates):
-        c, s = math.cos(yaw), math.sin(yaw)
-        turned = np.stack(
-            [c * rel[:, 0] - s * rel[:, 1], s * rel[:, 0] + c * rel[:, 1], rel[:, 2]], axis=1
-        )
-        score, n = model.score(turned + pivot, weights=lever)
-        scores.append(score)
-        if i == zero:
-            judged_at_zero = n
-    if judged_at_zero < ALIGN_MIN_POINTS:
-        return Alignment(0.0, 0.0, judged_at_zero, AlignReason.UNJUDGED)
-    best = int(np.argmax(scores))
-    gain = float(scores[best] - scores[zero])
-    if gain < ALIGN_MIN_GAIN:
-        return Alignment(0.0, gain, judged_at_zero, AlignReason.FITS)
-    if best == 0 or best == len(candidates) - 1:
-        return Alignment(float(candidates[best]), gain, judged_at_zero, AlignReason.AT_BOUND)
-    yaw = candidates[best]
-    y0, y1, y2 = scores[best - 1], scores[best], scores[best + 1]
-    denom = y0 - 2.0 * y1 + y2
-    if denom < 0.0:  # the vertex of the parabola through the three best: toward the higher side
-        step = candidates[best + 1] - candidates[best]
-        yaw += 0.5 * (y0 - y2) / denom * step
-    return Alignment(float(yaw), gain, judged_at_zero, AlignReason.ALIGNED)
