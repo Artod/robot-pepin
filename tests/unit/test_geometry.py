@@ -1,3 +1,4 @@
+import json
 import math
 from pathlib import Path
 
@@ -23,3 +24,11 @@ def test_meters_per_tick_is_circumference_over_ticks() -> None:
 def test_direction_must_be_a_sign() -> None:
     with pytest.raises(ValueError):
         WheelMotor(motor_id=7, direction=2)
+
+
+def test_a_wheel_ceiling_that_is_not_positive_is_refused() -> None:
+    raw = json.loads((REPO / "config" / "base.json").read_text())
+    with pytest.raises(ValueError):
+        BaseConfig.from_dict({**raw, "max_wheel_speed_m_s": 0.0})
+    older = {k: v for k, v in raw.items() if k != "max_wheel_speed_m_s"}
+    assert BaseConfig.from_dict(older).max_wheel_speed_m_s == 0.30  # a file from before the key

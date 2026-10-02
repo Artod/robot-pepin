@@ -59,6 +59,29 @@ def test_idle_wheels_are_released_so_the_cart_can_be_pushed() -> None:
     assert not core.armed and bus.torque[-1][0] == "off"
 
 
+def test_the_wheel_ceiling_is_answered_set_live_and_refused_outside_its_range() -> None:
+    """ros/speed.sh's base half: the ceiling in force and the config's, a set that holds until
+    the server restarts, a value outside pepin.speed's range refused with the ceiling unchanged,
+    and none of it a driving command (a client that only asked never releases the wheels)."""
+    from pepin.base_server import DRIVING_COMMANDS
+
+    core, bus = make_core()
+    assert core.command({"cmd": "max_wheel_speed"}, now=1.0) == {
+        "type": "max_wheel_speed",
+        "config_m_s": 0.30,
+        "m_s": 0.30,
+    }
+    reply = core.command({"cmd": "max_wheel_speed", "m_s": 0.2}, now=1.0)
+    assert reply is not None and (reply["m_s"], reply["was_m_s"]) == (0.2, 0.30)
+    core.command({"cmd": "twist", "v": 0.3, "w": 0.0}, now=1.1)
+    rim = bus.writes[-1][1][RIGHT] * CFG.geometry.m_per_tick
+    assert rim == pytest.approx(0.2, abs=1e-3)
+    for bad in (0.5, 0.05, "fast", True, None):
+        reply = core.command({"cmd": "max_wheel_speed", "m_s": bad}, now=1.2)
+        assert reply is not None and "error" in reply and reply["m_s"] == 0.2, bad
+    assert "max_wheel_speed" not in DRIVING_COMMANDS
+
+
 def test_ticks_integrate_odometry_and_snapshots_report_travel_once() -> None:
     core, bus = make_core()
     ticks_per_m = 4096 / (3.141592653589793 * 0.125)  # from the test geometry: 0.125 m wheels

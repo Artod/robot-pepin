@@ -143,6 +143,72 @@ def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
     assert "outside its limits" in refused.stderr
 
 
+@pytest.mark.slow  # two runs of the script against a fake board: ~0.5 s
+def test_speed_sh_sets_the_base_and_nav2_together_and_says_whether_they_hold_one_speed(
+    tmp_path: Path,
+) -> None:
+    """ros/speed.sh: a value outside pepin.speed's range is refused before any place is asked;
+    a set goes to the base server's port and to Nav2's tool in pepin-macnav; the last line says
+    whether every live place holds one number. A fake base server and a fake ``docker`` here."""
+    import json
+    import os
+    import socket
+    import sys
+    import threading
+
+    assert subprocess.run(["bash", "-n", str(REPO / "ros/speed.sh")], timeout=20).returncode == 0
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    asked: list[dict[str, Any]] = []
+
+    def board() -> None:
+        conn, _ = listener.accept()
+        with conn:
+            asked.append(json.loads(conn.recv(4096).split(b"\n")[0]))
+            conn.sendall(b'{"type":"state","x":0.0}\n')
+            answer = {"type": "max_wheel_speed", "m_s": 0.25, "config_m_s": 0.3, "was_m_s": 0.3}
+            conn.sendall((json.dumps(answer) + "\n").encode())
+
+    thread = threading.Thread(target=board, daemon=True)
+    thread.start()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    (bin_dir / "docker").write_text(
+        f'#!/bin/bash\necho "$*" >> {tmp_path}/docker.log\n'
+        "echo 'controller_server FollowPathMPPI.vx_max   0.25'\n"
+        "echo 'velocity_smoother min_velocity[0]        -0.25'\n"
+    )
+    (bin_dir / "docker").chmod(0o755)
+    (bin_dir / "python3").symlink_to(sys.executable)
+    env = os.environ | {
+        "PATH": f"{bin_dir}:/usr/bin:/bin",
+        "PEPIN_HOST": "127.0.0.1",
+        "PEPIN_BASE_PORT": str(listener.getsockname()[1]),
+    }
+
+    def speed(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(
+            ["bash", str(REPO / "ros/speed.sh"), *args],
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+
+    refused = speed("0.5")
+    assert refused.returncode == 2 and "outside" in refused.stderr, refused.stderr
+    assert not (tmp_path / "docker.log").exists() and not asked
+    done = speed("0.25")
+    thread.join(timeout=5)
+    listener.close()
+    assert done.returncode == 0, done.stdout + done.stderr
+    assert asked == [{"cmd": "max_wheel_speed", "m_s": 0.25}]
+    assert "pepin-macnav" in (tmp_path / "docker.log").read_text()
+    assert "nav_speed.py --set 0.25" in (tmp_path / "docker.log").read_text()
+    assert done.stdout.splitlines()[-1] == "one speed: 0.25 m/s in all 3 live places", done.stdout
+
+
 # ros/sensor.sh talks to exactly three things: ``ssh`` and ``docker`` (both functions, from
 # ros/lib.sh) and ros/flags.sh beside it. A copy of the script in a directory whose lib.sh and
 # flags.sh are fakes therefore runs whole, with no robot and no ros2, and every command it would

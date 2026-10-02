@@ -94,6 +94,7 @@ PER_CALL = (
     "pepin.goal_link",
     "pepin.push",
     "pepin.red_button",
+    "pepin.speed",
     "pepin.teleop",
     "pepin_bringup.teleop_keys",
 )

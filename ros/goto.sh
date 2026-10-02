@@ -7,6 +7,11 @@
 #                                  (ros/stop.sh is the hard stop that also brakes)
 #   ros/goto.sh where              the pose right now (map -> base_link, from the goal server)
 #   ros/goto.sh planner NAME       the planner for the next goals (navfn|lattice|theta|smac|hybrid)
+#   ros/goto.sh controller [NAME]  the controller that follows the plan (mppi|rpp|graceful|dwb|shim;
+#                                  shim = rpp_shim), or with no NAME the one in force: the goal
+#                                  server's `controller` flag, published latched on
+#                                  controller_selector; a running goal switches at the tree's next
+#                                  tick. Back to mppi when Nav2 restarts
 #   ros/goto.sh mark NAME          remember where the robot stands as NAME: a labelled RTAB-Map
 #                                  node plus the cart's offset from it, so the place rides the node
 #                                  when a loop closure bends the map
@@ -90,12 +95,26 @@ motion() {  # TOOL ARGS...
     MOTION=""
     exit "$rc"
 }
-USAGE="usage: ros/goto.sh NAME | X Y [YAW] | cancel | where | planner NAME | mark NAME | places | seed X Y [YAW] | round [NAME] | move NAME SEG..."
+USAGE="usage: ros/goto.sh NAME | X Y [YAW] | cancel | where | planner NAME | controller [mppi|rpp|graceful|dwb|shim] | mark NAME | places | seed X Y [YAW] | round [NAME] | move NAME SEG..."
 case "${1:-}" in
     "") echo "$USAGE"; exit 2 ;;
     cancel) cancel; exit ;;
     where) goal_link where; exit ;;
     planner) goal_link planner "${2:?$USAGE}"; exit ;;
+    controller)
+        # What the behaviour tree's ControllerSelector holds: the goal server's latched message.
+        selected() {
+            docker exec "$NAV" /pepin_entrypoint.sh timeout 8 ros2 topic echo --once \
+                --qos-durability transient_local --qos-reliability reliable \
+                --field data /controller_selector std_msgs/msg/String 2>/dev/null | head -1
+        }
+        if [ -n "${2:-}" ]; then
+            case "$2" in shim) PICK=rpp_shim ;; *) PICK="$2" ;; esac
+            "$HERE/flags.sh" set goal_server controller "$PICK" || exit
+        fi
+        echo "flag: $("$HERE/flags.sh" get goal_server controller)"
+        echo "controller_selector: $(selected)"
+        exit ;;
     # A PLACE LIVES IN RTAB-MAP'S GRAPH: goto_ros.py asks the laptop's places node (/places/mark,
     # answered on /places/marked), which labels the graph node the cart is at and stores the
     # cart's offset from it. --places names the map file's book, the fallback it falls back TO.

@@ -30,6 +30,20 @@ def _clamp(value: float, limit: float) -> float:
     return max(-limit, min(limit, value))
 
 
+def wheel_ceiling(twist: Twist, half_track_m: float, ceiling_m_s: float) -> Twist:
+    """``twist`` slowed so that neither wheel's rim runs faster than ``ceiling_m_s``.
+
+    Linear and angular are scaled by ONE factor, so the cart follows the same arc, slower. A
+    servo asked for more than it can turn delivers its own maximum on that wheel alone, and a
+    turn at speed came out 40-60 % of its rate (2026-10-02). Within the ceiling: unchanged.
+    """
+    fastest = abs(twist.linear) + abs(twist.angular) * half_track_m  # max(|v - wh|, |v + wh|)
+    if fastest <= ceiling_m_s:
+        return twist
+    scale = ceiling_m_s / fastest
+    return Twist(linear=twist.linear * scale, angular=twist.angular * scale)
+
+
 @dataclass
 class BusWatchdog:
     """Escalation policy for consecutive bus failures inside a control loop.
@@ -104,6 +118,9 @@ class DiffDriveBase:
         self._direction = {LEFT: config.left.direction, RIGHT: config.right.direction}
         ticks = config.geometry.ticks_per_rev
         self._unwrap = {name: EncoderUnwrapper(ticks) for name in (LEFT, RIGHT)}
+        self._half_track_m = config.geometry.track_width_m / 2.0
+        # Live (the base server's max_wheel_speed command); the config's value at every start.
+        self.max_wheel_speed_m_s = config.max_wheel_speed_m_s
 
     @staticmethod
     def motor_ids(config: BaseConfig) -> dict[str, int]:
@@ -131,15 +148,17 @@ class DiffDriveBase:
             unwrap.reset()
 
     def set_twist(self, twist: Twist) -> None:
-        """Drive at the given body velocity (m/s, rad/s), clamped to the configured limits.
+        """Drive at the given body velocity (m/s, rad/s): each axis clamped to its configured
+        limit, then the whole twist slowed to the wheel ceiling (:func:`wheel_ceiling`).
 
         One unacknowledged broadcast write: the wheels hold this velocity until the
         next command, so a stalled control loop leaves the base rolling.
         """
-        safe = Twist(
+        clamped = Twist(
             linear=_clamp(twist.linear, self._cfg.max_speed_m_s),
             angular=_clamp(twist.angular, self._cfg.max_yaw_rate_rad_s),
         )
+        safe = wheel_ceiling(clamped, self._half_track_m, self.max_wheel_speed_m_s)
         rates = self._kin.twist_to_wheels(safe)
         ticks = {
             LEFT: self._direction[LEFT] * self._kin.rad_s_to_ticks_s(rates.left),

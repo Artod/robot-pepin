@@ -18,6 +18,8 @@ Wire format, one JSON object per line in both directions::
                                                                   walk the head (pan +1 left,
                                                                   tilt +1 down) while repeated
                                                                   within its 0.5 s deadman
+                     {"cmd": "max_wheel_speed", "m_s": 0.3}        the wheel ceiling (m_s: set it
+                                                                  until a restart); ros/speed.sh
     board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, STATE_HZ
                      {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
                      {"type": "pong", "busy": true}                   moving: servos not pinged
@@ -27,6 +29,9 @@ Wire format, one JSON object per line in both directions::
                                                                   any, ride along)
                      {"type": "neck_jog", "error": "..."}         a refused jog (an accepted one
                                                                   is silent, like a twist)
+                     {"type": "max_wheel_speed", "m_s": 0.3, "config_m_s": 0.3, "was_m_s": ..}
+                                                                  the ceiling in force ("error":
+                                                                  a refused value, unchanged)
 
 The absolute moves (``neck_goto``, ``neck_home``) are board/README.md's; ``ros/neck.sh`` speaks
 them. Only a client that has sent ``twist`` or ``stop`` counts as a driver: the wheels are

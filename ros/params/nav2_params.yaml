@@ -56,7 +56,9 @@ controller_server:
     # so it runs with the yaw-checking general_goal_checker (the tree's GoalCheckerSelector).
     # FollowPathShim (2026-09-23): FollowPathRS inside Nav2's RotationShimController, which turns
     # the cart to the mark's heading once it is inside the goal tolerance (flag value rpp_shim).
-    controller_plugins: ["FollowPath", "FollowPathRS", "FollowPathMPPI", "FollowPathShim"]
+    # FollowPathGraceful and FollowPathDWB (2026-10-02): Nav2's Graceful and DWB controllers for
+    # an A/B beside MPPI (flag values graceful, dwb; ros/goto.sh controller NAME).
+    controller_plugins: ["FollowPath", "FollowPathRS", "FollowPathMPPI", "FollowPathShim", "FollowPathGraceful", "FollowPathDWB"]
     use_realtime_priority: false
 
     # Progress checker parameters
@@ -92,10 +94,11 @@ controller_server:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
-      # cap while the wheels had never been asked for more. The smoother below carries the same
-      # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.45
+      # THE CART'S ONE SPEED: the base server's wheel ceiling, config/base.json's
+      # max_wheel_speed_m_s, given over this number at launch (pepin.speed, nav.launch.py) as it is
+      # over the smoother's and every controller's; ros/speed.sh moves them all live. Every tape
+      # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
+      desired_linear_vel: 0.30
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
@@ -151,10 +154,11 @@ controller_server:
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
       plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
-      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
-      # cap while the wheels had never been asked for more. The smoother below carries the same
-      # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.45
+      # THE CART'S ONE SPEED: the base server's wheel ceiling, config/base.json's
+      # max_wheel_speed_m_s, given over this number at launch (pepin.speed, nav.launch.py) as it is
+      # over the smoother's and every controller's; ros/speed.sh moves them all live. Every tape
+      # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
+      desired_linear_vel: 0.30
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
@@ -226,10 +230,11 @@ controller_server:
       allow_reversing: true
       # Regulated Pure Pursuit: a fraction of MPPI's CPU on the board's A53 cores, and a
       # differential-drive cart at 0.15 m/s does not need model-predictive sampling.
-      # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
-      # cap while the wheels had never been asked for more. The smoother below carries the same
-      # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.45
+      # THE CART'S ONE SPEED: the base server's wheel ceiling, config/base.json's
+      # max_wheel_speed_m_s, given over this number at launch (pepin.speed, nav.launch.py) as it is
+      # over the smoother's and every controller's; ros/speed.sh moves them all live. Every tape
+      # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
+      desired_linear_vel: 0.30
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
@@ -306,9 +311,10 @@ controller_server:
       vx_std: 0.3
       vy_std: 0.2
       wz_std: 0.6
-      # The base's caps, the velocity smoother's: forward 0.30, reverse half of it, 0.6 rad/s.
-      vx_max: 0.45
-      vx_min: -0.45  # reverse at the cap too; the rear is unsensed (no ToF, lidar masked)
+      # The cart's one speed both ways (config/base.json max_wheel_speed_m_s, given over these at
+      # launch: pepin.speed; ros/speed.sh); the rear is unsensed (no ToF, lidar masked).
+      vx_max: 0.30
+      vx_min: -0.30
       vy_max: 0.0
       wz_max: 1.0
       ax_max: 0.8
@@ -400,6 +406,99 @@ controller_server:
         threshold_to_consider: 0.15  # hands over to GoalAngleCritic at the same distance
         max_angle_to_furthest: 1.0
         mode: 2  # follow the plan's own direction, reverse segments included
+
+    FollowPathGraceful:
+      # Nav2's Graceful controller (flag value graceful, an A/B beside MPPI, 2026-10-02): a smooth
+      # control law steering base_link onto a motion target on the plan, the farthest one between
+      # min_lookahead and max_lookahead whose simulated approach clears the footprint (the check
+      # is always on in this plugin and uses the true rectangle). base_link is the cart's front
+      # edge, so the law steers the bumper and the rear swings wide in a curve; the footprint
+      # check is what keeps the rear corners off furniture.
+      plugin: "nav2_graceful_controller::GracefulController"
+      transform_tolerance: 2.0  # the WiFi stall, as the RPPs and MPPI
+      max_robot_pose_search_dist: 10.0
+      min_lookahead: 0.40  # RPP's min_lookahead_dist
+      max_lookahead: 1.0
+      k_phi: 2.0  # the control law's gains: Nav2's defaults
+      k_delta: 1.0
+      beta: 0.4
+      lambda: 2.0
+      v_linear_min: 0.08  # RPP's min_approach_linear_velocity
+      v_linear_max: 0.30  # the cart's one speed (config/base.json max_wheel_speed_m_s, given over it at launch: pepin.speed; ros/speed.sh)
+      v_angular_max: 1.0
+      v_angular_min_in_place: 0.25
+      # The speed falls as the motion target nears: v <= v_linear_max * r / slowdown_radius, r the
+      # distance to the TARGET. Under max_lookahead, so a target at full look-ahead allows the cap
+      # (the default 1.5 capped the cruise at 0.30 m/s); near the goal the target is the goal.
+      slowdown_radius: 0.8
+      # Forward only: allow_backward reverses whenever the target lies behind the bumper, with no
+      # notion of a cusp, so a goal behind the cart would be reached backwards, blind (the rear is
+      # unsensed). A target more than initial_rotation_tolerance off the nose is turned to in
+      # place instead (sweeps 0.407 m about base_link, collision-checked every
+      # in_place_collision_resolution rad). The two are exclusive in the plugin.
+      allow_backward: false
+      initial_rotation: true
+      initial_rotation_tolerance: 0.75
+      prefer_final_rotation: true  # the mark's heading by a pivot inside the goal tolerance
+      rotation_scaling_factor: 0.5  # in-place turns at 0.5 rad/s, RPP's pivot speed
+      in_place_collision_resolution: 0.1
+
+    FollowPathDWB:
+      # Nav2's DWB (flag value dwb, an A/B beside MPPI, 2026-10-02): samples (vx, wz) pairs inside
+      # the acceleration window of one control period, rolls each out for sim_time and scores it.
+      # The obstacle critic is ObstacleFootprint (the true rectangle; a lethal or unknown cell on
+      # its outline drops the sample), not BaseObstacle (base_link's cell alone, which on this cart
+      # is the bumper). Velocities and accelerations are the velocity smoother's.
+      plugin: "dwb_core::DWBLocalPlanner"
+      debug_trajectory_details: false
+      # min_vel_x, max_vel_x, max_speed_xy: the cart's one speed (config/base.json max_wheel_speed_m_s, given over it at launch: pepin.speed; ros/speed.sh)
+      min_vel_x: -0.30
+      min_vel_y: 0.0
+      max_vel_x: 0.30
+      max_vel_y: 0.0
+      max_vel_theta: 1.0
+      min_speed_xy: 0.0
+      max_speed_xy: 0.30
+      min_speed_theta: 0.0
+      acc_lim_x: 0.8
+      acc_lim_y: 0.0
+      acc_lim_theta: 2.0
+      decel_lim_x: -1.5
+      decel_lim_y: 0.0
+      decel_lim_theta: -2.0
+      vx_samples: 20
+      vy_samples: 1
+      vtheta_samples: 20
+      sim_time: 1.5  # 0.45 m at 0.30 m/s, inside the 3 m local costmap
+      linear_granularity: 0.05
+      angular_granularity: 0.025
+      transform_tolerance: 2.0  # the WiFi stall, as the others
+      xy_goal_tolerance: 0.10  # RotateToGoal's hand-over: the goal checker's
+      trans_stopped_velocity: 0.10
+      short_circuit_trajectory_evaluation: true
+      prune_plan: true
+      forward_prune_distance: 1.2  # MPPI's prune_distance
+      publish_trajectories: false
+      publish_cost_grid_pc: false
+      critics: ["RotateToGoal", "Oscillation", "ObstacleFootprint", "GoalAlign", "PathAlign", "PathDist", "GoalDist", "PreferForward"]
+      ObstacleFootprint.scale: 0.02
+      PathAlign.scale: 32.0
+      PathAlign.forward_point_distance: 0.1
+      GoalAlign.scale: 24.0
+      GoalAlign.forward_point_distance: 0.1
+      PathDist.scale: 32.0
+      GoalDist.scale: 24.0
+      RotateToGoal.scale: 32.0
+      RotateToGoal.slowing_factor: 5.0
+      RotateToGoal.lookahead_time: -1.0
+      # Reverse only as an escape. The goal and path critics score a trajectory's END in cells x
+      # 24-32, so with a goal 1 m behind a reverse beats a pivot by ~300; 500 makes a reverse win
+      # only when no forward or turning sample is legal (a docked start). strafe_x 0 and
+      # theta_scale 0 keep the critic's other two terms (slow-and-straight, turning) silent.
+      PreferForward.scale: 500.0
+      PreferForward.penalty: 1.0
+      PreferForward.strafe_x: 0.0
+      PreferForward.theta_scale: 0.0
 
 local_costmap:
   local_costmap:
@@ -1231,10 +1330,11 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.45, 0.0, 1.0]
-    # Reverse at half speed: the rear is unsensed, but 0.075 made every BackUp and every Hybrid
-    # cusp a crawl the progress checker timed out on (review 2026-09-09).
-    min_velocity: [-0.45, 0.0, -1.0]
+    # The linear element of both: the cart's one speed (config/base.json max_wheel_speed_m_s, given over it at launch: pepin.speed; ros/speed.sh).
+    # Reverse at the full speed: the rear is unsensed, but 0.075 made every BackUp and every
+    # Hybrid cusp a crawl the progress checker timed out on (review 2026-09-09).
+    max_velocity: [0.30, 0.0, 1.0]
+    min_velocity: [-0.30, 0.0, -1.0]
     max_accel: [0.8, 0.0, 2.0]  # full speed in 0.6 s; braking twice as hard as that
     max_decel: [-1.5, 0.0, -2.0]  # 0.3 m/s to 0 in 0.2 s and 3 cm
     odom_topic: "odom"

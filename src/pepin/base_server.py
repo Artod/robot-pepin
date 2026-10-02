@@ -63,6 +63,7 @@ from pepin.geometry import BaseConfig
 from pepin.kinematics import STOP, Twist
 from pepin.neck import PAN, RAD_PER_TICK, TILT, NeckConfig, neck_servo_ids
 from pepin.odometry import DiffDriveOdometry
+from pepin.speed import check_speed
 from pepin.streams import JsonLinesServer
 from pepin.telemetry import LatencyTracker
 
@@ -536,6 +537,7 @@ class BaseServerCore:
         """
         self._bus = bus
         self._base = DiffDriveBase(bus, config)
+        self._config_wheel_speed = config.max_wheel_speed_m_s
         self._odom = DiffDriveOdometry(config.geometry)
         self._servo_names = servo_names or [LEFT, RIGHT]
         self._deadman_s = deadman_s
@@ -616,6 +618,8 @@ class BaseServerCore:
             return self._start_neck_move(cmd, message, now)
         elif cmd == "neck_jog":
             return self._jog_neck(message, now)
+        elif cmd == "max_wheel_speed":
+            return self._max_wheel_speed(message)
         else:
             logger.warning("unknown command %r", message)
         return None
@@ -741,6 +745,26 @@ class BaseServerCore:
         if self._mover is not None:
             # A neck left holding would stay energised with nobody left to release it.
             with_suppressed_timeout(self._mover.release)
+
+    def _max_wheel_speed(self, message: dict[str, Any]) -> dict[str, Any]:
+        """The ``max_wheel_speed`` request: the wheel ceiling in force, set first when the message
+        carries ``m_s`` (until this server restarts; refused outside pepin.speed's range)."""
+        reply: dict[str, Any] = {"type": "max_wheel_speed", "config_m_s": self._config_wheel_speed}
+        if "m_s" in message:
+            try:
+                speed = check_speed(message["m_s"])
+            except ValueError as exc:
+                return {**reply, "m_s": self._base.max_wheel_speed_m_s, "error": str(exc)}
+            reply["was_m_s"] = self._base.max_wheel_speed_m_s
+            self._base.max_wheel_speed_m_s = speed
+            logger.info(
+                "wheel ceiling %.2f -> %.2f m/s, live until a restart (config/base.json: %.2f)",
+                reply["was_m_s"],
+                speed,
+                self._config_wheel_speed,
+            )
+        reply["m_s"] = self._base.max_wheel_speed_m_s
+        return reply
 
     def _start_neck_move(
         self, cmd: str, message: dict[str, Any], now: float
@@ -933,6 +957,13 @@ def main() -> None:
     )
 
     config = BaseConfig.from_json(args.config)
+    logger.info(
+        "wheel ceiling %.2f m/s (max_wheel_speed_m_s): a twist that would run a wheel faster is"
+        " slowed whole, its arc kept; axis caps %.2f m/s, %.2f rad/s",
+        config.max_wheel_speed_m_s,
+        config.max_speed_m_s,
+        config.max_yaw_rate_rad_s,
+    )
     motors = DiffDriveBase.motor_ids(config)
     neck_ids = load_neck_ids(args.neck_config)
     motors.update(neck_ids)  # ids 9 and 10 by their names, before the roster fills the rest

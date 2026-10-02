@@ -400,6 +400,8 @@ def test_two_controllers_and_only_the_footprint_planner_may_plan_a_reverse() -> 
         "FollowPathRS",
         "FollowPathMPPI",
         "FollowPathShim",
+        "FollowPathGraceful",
+        "FollowPathDWB",
     ]
     assert cs["FollowPath"].get("allow_reversing", False) is False
     assert cs["FollowPathRS"]["allow_reversing"] is True
@@ -471,6 +473,38 @@ def test_the_shim_wraps_the_reversing_rpp_and_turns_only_at_the_goal() -> None:
     assert followers["rpp_shim"] == ("FollowPathShim", "general_goal_checker")
 
 
+def test_graceful_and_dwb_stay_inside_the_base_caps_check_the_footprint_and_hold_the_heading() -> (
+    None
+):
+    """The A/B controllers beside MPPI: the velocity smoother's caps, DWB's obstacle critic on the
+    true rectangle (BaseObstacle would check base_link's cell, the bumper), Graceful forward-only
+    (its allow_backward reverses towards any target behind the bumper, blind), and both ended by
+    the yaw-checking goal checker, since both turn to the heading themselves."""
+    import ast
+
+    cs = _p("controller_server")
+    vs = _p("velocity_smoother")
+    g, d = cs["FollowPathGraceful"], cs["FollowPathDWB"]
+    assert (
+        g["v_linear_max"] == vs["max_velocity"][0] and g["v_angular_max"] == vs["max_velocity"][2]
+    )
+    assert g["allow_backward"] is False and g["initial_rotation"] is True
+    assert g["slowdown_radius"] <= g["max_lookahead"]
+    assert d["max_vel_x"] == vs["max_velocity"][0] and d["min_vel_x"] == vs["min_velocity"][0]
+    assert d["max_vel_theta"] == vs["max_velocity"][2]
+    assert d["acc_lim_x"] == vs["max_accel"][0] and d["decel_lim_x"] == vs["max_decel"][0]
+    assert "ObstacleFootprint" in d["critics"] and "BaseObstacle" not in d["critics"]
+    assert d["xy_goal_tolerance"] == cs["general_goal_checker"]["xy_goal_tolerance"]
+    src = (REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text()
+    followers = next(
+        ast.literal_eval(n.value)
+        for n in ast.walk(ast.parse(src))
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") == "FOLLOWERS"
+    )
+    assert followers["graceful"] == ("FollowPathGraceful", "general_goal_checker")
+    assert followers["dwb"] == ("FollowPathDWB", "general_goal_checker")
+
+
 def test_every_planner_the_goal_server_offers_exists_with_its_controller() -> None:
     import ast
 
@@ -501,25 +535,42 @@ def test_the_footprint_planner_plans_the_cart_and_backs_out_only_briefly() -> No
     assert h["allow_unknown"] is True
 
 
-def test_the_cart_drives_at_the_base_s_full_speed_and_nothing_clips_it() -> None:
-    """One speed cap, the base's own: the controller asks for it, the smoother lets it through,
-    and the velocity-scaled lookahead has room for it. Every tape until 2026-09-09 sat at 0.20 m/s
-    because two Nav2 numbers said so while the wheels had never been asked for more."""
+def test_the_cart_drives_at_its_one_speed_and_nothing_clips_it() -> None:
+    """ONE speed, config/base.json's max_wheel_speed_m_s: the base server's wheel ceiling, and
+    what Nav2 is given at launch over every controller's and the smoother's linear limit
+    (pepin.speed.NAV2_SPEED, nav.launch.py), under the axis caps the base and the C++ bridge
+    clamp at. Every tape until 2026-09-09 sat at 0.20 m/s because two Nav2 numbers said so; a
+    controller left out of the table would be such a number again."""
     from pepin.deployment import BASE_MAX_ANGULAR_RAD_S, BASE_MAX_LINEAR_M_S
+    from pepin.geometry import BaseConfig
+    from pepin.speed import NAV2_SPEED, SPEED_RANGE_M_S, check_speed, file_value, nav2_overrides
 
     cfg = json.loads((REPO / "config/base.json").read_text())
-    base = cfg["max_speed_m_s"]
-    assert (base, cfg["max_yaw_rate_rad_s"]) == (BASE_MAX_LINEAR_M_S, BASE_MAX_ANGULAR_RAD_S)
+    axes = (cfg["max_speed_m_s"], cfg["max_yaw_rate_rad_s"])
+    assert axes == (BASE_MAX_LINEAR_M_S, BASE_MAX_ANGULAR_RAD_S)
     robot = sf.dict_items(sf.tree(ROBOT_LAUNCH))
     assert robot["max_linear_m_s"] == {"BASE_MAX_LINEAR_M_S"}, "the C++ bridge keeps its 0.25 cap"
-    follow = _p("controller_server")["FollowPath"]
+    assert SPEED_RANGE_M_S[1] == BASE_MAX_LINEAR_M_S, "ros/speed.sh never asks past the bridge"
+    speed = check_speed(BaseConfig.from_json(REPO / "config/base.json").max_wheel_speed_m_s)
+    for plugin in _p("controller_server")["controller_plugins"]:
+        assert any(p.name.startswith(f"{plugin}.") for p in NAV2_SPEED), f"{plugin}: own speed"
+    for param in NAV2_SPEED:
+        file_value(PARAMS, param)  # KeyError: a name Nav2 would ignore in silence
+    run = nav2_overrides(speed, PARAMS)  # what Nav2 runs: the file under the launch's overrides
+    for param in NAV2_SPEED:
+        assert param.held(run[param.node][param.name]) == pytest.approx(param.sign * speed)
     smoother = _p("velocity_smoother")
-    assert follow["desired_linear_vel"] == smoother["max_velocity"][0], (
-        "two caps: one wins silently"
-    )
-    assert follow["desired_linear_vel"] <= base, "the base clamps anything above its own cap"
-    assert follow["desired_linear_vel"] >= 0.30, "the base allows 0.30 m/s: ask for it"
-    assert follow["max_lookahead_dist"] >= follow["lookahead_time"] * follow["desired_linear_vel"]
+    for array in ("max_velocity", "min_velocity"):
+        assert run["velocity_smoother"][array][1:] == smoother[array][1:], "the rest is the file's"
+    loads = {
+        ast.unparse(sf.keywords(c)["name"]): ast.unparse(sf.keywords(c)["parameters"])
+        for c in sf.calls_to(sf.tree(NAV_LAUNCH), "ComposableNode")
+        if "parameters" in sf.keywords(c)
+    }
+    for node in {p.node for p in NAV2_SPEED}:
+        assert loads[repr(node)] == f"[params, speed[{node!r}]]", "the overrides after the file"
+    follow = _p("controller_server")["FollowPath"]
+    assert follow["max_lookahead_dist"] >= follow["lookahead_time"] * speed
     assert smoother["max_accel"][0] >= 0.5 and smoother["max_decel"][0] <= -1.0
 
 

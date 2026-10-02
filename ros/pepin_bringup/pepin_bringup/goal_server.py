@@ -106,12 +106,14 @@ FLAGS = FlagSet(
     Flag(
         "controller",
         "mppi",
-        choices=("mppi", "rpp", "rpp_shim"),
+        choices=("mppi", "rpp", "rpp_shim", "graceful", "dwb"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
         " Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23;"
         " rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart"
-        " to the mark's heading in place once it is inside the goal tolerance."
+        " to the mark's heading in place once it is inside the goal tolerance;"
+        " graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi"
+        " (ros/goto.sh controller NAME)."
         " Published latched on controller_selector and goal_checker_selector, so a change is"
         " read by the behaviour tree at its next tick",
         why="the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading:"
@@ -177,6 +179,9 @@ FOLLOWERS = {
     # The reversing RPP inside Nav2's RotationShimController: RPP's pace, and the shim turns the
     # cart in place to the mark's heading once it is inside the goal tolerance.
     "rpp_shim": ("FollowPathShim", "general_goal_checker"),
+    # Both turn to the mark's heading themselves (Graceful's final rotation, DWB's RotateToGoal).
+    "graceful": ("FollowPathGraceful", "general_goal_checker"),
+    "dwb": ("FollowPathDWB", "general_goal_checker"),
 }
 
 
@@ -242,6 +247,7 @@ class GoalServer(Node):
         # and a drive was credited to a planner that never ran.
         self._planner_path = self._record_dir / ".planner"
         self.planner = "navfn"  # the saved pick is published once the switches exist (below)
+        self.controller = ""  # the controller id last published on controller_selector
         self._goal_handle: Any = None
         self._driving = (
             False  # from before send_goal until the drive is finally over: cancel() clears it
@@ -537,6 +543,7 @@ class GoalServer(Node):
         self._controller_pick.publish(String(data=controller))
         self._checker_pick.publish(String(data=checker))
         self.planner = name.lower()
+        self.controller = controller
         with contextlib.suppress(OSError):
             self._planner_path.write_text(f"{self.planner}\n")
         self.get_logger().info(f"planner {planner} with controller {controller} ({checker})")
@@ -638,8 +645,8 @@ class GoalServer(Node):
             cancels = self._cancels  # any cancel from here on is this drive's
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
-            f"run {self._runs.run}: planner {PLANNERS[self.planner][0]} "
-            f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
+            f"run {self._runs.run}: planner {PLANNERS[self.planner][0]}, controller "
+            f"{self.controller} -> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
         try:
             if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
@@ -675,6 +682,7 @@ class GoalServer(Node):
                     "event": "accepted",
                     "run": self._runs.run,
                     "planner": PLANNERS[self.planner][0],
+                    "controller": self.controller,
                     "pose": "tf",
                     # early: a drive that never reaches "done" is still fetched
                     "recording": None if record is None else str(record),

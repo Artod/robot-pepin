@@ -15,6 +15,9 @@ owned the edge before, and the message-path owner of it (``slam:=true``), are on
 alt/tracker-2026-09-22.
 """
 
+from typing import Any
+
+import yaml
 from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
@@ -28,7 +31,9 @@ from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
 from pepin_bringup.launch_kit import respawned_container
 
-from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, NAV_NODES
+from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, NAV_NODES, config_file
+from pepin.geometry import BaseConfig
+from pepin.speed import NAV2_SPEED, nav2_overrides
 
 # Our own nodes come back by themselves after this pause: a code change costs one kicked process
 # (ros/laptop.sh kick <node>; SIGINT, what the launch sends at shutdown) instead of a stack
@@ -37,19 +42,37 @@ from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, NAV_NODES
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 
 
+def speed_overrides(context: LaunchContext) -> dict[str, dict[str, Any]]:
+    """THE CART'S ONE SPEED: config/base.json's max_wheel_speed_m_s, the base server's wheel
+    ceiling, for every controller's and the velocity smoother's linear limit (pepin.speed), given
+    after the params file so it wins over the number there. Read at every start of the
+    container, so a respawn picks up the file as it is; ros/speed.sh moves them all live."""
+    speed = BaseConfig.from_json(config_file("base.json")).max_wheel_speed_m_s
+    path = LaunchConfiguration("params_file").perform(context)
+    with open(path) as f:
+        overrides = nav2_overrides(speed, yaml.safe_load(f))
+    print(
+        f"nav speed {speed:.2f} m/s (config/base.json max_wheel_speed_m_s) on"
+        f" {len(NAV2_SPEED)} parameters: " + ", ".join(p.label for p in NAV2_SPEED),
+        flush=True,
+    )
+    return overrides
+
+
 def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The Nav2 nodes, described anew on every call (a respawned container loads fresh ones, see
     pepin_bringup.launch_kit): the servers of pepin.deployment.NAV_NODES and the lifecycle
     manager. No map_server: both costmaps' static layers read RTAB-Map's grid on /map
     (ros/params/nav2_params.yaml), and an unmapped room starts from ros/laptop.sh vslam --fresh."""
     params = LaunchConfiguration("params_file")
+    speed = speed_overrides(context)
     to_smoother = [("cmd_vel", "cmd_vel_nav")]
     catalogue = {
         "controller_server": ComposableNode(
             package="nav2_controller",
             plugin="nav2_controller::ControllerServer",
             name="controller_server",
-            parameters=[params],
+            parameters=[params, speed["controller_server"]],
             remappings=to_smoother,
         ),
         "planner_server": ComposableNode(
@@ -75,7 +98,7 @@ def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
             package="nav2_velocity_smoother",
             plugin="nav2_velocity_smoother::VelocitySmoother",
             name="velocity_smoother",
-            parameters=[params],
+            parameters=[params, speed["velocity_smoother"]],
             remappings=[("cmd_vel", "cmd_vel_nav"), ("cmd_vel_smoothed", "cmd_vel")],
         ),
     }
