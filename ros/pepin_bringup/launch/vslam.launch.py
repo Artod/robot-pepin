@@ -551,6 +551,7 @@ TRIPLE_SUBSCRIPTIONS = {
 # which then measures from the new origin — were measured with this table as it stands: 9.4-9.7
 # poses/s through the gate, none dropped, 0.2 cm and 0.0 deg of drift over 60 s at rest.
 VO_RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output; /vo is what the gate publishes for the EKF
+VO_INPUTS = ("depth", "stereo")  # the vo_input launch argument: what the visual odometry reads
 VISUAL_ODOMETRY = {
     # The EKF owns odom -> base_link. This node names its frame "odom" because that is the frame
     # its poses are differences in, and publishes no transform at all.
@@ -884,21 +885,49 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # board's odometry is the wheels and the gyro exactly as before. It never publishes a
     # transform: the EKF owns odom -> base_link, and it takes no guess from TF either
     # (guess_frame_id empty), so this measurement stays independent of the filter it feeds.
-    rgbd_odometry = Node(
-        package="rtabmap_odom",
-        executable="rgbd_odometry",
-        name="rgbd_odometry",
-        output="screen",
-        parameters=[{"frame_id": "base_link", **VISUAL_ODOMETRY}],
-        remappings=[
-            ("rgb/image", "/camera/image"),
-            ("rgb/camera_info", "/camera/camera_info"),
-            ("depth/image", "/camera/depth"),
-            ("odom", VO_RAW_TOPIC),
-        ],
-        condition=IfCondition(LaunchConfiguration("vo")),
-        **RESPAWN,
-    )
+    # vo_input picks what it reads: "depth" (rgbd_odometry on the picture and /camera/depth, so
+    # it runs at the DEPTH's rate) or "stereo" (stereo_odometry on the two rectified eyes, which
+    # all four topics carry under one stamp, so it runs at the CAMERA's rate and waits for no
+    # depth). Measured 2026-10-01 (scratch/cv_tradeoffs/REPORT.md): live, rgbd_odometry made
+    # 3.1 poses/s behind RAFT's 3.1 depth frames/s, 42 ms a frame, 0.5-0.6 s from stamp to pose;
+    # offline on 150 frames of this rig cropped to 640x480, the two cost the same, 64 ms median
+    # a frame (rgbd p95 129, stereo 115), 407 and 366 inliers, none lost.
+    vo_input = LaunchConfiguration("vo_input").perform(context).strip()
+    if vo_input not in VO_INPUTS:
+        raise ValueError(f"vo_input:={vo_input}: one of {', '.join(VO_INPUTS)}")
+    if vo_input == "stereo":
+        odometry = Node(
+            package="rtabmap_odom",
+            executable="stereo_odometry",
+            name="stereo_odometry",
+            output="screen",
+            parameters=[{"frame_id": "base_link", **VISUAL_ODOMETRY}],
+            remappings=[
+                ("left/image_rect", "/camera/image"),
+                ("left/camera_info", "/camera/camera_info"),
+                ("right/image_rect", "/camera/right/image"),
+                ("right/camera_info", "/camera/right/camera_info"),
+                ("odom", VO_RAW_TOPIC),
+            ],
+            condition=IfCondition(LaunchConfiguration("vo")),
+            **RESPAWN,
+        )
+    else:
+        odometry = Node(
+            package="rtabmap_odom",
+            executable="rgbd_odometry",
+            name="rgbd_odometry",
+            output="screen",
+            parameters=[{"frame_id": "base_link", **VISUAL_ODOMETRY}],
+            remappings=[
+                ("rgb/image", "/camera/image"),
+                ("rgb/camera_info", "/camera/camera_info"),
+                ("depth/image", "/camera/depth"),
+                ("odom", VO_RAW_TOPIC),
+            ],
+            condition=IfCondition(LaunchConfiguration("vo")),
+            **RESPAWN,
+        )
     vo = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.visual_odometry"],
         output="screen",
@@ -998,7 +1027,8 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         remappings=remappings,
     )
     vo_note = (
-        f" rgbd_odometry -> {VO_RAW_TOPIC} -> /vo for the board's EKF (withheld until"
+        f" {'stereo' if vo_input == 'stereo' else 'rgbd'}_odometry (vo_input {vo_input}) ->"
+        f" {VO_RAW_TOPIC} -> /vo for the board's EKF (withheld until"
         " visual_odometry's vo_publish is on)"
         if _flag(context, "vo")
         else " no visual odometry (vo:=false): the board's odometry is the wheels and the gyro"
@@ -1049,7 +1079,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         places,
         audit,
         foxglove,
-        rgbd_odometry,
+        odometry,
         vo,
     ]
 
@@ -1081,6 +1111,9 @@ def generate_launch_description() -> LaunchDescription:
             # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still
             # nothing until visual_odometry's vo_publish flag is turned on.
             DeclareLaunchArgument("vo", default_value="true"),
+            # What that odometry reads: depth (rgbd_odometry, at the depth's rate) or stereo
+            # (stereo_odometry on the two eyes, at the camera's). See the node's comment above.
+            DeclareLaunchArgument("vo_input", default_value="depth"),
             # The live phantom count (pepin_bringup.marks_audit): who painted each lethal cell of
             # the local costmap, once a second. On by default — it only reads, it costs this
             # laptop a few milliseconds a second, and the drive it is needed on is the drive

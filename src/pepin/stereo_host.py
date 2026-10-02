@@ -25,6 +25,10 @@ end against the host's own 88-90 ms forward pass (host_smoke.py, warmed host). T
 answer is float16 (``application/x-pepin-disparity16``): at 128 px of disparity — the near end of
 this rig, 0.18 m — float16's step is 0.06 px, an eighth of the half pixel
 :data:`pepin.stereo_depth.DISPARITY_SIGMA_PX` the reach is derived from, and 0.09 mm of depth.
+A client that sends ``Accept: application/x-pepin-disparity16z`` gets the same bits zlibbed
+(:data:`CONTENT_DISPARITY_Z`, 0.34 of the bytes): the reply is the direction Docker Desktop
+stalls, and from a container it was 295 ms a pair plain against 206 compressed, 2026-10-01
+(scratch/cv_tradeoffs/host_ab.py, a second host beside the live one, 40 pairs each).
 
 THE NODE'S SIDE is :class:`pepin.stereo_depth.RaftMatcher`: the live ``stereo_matcher`` flag in
 {sgbm, raft} picks which engine answers the next pair, and a pair the host cannot answer falls to
@@ -76,6 +80,7 @@ import http.client
 import json
 import logging
 import time
+import zlib
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -92,6 +97,14 @@ log = logging.getLogger("pepin.stereo_host")
 CONTENT_PAIR = "application/x-pepin-pair8"  # two rectified eyes, left then right; X-Channels
 # 1 (grey, the default) or 3 (RGB)
 CONTENT_DISPARITY = "application/x-pepin-disparity16"
+# The same float16 image, lossless: the low bytes of every pixel, then the high bytes, through
+# zlib level 1. Sent only to a client whose Accept names it, so either side may be the older one.
+# WHY: Docker Desktop's proxy stalls the reply. With the live stack up, a 960 KB pair up and a
+# 960 KB reply down took 6-16 ms in a third of the round trips and 60-200 ms in the rest (median
+# 75-85), 0.4 ms natively; the same pair up with 330 KB down, 15 ms median
+# (scratch/cv_tradeoffs/docker_loopback.py). Split + zlib 1 leaves 0.34 of the reply for ~9 ms of
+# the host's CPU (raft_bench.py, 8 rectified pairs).
+CONTENT_DISPARITY_Z = "application/x-pepin-disparity16z"
 DISPARITY_PATH = "/disparity"
 DEFAULT_WEIGHTS = "models/raftstereo-realtime.pth"  # relative to the repo root; see .gitignore
 DEFAULT_EYE = (600, 800)  # (height, width) of one eye of the stereo head, for the warm-up
@@ -316,25 +329,42 @@ def decode_pair(headers: Mapping[str, str], body: bytes) -> tuple[Array, Array]:
     return np.ascontiguousarray(both[0]), np.ascontiguousarray(both[1])
 
 
-def pack_disparity(disparity: Array) -> tuple[dict[str, str], bytes]:
-    """A disparity image as response headers and float16 body, its size in X-Height/X-Width."""
+def pack_disparity(disparity: Array, compress: bool = False) -> tuple[dict[str, str], bytes]:
+    """A disparity image as response headers and float16 body, its size in X-Height/X-Width;
+    ``compress`` packs it as :data:`CONTENT_DISPARITY_Z` (the same bits, byte planes zlibbed)."""
     h, w = int(disparity.shape[0]), int(disparity.shape[1])
-    body = np.ascontiguousarray(disparity, dtype=np.float16).tobytes()
-    return {"Content-Type": CONTENT_DISPARITY, "X-Height": str(h), "X-Width": str(w)}, body
+    half = np.ascontiguousarray(disparity, dtype="<f2")
+    if compress:
+        planes = half.view(np.uint8).reshape(-1, 2).T.tobytes()  # low bytes, then high bytes
+        body = zlib.compress(planes, 1)
+        kind = CONTENT_DISPARITY_Z
+    else:
+        body, kind = half.tobytes(), CONTENT_DISPARITY
+    return {"Content-Type": kind, "X-Height": str(h), "X-Width": str(w)}, body
 
 
 def unpack_disparity(headers: Mapping[str, str], body: bytes) -> Array:
-    """The float32 disparity of a response; :class:`StereoHostError` when it is not one."""
+    """The float32 disparity of a response, plain or compressed; :class:`StereoHostError` when it
+    is not one."""
     h = {str(k).lower(): str(v) for k, v in headers.items()}
-    if h.get("content-type", "") != CONTENT_DISPARITY:
-        raise StereoHostError(f"not a disparity image: {h.get('content-type', '')!r}")
+    kind = h.get("content-type", "")
+    if kind not in (CONTENT_DISPARITY, CONTENT_DISPARITY_Z):
+        raise StereoHostError(f"not a disparity image: {kind!r}")
     try:
         height, width = int(h["x-height"]), int(h["x-width"])
     except (KeyError, ValueError) as exc:
         raise StereoHostError("a disparity image without a size") from exc
+    if kind == CONTENT_DISPARITY_Z:
+        try:
+            planes = zlib.decompress(body)
+        except zlib.error as exc:
+            raise StereoHostError(f"a compressed disparity that does not inflate: {exc}") from exc
+        if len(planes) != height * width * 2:
+            raise StereoHostError(f"{len(planes)} bytes is not {height}x{width} float16")
+        body = np.frombuffer(planes, dtype=np.uint8).reshape(2, -1).T.tobytes()
     if len(body) != height * width * 2:
         raise StereoHostError(f"{len(body)} bytes is not {height}x{width} float16")
-    out: Array = np.frombuffer(body, dtype=np.float16).reshape(height, width).astype(np.float32)
+    out: Array = np.frombuffer(body, dtype="<f2").reshape(height, width).astype(np.float32)
     return out
 
 
@@ -401,7 +431,8 @@ class StereoModel:
         t1 = time.perf_counter()
         disparity = self.warm()(left, right)
         t2 = time.perf_counter()
-        out_headers, out = pack_disparity(disparity)
+        accept = {str(k).lower(): str(v) for k, v in headers.items()}.get("accept", "")
+        out_headers, out = pack_disparity(disparity, compress=CONTENT_DISPARITY_Z in accept)
         t3 = time.perf_counter()
         for stage, seconds in (
             ("decode", t1 - t0),
@@ -460,10 +491,13 @@ class RemoteDisparity:
     :meth:`health` takes a connection of its own so a report timer may ask mid-pair.
     """
 
-    def __init__(self, url: str, timeout_s: float = 2.0) -> None:
+    def __init__(self, url: str, timeout_s: float = 2.0, compressed: bool = True) -> None:
         if not url.startswith("http://"):
             raise ValueError(f"the stereo host URL must start with http://, not {url!r}")
         self.url = url
+        # Ask for the compressed reply (CONTENT_DISPARITY_Z); a host that predates it answers
+        # the plain one, which unpack_disparity reads all the same.
+        self._accept = CONTENT_DISPARITY_Z if compressed else CONTENT_DISPARITY
         host_port = url[len("http://") :].rstrip("/")
         self._host, _, port = host_port.partition(":")
         self._port = int(port) if port else 80
@@ -484,6 +518,7 @@ class RemoteDisparity:
     def __call__(self, left: Array, right: Array) -> Array:
         t0 = time.perf_counter()
         headers, body = encode_pair(left, right)
+        headers["Accept"] = self._accept
         t1 = time.perf_counter()
         try:
             if self._conn is None:

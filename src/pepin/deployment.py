@@ -130,6 +130,7 @@ LAPTOP_SLAM_NODES = (
     "/marks_audit",  # who painted the costmap's lethal cells, live (marks_audit:=false: absent)
     "/foxglove_bridge",
     "/rgbd_odometry",  # the camera's odometry (vo:=true, the default)
+    "/stereo_odometry",  # the same role from the two eyes (vo_input:=stereo; one of the two runs)
     "/visual_odometry",  # and the node that gates it for the board's EKF
 )
 
