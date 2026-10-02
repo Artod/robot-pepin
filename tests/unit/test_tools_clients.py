@@ -212,7 +212,7 @@ def test_the_neck_s_reach_and_rest_come_from_its_config() -> None:
     head = BaseServerNeck("127.0.0.1", closed_port(), NECK)
     reach = head.reach()
     assert reach.pan_left_deg == pytest.approx(155.7, abs=0.5)
-    assert reach.refusal(0.0, 95.0) is not None and reach.refusal(-150.0, 80.0) is None
+    assert reach.refusal(0.0, 70.0) is not None and reach.refusal(-150.0, 60.0) is None
     assert head.rest().tilt_deg == 23.8
     with pytest.raises(ServiceDownError, match="base server"):
         head.pose()
