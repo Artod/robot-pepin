@@ -29,8 +29,6 @@ ros/maps/*.data
 ros/maps/*_throttle*
 .coverage
 ros/maps/rtabmap*.db*
-# ...and the map the board serves, recorded by the same start so vslam seeds from it
-ros/.map
 ros/maps/last_pose.json
 
 # written by the depth node at run time (the persisted affine law)

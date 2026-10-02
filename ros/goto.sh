@@ -120,7 +120,11 @@ finish() {  # everything of this drive closed and named, always, once
         *.jsonl) echo "numbered tape: ros$taped" ;;
         *)
             echo "numbered bag: ros$taped; converting it to a tape"
-            pepin_bag_to_tape "$taped" >/dev/null && echo "numbered tape: ros$taped.jsonl" ;;
+            if pepin_bag_to_tape "$taped" >>"$LOG" 2>&1; then
+                echo "numbered tape: ros$taped.jsonl"
+            else
+                echo "!! the bag is here but not converted: see the end of $LOG"
+            fi ;;
     esac
     echo "recorded: ${REC#"$(dirname "$HERE")/"}/${STAMP}_goto.log, ${STAMP}_goto.nav2.log$([ -s "$CAM" ] && echo ", ${STAMP}_goto_cam.mkv")"
 }
