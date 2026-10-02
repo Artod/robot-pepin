@@ -577,7 +577,8 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `stall_margin_m` | number 0..0.3 | 0.05 | the hull grown by this much on every side for the sweep (one costmap cell) |
 | `gaze` | `stall_cluster_m` | number 0.05..1 | 0.25 | candidates first reached within this much of the nearest one are one blocker: the look aims at their centroid |
 | `gaze` | `stall_match_cells` | number 0.5..5 | 1.5 | how near a lidar return or a camera mark must land to a blocking cell, in costmap cells, to account for it (marks_audit's match_cells) |
-| `gaze` | `stall_column_top_m` | number 0.3..2 | 1.3 | the top of the columns asked of /fusion/column over the blockers, metres above the floor |
+| `gaze` | `stall_column_bottom_m` | number 0..1 | 0.15 | the bottom of the columns asked of /fusion/column over the blockers, metres above the cart's floor plane: depth_fusion's marks_min_z, where the camera's marks start, so the floor's own surface is never a blocker |
+| `gaze` | `stall_column_top_m` | number 0.3..2 | 1.3 | the top of the columns asked of /fusion/column over the blockers, metres above the cart's floor plane: the top of the band the marks are read in (pepin.volume_scan.MARKS_MAX_Z_M) |
 | `gaze` | `stall_max_depression_deg` | number 45..95 | 85.0 | a blocker deeper below the lens than this is in the frame's last rows: the look answers 'back off' and the tree backs up before asking again |
 | `gaze` | `slow_deg_s` | number 1..60 | 20.0 | the head's speed for a 'slow' request (a detector that wants unblurred frames), with neck_target; a saccade goes at the board's own top speed |
 | `gaze` | `target_renew_s` | number 0.1..5 | 0.5 | how often a held neck_target is sent again: well inside the board's lease, whose lapse sends the head home |

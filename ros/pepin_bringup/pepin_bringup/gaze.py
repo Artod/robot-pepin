@@ -598,7 +598,11 @@ class Gaze(Node):
             return True, said, record
         if not candidates.any():
             return True, f"{said}: all the lidar's, which a look cannot carve", record
-        box = column_box(blockers.xy, res, (0.0, self._knob("stall_column_top_m")))
+        # The marks' own band above the cart's floor plane: the floor's crossing stands under
+        # every cell and is no blocker (the costmap's camera marks start at the same height).
+        z0 = float(here.translation[2])
+        band = (z0 + self._knob("stall_column_bottom_m"), z0 + self._knob("stall_column_top_m"))
+        box = column_box(blockers.xy, res, band)
         before = self._column_points(box, frame)
         if isinstance(before, str):
             return True, f"{said}; {before}: nothing looked at", record

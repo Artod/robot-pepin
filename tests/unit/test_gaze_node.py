@@ -253,6 +253,9 @@ def test_a_stall_look_saccades_counts_frames_reads_the_verdict_and_comes_home(
     assert sent[0] == "neck_goto" and link(node).sent[0]["hold"] is True
     assert sent[-1] == "neck_home"
     assert len(asked) == 2  # the columns before and after the look
+    # ...in the marks' own band: the floor's surface stands under every cell and blocks nothing
+    box = asked[0]
+    assert box.z - box.l_z / 2 == pytest.approx(0.15) and box.z + box.l_z / 2 == pytest.approx(1.3)
     record = json.loads(node.pubs["/gaze/stall"].sent[-1].data)
     assert record["verdict"] == "carved" and record["look"]["frames_seen"] >= 3
     assert record["blockers"]["unexplained"] == 1 and record["before"]["occupied"] == 1
