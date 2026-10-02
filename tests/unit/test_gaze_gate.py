@@ -1,7 +1,7 @@
 """The gaze gate: frames whose exposure overlaps a head saccade or a fast body yaw are for nothing.
 
 The core (pepin.gaze_gate) is judged on scripted /gaze/state streams in board seconds, the way the
-arbiter's contract (gaze.md 3.4) writes them; the ROS half (node_kit.GazeFeed) and the visual
+arbiter's contract (gaze.md 3.4) writes them; the ROS half (pepin_bringup.gaze_feed) and the visual
 odometry node under the stubs. depth_stream's and sensor_pack's own gate tests sit beside their
 other tests, where their fixtures are.
 """
@@ -17,7 +17,7 @@ import ros_stubs
 
 ros_stubs.install()
 
-from pepin_bringup.node_kit import GazeFeed, gate_counts  # noqa: E402
+from pepin_bringup.gaze_feed import GazeFeed, gate_counts  # noqa: E402
 from pepin_bringup.visual_odometry import RAW_TOPIC, VO_TOPIC, VisualOdometry  # noqa: E402
 
 from pepin.flags import load_table  # noqa: E402

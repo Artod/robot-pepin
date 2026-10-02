@@ -179,16 +179,9 @@ from pepin.snapshot import (
     StampRing,
 )
 from pepin.sources import CAMERA, LIDAR
+from pepin_bringup.gaze_feed import GazeFeed, gate_counts
 from pepin_bringup.msgs import header, stamp_seconds
-from pepin_bringup.node_kit import (
-    GazeFeed,
-    Switches,
-    Tally,
-    TfLookup,
-    Window,
-    gate_counts,
-    spin_main,
-)
+from pepin_bringup.node_kit import Switches, Tally, TfLookup, Window, spin_main
 
 SENSOR_DATA_TOPIC = "/rtabmap/sensor_data"  # rtabmap's own relative "sensor_data" in its namespace
 # ...and what those snapshots CARRY, latched, for the one reader that must follow it: rtabmap_frame

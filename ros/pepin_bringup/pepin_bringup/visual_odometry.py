@@ -54,15 +54,9 @@ from pepin.visual_odometry import (
     planar_covariance,
     scaled_covariance,
 )
+from pepin_bringup.gaze_feed import GazeFeed, gate_counts
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import (
-    GazeFeed,
-    Switches,
-    Tally,
-    bridged_qos_profile,
-    gate_counts,
-    spin_main,
-)
+from pepin_bringup.node_kit import Switches, Tally, bridged_qos_profile, spin_main
 
 RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output, on this laptop only
 VO_TOPIC = "/vo"  # what crosses to the board's EKF

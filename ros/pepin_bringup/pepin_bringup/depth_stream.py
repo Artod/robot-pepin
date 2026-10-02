@@ -160,6 +160,7 @@ from pepin.stereo_depth import (
     StereoUnavailableError,
 )
 from pepin.tsdf import RigidPose
+from pepin_bringup.gaze_feed import GazeFeed, gate_counts
 from pepin_bringup.msgs import (
     array_from_image,
     image_from_array,
@@ -168,7 +169,6 @@ from pepin_bringup.msgs import (
 )
 from pepin_bringup.node_kit import (
     Fatal,
-    GazeFeed,
     LeanFeed,
     Switches,
     Tally,
@@ -176,7 +176,6 @@ from pepin_bringup.node_kit import (
     TfLookup,
     Window,
     Worker,
-    gate_counts,
     spin_main,
 )
 

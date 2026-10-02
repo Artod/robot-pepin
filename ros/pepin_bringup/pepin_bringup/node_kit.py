@@ -46,13 +46,11 @@ from rclpy.parameter import Parameter
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from rclpy.time import Time
 from sensor_msgs.msg import Imu
-from std_msgs.msg import String
 from tf2_ros import Buffer, TransformListener
 
 from pepin.deployment import bridged_qos
 from pepin.depth import UP_LEVEL, Array
 from pepin.flags import Flag, FlagSet
-from pepin.gaze_gate import GAZE_STATE_TOPIC, FrameGate, GazeState
 from pepin.lean import Lean, LeanEstimator, LevelPose
 from pepin.mounts import Mounts
 from pepin.telemetry import LatencySummary, LatencyTracker
@@ -68,7 +66,6 @@ BASE_FRAME = "base_link"  # the frame the C++ bridge publishes its IMU readings 
 
 __all__ = [
     "Fatal",
-    "GazeFeed",
     "LeanFeed",
     "Switches",
     "Tally",
@@ -77,7 +74,6 @@ __all__ = [
     "Window",
     "Worker",
     "descriptor",
-    "gate_counts",
     "spin_main",
     "stamp_seconds",
     "tf_failure_kind",
@@ -673,88 +669,6 @@ class LeanFeed:
         if self._on_unmounted is not None:
             self._on_unmounted(frame_id)
         return None
-
-
-class GazeFeed:
-    """``/gaze/state`` and the IMU's yaw rate feeding one :class:`pepin.gaze_gate.FrameGate`: a
-    node asks :meth:`verdict` by a frame's stamp and counts what it drops (the ``gaze_gate`` flag
-    and the ``gate_*`` knobs are the node's own, :data:`pepin.gaze_gate.GAZE_GATE`).
-
-    ``/imu/data_raw`` is subscribed only once ``gate_yaw_dps`` is above zero, so a node with the
-    yaw gate off carries exactly the subscriptions it had. Only readings in base_link (the C++
-    bridge's) are used: a reading in another frame is counted and ignored, never guessed at.
-    """
-
-    def __init__(
-        self,
-        node: Any,
-        *,
-        exposure_s: float,
-        settle_s: float,
-        yaw_dps: float,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
-        self._node = node
-        self._now = clock
-        self.gate = FrameGate(exposure_s=exposure_s, settle_s=settle_s, yaw_dps=yaw_dps)
-        self._imu = False
-        self.bad_states = 0  # messages that were not a state (counted for the report line)
-        self.foreign_imu = 0  # IMU readings outside base_link, ignored
-        node.create_subscription(
-            String,
-            GAZE_STATE_TOPIC,
-            self._on_state,
-            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
-        )
-        self._listen_imu()
-
-    def set(self, name: str, value: float) -> None:
-        """One of :data:`pepin.gaze_gate.GATE_KNOBS` changed live."""
-        if name == "gate_exposure_s":
-            self.gate.exposure_s = float(value)
-        elif name == "gate_settle_s":
-            self.gate.settle_s = float(value)
-        elif name == "gate_yaw_dps":
-            self.gate.yaw_dps = float(value)
-            self._listen_imu()
-
-    def verdict(self, stamp: float) -> str | None:
-        """Why the frame stamped ``stamp`` (board seconds) is for nothing, or ``None``."""
-        return self.gate.verdict(stamp, self._now())
-
-    def text(self) -> str:
-        """The gate's state for the owning node's report line."""
-        extra = f", {self.bad_states} unreadable states" if self.bad_states else ""
-        if self.foreign_imu:
-            extra += f", {self.foreign_imu} IMU readings outside base_link ignored"
-        return self.gate.text(self._now()) + extra
-
-    def _listen_imu(self) -> None:
-        if self._imu or self.gate.yaw_dps <= 0.0:
-            return
-        topic = "/imu/data_raw"
-        self._node.create_subscription(Imu, topic, self._on_imu, bridged_qos_profile(topic))
-        self._imu = True
-
-    def _on_state(self, msg: Any) -> None:
-        state = GazeState.from_json(msg.data)
-        if state is None:
-            self.bad_states += 1
-            return
-        self.gate.observe_state(state, self._now())
-
-    def _on_imu(self, msg: Any) -> None:
-        if msg.header.frame_id != BASE_FRAME:
-            self.foreign_imu += 1
-            return
-        self.gate.observe_yaw(stamp_seconds(msg.header.stamp), float(msg.angular_velocity.z))
-
-
-def gate_counts(counts: Mapping[str, int], frames: int) -> str:
-    """``12 blind, 3 spinning of 300 frames``: what a node's gate dropped in a report window,
-    from its tally's ``gaze_blind`` and ``gaze_spinning`` counts."""
-    blind, spinning = counts.get("gaze_blind", 0), counts.get("gaze_spinning", 0)
-    return f"{blind} blind, {spinning} spinning of {frames} frames"
 
 
 # ---- main ------------------------------------------------------------------------------------

@@ -25,7 +25,7 @@ THE BODY'S SPIN is the other blur: a frame whose window holds an IMU sample with
 A frame's exposure window is its stamp plus and minus ``exposure_s``: whether ustreamer's stamp
 marks the start of the exposure or its end is not known, so both sides are covered.
 
-Nothing here is ROS (:class:`pepin_bringup.node_kit.GazeFeed` is the subscriber around it) and
+Nothing here is ROS (:class:`pepin_bringup.gaze_feed.GazeFeed` is the subscriber around it) and
 nothing here reads a clock: the caller hands in its own monotonic ``now``.
 """
 
