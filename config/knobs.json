@@ -46,7 +46,13 @@
     "depth_reach_m": {"default": 4.0, "range": [0.3, 12.0],
       "note": "metres past which the published depth is NaN; the same number /depth_scan is capped at"},
     "scan_hz": {"default": 5.0, "range": [0.0, 30.0],
-      "note": "the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all"}
+      "note": "the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all"},
+    "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],
+      "note": "half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure"},
+    "gate_settle_s": {"default": 0.1, "range": [0.0, 1.0],
+      "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
+    "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
+      "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"}
   },
   "marks_audit": {
     "radius_m": {"default": 2.0, "range": [0.2, 3.0],
@@ -70,7 +76,13 @@
     "pair_periods": {"default": 1.5, "range": [0.5, 10.0],
       "note": "how many of its OWN measured periods a source's message may be from the snapshot's stamp and still be paired with it (pepin.snapshot)"},
     "place_timeout_s": {"default": 0.5, "range": [0.05, 0.95],
-      "note": "the most a snapshot waits for its place vector, from the moment it is packed — its wait in the worker's queue included — before it goes out with the null descriptor"}
+      "note": "the most a snapshot waits for its place vector, from the moment it is packed — its wait in the worker's queue included — before it goes out with the null descriptor"},
+    "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],
+      "note": "half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure"},
+    "gate_settle_s": {"default": 0.1, "range": [0.0, 1.0],
+      "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
+    "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
+      "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"}
   },
   "visual_odometry": {
     "vo_sigma_m": {"default": 0.07, "range": [0.001, 1.0],
@@ -86,6 +98,12 @@
     "vo_reset_radius_m": {"default": 0.05, "range": [0.0, 1.0],
       "note": "a pose that lands this close to rtabmap's own origin while the previous one was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the check off"},
     "vo_publish_hz": {"default": 10.0, "range": [0.0, 30.0],
-      "note": "how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them"}
+      "note": "how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them"},
+    "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],
+      "note": "half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure"},
+    "gate_settle_s": {"default": 0.1, "range": [0.0, 1.0],
+      "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
+    "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
+      "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"}
   }
 }

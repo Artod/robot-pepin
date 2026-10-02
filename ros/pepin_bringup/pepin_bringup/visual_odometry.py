@@ -25,18 +25,25 @@ is exactly what it was before this node existed), ``vo_covariance`` (the constan
 is published). The published pose is the sum of the steps the gate admitted, never rtabmap's own: a
 refused jump re-anchors the gate, and a filter that differences the stream it receives would
 otherwise get the whole discontinuity in one frame time (2026-09-14, odom -> base_link 43 km out).
+
+The gaze gate (``gaze_gate`` and the ``gate_*`` knobs, :mod:`pepin.gaze_gate`) withholds the
+same way: a pose of a frame taken during a head saccade (``/gaze/state``) or a body yaw above
+``gate_yaw_dps``, and the first pose after one, only re-anchor — the EKF coasts on the wheels and
+the gyro across them.
 """
 
 from __future__ import annotations
 
 import math
 import time
+from collections import Counter
 
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
+from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
 from pepin.visual_odometry import (
     PublishCap,
     RestWatch,
@@ -47,6 +54,7 @@ from pepin.visual_odometry import (
     planar_covariance,
     scaled_covariance,
 )
+from pepin_bringup.gaze_feed import GazeFeed, gate_counts
 from pepin_bringup.msgs import stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, Tally, bridged_qos_profile, spin_main
 
@@ -110,6 +118,10 @@ FLAGS = FlagSet(
         off_when="'dynamic' is the shipping value; leave it there unless a session is about the"
         " covariance itself",
     ),
+    # A pose of a frame taken while the head turned, or the body spun, and the first pose after
+    # one, never reach the EKF: each becomes the anchor the next step is measured from, so the
+    # pan rtabmap reads as a base yaw is never differenced into the filter (gaze.md 3.4).
+    GAZE_GATE,
 )
 
 
@@ -134,6 +146,13 @@ class VisualOdometry(Node):
         self._last_xy: tuple[float, float] | None = None  # the frame before this one, for its step
         self._drop: str | None = None  # the last reason, for the report line
         self._hold: str | None = None  # the last reason a pose was not published, for the same
+        self._gaze = GazeFeed(
+            self,
+            exposure_s=float(self._switches["gate_exposure_s"]),
+            settle_s=float(self._switches["gate_settle_s"]),
+            yaw_dps=float(self._switches["gate_yaw_dps"]),
+        )
+        self._after_gate = False  # the last pose was gated: this one only anchors the next step
         # Both of these cross the bridge, so their QoS is not this node's to choose: it is
         # pinned on both sides in pepin.deployment.BRIDGED_QOS (reliable, ten deep — what the
         # board's EKF subscribes with and what base_bridge.cpp writes /odom with). /vo/raw never
@@ -164,6 +183,10 @@ class VisualOdometry(Node):
             self._gate.reset_radius_m = float(new)  # type: ignore[arg-type]
         elif name == "vo_publish_hz":
             self._cap.hz = float(new)  # type: ignore[arg-type]
+        elif name in GATE_KNOBS:
+            self._gaze.set(name, float(new))  # type: ignore[arg-type]
+        elif name == "gaze_gate":
+            self._after_gate = False
 
     def _on_wheels(self, msg: Odometry) -> None:
         """The board's wheel odometry: only its twist is read, and only to know whether the cart
@@ -188,7 +211,10 @@ class VisualOdometry(Node):
             y=float(msg.pose.pose.position.y),
             yaw=yaw_of(msg.pose.pose.orientation),
         )
-        refused = self._gate.admit(pose, is_lost(msg.pose.covariance))
+        lost = is_lost(msg.pose.covariance)
+        if self._switches.on("gaze_gate") and self._gated(pose, lost):
+            return
+        refused = self._gate.admit(pose, lost)
         if refused is not None:
             self._tally.count("dropped")
             self._drop = refused
@@ -222,6 +248,23 @@ class VisualOdometry(Node):
         self._pub.publish(msg)
         self._tally.count("out")
 
+    def _gated(self, pose: VoPose, lost: bool) -> bool:
+        """Whether this pose is withheld by the gaze gate: its frame was taken while the head
+        turned or the body spun, or it is the first pose after such a frame (its step starts on
+        one). It then only anchors the next step — the gate's and the track's alike, so nothing
+        of the motion across it is differenced into the EKF — and the rest watch starts again. A
+        lost pose anchors nothing, and the pose after it is withheld in its place."""
+        verdict = self._gaze.verdict(pose.stamp)
+        if verdict is None and not self._after_gate:
+            return False
+        self._tally.count(f"gaze_{verdict or 'after'}")
+        self._after_gate = verdict is not None or lost
+        if not lost:
+            self._gate.reanchor(pose)
+            self._track.anchor(self._gate.anchor)
+        self._rest.restart()
+        return True
+
     def _step_since_last(self, msg: Odometry) -> float:
         """How far the visual odometry says the cart moved since the frame before this one, in
         metres — the step whose metres carry the depth scale's error. The first frame is 0.0."""
@@ -244,13 +287,22 @@ class VisualOdometry(Node):
             f"vo: {w.rate('in'):.1f} poses/s from rtabmap, {w.rate('out'):.1f} published,"
             f" {c['dropped']} dropped{drop}, {c['skipped']} skipped{hold},"
             f" {c['withheld']} withheld from the EKF; track at ({x:.2f}, {y:.2f});"
-            f" {self._rest.report()}; flags: {self._switches.state()}"
+            f" {self._rest.report()}; {self._gate_text(c)}; flags: {self._switches.state()}"
         )
         if c["in"] == 0:
             self.get_logger().warning(
                 f"no pose on {RAW_TOPIC} in this window: is rgbd_odometry running (vslam.launch.py"
                 " vo:=true) and is /camera/depth alive (the depth law needs the lidar)?"
             )
+
+    def _gate_text(self, counts: Counter[str]) -> str:
+        """The poses the gaze gate withheld this window (and the ones after them), the head."""
+        if not self._switches.on("gaze_gate"):
+            return "gaze gate off"
+        return (
+            f"gaze gate: {gate_counts(counts, counts['in'])} withheld, {counts['gaze_after']}"
+            f" after them; {self._gaze.text()}"
+        )
 
 
 def _write_planar_pose(msg: Odometry, pose: VoPose) -> None:

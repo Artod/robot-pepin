@@ -181,6 +181,13 @@ class VoGate:
         """
         return self._last
 
+    def reanchor(self, pose: VoPose) -> None:
+        """A pose the node may not use but the next step must start from — a frame taken while
+        the head turned (:mod:`pepin.gaze_gate`): it becomes the anchor, as a refused jump does,
+        so the motion across it reaches nobody. One older than the anchor moves nothing."""
+        if self._last is None or pose.stamp > self._last.stamp:
+            self._last = pose
+
     def admit(self, pose: VoPose, lost: bool) -> str | None:
         """``None`` when this pose may go to the filter, else the reason it may not.
 

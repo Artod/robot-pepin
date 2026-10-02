@@ -215,9 +215,15 @@ def _warm(node: SensorPack) -> None:
 
 
 # ---- the topics and the three kinds ---------------------------------------------------------
-def test_the_node_reads_four_topics_and_writes_one(build: Build) -> None:
+def test_the_node_reads_five_topics_and_writes_one(build: Build) -> None:
     node = build()
-    assert set(node.subs) == {"/camera/image", "/camera/depth", "/camera/camera_info", "/scan"}
+    assert set(node.subs) == {
+        "/camera/image",
+        "/camera/depth",
+        "/camera/camera_info",
+        "/scan",
+        "/gaze/state",  # the gaze gate's one signal; /imu/data_raw only with gate_yaw_dps > 0
+    }
     assert set(node.pubs) == {"/rtabmap/sensor_data", "/sensor_pack/state", "/sensor_pack/place"}
     assert (IMAGE_TOPIC, DEPTH_TOPIC, CAMERA_INFO_TOPIC, SCAN_TOPIC) == (
         "/camera/image",
@@ -785,3 +791,37 @@ def test_the_live_threaded_path_survives_a_raising_service(
     assert camera and all(descriptors(m)[0].is_null for m in camera)
     assert stamper.nulls["error"] == len(camera)
     assert any("the client itself fell over" in t for t in node.logger.texts("error"))
+
+
+# ---- the gaze gate (pepin.gaze_gate) -----------------------------------------------------------
+def _gaze(node: SensorPack, phase: str, since_offset_s: float, blind: bool) -> None:
+    """One /gaze/state on the board's clock, ``since_offset_s`` after the reference moment."""
+    since = BOARD_SEC + BOARD_NS * 1e-9 + since_offset_s
+    text = f'{{"phase": "{phase}", "since": {since!r}, "blind": {str(blind).lower()}}}'
+    node.subs["/gaze/state"][1](ros_stubs.String(data=text))
+
+
+def test_a_saccade_picture_is_never_a_member_and_the_camera_stays_carried(build: Build) -> None:
+    """A long saccade (0.28-0.98 s, seven pictures, depth and all): no snapshot is built on any of
+    them and none goes out lidar-only meanwhile — the moment waits for the next usable picture —
+    while the state keeps saying the camera is carried, because its pictures still arrive."""
+    node = build(pack_hz=15.0)
+    _warm(node)  # a full snapshot at 0.25
+    before = len(sent(node))
+    _gaze(node, "saccade", 0.28, blind=True)
+    for k in range(7):
+        frame(node, 0.35 + 0.1 * k)
+        scan(node, 0.42 + 0.1 * k)
+    assert len(sent(node)) == before, "nothing built on a blind picture, nothing lidar-only"
+    node._publish_state()
+    assert state(node).carrying == ("camera", "lidar"), "heard, so still alive"
+    _gaze(node, "still", 0.98, blind=False)
+    frame(node, 1.15)
+    scan(node, 1.22)
+    pictures = [m for m in sent(node)[before:] if m.left_camera_info]
+    assert pictures, "the first picture after the saccade is a member again"
+    first = pictures[0].left.header.stamp
+    assert (first.sec, first.nanosec) == (_stamp(1.15).sec, _stamp(1.15).nanosec)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "gaze gate: 7 blind, 0 spinning of" in line and "gaze_gate=on" in line
