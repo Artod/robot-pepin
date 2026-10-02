@@ -34,6 +34,9 @@ public:
     // on the tree's thread, and never by bt_navigator's executor.
     group_ = node_->create_callback_group(rclcpp::CallbackGroupType::MutuallyExclusive, false);
     executor_.add_callback_group(group_, node_->get_node_base_interface());
+    // The client is made with the tree, not at the first stall: by then discovery has had the
+    // whole drive to find the arbiter, and service_is_ready() answers for what is there.
+    connect(getInput<std::string>("service_name").value_or("/gaze/stall_look"));
   }
 
   static BT::PortsList providedPorts()
@@ -48,11 +51,7 @@ public:
 
   BT::NodeStatus onStart() override
   {
-    const auto service = getInput<std::string>("service_name").value_or("/gaze/stall_look");
-    if (!client_ || service != service_) {
-      service_ = service;
-      client_ = node_->create_client<Trigger>(service_, rclcpp::ServicesQoS(), group_);
-    }
+    connect(getInput<std::string>("service_name").value_or("/gaze/stall_look"));
     if (!client_->service_is_ready()) {
       RCLCPP_INFO(
         node_->get_logger(), "AskGaze: %s is not up; the tree goes on without a look",
@@ -91,6 +90,14 @@ public:
   void onHalted() override {forget();}
 
 private:
+  void connect(const std::string & service)
+  {
+    if (!client_ || service != service_) {
+      service_ = service;
+      client_ = node_->create_client<Trigger>(service_, rclcpp::ServicesQoS(), group_);
+    }
+  }
+
   void forget()
   {
     if (pending_) {
