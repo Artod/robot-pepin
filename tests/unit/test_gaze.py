@@ -300,6 +300,22 @@ def test_renew_restarts_the_ttl() -> None:
     assert not out
 
 
+def test_renewing_an_answered_request_keeps_holding_the_head() -> None:
+    """Path gaze: answered at once (no frames), held for its dwell, renewed every period."""
+    arb, head, out = arbiter()
+    arb.submit(look("nav.path", frames=0, dwell_s=0.5, ttl_s=0.5), 0.0, out.append)
+    arb.step(0.0)
+    arrive(arb, head, LEFT, 0.2)
+    arb.step(0.2)
+    assert out[0].status == "done"
+    for t in (0.4, 0.6, 0.8, 1.0, 1.2):
+        arb.renew("nav.path", t)
+        arb.step(t + 0.05)
+    assert len(head.writes) == 1  # held all along
+    arb.step(1.8)
+    assert head.writes[-1][0] is None  # the renewals stopped: home
+
+
 def test_a_home_request_is_answered_at_home() -> None:
     arb, head, out = arbiter()
     arb.submit(look(frames=0), 0.0)

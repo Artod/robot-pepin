@@ -700,9 +700,16 @@ class Fatal:
             raise SystemExit(self._reason)
 
 
-def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None:
+def spin_main(
+    factory: Callable[[], Any],
+    args: list[str] | None = None,
+    *,
+    executor: Callable[[], Any] | None = None,
+) -> None:
     """A node's ``main``: init, build the node, spin, and leave cleanly on SIGINT — the signal
-    the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand.
+    the launch sends at shutdown and ``ros/laptop.sh kick`` sends by hand. ``executor`` builds
+    the executor to spin on (rclpy's single-threaded default when None): a node whose service
+    answers only after other callbacks have run needs more than one thread.
 
     ``kill -USR2`` prints every thread's stack to stderr and changes nothing
     (:func:`listen_for_stack_dumps`).
@@ -732,7 +739,10 @@ def spin_main(factory: Callable[[], Any], args: list[str] | None = None) -> None
     node: Any = None
     try:
         node = factory()
-        rclpy.spin(node)
+        if executor is None:
+            rclpy.spin(node)
+        else:
+            rclpy.spin(node, executor=executor())
     except (KeyboardInterrupt, ExternalShutdownException):
         pass
     except Exception as exc:

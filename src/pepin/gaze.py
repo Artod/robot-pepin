@@ -333,11 +333,14 @@ class Arbiter:
         return len(gone)
 
     def renew(self, source: str, now: float) -> int:
-        """Restart the TTL of ``source``'s requests (``see`` keeps a look); how many."""
+        """Restart the TTL of ``source``'s requests, and the dwell of one already answered
+        (``see`` keeps a look; path gaze keeps its aim); how many."""
         with self._lock:
             mine = [h for h in self._held if h.look.source == source]
             for held in mine:
                 held.created = now
+                if held.answered:
+                    held.answered_at = now
         return len(mine)
 
     # ---- the decision ------------------------------------------------------------------------
