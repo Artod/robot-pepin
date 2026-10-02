@@ -18,7 +18,7 @@ the latched ``/places`` and takes a mark on ``/places/mark``. Both are topics, b
 runs inside the board's container and topics are what cross the zenoh bridge.
 
 Latched is what makes it usable: the last vocabulary the laptop published is still in this client's
-first callback after a WiFi drop, so ``go.sh printer`` works with the laptop asleep. When nothing
+first callback after a WiFi drop, so ``goto.sh printer`` works with the laptop asleep. When nothing
 answers there at all, the coordinates in the file named by --places (default /maps/places.yaml) are
 used with a plain warning — they are a frozen grid's numbers and the graph may have moved the room
 since. An unknown name is refused either way, as before.

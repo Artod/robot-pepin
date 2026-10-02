@@ -190,8 +190,9 @@ case "${1:-}" in
     nav)
         # NAV2 ON THIS MAC (decision of 2026-10-01): the launch the board ran, whole, beside this
         # machine's router; scans, ToF and odometry come from the board over WiFi and the velocity
-        # goes back on /cmd_vel. The goal server's port is published here: ros/goto.sh,
-        # ros/preflight.sh and the tray speak to 127.0.0.1:3337.
+        # goes back on /cmd_vel. The goal server's port is published on this Mac's loopback only
+        # (a goal is a command to the wheels): ros/goto.sh, ros/preflight.sh, ros/stop.sh and the
+        # tray speak to 127.0.0.1:3337.
         case "${2:-up}" in
             down) pepin_remove_container "$NAV"; echo "$NAV stopped"; exit 0 ;;
             logs) exec docker logs -f "$NAV" ;;
@@ -203,7 +204,7 @@ case "${1:-}" in
         pepin_remove_container "$NAV"
         zrouter_up
         pepin_timeserver_up  # the clock the board follows (ros/lib.sh)
-        docker run -d --name "$NAV" --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+        docker run -d --name "$NAV" --network "$NET" -p 127.0.0.1:3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
             "$(image)" ros2 launch pepin_bringup nav.launch.py "map:=$MAP" "recorder:=$PEPIN_RECORDER" >/dev/null
         # The tree's transitions, one watcher per container, read by ros/goto.sh (which starts

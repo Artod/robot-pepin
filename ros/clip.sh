@@ -10,7 +10,7 @@
 # TERM, not INT, ends it: a script's background job ignores SIGINT, and ros/goto.sh runs this in
 # a process group of its own so the operator's Ctrl-C reaches the goal and not the film. A clip
 # nobody stops is a bug: ffmpeg stops by itself after PEPIN_CLIP_MAX_S (1800), and this script
-# when its parent is gone.
+# stops it within a second of its parent being gone.
 set -u
 [ $# -eq 2 ] || { echo "usage: ros/clip.sh FILE URL"; exit 2; }
 CAM="$1"
@@ -56,7 +56,10 @@ if ! [ -s "$CAM" ]; then
     pause "$CHECK_S"
     [ -s "$CAM" ] || echo "!! still no camera clip: this drive has no picture ($URL)"
 fi
-wait "$FF"
-[ -s "$CAM" ] && echo "!! the camera stream ended before the drive did ($(said))"
-while kill -0 "$PPID" 2>/dev/null; do pause 1; done
+# Until the stop, or until the parent is gone (a goto.sh killed outright cannot send one).
+while kill -0 "$PPID" 2>/dev/null && kill -0 "$FF" 2>/dev/null; do pause 1; done
+if kill -0 "$PPID" 2>/dev/null; then
+    [ -s "$CAM" ] && echo "!! the camera stream ended before the drive did ($(said))"
+    while kill -0 "$PPID" 2>/dev/null; do pause 1; done
+fi
 finish

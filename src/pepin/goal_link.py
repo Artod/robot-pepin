@@ -15,7 +15,8 @@ Standard library only: ``ros/goto.sh`` runs it with the laptop's own interpreter
 
 Exit codes: 0 answered (a goal: reached), 1 refused or not reached, 3 no goal server answered,
 4 the goal server cannot do what was asked (a build whose cancel reaches only its own goal), 5 a
-cancel no navigator confirmed — on 3, 4 and 5 ros/goto.sh cancels through goto_ros.py instead.
+cancel no navigator confirmed — on any of them ros/goto.sh asks once more, then goto_ros.py in
+Nav2's container, and ros/stop.sh goes on to stop the wheels itself.
 """
 
 from __future__ import annotations
@@ -42,6 +43,9 @@ CANCEL_CONFIRM_S = 30.0  # 3 s until 2026-09-29: under load the confirmation cam
 CANCEL_OUTCOMES = {0: "accepted", 1: "rejected", 2: "no such goal", 3: "the goal had already ended"}
 # A cancel or a where is answered in well under a second; past this the server is not there.
 ASK_TIMEOUT_S = 5.0
+# After a Ctrl-C the operator hears within this whether the cancel was confirmed, not after the
+# server's whole 30 s: a silent goal server is the cue for ros/stop.sh, at once.
+CTRL_C_CANCEL_S = 5.0
 # A goal's events come every second while it drives, but a whole-map search before it may take
 # a minute (goal_server._find_myself: 60 s for the search, 15 s for the fit).
 GOAL_SILENCE_S = 120.0
@@ -293,8 +297,8 @@ def run_cancel(host: str, port: int, out: TextIO, timeout_s: float = CANCEL_CONF
         return EXIT_UNSUPPORTED
     print(line, file=out, flush=True)
     if not cancel_confirmed(answer):
-        # Not one navigator answered the server: a second opinion through goto_ros.py is worth a
-        # stall here, and the old path gives it.
+        # Not one navigator answered the server: the caller asks again, or stops the wheels
+        # itself (ros/goto.sh, ros/stop.sh).
         print("!! no navigator confirmed the cancel through the goal server", file=out, flush=True)
         return EXIT_UNCONFIRMED
     return EXIT_OK
@@ -334,7 +338,7 @@ def run_goal(
     except KeyboardInterrupt:
         say("Ctrl-C: cancelling every goal through the goal server...")
         try:
-            run_cancel(host, port, out)
+            run_cancel(host, port, out, CTRL_C_CANCEL_S)
         except GoalServerUnreachableError as error:
             say(f"!! cancel NOT sent ({error}) — run ros/goto.sh cancel or ros/stop.sh NOW")
         return EXIT_FAILED

@@ -18,12 +18,15 @@ What stays from the Python stack:
 - Saved maps (`data/maps/*.npz`) convert to Nav2 maps with `ros/tools/npz_to_map.py`.
 
 ```
-laptop (Mac)                      board (Orange Pi Zero 3, 1.5 GB + zram)
-Foxglove Studio                   docker: ldlidar_node -> laser_filters box filter (/scan), base_bridge
-  ^ ws 8765, foxglove_bridge ON THE LAPTOP  (/odom, tf), tof_bridge, Nav2 (amcl, costmaps,
-                                          planner, controller, bt_navigator), slam_toolbox
-                                  host:   pepin-base.service (:3336), pepin-tof.service (:3335),
-                                          ser2net (:3333 servo bus for bench tools only)
+laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + zram)
+pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
+  costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (/odom, tf),
+  velocity smoother), goal_server               tof_bridge, EKF, rf2o
+  (127.0.0.1:3337), run_recorder              host: pepin-base.service (:3336),
+pepin-vslam: RTAB-Map (map -> odom), the        pepin-tof.service (:3335),
+  camera, foxglove_bridge (ws 8765)             ser2net (:3333 servo bus, bench tools only)
+        /cmd_vel ───────── zenoh, WiFi ──────►  base_bridge -> base server
+        ◄──────── /scan, /odom, ToF, IMU, tf
 ```
 
 ## Layout
@@ -107,21 +110,40 @@ controller failures, recoveries and why), and the tree's transitions, `bt|` — 
 in the terminal, `<stamp>_goto_cam.mkv` (the head camera through `ros/clip.sh`), and the numbered
 tape `NNNN_<utc>Z_<place>.jsonl` the recorder wrote, named at the end. A camera clip that has not
 started 4 s in is said aloud and started once more, a second miss is said aloud too, and the drive
-ends on the clip's size or on `!! no camera clip for this drive`. `round [NAME]` and `move NAME
-SEG...` are the two measured motions without the planner; they run on the board, beside the wheels.
+ends on the clip's size or on `!! no camera clip for this drive`. Ctrl-C, a closed terminal and a
+kill each cancel the goal (twice through the goal server within 5 s each, then `goto_ros.py` in
+Nav2's container), and the film and the streams end with the script, whatever ended it.
+`round [NAME]` and `move NAME SEG...` are the two measured motions without the planner; they run
+on the board, beside the wheels, and go only while the goal server's `where` says `"navigating":
+false` (a goal of anyone's on either navigator, or the end-of-drive pivot); Ctrl-C kills the
+motion on the board and stops the base.
 
-**The red button**, `ros/stop.sh` (the tray's first item does the same): every goal cancelled
-through the goal server, confirmed by a navigator within 3 s; if not, the base server's own stop
-on the board, `pepin-macnav` stopped, and the base's stop again. It never restarts the board,
-whose odometry the map is tied to; `ros/laptop.sh nav` brings Nav2 back.
+`where` also says `lidar`: `ok`, or how long no scan has reached Nav2. That is a report only: the
+lidar watch that restarted the board's driver when it fell silent or was re-plugged (2026-09-28)
+ran beside Nav2 on the board and went with it; a lidar plugged in after the board's stack started
+needs that stack restarted (`ros/restart.sh board`).
+
+**The red button**, `ros/stop.sh` (the tray's first item runs it): the base server's own stop at
+once; every goal cancelled through the goal server (confirmed by a navigator within 3 s); and the
+base's stop again, believed only from its state stream — the last state lines of a one-second
+window must say the wheels are commanded still. Cancelled and still is the whole stop, and Nav2
+stays up. Otherwise what commands the wheels is killed first — Nav2's composed container
+(`pkill -9`; its launch respawns it idle) and a measured motion on the board — because the base's
+stop is not latched and a live controller overwrites it within 50 ms; then the base's stop and
+its confirmation once more, then `pepin-macnav` stopped (every docker and ssh call bounded at 8 s).
+It exits 0 only when the wheels read still, and never restarts the board, whose odometry the map
+is tied to; `ros/laptop.sh nav` brings Nav2 back. A goal's cancel inside the goal server also
+reaches a drive still on its way to Nav2 (it is never sent) and the pivot (its spin is
+cancelled).
 
 ## Restarting
 
 `ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]` brings the
 robot up working in one command and ends on one line — `green: N checks, none failed`, or `red:`
 with the failing lines above it — and that line is all the operator reads. It restarts the board's
-sensor stack together with its zenoh router (stack stopped, router restarted, stack started;
-`--deploy` does it through `ros/sync.sh --restart`), then the laptop — `ros/laptop.sh vslam --neck`,
+sensor stack together with its zenoh router (every goal cancelled first: the restart zeroes the
+odometry a drive is steered by; stack stopped, router restarted, stack started; `--deploy` does it
+through `ros/sync.sh --restart`), then the laptop — `ros/laptop.sh vslam --neck`,
 then `ros/laptop.sh nav`: board first, always, because a board restart re-zeroes the odometry
 RTAB-Map runs on (`board` alone restarts only the laptop's vslam, and only if that half is up).
 Then it proves the planner plans (4.1) and repairs it when it does not — the Nav2 container alone,
@@ -985,7 +1007,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim | mppi | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance. Published latched on controller_selector and goal_checker_selector, so a change is read by the behaviour tree at its next tick |
 | `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for this same flag before its own preflight. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `goal_server` | `cancel_every_goal` | bool | on | yes | a cancel on the socket also asks both navigators' own cancel services (navigate_to_pose and navigate_through_poses, <action>/_action/cancel_goal) for EVERY goal — a zero goal id, whoever sent it — and answers what each said (``navigators``); off, it cancels only the goal this node sent, as before 2026-09-25 |
-| `goal_server` | `lidar_watch` | bool | on | yes | the lidar's driver is restarted when its port is there and no scan has come for 5 s, and once per absence of the port so it respawns idle instead of spinning a core (pepin.lidar_watch); `where` says `lidar` either way |
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
 | `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
 | `marks_audit` | `phantom_cloud` | bool | on | yes | the camera-only cells are published as red points on /marks_audit/phantoms; off, only the counts go out |
@@ -1255,11 +1276,6 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop -> board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal 2026-09-25). Asked from this long-lived node the same cancel costs a socket write; one 30 s deadline is shared by both navigators, as in goto_ros.py
   - *On when:* always: the operator's cancel means every goal on the board, whichever client sent it
   - *Off when:* to put the old answer back for a comparison — pepin.goal_link then finds no navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py
-- **`lidar_watch`** — bool, default on
-  - *What:* the lidar's driver is restarted when its port is there and no scan has come for 5 s, and once per absence of the port so it respawns idle instead of spinning a core (pepin.lidar_watch); `where` says `lidar` either way
-  - *Default:* on — the driver opens its port once: a lidar re-plugged or plugged in after the start stayed dead until a stack restart (journal 2026-09-28)
-  - *On when:* always
-  - *Off when:* while the lidar is deliberately held silent with its port present
 
 #### `marks_audit`
 

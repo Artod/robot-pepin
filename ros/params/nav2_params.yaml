@@ -1209,7 +1209,7 @@ map_saver:
 planner_server:
   ros__parameters:
     expected_planner_frequency: 2.0
-    # Two planners, chosen at run time through /planner_selector (ros/go.sh planner ...).
+    # Two planners, chosen at run time through /planner_selector (ros/goto.sh planner ...).
     # GridBased is the baseline: NavFn, a grid search that returns a polyline with no notion of
     # which way the cart faces. Lattice is the experiment: Smac's state lattice walking real
     # motion primitives for a DIFFERENTIAL drive — it can turn in place and it can reverse, so a

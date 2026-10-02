@@ -5,12 +5,15 @@ answers; ``docker`` and ``ssh`` are fakes on PATH that only write down what they
 
 from __future__ import annotations
 
+import contextlib
 import io
 import json
 import os
 import socket
 import subprocess
 import threading
+import time
+import zlib
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -269,7 +272,8 @@ def test_a_cancelled_drive_is_not_a_success() -> None:
 FAKE = """#!/bin/bash
 printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0") $*" in
-    "docker logs"*) printf '%s\\n' "$FAKE_NAV2_LINE"; sleep 30 ;;
+    "docker logs"*) printf '%s\\n' "$FAKE_NAV2_LINE"; exec sleep "$FAKE_SLEEP" ;;
+    *"docker exec -i pepin-ros"*) exec sleep "$FAKE_SLEEP" ;;  # a measured motion, turning
     "docker inspect"*) printf '%s\\n' ros2 launch nav.launch.py map:=/maps/flat3.yaml ;;
 esac
 exit 0
@@ -280,35 +284,55 @@ NAV2_LINE = (
 )
 
 
-def goto(tmp_path: Path, port: int, *args: str, **env: str) -> tuple[int, str, list[str]]:
-    """Run ros/goto.sh against a goal server on ``port`` with ``docker`` and ``ssh`` faked, its
-    records in ``tmp_path``; its exit status, its output and the commands the fakes were given."""
+def goto_env(tmp_path: Path, port: int, **env: str) -> dict[str, str]:
+    """The fakes on PATH and the environment that points ros/goto.sh at them and at ``port``,
+    with its records in ``tmp_path``."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name in ("docker", "ssh"):
         (bin_dir / name).write_text(FAKE)
         (bin_dir / name).chmod(0o755)
-    log = tmp_path / "fakes.log"
-    log.write_text("")
-    run = subprocess.run(
-        ["bash", str(REPO / "ros/goto.sh"), *args],
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=os.environ
+    (tmp_path / "fakes.log").write_text("")
+    return (
+        dict(os.environ)
         | {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "PEPIN_HOST": "127.0.0.1",
+            "PEPIN_BASE_PORT": str(closed_port()),
             "PEPIN_GOAL_PORT": str(port),
             "PEPIN_REC_DIR": str(tmp_path / "rec"),
             "PEPIN_BT_LOG": str(tmp_path / "rec/bt_live.log"),
             "PEPIN_CAMERA_STREAM": f"http://127.0.0.1:{closed_port()}/stream",
             "PEPIN_CLIP_CHECK_S": "0.2",
-            "FAKE_LOG": str(log),
+            "FAKE_LOG": str(tmp_path / "fakes.log"),
             "FAKE_NAV2_LINE": NAV2_LINE,
+            "FAKE_SLEEP": _sleep_of(tmp_path),
         }
-        | env,
+        | env
     )
-    return run.returncode, run.stdout + run.stderr, log.read_text().splitlines()
+
+
+def _sleep_of(tmp_path: Path) -> str:
+    """How long this test's fakes sleep: a number no other test's fakes use, so what is left
+    behind is found by it."""
+    return f"31.{zlib.crc32(str(tmp_path).encode()) % 100000:05d}"
+
+
+def goto(tmp_path: Path, port: int, *args: str, **env: str) -> tuple[int, str, list[str]]:
+    """Run ros/goto.sh against a goal server on ``port`` with ``docker`` and ``ssh`` faked, its
+    records in ``tmp_path``; its exit status, its output and the commands the fakes were given."""
+    run = subprocess.run(
+        ["bash", str(REPO / "ros/goto.sh"), *args],
+        capture_output=True,
+        text=True,
+        timeout=30,
+        env=goto_env(tmp_path, port, **env),
+    )
+    return (
+        run.returncode,
+        run.stdout + run.stderr,
+        (tmp_path / "fakes.log").read_text().splitlines(),
+    )
 
 
 def test_goto_s_cancel_goes_over_the_socket(tmp_path: Path, served: FakeGoalServer) -> None:
@@ -393,3 +417,159 @@ def test_the_goal_server_is_looked_for_on_this_mac_only() -> None:
         port = int(listener.getsockname()[1])
         assert goal_link.find_server(port, timeout_s=0.5) == "127.0.0.1"
     assert goal_link.find_server(closed_port(), timeout_s=0.5) is None
+
+
+# ---- every way goto.sh can end cancels the goal, and leaves nothing behind ----------------------
+
+
+class HoldingGoalServer:
+    """A goal server whose drive goes on until a cancel arrives: ``go`` answers accepted and
+    holds the connection; ``cancel`` confirms, counts, and ends the drive with Nav2's CANCELED;
+    ``where`` answers ``navigating``."""
+
+    def __init__(self, navigating: bool = False) -> None:
+        self.cancels, self.navigating = 0, navigating
+        self.cancelled = threading.Event()
+        self._listener = socket.socket()
+        self._listener.bind(("127.0.0.1", 0))
+        self._listener.listen(8)
+        self._listener.settimeout(0.2)
+        self.port = int(self._listener.getsockname()[1])
+        self._open = True
+        threading.Thread(target=self._run, daemon=True).start()
+
+    def _run(self) -> None:
+        while self._open:
+            try:
+                connection, _ = self._listener.accept()
+            except OSError:
+                continue
+            threading.Thread(target=self._serve, args=(connection,), daemon=True).start()
+
+    def _serve(self, connection: socket.socket) -> None:
+        with connection:
+            request = json.loads(connection.makefile("r").readline())
+            answers: list[dict[str, Any]] = []
+            if request["cmd"] == "go":
+                connection.sendall((json.dumps(DRIVE[0]) + "\n").encode())
+                self.cancelled.wait(20.0)
+                answers = [{"event": "done", "status": 5, "seconds": 3.0, "arrival": {}}]
+            elif request["cmd"] == "cancel":
+                self.cancels += 1
+                self.cancelled.set()
+                answers = [{"event": "cancelled", "had_goal": True, "navigators": NAVIGATORS}]
+            elif request["cmd"] == "where":
+                answers = [{"event": "where", "pose": "tf", "navigating": self.navigating}]
+            with contextlib.suppress(OSError):
+                for answer in answers:
+                    connection.sendall((json.dumps(answer) + "\n").encode())
+
+    def close(self) -> None:
+        self._open = False
+        self._listener.close()
+
+
+def _left_behind(tmp_path: Path) -> list[str]:
+    """Every process still alive that belongs to this test's goto.sh: its fakes' sleeps, its
+    film, its streams, anything naming its records."""
+    ps = subprocess.run(["ps", "-A", "-o", "pid=,command="], capture_output=True, text=True)
+    return [
+        line
+        for line in ps.stdout.splitlines()
+        if (f"sleep {_sleep_of(tmp_path)}" in line or str(tmp_path) in line) and "ps -A" not in line
+    ]
+
+
+def _drive_then(tmp_path: Path, signal_name: str, whole_group: bool) -> tuple[int, str, int]:
+    """Start a drive, wait until it is accepted, send the signal (to the whole process group
+    like a terminal's Ctrl-C or hang-up, or to goto.sh alone like a kill); exit status, output,
+    and the cancels the goal server received."""
+    import signal
+
+    server = HoldingGoalServer()
+    try:
+        process = subprocess.Popen(
+            ["bash", str(REPO / "ros/goto.sh"), "printer"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=goto_env(tmp_path, server.port),
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 15.0
+        while time.monotonic() < deadline:
+            logs = list((tmp_path / "rec").glob("*_goto.log"))
+            if logs and " accepted" in logs[0].read_text():
+                break
+            time.sleep(0.1)
+        sig = getattr(signal, signal_name)
+        if whole_group:
+            os.killpg(process.pid, sig)
+        else:
+            process.send_signal(sig)
+        out, _ = process.communicate(timeout=30)
+        return process.returncode, out, server.cancels
+    finally:
+        server.close()
+
+
+@pytest.mark.slow  # a drive with its film, its streams and the signal: ~3 s each
+@pytest.mark.parametrize(
+    ("signal_name", "whole_group", "status"),
+    [("SIGINT", True, 130), ("SIGHUP", True, 129), ("SIGTERM", False, 143)],
+)
+def test_ctrl_c_a_closed_terminal_and_a_kill_each_cancel_the_goal_and_leave_nothing(
+    tmp_path: Path, signal_name: str, whole_group: bool, status: int
+) -> None:
+    code, out, cancels = _drive_then(tmp_path, signal_name, whole_group)
+    assert code == status, out
+    assert cancels >= 1, out
+    assert "interrupted: cancelling every goal" in out
+    time.sleep(1.5)  # a helper that was told to go has had its second
+    assert _left_behind(tmp_path) == []
+
+
+def test_round_refuses_while_anything_navigates_and_when_nobody_answers(tmp_path: Path) -> None:
+    """The measured motions write /cmd_vel past every guard of Nav2's, and their own look at the
+    action status fails open from the board: the goal server is asked, and only "idle" goes."""
+    busy = HoldingGoalServer(navigating=True)
+    try:
+        code, out, sent = goto(tmp_path, busy.port, "round")
+    finally:
+        busy.close()
+    assert code == 2 and "refused: a navigation goal is running" in out
+    assert not [c for c in sent if c.startswith("ssh")], sent
+    code, out, sent = goto(tmp_path, closed_port(), "move", "leg", "f0.40")
+    assert code == 2 and "refused: the goal server did not say Nav2 is idle" in out
+    assert sent == []
+
+
+@pytest.mark.slow  # the motion runs until the signal
+def test_ctrl_c_on_a_measured_motion_stops_it_on_the_board(tmp_path: Path) -> None:
+    import signal
+
+    idle = HoldingGoalServer(navigating=False)
+    try:
+        process = subprocess.Popen(
+            ["bash", str(REPO / "ros/goto.sh"), "round", "lap"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            env=goto_env(tmp_path, idle.port),
+            start_new_session=True,
+        )
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if "docker exec -i pepin-ros" in (tmp_path / "fakes.log").read_text():
+                break
+            time.sleep(0.1)
+        os.killpg(process.pid, signal.SIGINT)
+        out, _ = process.communicate(timeout=20)
+    finally:
+        idle.close()
+    sent = (tmp_path / "fakes.log").read_text()
+    assert process.returncode == 130, out
+    assert "pepin_motion.pid" in sent and "kill -KILL" in sent, sent
+    assert "stopping the measured motion on the board" in out and "base:" in out
+    time.sleep(1.0)
+    assert _left_behind(tmp_path) == []

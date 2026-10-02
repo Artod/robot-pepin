@@ -167,9 +167,11 @@ def test_neck_home_is_one_line_reached_refused_or_silent() -> None:
     assert tm.neck_home_line(None) == "neck home: no answer from the base server"
 
 
-def test_the_stop_waits_the_red_button_s_three_seconds_for_the_goal_server() -> None:
-    """ros/stop.sh gives its own polite step 3 s; the tray's socket cancel gets the same."""
-    assert tm.STOP_CONFIRM_S == 3.0
+def test_the_red_button_is_ros_stop_sh_alone() -> None:
+    """One script stops the robot, so the tray never waits for a cancel twice (3 s each)."""
+    tray = (REPO / "apps/macos/tray.py").read_text()
+    on_stop = tray[tray.index("    def on_stop(") : tray.index("    def on_where(")]
+    assert '"ros/stop.sh"' in on_stop and "goal_link" not in on_stop
 
 
 # ---- the launcher -----------------------------------------------------------------------------

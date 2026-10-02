@@ -48,15 +48,14 @@ from __future__ import annotations
 import contextlib
 import json
 import math
-import os
 import socket
-import subprocess
 import threading
 import time
 from pathlib import Path
 from typing import Any
 
 import rclpy
+from action_msgs.msg import GoalStatusArray
 from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
@@ -70,7 +69,6 @@ from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
-from pepin.lidar_watch import LidarWatch
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
@@ -252,17 +250,6 @@ FLAGS = FlagSet(
         off_when="to put the old answer back for a comparison — pepin.goal_link then finds no"
         " navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py",
     ),
-    Flag(
-        "lidar_watch",
-        True,
-        description="the lidar's driver is restarted when its port is there and no scan has"
-        " come for 5 s, and once per absence of the port so it respawns idle instead of spinning"
-        " a core (pepin.lidar_watch); `where` says `lidar` either way",
-        why="the driver opens its port once: a lidar re-plugged or plugged in after the start"
-        " stayed dead until a stack restart (journal 2026-09-28)",
-        on_when="always",
-        off_when="while the lidar is deliberately held silent with its port present",
-    ),
 )
 
 PLANNERS = {
@@ -278,11 +265,14 @@ PLANNERS = {
 # took. "mppi" is one controller for every planner, and it turns to the heading itself, so the
 # tree holds it to the heading as well.
 RPP_GOAL_CHECKER = "xy_only_goal_checker"
-# The lidar the watch looks after: its scan, its port as udev names it, and its driver's process
-# (the component container of robot.launch.py).
+# The lidar as Nav2 receives it: `where` says how old the last scan is. Report only: the driver
+# is the board's, and a restart of it from here (the re-plug recovery of 2026-09-28) went with
+# Nav2 to the Mac, where neither its port nor its process is.
 LIDAR_SCAN_TOPIC = "/scan"
-LIDAR_PORT = "/dev/lidar"
-LIDAR_PROCESS = "__node:=lidar_container"
+LIDAR_SILENT_S = 5.0  # no scan for this long: `where` says so
+# Goals that are running on an action server, by action_msgs/GoalStatus: ACCEPTED, EXECUTING and
+# CANCELING (a canceling goal still drives until its server lets it go).
+ACTIVE_STATUSES = (1, 2, 3)
 FOLLOWERS = {
     "mppi": ("FollowPathMPPI", "general_goal_checker"),
     # The reversing RPP inside Nav2's RotationShimController: RPP's pace, and the shim turns the
@@ -359,13 +349,28 @@ class GoalServer(Node):
         self._driving = (
             False  # from before send_goal until the drive is finally over: cancel() clears it
         )
-        # The lidar's driver, brought back when its port is there and it says nothing. The scan
-        # is taken raw: only its arrival matters here, and a parsed one costs a core's percent.
-        self._lidar = LidarWatch(started_at=time.monotonic())
+        # The end-of-drive pivot (behaviour server Spin) is a goal of its own: a cancel stops it
+        # too. Every cancel bumps _cancels, so a drive that started before it never sends a goal
+        # after it (see _go: the recorder alone may take 8 s between the two).
+        self._spin_handle: Any = None
+        self._cancels = 0
+        # Whether ANY goal runs on the navigators, whoever sent it: their latched status lists,
+        # read here beside them. `where` answers it, and the measured motions refuse on it.
+        self._nav_active: dict[str, bool] = dict.fromkeys((*NAV_ACTIONS, "spin"), False)
+        status_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        for action in self._nav_active:
+            self.create_subscription(
+                GoalStatusArray,
+                f"/{action}/_action/status",
+                lambda msg, a=action: self._on_nav_status(a, msg),
+                status_qos,
+            )
+        # The lidar as Nav2 receives it, taken raw: only its arrival matters here.
+        self._last_scan_at: float | None = None
+        self._started_at = time.monotonic()
         self.create_subscription(
             LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
         )
-        self.create_timer(1.0, self._watch_lidar)
         # The recorder is a node of its own (run_recorder, beside this one): one command opens a
         # tape, the latched status names it (pepin.runlink).
         self._runs = RunLink()
@@ -399,26 +404,27 @@ class GoalServer(Node):
         self._up = True  # last: everything above exists, the timers may run
 
     def _on_scan(self, _raw: bytes) -> None:
-        """A scan arrived (unparsed): the lidar is alive."""
-        self._lidar.scan(time.monotonic())
+        """A scan arrived (unparsed): the lidar reaches Nav2."""
+        self._last_scan_at = time.monotonic()
 
-    def _watch_lidar(self) -> None:
-        """Once a second: end the driver's process when the watch says so; the launch respawns
-        it within two seconds on the port that is there now."""
-        if not self._switches.on("lidar_watch"):
-            return
-        now, port = time.monotonic(), os.path.exists(LIDAR_PORT)
-        if self._lidar.due(now, port):
-            rule = (
-                "port present: respawn it on the port"
-                if port
-                else "port lost: respawn it without one, to idle (once per absence)"
-            )
-            self.get_logger().warning(
-                f"lidar {self._lidar.status(now, port)}: ending its driver ({LIDAR_PROCESS}),"
-                f" kick {self._lidar.kicks}, rule {rule}"
-            )
-            subprocess.run(["pkill", "-INT", "-f", LIDAR_PROCESS], check=False, timeout=5)
+    def lidar_status(self, now: float) -> str:
+        """``ok``, or how long no scan has reached this node (report only)."""
+        last = self._started_at if self._last_scan_at is None else self._last_scan_at
+        silent = now - last
+        if silent < LIDAR_SILENT_S:
+            return "ok"
+        heard = "" if self._last_scan_at is not None else ", none since the start"
+        return f"silent {silent:.0f} s{heard} (the board's lidar: ros/board.sh census)"
+
+    def _on_nav_status(self, action: str, msg: GoalStatusArray) -> None:
+        """One navigator's latched status list: whether a goal of anyone's runs on it."""
+        self._nav_active[action] = any(s.status in ACTIVE_STATUSES for s in msg.status_list)
+
+    def navigating(self) -> bool:
+        """A drive of this node, or any goal running on a navigator or the spin behaviour."""
+        with self._lock:
+            driving = self._driving or self._spin_handle is not None
+        return driving or any(self._nav_active.values())
 
     def _clock_s(self) -> float:
         """The node's clock in seconds."""
@@ -529,7 +535,8 @@ class GoalServer(Node):
                     "event": "where",
                     "planner": self.planner,
                     "pose": "tf" if pose else "none",
-                    "lidar": self._lidar.status(time.monotonic(), os.path.exists(LIDAR_PORT)),
+                    "navigating": self.navigating(),
+                    "lidar": self.lidar_status(time.monotonic()),
                     **pose,
                 },
             )
@@ -683,16 +690,22 @@ class GoalServer(Node):
     def cancel(self, send: bool = True) -> bool:
         """Stop the running drive, if any; True when there was one.
 
-        Clears ``_driving`` as well as the handle. ``send=False`` lets the handle go without
-        cancelling it: the caller cancels every goal on the navigator itself
-        (:meth:`cancel_every_goal`).
+        Clears ``_driving`` as well as the handle, and counts the cancel, so a drive still on
+        its way to Nav2 is never sent and a handle that arrives after it is cancelled at once
+        (:meth:`_go`). The end-of-drive pivot is cancelled whatever ``send`` says: no navigator
+        owns it. ``send=False`` lets the drive's handle go without cancelling it: the caller
+        cancels every goal on the navigators itself (:meth:`cancel_every_goal`).
         """
         with self._lock:
             handle, self._goal_handle = self._goal_handle, None
+            spin, self._spin_handle = self._spin_handle, None
             was_driving, self._driving = self._driving, False
+            self._cancels += 1
         if handle is not None and send:
             handle.cancel_goal_async()
-        return was_driving
+        if spin is not None:
+            spin.cancel_goal_async()
+        return was_driving or spin is not None
 
     def cancel_every_goal(self) -> dict[str, dict[str, Any]]:
         """Cancel every goal on both navigators, whoever sent it; what each said, per action.
@@ -757,12 +770,18 @@ class GoalServer(Node):
                 )
                 return
             self._driving = True
+            cancels = self._cancels  # any cancel from here on is this drive's
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
         self.get_logger().info(
             f"run {self._runs.run}: planner {PLANNERS[self.planner][0]} "
             f"-> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
         try:
+            if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
+                self._send(
+                    connection, {"event": "error", "detail": "cancelled before Nav2 had the goal"}
+                )
+                return
             send = self._client.send_goal_async(
                 goal,
                 lambda f: feedback.update(
@@ -775,7 +794,16 @@ class GoalServer(Node):
                 self._send(connection, {"event": "error", "detail": "the goal was refused"})
                 return
             with self._lock:
-                self._goal_handle = handle
+                late = self._cancels != cancels
+                if not late:
+                    self._goal_handle = handle
+            if late:  # the cancel came while Nav2 was taking the goal: it is cancelled now
+                handle.cancel_goal_async()
+                self._send(
+                    connection,
+                    {"event": "error", "detail": "cancelled while Nav2 took the goal: cancelled"},
+                )
+                return
             self._send(
                 connection,
                 {
@@ -806,8 +834,8 @@ class GoalServer(Node):
                 self._goal_handle = None
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
-            if status == 4:  # position met: now the heading, on the tape still
-                self._pivot_to(yaw_deg, connection)
+            if status == 4 and not self._cancelled_since(cancels):  # now the heading, taped
+                self._pivot_to(yaw_deg, connection, cancels)
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
                 connection,
@@ -826,7 +854,12 @@ class GoalServer(Node):
             with self._lock:
                 self._driving = False
 
-    def _pivot_to(self, yaw_deg: float, connection: socket.socket) -> None:
+    def _cancelled_since(self, cancels: int) -> bool:
+        """Whether a cancel came after the one counted as ``cancels``."""
+        with self._lock:
+            return self._cancels != cancels
+
+    def _pivot_to(self, yaw_deg: float, connection: socket.socket, cancels: int) -> None:
         """Turn in place to the mark's heading once the drive has met the position.
 
         The controller that can reverse (RPP, FollowPathRS) cannot rotate in place, and at a
@@ -852,7 +885,18 @@ class GoalServer(Node):
         if handle is None or not handle.accepted:
             self._send(connection, event | {"status": 0, "detail": "the spin was refused"})
             return
+        with self._lock:  # a cancel from here on stops the spin (cancel); before, it is done here
+            late = self._cancels != cancels
+            if not late:
+                self._spin_handle = handle
+        if late:
+            handle.cancel_goal_async()
+            self._send(connection, event | {"status": 0, "detail": "cancelled"})
+            return
         outcome = self._wait(handle.get_result_async(), PIVOT_ALLOWANCE_S + 5.0)
+        with self._lock:
+            if self._spin_handle is handle:
+                self._spin_handle = None
         status = getattr(outcome, "status", 0) if outcome else 0
         after = heading_residual_deg(yaw_deg, self._pose_now().get("yaw_deg", here))
         self._send(connection, event | {"status": int(status), "after_deg": round(after, 1)})

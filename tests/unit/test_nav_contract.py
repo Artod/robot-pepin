@@ -299,17 +299,28 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
-    # The red button: the Mac's goal server first, 3 s; then the base's own stop and Nav2 down.
-    # Never a board restart: it zeroes the odometry the map is tied to.
-    assert "pepin.goal_link --timeout 3 cancel" in stop
-    assert r"{\"cmd\": \"stop\"}" in stop and "3336" in stop
-    assert "pepin_stop_container pepin-macnav" in stop
+    # The red button (tests/unit/test_stop.py drives it against fakes): the goal server's
+    # cancel, the base's own stop believed from its state stream, and when either is not
+    # confirmed the cmd_vel producers killed BEFORE the stop that is believed. The only kills
+    # are those producers: Nav2's composed container and the board's measured motion. Never a
+    # board restart: it zeroes the odometry the map is tied to.
+    assert 'pepin.goal_link --port "$GOAL_PORT" --timeout 3 cancel' in stop
+    assert "pepin.red_button" in stop
     acted = "\n".join(ln for ln in stop.splitlines() if not ln.lstrip().startswith("#"))
-    assert "systemctl" not in acted and "pkill" not in acted and "goto_ros" not in acted
+    kills = [ln.strip() for ln in acted.splitlines() if "pkill" in ln or "kill -KILL" in ln]
+    assert any("pkill -9 -f '__node:=nav2_container'" in k for k in kills), kills
+    assert all(
+        "__node:=nav2_container" in k or "pepin_motion.pid" in k or '"$pid"' in k for k in kills
+    ), kills
+    assert acted.index("__node:=nav2_container") < acted.rindex("base && STILL=1")
+    assert "systemctl" not in acted and "goto_ros" not in acted
     goto = (REPO / "ros/goto.sh").read_text()
     assert re.search(r"trap .*EXIT", goto)
-    # Ctrl-C cancels and never restarts the board (2026-09-29): the red button is typed by hand.
-    assert "goal_link cancel || goal_link cancel" in goto
+    # Every signal cancels and never restarts the board (2026-09-29): the red button is typed.
+    for sig, status in (("INT", 130), ("HUP", 129), ("TERM", 143)):
+        assert f"trap 'on_signal {status}' {sig}" in goto, sig
+    cancel = goto[goto.index("cancel() {") : goto.index("\n}\n", goto.index("cancel() {"))]
+    assert cancel.count('goal_link --timeout "$CANCEL_S" cancel && return 0') == 2
     assert not re.search(r'/stop\.sh"', goto), "Ctrl-C must not run stop.sh"
     run = (REPO / "ros/run.sh").read_text()
     assert "--rm" not in run  # a stopped container must keep its log for the next start to save
@@ -772,12 +783,15 @@ def test_one_recorder_writes_a_drive_not_two() -> None:
 
 def test_goto_ends_every_helper_it_started_whatever_ends_it() -> None:
     """bash defers a trap until the running foreground command returns, and three goto.sh
-    survived their SIGTERM on 2026-09-13, each holding a watcher. The goal is the one foreground
-    command; the film and the streams run in process groups of their own (one signal ends every
-    member, and the operator's Ctrl-C reaches the goal alone), ended by a `finish` that runs
-    exactly once (tests/unit/test_goal_link.py drives it against fakes)."""
+    survived their SIGTERM on 2026-09-13, each holding a watcher. So nothing of a drive is in
+    the foreground: the goal is a background job waited on (a trapped signal interrupts the
+    wait), the traps are set before any helper starts, the film and the streams run in process
+    groups of their own and end by themselves when goto.sh is gone, and `finish` runs exactly
+    once (tests/unit/test_goal_link.py sends INT, HUP and TERM against fakes)."""
     script = (REPO / "ros/goto.sh").read_text()
-    assert "trap finish EXIT\n" in script and "trap 'finish; exit 143' HUP TERM" in script
+    assert "trap finish EXIT\n" in script and "trap 'on_signal 143' TERM" in script
+    assert script.index("trap finish EXIT") < script.index('bash "$HERE/clip.sh"')
+    assert 'goal_link --log "$LOG" go "$@" &\nGOAL=$!\nwait "$GOAL"' in script
     assert 'if [ "$FINISHED" = 1 ]; then return 0; fi' in script, "finish must not run twice"
     assert "os.setpgrp()" in script and 'kill -TERM -- "-$STREAMS"' in script
     assert 'kill -TERM "$CLIP"' in script and 'wait "$CLIP"' in script
