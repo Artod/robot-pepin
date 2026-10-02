@@ -11,7 +11,7 @@
 #   3. a process of ours the launch does not respawn (the Python base bridge, the link and bridge
 #      watches, RTAB-Map's XFeat adapters) that imports a change refuses the push while it runs
 #   4. rsync of exactly these files to the board, never --delete: the board writes files of its
-#      own beside ours (maps/map_cache.json, 2026-09-20)
+#      own beside ours (maps/rec)
 #   5. the kicks, all at once: ros/thin.sh kick on the board, ros/laptop.sh kick here, each
 #      waiting for its node's NEW pid and that pid's own ready line (ros/kick_ready.awk); a
 #      node that is not running on its half (the other recorder, the goal server's other side,

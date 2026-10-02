@@ -1,5 +1,5 @@
 [Unit]
-Description=Pepin ROS 2 stack (sensors, bridges, Foxglove; Nav2 started separately) in Docker
+Description=Pepin ROS 2 sensor stack (lidar, base bridge, ToF, neck, EKF) in Docker
 After=docker.service pepin-base.service pepin-tof.service network-online.target
 Wants=network-online.target
 StartLimitIntervalSec=0
@@ -7,13 +7,9 @@ Requires=docker.service
 Wants=pepin-base.service pepin-tof.service
 
 [Service]
-# PEPIN_NAV=true in /etc/default/pepin-ros starts Nav2 at boot too (one launch process for both).
+# The switches below are ros/feature.sh's, kept in /etc/default/pepin-ros. Navigation runs on the
+# laptop; the board runs sensors only.
 EnvironmentFile=-/etc/default/pepin-ros
-Environment=PEPIN_NAV=false
-# The old lidar-only mapper (slam_toolbox, ros/mode.sh slam_toolbox): builds a map to SAVE,
-# never drives on it. Never together with PEPIN_NAV: two map -> odom publishers.
-Environment=PEPIN_SLAM_TOOLBOX=false
-Environment=PEPIN_MAP=/maps/20260903_182653_lap3_loop.yaml
 Environment=PEPIN_CPP_BRIDGE=false
 Environment=PEPIN_IMU=false
 # The EKF (ros/params/ekf.yaml) fuses whatever odometry sources are alive and owns
@@ -28,18 +24,12 @@ Environment=PEPIN_TOF=false
 # The neck's encoders and the live camera transform (ros/feature.sh neck on|off); the laptop's
 # SLAM must then start with ros/laptop.sh vslam --neck, or two nodes publish base_link -> camera_link.
 Environment=PEPIN_NECK=false
-# all: the whole stack here; board: the reflex half, with the planner and goal server on the laptop (ros/laptop.sh)
-Environment=PEPIN_SIDE=all
-# Who writes a drive down: jsonl = pepin_bringup.run_recorder (the numbered tape, written here,
-# 34-43 % of a core), bag = pepin_bringup.bag_recorder, which starts `ros2 bag record` (MCAP, no
-# compression) and deserialises nothing; ros/tools/bag_to_tape.py then makes the same tape on the
-# laptop. jsonl until the two are measured on this board.
-Environment=PEPIN_RECORDER=jsonl
 # The middleware is rmw_zenoh_cpp against pepin-zrouter.service (ros/run.sh sets it).
-# One container per boot; --rm so a stale one never blocks the name. The image is built by ros/build.sh.
+# One container per boot; --rm so a stale one never blocks the name. The image is built on the
+# laptop and loaded here by ros/build-image.sh --ship.
 # No RTC on this board: it boots with yesterday's clock and NTP jumps it hours forward a minute
-# later; every "seconds since the last reading" check in Nav2 then sees stale data and the first
-# goal dies (2026-09-07 11:45). Wait for the sync, but never forever: an offline robot still starts.
+# later; every stamp taken before the jump is hours stale to the laptop's consumers (the first goal
+# died of it, 2026-09-07 11:45). Wait for the sync, but never forever: an offline robot still starts.
 # The wait asks the KERNEL, not a daemon, so it holds for systemd-timesyncd and for chrony alike
 # (board/chrony.sh): timedated's NTPSynchronized is `adjtimex().maxerror < 16 s` (systemd 257,
 # timedated.c ntp_synced, which ignores STA_UNSYNC on purpose), and chronyd writes its real
@@ -48,17 +38,17 @@ Environment=PEPIN_RECORDER=jsonl
 # first three updates after chronyd starts, so a stack that waited for the first one starts after
 # the jump; one that gave up waiting (no network within 90 s) still takes it later, under it.
 ExecStartPre=-/bin/sh -c 'for i in $$(seq 1 90); do [ "$$(timedatectl show -p NTPSynchronized --value)" = yes ] && exit 0; sleep 1; done; echo "clock not synced after 90 s, starting anyway"'
-# The previous container's log is the only record of what Nav2 did; keep it before the rm.
+# The previous container's log is the only record of what the sensors did; keep it before the rm.
 ExecStartPre=-/bin/sh -c 'mkdir -p /root/pepin-ros/logs && /usr/bin/docker logs pepin-ros > /root/pepin-ros/logs/$$(date +%%Y%%m%%d_%%H%%M%%S).log 2>&1'
 ExecStartPre=-/usr/bin/docker rm -f pepin-ros
 # run.sh mounts the code from /root/pepin-ros (see it): edits reach the robot via ros/sync.sh, no rebuild.
-ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py nav:=${PEPIN_NAV} slam_toolbox:=${PEPIN_SLAM_TOOLBOX} map:=${PEPIN_MAP} base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK} side:=${PEPIN_SIDE} recorder:=${PEPIN_RECORDER}
+ExecStart=/root/pepin-ros/run.sh ros2 launch pepin_bringup bringup.launch.py base_bridge_cpp:=${PEPIN_CPP_BRIDGE} imu:=${PEPIN_IMU} ekf:=${PEPIN_EKF} laser_odom:=${PEPIN_LASER_ODOM} tof:=${PEPIN_TOF} neck:=${PEPIN_NECK}
 # ros2 launch needs more than 5 s to bring a dozen nodes down on this board; a SIGKILL (137)
 # after the grace period is still a normal stop, not a failure.
 # The container's stop signal is SIGINT (ros/run.sh, ros/Dockerfile), which the launch answers by
 # shutting its nodes down — the 30 s here is the launch's own sigterm_timeout, so on a
-# `systemctl restart pepin-ros` every node gets the whole window to finish its write (the run
-# recorder's tape, /maps/last_pose.json) instead of the SIGKILL that used to end it.
+# `systemctl restart pepin-ros` every node gets the whole window to leave cleanly instead of the
+# SIGKILL that used to end it.
 # TimeoutStopSec must stay ABOVE that window: when it expires systemd stops waiting for ExecStop
 # and starts killing the unit's own cgroup, which cuts the `docker run` client off mid-stop.
 ExecStop=/usr/bin/docker stop -t 30 pepin-ros

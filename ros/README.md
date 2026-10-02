@@ -27,8 +27,8 @@ Foxglove Studio                   docker: ldlidar_node -> laser_filters box filt
 
 | Path | What |
 | --- | --- |
-| `ros/Dockerfile` | Jazzy base + nav2, nav2-bringup, slam-toolbox, foxglove-bridge, CycloneDDS; LD19 driver ([Myzhar/ldrobot-lidar-ros2](https://github.com/Myzhar/ldrobot-lidar-ros2)) built from source; our `pepin_bringup` |
-| `ros/run.sh` | `docker run` with host networking, the lidar device and `ros/maps`, `ros/params` mounted |
+| `ros/Dockerfile` | The board's sensor image: Jazzy base + nav2-lifecycle-manager (the lidar's only), laser-filters, robot-localization, foxglove-bridge, rmw_zenoh; the LD19 driver ([Myzhar/ldrobot-lidar-ros2](https://github.com/Myzhar/ldrobot-lidar-ros2)) and rf2o built from source; our `pepin_bringup` and `pepin_base_cpp`. No Nav2: `ros/Dockerfile.laptop` adds it |
+| `ros/run.sh` | the board's `docker run`: host networking, the lidar device, `ros/maps` (recordings) and `ros/params` (`ekf.yaml`) mounted |
 | `ros/pepin_bringup/` | ament_python package: `base_bridge`, `tof_bridge`, launch files |
 | `ros/pepin_base_cpp/` | ament_cmake package: the same base bridge in C++ (`base_bridge_cpp:=true`), ~25 MB instead of ~190 MB |
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates for a weak CPU) |
@@ -109,13 +109,6 @@ silence as good news. What is checked:
 | 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with a kick of the board's old tracker: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
 | 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `scripts/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
-
-`ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
-board half (10 by default), each timed from `Activating planner_server` to the bond, with the
-range-layer and `Invalid frame ID` counts beside it, one row per start and a non-zero exit unless
-every start passed. It restarts processes and reads logs — **the robot does not move**, and it
-refuses to begin while a navigation goal is running. The hang appeared on 4 of 7 starts on
-2026-09-21, which is why one green restart is not an answer.
 
 | # | laptop |
 |---|---|
@@ -1653,7 +1646,8 @@ at 0.30 m/s, stands still at the first read 0.43 s after the cancel returned.
 
 ## What runs on the board
 
-Four A53 cores and 1.5 GB. Everything the board is allowed to run is declared once, with a
+Four A53 cores and 1.5 GB, and since 2026-10-01 a sensor box: Nav2, the goal server and the
+drive recorders run on the laptop. Everything the board is allowed to run is declared once, with a
 budget, in [`config/board_manifest.json`](../config/board_manifest.json); `ros/board.sh census`
 compares that file against a live `ps` and `ros/board.sh manifest` prints the registry itself.
 Two rules hold this together:
@@ -1677,8 +1671,8 @@ seconds of CPU on this board), no `docker exec`, nothing restarted. The verdict 
 anything is **OVER** its budget, **MISSING** (expected always, not running), **FORBIDDEN**
 (declared `expected: false` and running anyway) or **UNLISTED** (a process above 1 % CPU that no
 entry claims — usually a `ros2 topic hz` left behind, which is what takes this board to load 12).
-Entries marked `sometimes` (the per-drive recorder, the reaper, the SLAM-only and split-only
-nodes) are **IDLE** when absent, never missing. The census is also a health probe (`board
+Entries marked `sometimes` (a recorded drive's loggers, the reaper) are **IDLE** when absent,
+never missing. The census is also a health probe (`board
 budget`) in `scripts/health_check.py` and the tray.
 
 Two things to know about the numbers before reading a table: ps's `%CPU` is the process's
@@ -1688,25 +1682,20 @@ is the whole board.
 
 | process | what it is | why on the board | budget | owner |
 | --- | --- | --- | --- | --- |
-| `nav2_container` | Nav2 in one process: map server, planner, controller, behaviours, tree, smoother (nice 5) | real-time, wifi-loss | 120 % / 152 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `lidar_container` | LD19 driver, hull filter, its static mount, the driver's lifecycle manager (nice -10, respawned) | real-time, hardware-attached | 22 % / 70 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
 | `base_container` | base bridge (wheels, IMU, gyro-bias tracker), the IMU's static mount (nice -10, respawned) | real-time, hardware-attached | 15 % / 60 MB (to measure) | `pepin-ros.service` -> `robot.launch.py` |
-| `run_recorder` | every drive on disk: scans, odometry, pose, commands, camera | wifi-loss | 24 % / 93 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `tof_bridge` | the three VL53L1X ranges as ROS `Range` for the contact layer | real-time, hardware-attached | 20 % / 102 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `neck_state` | the neck's encoders, and `base_link -> camera_link` behind its flag | hardware-attached | 16 % / 99 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `base_server` | wheels, odometry and the deadman next to the UART (TCP 3336) | real-time, wifi-loss, hardware-attached | 16 % / 27 MB | `pepin-base.service` |
 | `ekf_node` | wheels + gyro + the camera's odometry + the lidar's scan-to-scan odometry fused in the plane, owns `odom -> base_link`; runs on whichever of them are alive, the IMU included or not | real-time, wifi-loss | 14 % / 42 MB | `pepin-ros.service` -> `robot.launch.py` |
 | `laser_odometry` | each LD19 scan matched against the one before it (rf2o, no map) as `/odom_laser` for the filter | real-time, wifi-loss | 30 % / 105 MB **(estimate, to measure)** | `pepin-ros.service` -> `robot.launch.py` |
 | `tof_server` | the ToF sensors on I2C as a TCP stream (3335) | real-time, hardware-attached | 13 % / 22 MB | `pepin-tof.service` |
-| `goal_server` | goals on a socket, with the places book of the map in use | wifi-loss | 10 % / 113 MB | `pepin-ros.service` -> `nav.launch.py` |
 | `ros2_launch` | the launch process that started and respawns the ROS nodes | wifi-loss | 10 % / 105 MB | `pepin-ros.service` ExecStart |
 | `ser2net` | servo bus and lidar as TCP ports 3333/3334 | hardware-attached | 6 % / 5 MB | `ser2net.service` |
 | `ustreamer` | the overview camera as MJPEG on 8080 — frames copied, never decoded | hardware-attached | 3 % / 19 MB | `pepin-camera.service` |
 | `docker` | dockerd, containerd and one supervisor per container | wifi-loss | 3 % / 225 MB | `docker.service`, `containerd.service` |
 | `session_logger` | the per-drive jsonl recorder (`sometimes`) | wifi-loss | 25 % / 90 MB | `ros/goto.sh`, `ros/teleop.sh` |
-| `bag_record` | `ros2 bag record` writing one run's MCAP bag, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 30 % / 120 MB | `pepin_bringup.bag_recorder` (a subprocess per run) |
-| `bag_recorder` | the node that starts and stops it and subscribes to nothing, `PEPIN_RECORDER=bag` only (`sometimes`, an estimate) | wifi-loss | 8 % / 60 MB | `pepin-ros.service` -> `nav.launch.py` |
-| `link_watch` | stops the cart when the laptop half goes away, `side=board` only (`sometimes`) | real-time, wifi-loss | 15 % / 90 MB | `pepin-ros.service` -> `nav.launch.py` |
+| `bag_record` | `ros2 bag record` writing a recorded drive's MCAP bag (`sometimes`, an estimate) | wifi-loss | 30 % / 120 MB | `ros/teleop.sh NAME` |
 | `reap_ros2_cli` | kills ros2 CLI tools older than 90 s, once a minute (`sometimes`) | real-time | 5 % / 10 MB | `pepin-reap.timer` |
 | `foxglove_bridge` | **not expected**: the websocket is being removed, the laptop reads the board through zenoh | - | 0 % | was a component of `sensors_container` |
 
@@ -1727,9 +1716,10 @@ be quiet: the drive that measures them pushes the cart forward by hand (`/odom_l
 be positive and near `/odom`'s) and turns it left (`vyaw` positive and near the gyro's), because
 the LD19 hangs upside down and yawed and a sign error here is the one failure that would matter.
 
-The entries that must always run promise **327 % of 400 %** and 1377 MB of the 1.5 GB. That is
-the budget, not the measurement: the same stack idling on 2026-09-14 measured 235 % and 850 MB.
-The gap is the +50 % headroom every entry carries, and it is the reason a new process needs a
+The entries that must always run promise **181 % of 400 %** and 1094 MB of the 1.5 GB (with Nav2,
+the goal server and the recorder still on the board: 327 % and 1377 MB). That is the budget, not
+the measurement: the stack with Nav2 idling on 2026-09-14 measured 235 % and 850 MB. The gap is
+the +50 % headroom every entry carries, and it is the reason a new process needs a
 number before it needs a launch line — which is exactly what it caught on 2026-09-22: with the
 tracker still counted as always-on, adding laser odometry promised **427 %** of four cores and
 1498 MB of 1.5 GB. Four A53 cores do not hold a map localiser *and* the laser odometry that
@@ -1738,43 +1728,46 @@ default); absent it is IDLE rather than MISSING, and running it is measured as b
 
 ## Building the image
 
-There are two ways to produce the board's image, `pepin-ros` (tagged `:latest` and `:zenoh`,
-which is what `ros/run.sh` asks for). Both read the same `ros/Dockerfile`; they differ only in
-which CPU compiles it.
-
-| | `ros/build-image.sh` (laptop) | `ros/build.sh` (board) |
-|---|---|---|
-| where | `docker buildx build --platform linux/arm64` on the Mac — native, no emulation | `docker build` on the Orange Pi |
-| cold build | 4-5 min (262 s measured, rf2o's layer 25 s of it at `-j18`) | 16-30 min (rf2o alone compiles at `-j1`) |
-| rebuild after a `pepin_bringup` change | seconds (the layers below are cached) | minutes |
-| needs the robot | no | yes, and the stack is stopped for the whole build |
-| gets the image to the board | `--ship`: `docker save` piped into the board's `docker load` | it is already there |
-
-Use the laptop path by default. Keep the board path for the case where the laptop cannot build
-(no Docker, no disk) or where only the board can reach the network the build needs.
+The board's image is `pepin-ros`, built from `ros/Dockerfile` on the Mac — the same arm64
+architecture, so `docker buildx build --platform linux/arm64` runs natively — and loaded on the
+board over ssh. It carries the sensor stack only: no Nav2 (the lidar's lifecycle manager is the
+one Nav2 package in it), no slam_toolbox, no rviz. `ros/Dockerfile.laptop` builds the laptop's
+image on top of it and adds Nav2.
 
 ```bash
-ros/build-image.sh            # build only: linux/arm64 image in the laptop's Docker, board untouched
-ros/build-image.sh --ship     # build, then load it on the board (the stack must be stopped first)
-ros/build-image.sh --ship-only  # ship the image already built here
+ros/build-image.sh                    # build pepin-ros:sensors here; the board untouched
+PEPIN_BUILD_CPUS=4 ros/build-image.sh # the same on 4 of the Docker VM's CPUs at low weight
+ros/build-image.sh --ship             # build, then load it on the board (stack stopped first)
+ros/build-image.sh --ship-only        # load the image already built here
 ```
 
-The image is about 1.0 GB on the wire and travels uncompressed: Docker Desktop's containerd
-image store already saves compressed layers, so a compressor takes 0.7 % off the tarball and
-costs the board a decompression (`PEPIN_SHIP_COMPRESS=zstd` turns one on for a daemon whose
-image store writes plain tars).
+| | before 2026-10-01 (Nav2 on the board) | sensors only |
+|---|---|---|
+| on the wire (compressed layers) | 1.08 GB | 0.35 GB |
+| unpacked | 3.85 GB | 1.32 GB |
+| cold build, 4 CPUs of the Docker VM | - | 155 s |
 
-Neither step restarts the robot: `docker load` under a driving cart is refused unless `--force`,
-and the restart (`ros/restart.sh board`) stays a separate, deliberate command. The image carries
-only what is baked in — code, params and maps are mounted from `/root/pepin-ros` and travel with
-`ros/sync.sh` as before.
+Tags: on the Mac the image is `pepin-ros:sensors` alone, because this Mac's `pepin-ros:latest`
+and `:zenoh` are the older image with Nav2 that `ros/sim.sh` and `ros/replay.sh` still run. The
+load tags it `pepin-ros:latest` and `pepin-ros:zenoh` on the board, the names `ros/run.sh` and
+`pepin-zrouter.service` ask for. The board's image from before the first sensors-only load keeps
+the tag `pepin-ros:pre-sensors-2026-10-01` (set once; a later ship never moves it), and the
+script's header carries the one line that puts it back.
 
-The rf2o layer's `-j1` is the board's RAM limit, not the package's: it is the `RF2O_JOBS` build
-argument, default 1 so an on-board `docker build` is safe without being told, and
-`ros/build-image.sh` passes the laptop's core count. The rest of the caching is Docker's own —
-an unchanged layer is reused, so a rebuild after a change to `pepin_bringup` does not recompile
-rf2o. `PEPIN_BUILD_CACHE=<dir>` additionally exports the build cache to a directory (this needs
-a `docker-container` builder, which the script creates as `pepin-arm64`).
+The image travels uncompressed: Docker Desktop's containerd image store already saves compressed
+layers (`PEPIN_SHIP_COMPRESS=zstd` turns a compressor on for a daemon whose store writes plain
+tars). Neither step restarts the robot. A ship is refused under a running stack (unless
+`--force`), on a board whose `/etc/default/pepin-ros` still says `PEPIN_NAV=true` or
+`PEPIN_SLAM_TOOLBOX=true`, and under 2 GB free on docker's root; it sets the rollback tag before
+it loads anything, installs `board/pepin-ros.service` (daemon-reload, no restart), and prints the
+restart. Code, `params/ekf.yaml` and `config/` are
+mounted from `/root/pepin-ros` and travel with `ros/sync.sh` as before.
+
+The rf2o layer's compiler count is the `RF2O_JOBS` build argument (Eigen-heavy units; a `-j4`
+build put the board into swap once): `ros/build-image.sh` passes the Mac's core count, or
+`PEPIN_BUILD_CPUS`. `PEPIN_BUILD_CPUS` builds in a `docker-container` builder of its own
+(`pepin-board-<N>cpu`), pinned to the VM's last N CPUs with a tenth of the default CPU weight, so
+a build beside a live stack yields to it; that builder keeps its own layer cache.
 
 ## The XFeat image
 
@@ -1955,13 +1948,12 @@ aborted on the first update after a registration, exactly as read in the source.
 ## Build and run (on the board)
 
 ```bash
-# from the laptop: copy ros/ to the board and build the image there (15-30 min the first time)
-rsync -a --delete ros/ root@pepin.local:/root/pepin-ros/
-ssh root@pepin.local 'cd /root/pepin-ros && docker build -t pepin-ros .'
-# on the board: sensors + bridges (no Foxglove bridge here: the laptop serves it)
+# from the laptop: the image (built here, loaded there), then the code, params/ekf.yaml and config
+ssh root@pepin.local systemctl stop pepin-ros
+ros/build-image.sh --ship
+ros/sync.sh --restart
+# by hand instead of the unit (systemctl stop pepin-ros first): the sensors and bridges
 ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup robot.launch.py'
-# on the board, second terminal: navigation on a saved map
-ssh root@pepin.local '/root/pepin-ros/run.sh ros2 launch pepin_bringup nav.launch.py map:=/maps/lap3.yaml'
 ```
 
 Laptop: install Foxglove (`brew install --cask foxglove`), and let `ros/foxglove.sh` do the rest.
@@ -1993,10 +1985,11 @@ send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped
 
 ## At boot
 
-`board/pepin-ros.service` starts the sensors container (`robot.launch.py`) after the base and ToF
-servers; Nav2 (`nav.launch.py`) is started on demand inside it. Build or rebuild the image with
-`ros/build-image.sh --ship` on the laptop, or `ros/build.sh` on the board itself (see
-**Building the image**).
+`board/pepin-zrouter.service` starts the board's zenoh router and `board/pepin-ros.service` the
+sensor container (`bringup.launch.py`, which is `robot.launch.py` under the stop window) after
+the base and ToF servers, with the switches of `/etc/default/pepin-ros` (`ros/feature.sh`). Nothing
+of navigation starts on the board. Build or rebuild the image with `ros/build-image.sh --ship` on
+the laptop (see **Building the image**).
 
 ## Bring-up checklist (in this order, each step visible in Foxglove)
 

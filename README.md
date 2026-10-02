@@ -278,9 +278,6 @@ the accumulated drift still there. Right: keyframes as pose-graph nodes, matches
 revisits detected and verified (`src/pepin/slam.py`), Gauss-Newton over SE(2) with the start
 pinned (`src/pepin/posegraph.py`) — 5 cm.
 
-`slam_toolbox` is also wired in (`ros/mode.sh slam` + `ros/savemap.sh NAME`) for building a map
-live while teleoperating.
-
 ## Perception and costmaps
 
 **LD19 lidar**, 10 Hz, 455 beams, mounted upside down at the height `config/lidar.json` carries
@@ -475,14 +472,12 @@ git config core.hooksPath .githooks
 uv run pytest && uv run mypy && uv run ruff check .
 
 # the robot
-ros/build.sh                            # sync ros/ + src/pepin to the board, build the image there
+ros/build-image.sh --ship               # build the board's sensor image on this Mac, load it on the board
 ros/push.sh src/pepin/x.py              # a change to the running robot: rsync it, kick the nodes that import it (--dry-run: the plan)
 ros/sync.sh                             # the whole code tree to the board, nothing restarted (--restart: the stack too)
 ros/thin.sh kick goal_server            # one board node from the synced sources (~10 s), the stack untouched
 ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
 ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
-ros/mode.sh nav                         # Nav2 on the map RTAB-Map's graph publishes
-ros/mode.sh sensors                     # lidar, base bridge, Foxglove — nothing that localises
 
 # driving
 ros/go.sh printer                       # go to a named place; Ctrl-C cancels
@@ -494,8 +489,8 @@ ros/go.sh trip                          # printer, then home
 ros/stop.sh                             # the red button: wheels stopped within a second
 
 # a new map
-ros/mode.sh slam && ros/teleop.sh       # build a map while driving it by hand
-ros/savemap.sh flat3                    # save it on the board and fetch it here
+ros/teleop.sh lap                       # a recorded drive by hand, fetched here when it ends
+ros/map.sh save flat3                   # freeze RTAB-Map's grid into ros/maps/flat3.{pgm,yaml}
 ```
 
 Watch it in Foxglove (`brew install --cask foxglove-studio`) on `ws://localhost:8765`, the laptop's bridge: a 3D panel

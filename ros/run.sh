@@ -2,11 +2,11 @@
 # Run the ROS 2 container on the board (used by board/pepin-ros.service and by hand). Usage:
 #   ros/run.sh                      -> interactive shell inside the container
 #   ros/run.sh ros2 launch pepin_bringup robot.launch.py
-# Development mounts: the Python package, launch files, tools, params, maps and our pepin
-# library come from /root/pepin-ros on the host, over the paths baked into the image — so an
-# edit needs `ros/push.sh FILE` (rsync + a kick of the nodes it reaches) or `ros/sync.sh
-# --restart` (rsync + container restart), not an image rebuild. The image is rebuilt
-# (ros/build.sh, container stopped) only when the Dockerfile changes.
+# Development mounts: the Python package, launch files, tools, params (ekf.yaml), maps (the
+# recordings written here) and our pepin library come from /root/pepin-ros on the host, over the
+# paths baked into the image — so an edit needs `ros/push.sh FILE` (rsync + a kick of the nodes it
+# reaches) or `ros/sync.sh --restart` (rsync + container restart), not an image rebuild. The image
+# is rebuilt on the laptop (ros/build-image.sh --ship) only when the Dockerfile changes.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # The lidar's port comes and goes (unplugged, re-plugged, enumerated late at boot): the host's /dev
@@ -25,10 +25,12 @@ I2C=""
 # three variables:
 #   RMW_IMPLEMENTATION    the middleware itself
 #   PEPIN_RMW             kept for the tools that print it
-#   ZENOH_ROUTER_CHECK_ATTEMPTS=0  do not block on the router at start-up. The session's own
-#       connect retry is infinite for a peer (connect/timeout_ms -1, exit_on_failure false in
-#       the shipped session config), so a node started before pepin-zrouter comes up stays
-#       alive and joins when the router appears, instead of dying on a start-order race.
+#   ZENOH_ROUTER_CHECK_ATTEMPTS=0  rmw_zenoh's meaning: wait for the router at start-up for as
+#       long as it takes, one check a second (-1 would skip the check). A node started before
+#       pepin-zrouter comes up therefore blocks in its first rmw call and comes alive when the
+#       router appears, instead of dying on a start-order race (seen in a container with no
+#       router, 2026-10-01: "Unable to connect to a Zenoh router" once a second, and the nodes
+#       came up the moment a router started).
 # No session config is passed: the shipped default (peer, connect tcp/localhost:7447, listen
 # tcp/localhost:0) is already the shape the board wants — nodes talk to each other directly
 # over the host loopback, and only what leaves the board goes through the router.

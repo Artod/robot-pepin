@@ -1,8 +1,38 @@
-# Board: Orange Pi Zero 3 as the robot's relay
+# Board: Orange Pi Zero 3 as the robot's sensor box
 
 The board runs Armbian and does nothing clever: it bridges the servo bus and the
-lidar to TCP, streams the ToF ranges, serves the camera, and — the one real-time
-job — owns the wheels. Everything else runs on the laptop.
+lidar to TCP, streams the ToF ranges, serves the camera, runs the ROS sensor
+stack, and — the one real-time job — owns the wheels. Navigation (Nav2, the goal
+server, the drive recorders) and everything that consumes the camera run on the
+laptop.
+
+## The ROS sensor stack
+
+One container, `pepin-ros` (`pepin-ros.service`, `ros/run.sh`), runs
+`bringup.launch.py`, which is `robot.launch.py` alone: the LD19 driver and its hull
+filter (`/scan`), the base bridge (`/odom`, `/cmd_vel` to the base server), the
+EKF (`odom -> base_link`), the lidar's scan-to-scan odometry, and behind their
+switches the ToF bridge and the neck's encoders. Its router is
+`pepin-zrouter.service` (rmw_zenoh), on the same image.
+
+| Switch (`/etc/default/pepin-ros`) | `ros/feature.sh` | Default |
+| --- | --- | --- |
+| `PEPIN_CPP_BRIDGE` | `cpp on\|off` | false |
+| `PEPIN_IMU` | `imu on\|off` | false |
+| `PEPIN_EKF` | `ekf on\|off` | true |
+| `PEPIN_LASER_ODOM` | `laser_odom on\|off` | true |
+| `PEPIN_TOF` | `tof on\|off` | false |
+| `PEPIN_NECK` | `neck on\|off` | false |
+
+Lines a board still carries from before 2026-10-01 (`PEPIN_NAV`, `PEPIN_SLAM_TOOLBOX`,
+`PEPIN_MAP`, `PEPIN_SIDE`, `PEPIN_RECORDER`) are read by nothing on the board.
+
+The image is built on the Mac (same arm64 architecture, minutes instead of the
+board's half hour) and loaded here over ssh: `ros/build-image.sh --ship` with the
+stack stopped, which also installs `board/pepin-ros.service`. The board's image from before the sensors-only stack is kept as
+`pepin-ros:pre-sensors-2026-10-01`; the script's header has the one-line rollback.
+Code, `params/ekf.yaml` and `config/` travel with `ros/sync.sh`; no map goes to the
+board.
 
 ## Services
 
@@ -29,7 +59,8 @@ talk to the servo bus directly (`scripts/base_smoke.py`, `jog.py`,
 | `board/tof-init.service` | `/etc/systemd/system/tof-init.service` |
 | `board/pepin-tof.service` | `/etc/systemd/system/pepin-tof.service` |
 | `board/pepin-base.service` | `/etc/systemd/system/pepin-base.service` |
-| `board/pepin-ros.service` | `/etc/systemd/system/pepin-ros.service` (branch ros2-nav2: the ROS container at boot) |
+| `board/pepin-ros.service` | `/etc/systemd/system/pepin-ros.service` (the ROS sensor container at boot) |
+| `board/pepin-zrouter.service` | `/etc/systemd/system/pepin-zrouter.service` (its zenoh router) |
 | `board/ser2net-stale-locks.conf` | `/etc/systemd/system/ser2net.service.d/stale-locks.conf` |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |

@@ -1,5 +1,5 @@
 #!/bin/bash
-# Persistent switches of the robot's stack (kept across ros/mode.sh calls and reboots):
+# Persistent switches of the board's sensor stack (kept across restarts and reboots):
 #   ros/feature.sh cpp on|off    the C++ base bridge instead of the Python one (~25 MB vs ~190 MB)
 #   ros/feature.sh imu on|off    read the MPU6050 and fuse it with the wheels (needs cpp on)
 #   ros/feature.sh ekf on|off    fuse the live odometry sources and own odom -> base_link
@@ -17,25 +17,15 @@
 #   ros/feature.sh neck on|off   the neck's encoders as /neck/state and the live base_link -> camera_link
 #                                (a Python node, ~150 MB); the laptop's SLAM must then run with
 #                                `ros/laptop.sh vslam --neck`, or two nodes publish that one edge
-#   ros/feature.sh recorder jsonl|bag
-#                                who writes a drive down: jsonl = pepin_bringup.run_recorder, the
-#                                numbered tape written on the board (34-43 % of a core); bag =
-#                                pepin_bringup.bag_recorder, which starts `ros2 bag record` (MCAP)
-#                                and deserialises nothing — ros/goto.sh then converts the bag into
-#                                the same tape on the laptop (ros/tools/bag_to_tape.py)
 # Each change restarts the one launch process (about 60 s); the robot does not move.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck | recorder}"; STATE="${2:?on | off (recorder: jsonl | bag)}"
-case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; recorder) VAR=PEPIN_RECORDER ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
-# The recorder is the one switch here that is not a boolean: it names which of the two recorders
-# the launch starts, and the values are the launch argument's own (nav.launch.py `recorder`).
-case "$FEATURE:$STATE" in
-    recorder:jsonl|recorder:bag) VAL="$STATE" ;;
-    recorder:*) echo "jsonl or bag"; exit 2 ;;
-    *:on) VAL=true ;;
-    *:off) VAL=false ;;
+FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck}"; STATE="${2:?on | off}"
+case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+case "$STATE" in
+    on) VAL=true ;;
+    off) VAL=false ;;
     *) echo "on or off"; exit 2 ;;
 esac
 if { [ "$FEATURE" = imu ] || [ "$FEATURE" = ekf ]; } && [ "$VAL" = true ]; then

@@ -82,7 +82,7 @@ at that rate and two atomic stores per IMU sample; no new process, no new thread
 ## Build and switch
 
 `ros/Dockerfile` apt-installs `nlohmann-json3-dev` and colcon-builds this package next to
-`pepin_bringup` into `/ws/install`. A change here needs an image rebuild (`ros/build.sh`),
+`pepin_bringup` into `/ws/install`. A change here needs an image rebuild (`ros/build-image.sh --ship`),
 not `ros/sync.sh`: only the Python package is mounted from the host.
 
     ros2 launch pepin_bringup robot.launch.py base_bridge_cpp:=true  # this node

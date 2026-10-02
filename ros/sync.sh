@@ -20,18 +20,11 @@ for arg in "$@"; do
         *) echo "usage: ros/sync.sh [--restart]"; exit 2 ;;
     esac
 done
-# maps/rec and logs are written BY the board and fetched to the laptop; pushing them back would ship
-# hundreds of MB of camera video over WiFi onto the SD card (it did, 2026-09-06: a 4-minute sync).
-# A database set aside in a SUBDIRECTORY of maps/ is not caught by 'maps/rtabmap*': on 2026-09-19 a
-# 1.1 GB rtabmap.worldv.db under maps/_aside_*/ held a deploy for ten minutes before it was seen.
-# The volume's snapshot (*.world.npz, ~11 MB) stays on the laptop that paints it; the pgm/yaml
-# pair exported from it DOES go, because that pair is the map the board serves.
-# maps/map_cache.json is the BOARD's own: the tracker writes down the grid it adopted so that it
-# has a map with the laptop gone. It exists only on the board, so --delete removed it on every
-# deploy — unseen while a tied RTAB-Map sent a fresh grid seconds later, and on 2026-09-20 a
-# restarted tracker beside an untied RTAB-Map came up with "NO MAP AND NO CACHE" and published
-# nothing for an hour while the bridge watch restarted the bridges over the silence.
-rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'maps/rec' --exclude 'maps/rtabmap*' --exclude 'maps/**/*.db' --exclude 'maps/_aside*' --exclude 'maps/*.world.npz' --exclude 'maps/world_*.npz*' --exclude 'logs' --exclude 'maps/*.places.yaml' --exclude 'maps/last_pose.json' --exclude 'maps/map_cache.json' "$HERE/" "root@$BOARD:/root/pepin-ros/"
+# The board is a sensor box: of params/ it reads ekf.yaml alone, and of maps/ nothing — maps,
+# databases and places books are the laptop's (hundreds of MB that once held a deploy for
+# minutes). maps/rec and logs are written BY the board and fetched to the laptop. An excluded
+# path is also out of --delete's reach, so what the board wrote there stays.
+rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'logs' --exclude 'maps/*' --include 'params/ekf.yaml' --exclude 'params/*' "$HERE/" "root@$BOARD:/root/pepin-ros/"
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/pepin_src/pepin /root/pepin-ros/pepin_src/config"
 rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/root/pepin-ros/pepin_src/pepin/"
 # The mounts (config/lidar.json, config/imu.json) beside the library: the container mounts

@@ -1,8 +1,8 @@
 #!/bin/bash
 # Drive by keyboard through ROS. Usage:
 #   ros/teleop.sh            just drive (current mode stays)
-#   ros/teleop.sh NAME       RECORDED mapping run: switches the robot to the lean sensors mode,
-#                            starts TWO recorders (our jsonl + a rosbag) on the board's SD card,
+#   ros/teleop.sh NAME       RECORDED mapping run: starts TWO recorders (our jsonl + a rosbag)
+#                            on the board's SD card,
 #                            REFUSES to hand you the keyboard until both files are visibly growing,
 #                            and on Ctrl-C stops the wheels, closes both recordings and copies
 #                            everything to the laptop (ros/maps/rec/). The map itself is built
@@ -42,15 +42,13 @@ fi
 
 STAMP=$(date +%Y%m%d_%H%M%S)
 REC="rec/${STAMP}_${MAPNAME}"
-echo "[1/4] switching the robot to the lean sensors mode (frees memory for the recorders)..."
-"$HERE/mode.sh" sensors >/dev/null 2>&1 || true
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/maps/rec"
 
-echo "[2/4] starting both recorders..."
+echo "[1/3] starting both recorders..."
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh python3 /tools/session_logger.py /maps/${REC}.jsonl"
 ssh "root@$BOARD" "docker exec -d pepin-ros /pepin_entrypoint.sh ros2 bag record -o /maps/${REC}_bag /ldlidar_node/scan /odom /tf /tf_static /cmd_vel"
 sleep 8
-echo "[3/4] checking that both recordings actually grow..."
+echo "[2/3] checking that both recordings actually grow..."
 CHECK='J=$(stat -c%s /root/pepin-ros/maps/REC.jsonl 2>/dev/null || echo 0); B=$(du -sb /root/pepin-ros/maps/REC_bag 2>/dev/null | cut -f1 || echo 0); sleep 4; J2=$(stat -c%s /root/pepin-ros/maps/REC.jsonl 2>/dev/null || echo 0); B2=$(du -sb /root/pepin-ros/maps/REC_bag 2>/dev/null | cut -f1 || echo 0); echo "$J $J2 $B $B2"'
 SIZES=$(ssh "root@$BOARD" "${CHECK//REC/$REC}")
 read -r J1 J2 B1 B2 <<<"$SIZES"
@@ -65,7 +63,7 @@ else
 fi
 
 finish() {
-    echo; echo "[4/4] stopping recorders, copying everything to the laptop..."
+    echo; echo "[3/3] stopping recorders, copying everything to the laptop..."
     ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}' >/dev/null 2>&1" || true
     ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f session_logger.py; docker exec pepin-ros pkill -INT -f 'ros2 bag record'" || true
     sleep 4

@@ -286,8 +286,9 @@ def test_the_manifest_table_says_why_each_process_is_on_the_board() -> None:
 def test_the_shipped_manifest_parses_and_covers_the_stack() -> None:
     manifest = load_manifest()
     names = {e.name for e in manifest.entries}
+    # A sensor box since 2026-10-01: Nav2, the goal server and the recorders run on the laptop.
+    assert not {"nav2_container", "goal_server", "run_recorder", "link_watch"} & names
     assert {
-        "nav2_container",
         "lidar_container",
         "base_container",
         "base_server",
@@ -306,11 +307,11 @@ def test_the_shipped_manifest_parses_and_covers_the_stack() -> None:
 def test_the_shipped_manifest_matches_a_real_dump() -> None:
     report = take_census(load_manifest(), PS_DUMP, LOAD)
     by_name = {m.entry.name: m for m in report.measured}
-    assert by_name["nav2_container"].status == OK
     assert by_name["lidar_container"].status == OK
     assert by_name["base_container"].status == OK
     assert by_name["base_server"].status == OK
-    assert [p.pid for p in report.unlisted] == [122900]  # the stray ros2 CLI tool, nothing else
+    # the Nav2 container of that dump (no entry claims it on a sensor box) and the stray ros2 CLI
+    assert [p.pid for p in report.unlisted] == [122289, 122900]
 
 
 def test_split_sections_reads_what_board_sh_sends() -> None:
