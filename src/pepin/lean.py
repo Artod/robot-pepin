@@ -22,8 +22,6 @@ turns them into one number every consumer asks for:
 * :class:`LeanSource` — the port a :class:`pepin.frame_pose.FramePoser` takes a lean through.
 * :class:`LeanGate` — how far the body may be from level before a measurement is thrown away
   instead of corrected, and the counters of what it did, for a node's report line.
-* :func:`scan_height_shift` — how far a lidar's returns move in height when the body leans: the
-  physical size of the problem, in metres, per beam.
 * :data:`LEAN_QUALITY_FLOOR` — how much of a lean gravity must have voted for before a consumer
   places a measurement by it. A drifting gyro reports a tip nobody made, and its only signature
   is a quality near zero: below the floor the lean is unknown rather than wrong, and the

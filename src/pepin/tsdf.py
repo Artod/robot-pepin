@@ -142,8 +142,8 @@ class GridSpec:
 
         Whole voxels, so the lattice never moves: an integer slide is a copy of the overlap and
         nothing else — no resampling, no quantisation, and every surviving voxel keeps the metres
-        it was painted at. A fractional slide would be :class:`PlanarShift`'s resample, which a
-        window that only changes what it covers has no reason to pay.
+        it was painted at. A fractional slide would need a resample, which a window that only
+        changes what it covers has no reason to pay.
         """
         cx, cy = self.centre_xy
         return (round((xy[0] - cx) / self.voxel_m), round((xy[1] - cy) / self.voxel_m))

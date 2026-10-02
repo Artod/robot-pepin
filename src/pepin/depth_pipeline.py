@@ -6,10 +6,10 @@ they run as an ordered list of stages, each switchable by name, so a node's flag
 instead of branches, every stage's cost and effect is counted per frame, and a new source of truth
 is one more stage in the list.
 
-Two roles. An :class:`Anchor` is an external truth about some pixels: it contributes
-:class:`Pairs` — (measured depth, true depth, weight) — to the pool the law fits on, and / or
-corrects the pixels it knows directly. A :class:`Law` is the map from the measured depth to
-metres, fitted on the pooled pairs and applied to the whole image. The chain is
+Two roles. An anchor is an external truth about some pixels: it contributes :class:`Pairs` —
+(measured depth, true depth, weight) — to the pool the law fits on, and / or corrects the pixels
+it knows directly. A law is the map from the measured depth to metres, fitted on the pooled pairs
+and applied to the whole image. The chain is
 :class:`EdgeFilter` -> :class:`LidarAnchor` -> :class:`AffineLaw` -> :class:`FloorAnchor`. Under
 the metric stereo head the affine law watches rather than corrects (``watching``): its numbers
 are the head's health.

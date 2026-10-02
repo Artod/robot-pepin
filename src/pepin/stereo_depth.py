@@ -32,8 +32,7 @@ calibrated rig live in :mod:`pepin.stereo`.
 WHICH ENGINE answers is the depth node's live ``stereo_matcher`` flag in {sgbm, raft}, default
 ``sgbm`` until a live drive says otherwise (CLAUDE.md rule 19): both are built at start and the
 flag picks which one the next pair goes to, so an A/B needs no restart and nothing is rebuilt
-mid-drive. :func:`build_matcher` is the name-to-engine map, and the switch's state is in the
-node's report line.
+mid-drive. The switch's state is in the node's report line.
 
 THE ERROR MODEL is why a reach exists. A disparity measured to ``sigma_d`` pixels gives a depth
 good to ``sigma_z = z^2 / (fx * B) * sigma_d``: the error grows with the SQUARE of the range, so

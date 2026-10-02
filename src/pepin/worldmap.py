@@ -14,11 +14,10 @@ A TSDF volume (:mod:`pepin.tsdf`) both sensors write into:
   the camera may correct;
 * a horizontal band reads out as an occupancy grid (:class:`OccupancySlice`) for a picture, a
   map_server pair or an offline instrument — never for a matcher;
-* the whole thing snapshots to an ``.npz`` and loads back, so a room the cart has painted comes
-  back as it was left — which is what a volume in the MAP frame is for. A volume painted in the
-  odometry frame is local obstacle memory instead: it has no snapshot at all, and
-  :meth:`WorldMap.recentre` slides its window onto the cart and forgets what leaves
-  (:class:`pepin.tsdf.WindowShift`, ``volume_frame`` on pepin_bringup.depth_fusion).
+* it is painted in the odometry frame as local obstacle memory: :meth:`WorldMap.recentre` slides
+  its window onto the cart and forgets what leaves (:class:`pepin.tsdf.WindowShift`). The volume
+  in the map frame, with its snapshot and its loop-closure shift, is on the tag
+  alt/volume-map-2026-10-02.
 
 THE VOLUME IS OPEN-LOOP, and that is the one hard rule here. It is painted at the pose the tracker
 gives, and no pose is ever estimated against it: a tracker that matches the slice it is painting
@@ -27,18 +26,8 @@ scan maps onto itself — and a cart parked with its wheels blocked walked 7 deg
 minutes through it at fit 0.97-0.99 (2026-09-18). The room's own geometry is RTAB-Map's loop-closed
 graph and its occupancy grid; this volume is the 3D surface beside it.
 
-No ROS here (the message is returned as plain fields), no file formats beyond the snapshot and
-the map_server pair the existing tooling already reads.
-
-A loop closure moves the whole map, not the pose alone. Every frame in here was placed through
-``map -> odom`` at its own stamp, so when a pose graph optimises and that edge jumps, the room
-this volume drew is stale by exactly that difference: :meth:`WorldMap.shift` carries the content
-rigidly through it (:class:`pepin.tsdf.PlanarShift`), and the node that paints decides when
-(``follow_correction``, pepin_bringup.depth_fusion). Out of scope, still: a graph that corrects
-its nodes differently from one another — that deformation cannot be a rigid move and wants the
-frames replayed at their corrected poses, which is why the snapshot records every integration's
-stamp, sensor and pose (:attr:`WorldMap.frames`). The measurements themselves stay in the run
-tape, which is where they already live; the snapshot is a warm cache, never the only copy.
+No ROS here (the message is returned as plain fields), no file formats beyond the map_server
+pair the existing tooling already reads.
 """
 
 from __future__ import annotations
@@ -854,9 +843,8 @@ def trinary_from_log_odds(grid: OccupancyGrid) -> tuple[Int8, float, tuple[float
 
 
 def bearings_in_base(angles: Array, mount_yaw: float, mirrored: bool) -> Array:
-    """Sensor-frame beam angles as robot-frame bearings, the conversion
-    :func:`pepin.timeline.timed_scan_from_ros` makes on its points: mirrored for an upside-down
-    sensor, then turned by the mount's yaw."""
+    """Sensor-frame beam angles as robot-frame bearings: mirrored for an upside-down sensor, then
+    turned by the mount's yaw."""
     a = np.asarray(angles, dtype=float)
     return (mount_yaw - a) if mirrored else (mount_yaw + a)
 

@@ -641,8 +641,7 @@ local_costmap:
         # minute and 44 recoveries (tape ros/maps/rec/0415_*). What is THERE comes from the
         # accumulated volume instead: the same frames fused with weights and carved by every later
         # ray, sliced around the cart by pepin_bringup.depth_fusion into /depth_marks. Frames
-        # clear, the model marks (the nvblox arrangement), and `ros/flags.sh set depth_fusion
-        # marks_source frame` puts the old behaviour back live.
+        # clear, the model marks (the nvblox arrangement).
         observation_sources: depth_scan depth_marks depth_free
         depth_scan:
           # The camera's depth folded onto the plane (pepin_bringup.depth_stream on the laptop):
