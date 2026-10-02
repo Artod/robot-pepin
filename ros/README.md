@@ -1,10 +1,13 @@
 # Pepin on ROS 2 Jazzy + Nav2 (branch `ros2-nav2`)
 
-The navigation stack moves to Nav2; everything ROS runs **on the board** in one Docker
-container (the board is Armbian Debian trixie, which has no Jazzy binaries; the container
-is Ubuntu 24.04 with the official `ros:jazzy-ros-base` image). The laptop only watches,
-through Foxglove Studio. Reason: the wifi to the board has 300-700 ms latency spikes; a
-20 Hz controller on the laptop would drive through them the way our first wheel loop did.
+Navigation is Nav2, and since 2026-10-01 it runs **on the Mac**: planner, controller, both
+costmaps, the behaviour tree, the goal server and the run recorder in one container,
+`pepin-macnav` (`ros/laptop.sh nav`), beside the camera's mapping in `pepin-vslam`. The board is a
+sensor box: lidar, ToF, wheels and IMU, the base bridge and the EKF in its own container (Armbian
+Debian trixie has no Jazzy binaries; the container is Ubuntu 24.04 on `ros:jazzy-ros-base`), and
+the velocity comes back to it on `/cmd_vel`. The board's four A53 cores ran MPPI at a crawl
+(a median 0.06 m/s); the Mac runs it at the speeds the base allows, and the base server's own
+0.5 s deadman is what a WiFi stall meets.
 
 What stays from the Python stack:
 
@@ -48,7 +51,7 @@ Python change needs no image, only the processes that hold the old code restarte
 | Python in `src/pepin` or `ros/pepin_bringup/pepin_bringup` | `ros/push.sh FILE...` | the running nodes that import it, on both halves |
 | a launch file, `ros/params`, `config/`, a module a launch file imports | `ros/restart.sh board --deploy`, `laptop` or `both --deploy` | the half's whole stack |
 | the whole tree, nothing restarted | `ros/sync.sh` (`--restart`: the board's stack too) | nothing |
-| one node by hand | `ros/thin.sh kick NODE`, `ros/laptop.sh kick NODE` (no name: the list) | that node |
+| one node by hand | `ros/board.sh kick NODE`, `ros/laptop.sh kick NODE` (no name: the list) | that node |
 | the Dockerfiles, the C++ packages, rf2o's patch | `ros/build-image.sh`, `ros/laptop-build.sh` | see **Building the image** |
 
 `ros/push.sh` takes its plan from `pepin.push`: the nodes whose Python imports a changed module
@@ -59,8 +62,7 @@ ours that the launch does not respawn (checked in its container: refused only wh
 laptop container that mounts another checkout. Otherwise the files go to the board by rsync —
 exactly those, never `--delete` — and the nodes of both halves are kicked at once, one line each:
 kicked at, ready at (UTC, the container's clock), seconds, the old and the new pid, the ready line.
-A node that is not running on its half (the other recorder, the goal server's other side) is
-skipped. `--dry-run` or `PEPIN_PUSH_DRY=1` prints the plan and what
+A node that is not running on its half (the other recorder) is skipped. `--dry-run` or `PEPIN_PUSH_DRY=1` prints the plan and what
 would run, and touches nothing.
 
 A kick ends the node with SIGINT, the launch respawns it from the new sources two seconds later,
@@ -71,18 +73,61 @@ The laptop's SLAM container is its own: `ros/laptop.sh vslam` restarts it with t
 database kept, `ros/laptop.sh vslam --fresh` deletes the database first and starts an empty map
 (in SLAM mode the session starts empty anyway: see below).
 
+## Driving
+
+Nav2 runs on this Mac and every command speaks to its goal server on `127.0.0.1:3337`:
+
+```bash
+ros/laptop.sh vslam --neck          # the camera's mapping: RTAB-Map is the map and owns map -> odom
+ros/laptop.sh nav                   # Nav2 in pepin-macnav (controller mppi); `nav down`, `nav logs`
+ros/ready.sh                        # the cart put on its base: seeded there, voxels and costmaps
+                                    # emptied, one plan proven, the pose read back ([X Y YAW]: elsewhere)
+ros/preflight.sh                    # ready for a goal? pose, lidar, planner, snapshots, recognition,
+                                    # Foxglove, one plan; --no-plan during a drive
+ros/goto.sh printer                 # a goal; Ctrl-C cancels it; exit 0 only when reached
+ros/goto.sh -1.0 0.3 90             # map coordinates and a heading
+ros/goto.sh cancel | where | places | mark NAME | seed X Y [YAW] | planner NAME
+ros/reset_world.sh                  # empty the voxels and both costmaps, nothing restarted
+ros/watch.sh                        # Nav2's own words, live
+ros/stop.sh                         # the red button (below)
+```
+
+`ros/laptop.sh nav` starts `nav.launch.py` whole in `pepin-macnav` on `pepin-net`, with the zenoh
+session's tx queues raised to 16 batches like every laptop container (`ZENOH_CONFIG_OVERRIDE`;
+32 panics zenoh), port 3337 published, and the map named by `PEPIN_MAP`
+(`/maps/flat3_straight.yaml` by default) — only for its places book, since map_server stays off
+and both costmaps read RTAB-Map's `/map`. `PEPIN_RECORDER=bag` starts the bag recorder instead of
+the JSONL one ("Two recorders"). It also starts the behaviour-tree watcher
+(`ros/tools/bt_watch.py`), one per container, appending to `ros/maps/rec/bt_live.log`. The
+goal server's `controller` flag defaults to `mppi`.
+
+Every goal of `ros/goto.sh` leaves, under `ros/maps/rec/`: `<stamp>_goto.log` (the goal's own
+lines), `<stamp>_goto.nav2.log` — Nav2's reasons as they happen, `nav2|` (planner refusals,
+controller failures, recoveries and why), and the tree's transitions, `bt|` — both also printed
+in the terminal, `<stamp>_goto_cam.mkv` (the head camera through `ros/clip.sh`), and the numbered
+tape `NNNN_<utc>Z_<place>.jsonl` the recorder wrote, named at the end. A camera clip that has not
+started 4 s in is said aloud and started once more, a second miss is said aloud too, and the drive
+ends on the clip's size or on `!! no camera clip for this drive`. `round [NAME]` and `move NAME
+SEG...` are the two measured motions without the planner; they run on the board, beside the wheels.
+
+**The red button**, `ros/stop.sh` (the tray's first item does the same): every goal cancelled
+through the goal server, confirmed by a navigator within 3 s; if not, the base server's own stop
+on the board, `pepin-macnav` stopped, and the base's stop again. It never restarts the board,
+whose odometry the map is tied to; `ros/laptop.sh nav` brings Nav2 back.
+
 ## Restarting
 
 `ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--dry-run]` brings the
 robot up working in one command and ends on one line — `green: N checks, none failed`, or `red:`
 with the failing lines above it — and that line is all the operator reads. It restarts the board's
-stack together with its zenoh router (stack stopped, router restarted, stack started; `--deploy`
-does it through `ros/sync.sh --restart`), then the laptop: board first, always, because a board
-restart re-zeroes the odometry RTAB-Map runs on (`board` alone restarts only the laptop's vslam, and
-only if that half is up). Then it proves the planner plans (4.1) and repairs it when it does not —
-the Nav2 container alone, then the board half once more — before it fails; a planner that answers
-"no path" in every direction is reported, never restarted. The board's Nav2 waits for the laptop's
-map however late it comes (`initial_transform_timeout`), so the start order is no longer a race.
+sensor stack together with its zenoh router (stack stopped, router restarted, stack started;
+`--deploy` does it through `ros/sync.sh --restart`), then the laptop — `ros/laptop.sh vslam --neck`,
+then `ros/laptop.sh nav`: board first, always, because a board restart re-zeroes the odometry
+RTAB-Map runs on (`board` alone restarts only the laptop's vslam, and only if that half is up).
+Then it proves the planner plans (4.1) and repairs it when it does not — the Nav2 container alone,
+then both halves once more — before it fails; a planner that answers "no path" in every direction
+is reported, never restarted. Nav2 waits for the map however late it comes
+(`initial_transform_timeout`), so the start order is no longer a race.
 `--dry-run` prints the order and touches nothing, `--no-check` restarts only, `--fresh-graph` starts
 the camera half on an empty RTAB-Map database and moves the old frame's volume aside;
 `PEPIN_RESTART_WAIT_S`, `PEPIN_RESTART_POLL_S` and `PEPIN_PLANNER_WAIT_S` change how long a half
@@ -99,14 +144,12 @@ silence as good news. What is checked:
 | # | board |
 |---|---|
 | 1.1 | `ros/board.sh census`: every process accounted for, every budget kept |
-| 1.3 | the pose: `ros/go.sh where` — the goal server's socket, whose answer is composed from `map -> base_link` — answers and says `"pose": "tf"` |
-| 1.4 | no `Failed to meet update rate` in the last 60 s |
-| 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in the last 60 s |
-| 1.6, 1.7 | `/depth_scan` and `/vo` really reach the board (`ros/tools/topic_rate.py`, one 5 s measurement each — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
-| 1.8 | `pepin-base` is active and no `torque on` is left standing in its journal |
-| 1.11 | Nav2 is **active**, not merely running: the lifecycle manager got `planner_server connected with bond`, and the log carries zero `Range sensor layer can't transform` lines. A `planner_server` that activated and never bonded is wedged inside its global costmap's first update — tf2's `canTransform` costs a whole `transform_tolerance` per untransformable Range and the three ToF layers deliver 15 Hz each, so the backlog outgrows the drain and the update never ends (`scratch/nav2_hang/wedge_gain.py`; the fix was to stop feeding that plugin — the whiskers are `ObstacleLayer`s now, which drop what they cannot place). Goals are then accepted and nothing is planned. A board that runs no Nav2 is a `WARN`, never a failure. Since 2026-09-21 no costmap lists a `RangeSensorLayer` at all (the whiskers arrive as scan fans, `tof_bridge`'s `range_as`), so one of those lines now means the board is running a `nav2_params.yaml` older than this checkout — still worth a `FAIL` |
+| 1.3 | the pose: `ros/goto.sh where` — the goal server's socket, whose answer is composed from `map -> base_link` — answers and says `"pose": "tf"` |
+| 1.4 | no `Failed to meet update rate` in Nav2's log (`pepin-macnav`) in the last 60 s |
+| 1.5 | no `Extrapolation` / `out of map bounds` / `Off Grid` in Nav2's log in the last 60 s |
+| 1.8 | `/vo`, the camera's odometry the board's EKF fuses, really reaches the board (`ros/tools/topic_rate.py`, one 5 s measurement — not `ros2 topic hz`, which costs ~4.5 s of A53 before it measures anything) |
+| 1.10 | `pepin-base` is active and no `torque on` is left standing in its journal |
 | 1.13 | **who is correcting the pose**: `map -> odom` is in TF and read where its publisher is — one rclpy node in the laptop's own container (`ros/tools/map_odom.py`), never on the board, whose /tf would cost it ~100 messages a second (CLAUDE.md rule 20). Two readings: the transform is **fresh** (re-broadcast at 20 Hz, so seconds of silence is a publisher that is gone) and it is **not the identity** (a localiser that has recognised nothing publishes `map == odom`, and every pose composed from it is simply the odometry's). The identity is a `WARN` while the laptop half is under 60 s old and a `FAIL` after that |
-| 1.12 | no thread of the Nav2 container is pegged: `ps -L` over ssh, the busiest thread's cumulative CPU time over the process's own lifetime. `range_sensor_layer.cpp:362-369` clamps its cell bounds and then walks them as `unsigned`, so a cone that falls off the grid's left or bottom edge runs ~4e9 iterations under the costmap mutex and writes **no log line at all** — one thread at 100 %, "Pose Goes Off Grid", services timing out, zero plans (reproduced 2026-09-21 with a kick of the board's old tracker: tid 191, 415 s of CPU in 700 s). `FAIL` above 0.90, `WARN` above 0.50 (nobody has yet measured what a healthy container's busiest thread costs — tighten it once a few restarts have printed theirs), `WARN` when the board could not be read |
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
 | 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `scripts/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
@@ -179,7 +222,7 @@ With the cart parked where it can see the room, both halves up, and **no goal se
 3. `docker logs pepin-vslam | grep 'rtabmap frame:'` — **at most two** distinct map ids in the
    window. More than that is the churning grid this switch exists to stop, and means the session
    is not localising after all.
-4. `ros/go.sh where` — `"pose": "tf"`, no `fit` in the answer, and coordinates that match where
+4. `ros/goto.sh where` — `"pose": "tf"`, no `fit` in the answer, and coordinates that match where
    the cart really stands to a few centimetres.
 5. `ros/restart.sh board` alone, then Nav2: `planner_server connected with bond` and no
    `Pose Goes Off Grid` — the board must come up and plan with the transform arriving from the
@@ -405,11 +448,11 @@ arrows the wheels at the same speeds, W/S tilt and A/D pan the head (the base se
 board/README.md), Shift slow, Space stops everything, Esc quits. It speaks to the base server on
 :3336 directly, past ROS, so a drive made with it is not recorded.
 
-Goals work with no places book: `ros/go.sh -1.0 0.3 90` drives to map coordinates (recorded like
+Goals work with no places book: `ros/goto.sh -1.0 0.3 90` drives to map coordinates (recorded like
 any other drive), and a click in Foxglove (Publish → `/goal_pose`, frame `map`) does the same
 without a tape. **The goal server takes the cart's pose from `map -> base_link`** and accepts a
 goal while that edge is younger than 1 second; older, or missing, the goal is refused with which
-of the two it was. `ros/go.sh where` says `"pose": "tf"`, and `ros/go.sh mark` fills the book on
+of the two it was. `ros/goto.sh where` says `"pose": "tf"`, and `ros/goto.sh mark` fills the book on
 the same evidence.
 
 **A fresh edge is not a placed start.** RTAB-Map publishes `map -> odom` from the moment it
@@ -827,15 +870,14 @@ ros/camera_grid.sh status   # the flag, both costmaps' two layers, the fusion's 
 ros/camera_grid.sh off      # camera_layer on, camera_grid_layer off, then grid_out off
 ```
 
-By hand, the same switches (the global costmap is the laptop's `pepin-laptop` under the split,
-`PEPIN_SIDE=board`, and the board's `pepin-ros` otherwise):
+By hand, the same switches (both costmaps live in the Mac's Nav2 container, `pepin-macnav`):
 
 ```bash
 ros/flags.sh set depth_fusion grid_out true
-ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled true
-ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_layer.enabled false
-docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_grid_layer.enabled true
-docker exec pepin-laptop /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_layer.enabled false
+docker exec pepin-macnav /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled true
+docker exec pepin-macnav /pepin_entrypoint.sh ros2 param set /local_costmap/local_costmap camera_layer.enabled false
+docker exec pepin-macnav /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_grid_layer.enabled true
+docker exec pepin-macnav /pepin_entrypoint.sh ros2 param set /global_costmap/global_costmap camera_layer.enabled false
 ```
 
 and back with the four `enabled` values swapped and `grid_out false`. What guards what:
@@ -1481,31 +1523,31 @@ ros2 param get /base_bridge zupt_rate_hz              # what is in force
 ## Two recorders
 
 Every drive is written down, and there are two ways to do it. Which one runs is
-`PEPIN_RECORDER` on the board (`board/pepin-ros.service`, the `recorder` argument of
-`nav.launch.py`); the operator flips it with one command and never touches the analysis side,
+`PEPIN_RECORDER` when Nav2 starts (`PEPIN_RECORDER=bag ros/laptop.sh nav`, the `recorder` argument
+of `nav.launch.py`); the operator flips it with one command and never touches the analysis side,
 because both roads end in the same file — `ros/maps/rec/NNNN_<utc>Z_<goal>.jsonl`.
 
 | | `PEPIN_RECORDER=jsonl` (default) | `PEPIN_RECORDER=bag` |
 | --- | --- | --- |
-| who writes | `pepin_bringup.run_recorder`, on the board | `ros2 bag record` (MCAP, no compression), started by `pepin_bringup.bag_recorder` |
-| board cost | 34-43 % of a core: rclpy deserialises 450 floats 10x/s, the TF buffer runs, `json.dumps` writes | an estimated 8 % for the node plus rosbag2's copy of serialised bytes — nothing deserialises a message |
-| what lands there | the tape itself, plus the camera clip | `NNNN_<utc>Z_<goal>/` (MCAP) plus the camera clip |
-| the tape | already written | made on the laptop by `ros/tools/bag_to_tape.py`, which `ros/goto.sh` runs for you |
+| who writes | `pepin_bringup.run_recorder`, beside Nav2 in `pepin-macnav` | `ros2 bag record` (MCAP, no compression), started by `pepin_bringup.bag_recorder` |
+| cost | 34-43 % of a core (measured on the board's A53): rclpy deserialises 450 floats 10x/s, the TF buffer runs, `json.dumps` writes | an estimated 8 % for the node plus rosbag2's copy of serialised bytes — nothing deserialises a message |
+| what lands there | the tape itself | `NNNN_<utc>Z_<goal>/` (MCAP) |
+| the tape | already written | made by `ros/tools/bag_to_tape.py` in `pepin-vslam`, which `ros/goto.sh` runs for you |
 | prelude | the 15 s before the goal are on the tape (`pepin.tape.RunTape`) | none: the bag begins when the goal's word does |
 
-Both recorders answer the same protocol (`pepin.runlink`): the goal server — on the board or on
-the laptop — publishes `{"cmd": "start", "name": ...}` on `pepin/run` and reads the run's number
-and path back from the latched `pepin/run_status`, so `ros/go.sh` and `ros/goto.sh` are unchanged.
+Both recorders answer the same protocol (`pepin.runlink`): the goal server publishes
+`{"cmd": "start", "name": ...}` on `pepin/run` and reads the run's number and path back from the
+latched `pepin/run_status`, so `ros/goto.sh` is the same either way.
 The bag records every topic the JSONL recorder subscribes to (`pepin.tape_rows.TOPIC_RECORDS`)
 plus `/tf`, `/tf_static` and `/odom_laser`, with `--include-hidden-topics` for Nav2's action
 status topics and a QoS override for the two latched ones
 ([`ros/params/rosbag_qos.yaml`](params/rosbag_qos.yaml)).
 
 ```bash
-ros/feature.sh recorder bag      # the board restarts the stack; a drive now writes an MCAP bag
-ros/feature.sh recorder jsonl    # back to the tape written on the board
-ros/goto.sh home                 # either way: "numbered tape: ros/maps/rec/0251_...jsonl"
-# by hand, if a bag was fetched without its conversion (the laptop's ROS container):
+PEPIN_RECORDER=bag ros/laptop.sh nav   # Nav2 restarts; a drive now writes an MCAP bag
+ros/laptop.sh nav                      # back to the JSONL tape
+ros/goto.sh home                       # either way: "numbered tape: ros/maps/rec/0251_...jsonl"
+# by hand, if a bag was left without its conversion (the laptop's ROS container):
 docker exec pepin-vslam /pepin_entrypoint.sh python3 /tools/bag_to_tape.py /maps/rec/0251_... --force
 ```
 

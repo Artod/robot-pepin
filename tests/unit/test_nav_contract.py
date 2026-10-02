@@ -404,9 +404,8 @@ def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> No
 
 
 def test_the_board_s_stack_starts_behind_a_router_that_accepts() -> None:
-    """A cold start of the board: its stack must not start behind a router still binding."""
-    # The other half of a cold start: `docker run` returns before rmw_zenohd accepts, and the
-    # stack started behind a router that was still binding is what delayed /tf_static by 157 s.
+    """A cold start of the board: `docker run` returns before rmw_zenohd accepts, and the stack
+    started behind a router that was still binding is what delayed /tf_static by 157 s."""
     router = (REPO / "board/pepin-zrouter.service").read_text()
     assert "ExecStartPost=" in router and "/dev/tcp/127.0.0.1/7447" in router
 

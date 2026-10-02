@@ -40,10 +40,9 @@ plist in `~/Library/LaunchAgents` works too, and restarts it on crash).
 Two halves of the stack are probed, both read-only. The **board** (the quick tier of
 `pepin.health`, the same probes as `scripts/health_check.py --quick`: ssh vitals, the
 process census against its budget, bridges, servo ping, lidar, ToF, IMU, camera presence)
-and **this Mac** (`pepin.health.probe_laptop`, no ssh): where the goal server answers on
-port 3337 — `127.0.0.1` when Nav2 runs here (the macnav container or `ros/laptop.sh`), the
-board otherwise — and which of `pepin-vslam` / `pepin-macnav` / `pepin-laptop` are up
-(`docker ps`; red without the mapper). ALL GO means both halves.
+and **this Mac** (`pepin.health.probe_laptop`, no ssh): whether the goal server answers on
+`127.0.0.1:3337`, where Nav2 runs (`ros/laptop.sh nav`), and which of `pepin-vslam` /
+`pepin-macnav` are up (`docker ps`; red without the mapper). ALL GO means both halves.
 
 The first item, **■ STOP THE ROBOT**, is the red button, run in the background and reported
 as a notification. It cancels every goal through the goal server's socket on this Mac,
