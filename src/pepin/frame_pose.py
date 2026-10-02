@@ -218,7 +218,7 @@ class FramePoser:
         """``map <- base_link`` at ``stamp``, built the one way that cannot go stale: the newest
         ``map <- odom`` there is — the tracker's correction, published slowly and, being a
         correction, changing slowly — composed with ``odom <- base_link`` at the frame's own
-        stamp, which the EKF publishes at 20 Hz. Never waits. ``None`` only when the map edge
+        stamp, which the EKF publishes at 50 Hz. Never waits. ``None`` only when the map edge
         does not exist at all, or when the odometry does not cover the stamp.
 
         Why this and not :meth:`map_motion_recent`, which asks the same question through one

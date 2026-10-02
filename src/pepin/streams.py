@@ -312,13 +312,16 @@ class JsonLinesServer:
         *,
         on_last_client_left: dict[str, Any] | None = None,
         driving_commands: frozenset[str] | None = None,
+        outbox_size: int = 24,
     ) -> None:
         """``port`` 0 picks a free one (tests); ``on_last_client_left`` is queued into the inbox
         when the last driver leaves; ``driving_commands`` says what makes a client a driver
-        (None: every client is one from the moment it connects)."""
+        (None: every client is one from the moment it connects); ``outbox_size`` is how many
+        lines a client may fall behind before it is dropped (about a second of the stream)."""
         self._requested_port = port
         self._farewell = on_last_client_left
         self._driving_commands = driving_commands
+        self._outbox_size = outbox_size
         self._server: socket.socket | None = None
         self._clients: list[ClientConn] = []
         self._lock = threading.Lock()
@@ -401,7 +404,12 @@ class JsonLinesServer:
                 continue
             address = str(peer[0]) if peer else "?"  # reset-before-accept yields no address
             client = ClientConn(
-                conn, address, self._inbox, self._on_close, driving_commands=self._driving_commands
+                conn,
+                address,
+                self._inbox,
+                self._on_close,
+                outbox_size=self._outbox_size,
+                driving_commands=self._driving_commands,
             )
             with self._lock:
                 self._clients.append(client)

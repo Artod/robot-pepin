@@ -25,7 +25,11 @@
 # which hands it odom -> base_link; `ros/feature.sh ekf off` is the way back to no filter.
 ekf_filter_node:
   ros__parameters:
-    frequency: 20.0
+    # The wheels' state rate (pepin.base_link.STATE_HZ) since 2026-10-01: one wheel line per cycle,
+    # so odom -> base_link and /odometry/filtered are as fresh as the wheels and the 100 Hz gyro
+    # allow. 20 until then, while the wheels came at 16.7 Hz and the board also ran Nav2 (beside
+    # its 200 % costmaps this filter missed even 20 Hz at 9.4 VO poses/s, 2026-09-14).
+    frequency: 50.0
     sensor_timeout: 0.5
     two_d_mode: true
     publish_tf: true
@@ -68,8 +72,9 @@ ekf_filter_node:
     # be non-zero while the cart is pushed by hand with /cmd_vel at zero, which is the whole point
     # of the change; (3) only then flip the index-11 false below to true. Nothing else changes:
     # the covariance is already the measured one, and at 0.01 against the gyro's 0.0004 the wheels
-    # carry 4 % of the gyro's weight per sample (1.7 % per second: 20 Hz against the gyro's 47) --
-    # a heading that survives the gyro dying, and changes nothing while it lives.
+    # carry 4 % of the gyro's weight per sample (1.7 % per second at 20 Hz against the gyro's 47;
+    # 2 % at 50 against 100 since 2026-10-01) -- a heading that survives the gyro dying, and
+    # changes nothing while it lives.
     # TWO WARNINGS ON THAT 0.01, BOTH FOUND BY RE-RUNNING THE SCRIPT ON 2026-09-15.
     # (a) It is the spread's p90, not its middle: per-tape the residual RMS runs 0.016 to 0.107
     # rad/s (variance 0.0003 to 0.0114) across the 2026-09-14 tapes. 0.01 is the pessimistic end,
@@ -108,7 +113,7 @@ ekf_filter_node:
     # 5 SIGMA AND NOT 3: with R = 0.001 (m/s)^2 from the base bridge and the filter's own P around
     # 0.001 between updates, one sigma is about 0.045 m/s, so 5 is roughly 0.22 m/s of disagreement
     # — most of this cart's top speed, which a slip that invents 0.4 m reaches and an honest
-    # acceleration inside one 20 Hz period does not. 3 (0.13 m/s) would also catch a hard start,
+    # acceleration inside one filter period (20 ms) does not. 3 (0.13 m/s) would also catch a hard start,
     # and a rejected honest wheel sample is the worse failure: the wheels are the only source of
     # distance here. Tighten it only after a tape shows slip passing the gate.
     # The pose threshold is declared with it and does nothing today — odom0_config fuses no pose

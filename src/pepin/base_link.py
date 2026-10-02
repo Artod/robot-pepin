@@ -18,7 +18,7 @@ Wire format, one JSON object per line in both directions::
                                                                   walk the head (pan +1 left,
                                                                   tilt +1 down) while repeated
                                                                   within its 0.5 s deadman
-    board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, ~20 Hz
+    board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, STATE_HZ
                      {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
                      {"type": "pong", "busy": true}                   moving: servos not pinged
                      {"type": "neck", "pan_ticks": 2048, "tilt_ticks": 2360, "age_s": 0.01,
@@ -49,6 +49,9 @@ from pepin.streams import Connector, JsonLinesClient
 
 BASE_PORT = 3336
 DEADMAN_S = 0.5  # the board stops the wheels when no twist arrived for this long
+# How often the base server broadcasts a state line: every tick of its 50 Hz loop since 2026-10-01
+# (20 before, which its scheduler delivered as 16.7). Each line becomes one /odom on the board.
+STATE_HZ = 50.0
 NECK_MOVE_WAIT_S = 8.0  # a neck move gives up after 3 s on the board; its reply comes a bit later
 NECK_ERROR_SHOWN_S = 2.0  # a refused jog is reported for this long after it arrived
 
@@ -62,8 +65,8 @@ def ask(
 ) -> dict[str, Any] | None:
     """One request on a fresh connection, and the first ``{"type": reply_type}`` line back.
 
-    The port broadcasts a state line 20 times a second to everyone connected; those are
-    skipped. ``None`` when the answer did not come within ``wait_s``; ``OSError`` when nobody
+    The port broadcasts a state line ``STATE_HZ`` times a second to everyone connected; those
+    are skipped. ``None`` when the answer did not come within ``wait_s``; ``OSError`` when nobody
     listens. A connection that only asks is not a driver, so the wheels are left alone.
     """
     with socket.create_connection((host, port), timeout=3.0) as sock:
@@ -105,7 +108,7 @@ class BaseState:
     deadman: bool  # the board stopped the wheels because commands stopped arriving
     bus_ok: bool  # the servos answered on the last tick
     bus_p95_ms: float  # board-local servo round trip, 95th percentile
-    stamp_s: float  # board clock (time.monotonic there) when the message was made
+    stamp_s: float  # board clock (time.monotonic there): the middle of the encoder read it carries
     age_s: float  # laptop clock: seconds since this message arrived
 
 

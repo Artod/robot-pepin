@@ -82,7 +82,7 @@ FLAGS = FlagSet(
         on_when="always, unless the run is about what the stack does with dead wheel odometry",
         off_when="to watch a consumer meet a silent odometry — the EKF's sensor_timeout, Nav2's"
         " TF lookups, the tracker's dead reckoning — without stopping the base server; unmute"
-        " and /odom is back on the next state line (20 Hz)",
+        " and /odom is back on the next state line (50 Hz)",
     ),
 )
 

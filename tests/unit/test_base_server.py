@@ -8,8 +8,9 @@ from test_base import CFG, FakeBus
 
 from pepin.base import LEFT, RIGHT
 from pepin.base_link import decode_state
-from pepin.base_server import BaseServerCore, NeckMover, NeckReader
+from pepin.base_server import BaseServerCore, NeckMover, NeckReader, PublishGrid
 from pepin.neck import NeckConfig
+from pepin.telemetry import LatencyTracker
 
 REPO = Path(__file__).resolve().parents[2]
 
@@ -71,6 +72,76 @@ def test_ticks_integrate_odometry_and_snapshots_report_travel_once() -> None:
     again = decode_state(core.snapshot(1.05), received_at=1.05)
     assert again.d_left_m == 0.0  # travel is reported once, not accumulated forever
     assert again.pose.x == state.pose.x
+
+
+def _published(publish_hz: float, ticks: list[float]) -> list[float]:
+    """The ticks a PublishGrid on a 50 Hz loop publishes on."""
+    grid = PublishGrid(publish_hz, 50.0, ticks[0])
+    return [t for t in ticks if grid.due(t)]
+
+
+def test_a_state_line_goes_out_on_every_tick_at_the_tick_rate() -> None:
+    """50 Hz on a 50 Hz loop is every tick, a late tick included: the old rule waited one
+    period after the last line and then for the next tick, which gave 20 Hz as 16.7."""
+    ticks = [i * 0.0201 for i in range(500)]  # the loop's own drift: each tick a little late
+    assert len(_published(50.0, ticks)) == 500
+    early = [0.0, 0.0195, 0.0391, 0.0602]  # a tick that wakes up a little early still counts
+    assert _published(50.0, early) == early
+
+
+def test_a_lower_rate_averages_out_to_exactly_that_rate() -> None:
+    """20 Hz on 20 ms ticks alternates two and three ticks apart: 20 lines a second, not 16.7."""
+    ticks = [i * 0.02 for i in range(500)]  # 10 s
+    assert len(_published(20.0, ticks)) == 200
+
+
+def test_a_stalled_loop_resumes_on_a_fresh_grid_without_a_burst() -> None:
+    """A tick that took 0.4 s (a silent servo) publishes once, and the next one is a tick later,
+    not the twenty lines the stall skipped."""
+    ticks = [0.0, 0.02, 0.04, 0.44, 0.46, 0.48]
+    assert _published(50.0, ticks) == ticks
+    assert _published(20.0, ticks) == [0.0, 0.04, 0.44, 0.48]
+
+
+def test_the_bus_p95_is_resorted_once_a_second_not_on_every_state_line() -> None:
+    """Sorting the 512-sample window per 50 Hz line costs more than the line; the state lines of
+    one second share one p95."""
+    latency = LatencyTracker("bus")
+    core = BaseServerCore(FakeBus(), CFG, latency=latency)
+    core.tick(0.0)
+    latency.add(0.004)
+    assert core.snapshot(0.0)["bus_p95_ms"] == pytest.approx(4.0)
+    latency.add(0.009)
+    latency.add(0.009)
+    assert core.snapshot(0.5)["bus_p95_ms"] == pytest.approx(4.0), "within the second: cached"
+    assert core.snapshot(1.0)["bus_p95_ms"] == pytest.approx(9.0)
+
+
+class SlowBus(FakeBus):
+    """FakeBus whose encoder read takes 4 ms of a fake clock."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 0.0
+
+    def sync_read(
+        self, data_name: str, motors: list[str], *, normalize: bool = True
+    ) -> dict[str, int]:
+        self.now += 0.004
+        return super().sync_read(data_name, motors, normalize=normalize)
+
+
+def test_a_state_line_is_stamped_with_the_middle_of_its_encoder_read() -> None:
+    """The bridge differences two poses over their stamps: the stamp is when the encoders were
+    read, not when the tick began (a twist written first delays the read by milliseconds that
+    are a tenth of a 20 ms gap); a failed read stamps the tick."""
+    bus = SlowBus()
+    core = BaseServerCore(bus, CFG, clock=lambda: bus.now)
+    bus.now = 10.0
+    core.tick(10.0)
+    bus.now = 10.003  # the twist's write before the read
+    core.tick(10.0)
+    assert core.snapshot(10.0)["t"] == pytest.approx(10.005)
 
 
 def test_ping_reports_every_servo_in_the_roster() -> None:

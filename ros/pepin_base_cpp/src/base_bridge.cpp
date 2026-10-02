@@ -334,12 +334,12 @@ private:
   /// COVARIANCE. Unchanged, and on purpose: the encoder is not this measurement's error.
   /// One tick is pi * 0.125 m / 4096 = 9.6e-5 m of wheel travel (config/base.json), a pose
   /// difference carries the quantisation of two reads (sigma = 9.6e-5 * sqrt(2/12) = 3.9e-5 m
-  /// per wheel), and over the 0.05 s between state lines (base_server --publish-hz 20) that is
-  /// 5.5e-4 m/s of forward noise and 2.2e-3 rad/s of yaw noise -- variances of 3.1e-7 (m/s)^2
-  /// and 4.8e-6 (rad/s)^2, three to four orders below the 0.001 and 0.01 the message already
-  /// carries (protocol.hpp:203). Those numbers are slip and wheel-diameter error, measured
-  /// against the gyro over 51 tapes (ros/params/ekf.yaml), and they are what the filter needs
-  /// to hear. Quantisation would only matter if the state rate rose far past 20 Hz.
+  /// per wheel), and over the 0.02 s between state lines (base_server at 50 Hz since 2026-10-01;
+  /// 0.06 s before) that is 1.4e-3 m/s of forward noise and 5.5e-3 rad/s of yaw noise --
+  /// variances of 1.9e-6 (m/s)^2 and 3.0e-5 (rad/s)^2, two to three orders below the 0.001 and
+  /// 0.01 the message already carries (protocol.hpp:203). Those numbers are slip and
+  /// wheel-diameter error, measured against the gyro over 51 tapes (ros/params/ekf.yaml), and
+  /// they are what the filter needs to hear. Quantisation would matter only past ~500 Hz.
   BodyTwist odom_twist(const BaseState & state)
   {
     const auto source = get_parameter("odom_twist_source").as_string();

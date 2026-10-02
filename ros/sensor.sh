@@ -313,7 +313,7 @@ consequence() {  # SENSOR mute|unmute: what a consumer should now see, in one or
     if [ "$2" = unmute ]; then
         case "$1" in
             imu) echo "  /imu/data_raw is back within one IMU period (50 Hz)" ;;
-            odom) echo "  /odom is back on the next state line (20 Hz), and the transform with it" ;;
+            odom) echo "  /odom is back on the next state line (50 Hz), and the transform with it" ;;
             vo) echo "  /vo is back at about 9.4 poses/s and the EKF fuses it again" ;;
             lidar) echo "  lidar_layer feeds both costmaps again" ;;
         esac
