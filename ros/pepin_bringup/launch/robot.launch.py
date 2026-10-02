@@ -4,7 +4,10 @@ Two component containers (high CPU priority, each respawned with fresh nodes whe
 dies: pepin_bringup.launch_kit): the lidar's holds the LD19 driver, the hull box filter that
 turns its scan into /scan, the static base_link->laser transform and the lifecycle manager that
 activates the driver; the base's holds the C++ base bridge (``pepin_base_cpp``: odometry, the
-/cmd_vel sink, the IMU). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
+/cmd_vel sink, the IMU, and the neck's encoders as /neck/state and base_link -> camera_link at
+the state line's stamp, its geometry from config/neck.json and the camera's link frame from
+config/camera.json, pepin.neck.bridge_parameters). Every extra ROS process costs ~140 MB on this
+1.5 GB board, so
 composition is not a nicety here. The board runs no Foxglove bridge: the laptop's
 (vslam.launch.py) sees these topics through zenoh.
 
@@ -30,11 +33,6 @@ Arguments:
   as a twist. It is a source of the filter, never its precondition: ``laser_odom:=false`` leaves
   the wheels, the gyro and the camera exactly as they were. ``ros/feature.sh laser_odom on|off``
   flips it; the node publishes NO transform (the EKF owns odom -> base_link).
-- ``neck`` (default true): the neck's encoders as /neck/state and, behind the node's live
-  ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
-  process, ~150 MB). The laptop's camera node then keeps its static edge off (the default of
-  ros/laptop.sh vslam; ``--fixed-head`` is the static edge for a run without this node);
-  ros/feature.sh neck on|off flips this one.
 - ``board_bag`` (default false): the board's raw sensors recorded on the board itself, always,
   into minute MCAP files under /maps/board_rec, capped at 20 GB with 10 GB of the card always
   left free (pepin.board_bag: one long-lived ``ros2 bag record`` and its supervisor, niced under
@@ -51,6 +49,7 @@ from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
 from pepin_bringup.launch_kit import respawned_container
 
+from pepin.base_link import STATE_HZ
 from pepin.deployment import (
     BASE_MAX_ANGULAR_RAD_S,
     BASE_MAX_LINEAR_M_S,
@@ -58,9 +57,11 @@ from pepin.deployment import (
     LASER_ODOM_HZ,
     LASER_ODOM_TOPIC,
     LASER_ODOM_TWIST_VARIANCE,
+    config_file,
 )
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
+from pepin.neck import JOINT_NAMES, NeckConfig, bridge_parameters
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
 # process: ros/board.sh kick <node>).
@@ -195,10 +196,30 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "publish_tf": not ekf_on,
                     "max_linear_m_s": BASE_MAX_LINEAR_M_S,
                     "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
+                    **neck_parameters(),
                 }
             ],
         )
     ]
+
+
+def neck_parameters() -> dict[str, object]:
+    """The bridge's neck: config/neck.json's geometry and config/camera.json's link frame, read
+    anew at every (re)spawn so a re-measured mount is a restart, never a rebuild. The bridge
+    publishes base_link -> camera_link alone; the laptop's static copy stays off (ros/laptop.sh
+    vslam without --fixed-head). Without config/neck.json there is no camera edge from here."""
+    try:
+        neck = NeckConfig.from_json(config_file("neck.json"))
+    except (OSError, KeyError, ValueError) as exc:
+        print(f"[robot.launch] no neck ({exc}): no /neck/state, no camera transform")
+        return {"neck_camera_frame": ""}
+    return {
+        **bridge_parameters(neck),
+        "neck_parent_frame": "base_link",
+        "neck_camera_frame": MOUNTS.camera.link_frame,
+        "neck_joint_names": list(JOINT_NAMES),
+        "neck_publish_hz": STATE_HZ,  # every state line: the camera's pose at the odometry's rate
+    }
 
 
 def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
@@ -300,16 +321,6 @@ def generate_launch_description() -> LaunchDescription:
         condition=IfCondition(LaunchConfiguration("laser_odom")),
         **RESPAWN,
     )
-    # The neck's encoders and the live camera transform (pepin_bringup.neck_state). As a module,
-    # like the recorder: the image's console scripts are generated at build time and the sources
-    # are mounted over them. The laptop's static edge stays off while this runs (two publishers
-    # of one edge fight): ros/laptop.sh vslam's default, --fixed-head when this node is off.
-    neck = ExecuteProcess(
-        cmd=["python3", "-m", "pepin_bringup.neck_state"],
-        output="screen",
-        condition=IfCondition(LaunchConfiguration("neck")),
-        **RESPAWN,
-    )
     # THE BOARD'S OWN RECORDING (pepin.board_bag): every raw sensor topic into minute MCAP files on
     # the card, for as long as the stack runs, so a drive whose WiFi stalled is still whole here.
     # One recorder opened once (a zenoh session opened per goal stalled the board's delivery,
@@ -329,13 +340,11 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("imu", default_value="true"),
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
-            DeclareLaunchArgument("neck", default_value="true"),
             DeclareLaunchArgument("board_bag", default_value="false"),
             OpaqueFunction(function=sensors_container),
             ekf,
             tof,
             laser_odom,
-            neck,
             board_bag,
         ]
     )

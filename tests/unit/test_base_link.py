@@ -22,6 +22,9 @@ def test_state_message_round_trips_and_ages_on_the_laptop_clock() -> None:
     assert state.pose.x == 1.0 and state.moving and state.bus_p95_ms == 9.1
     assert abs(state.age_s - 0.25) < 1e-6
     assert decode_state(message, received_at=0.0).stamp_s == 12.5
+    assert state.neck_ticks is None, "no neck in that read"
+    with_neck = decode_state({**message, "pan_ticks": 2029, "tilt_ticks": 2311}, received_at=0.0)
+    assert with_neck.neck_ticks == (2029, 2311)
 
 
 def test_commands_are_dropped_not_raised_while_the_link_is_down() -> None:
@@ -38,10 +41,20 @@ def test_neck_jog_and_the_neck_request_are_the_boards_lines() -> None:
     client.neck_jog(1, -1, slow=True)
     client.neck_jog(0, 0)
     client.ask_neck()
+    client.neck_target(0.5, 0.42)
+    client.neck_target(-0.1, 0.6, speed_deg_s=40.0, acc_deg_s2=300.0)
     assert sent == [
         {"cmd": "neck_jog", "pan": 1, "tilt": -1, "slow": True},
         {"cmd": "neck_jog", "pan": 0, "tilt": 0, "slow": False},
         {"cmd": "neck"},
+        {"cmd": "neck_target", "pan_rad": 0.5, "tilt_rad": 0.42},
+        {
+            "cmd": "neck_target",
+            "pan_rad": -0.1,
+            "tilt_rad": 0.6,
+            "speed_deg_s": 40.0,
+            "acc_deg_s2": 300.0,
+        },
     ]
 
 
@@ -53,11 +66,13 @@ def test_neck_answers_and_refused_jogs_are_kept_for_the_window() -> None:
     )
     reading = client.neck()
     assert reading is not None and reading.ticks == (2029, 2311)
-    client._ingest({"type": "neck_jog", "error": "the wheels are moving"})
-    assert client.neck_error() == "the wheels are moving"
+    client._ingest({"type": "neck_jog", "error": "a neck move is under way"})
+    assert client.neck_error() == "a neck move is under way"
     assert client.neck_error(now=time.monotonic() + 5.0) is None, "old news is dropped"
     client._ingest({"type": "neck_jog"})  # not an error: nothing to keep
-    assert client.neck_error() == "the wheels are moving"
+    assert client.neck_error() == "a neck move is under way"
+    client._ingest({"type": "neck_target", "error": "an operator jog holds the head"})
+    assert client.neck_error() == "an operator jog holds the head"
 
 
 def test_pong_wakes_a_waiting_ping() -> None:

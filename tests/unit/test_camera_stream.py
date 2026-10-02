@@ -231,9 +231,9 @@ def test_the_node_broadcasts_the_camera_s_two_edges_and_the_laser_s(build: Build
 
 
 def test_the_camera_link_edge_is_left_to_the_board_by_default(build: Build) -> None:
-    """The board's neck node publishes base_link -> camera_link from the encoders (the default
-    since 2026-10-02), so this side must not publish its static copy: two publishers of one edge
-    fight."""
+    """The board's base bridge publishes base_link -> camera_link from the neck's encoders (the
+    default since 2026-10-02), so this side must not publish its static copy: two publishers of
+    one edge fight."""
     node, _ = build()
     assert edges(node) == [("camera_link", "camera_optical"), ("base_link", "laser")]
 

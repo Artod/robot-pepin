@@ -301,9 +301,10 @@ class JsonLinesServer:
 
     With ``driving_commands`` given, only a client that has sent one of those
     commands is a *driver*, and the farewell is queued when the last driver
-    leaves: an observer that only asks questions (the neck node polling the
-    encoders) must neither trigger the wheels' release by leaving nor, by
-    staying, hide the departure of the bridge that drives them.
+    leaves: an observer that only asks questions or aims the head (a tool
+    reading the neck's encoders, the gaze arbiter) must neither trigger the
+    wheels' release by leaving nor, by staying, hide the departure of the
+    bridge that drives them.
     """
 
     def __init__(

@@ -9,7 +9,7 @@ sent as encoder ticks per second in the servo's own sign convention; the
 from __future__ import annotations
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import Literal
@@ -170,13 +170,14 @@ class DiffDriveBase:
         """Command zero velocity to both wheels; torque stays on, so the base holds position."""
         self._bus.sync_write("Goal_Velocity", {LEFT: 0, RIGHT: 0}, normalize=False)
 
-    def read_wheel_travel(self) -> tuple[float, float]:
-        """Distance in meters each wheel rolled since the previous call (first call: zeros).
+    def wheel_travel(self, raw: Mapping[str, int]) -> tuple[float, float]:
+        """Distance in meters each wheel rolled since the previous reading (first: zeros), from
+        one read of Present_Position that holds both wheels (and may hold other servos too: the
+        base server reads the neck in the same packet).
 
-        Call this faster than the wheels cover half a revolution so that the
-        encoder wrap can be resolved unambiguously.
+        Read faster than the wheels cover half a revolution so that the encoder wrap can be
+        resolved unambiguously.
         """
-        raw = self._bus.sync_read("Present_Position", [LEFT, RIGHT], normalize=False)
         m_per_tick = self._cfg.geometry.m_per_tick
         return tuple(  # type: ignore[return-value]
             self._unwrap[name].delta(raw[name]) * self._direction[name] * m_per_tick

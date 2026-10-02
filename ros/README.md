@@ -11,8 +11,8 @@ wheels, IMU and neck, the C++ base bridge and the EKF in its own container, `pep
 laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + zram)
 pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
   costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (C++: /odom,
-  velocity smoother), goal_server               /imu/data_raw, /zupt), EKF (odom -> base_link),
-  (127.0.0.1:3337), run_recorder                rf2o (/odom_laser), tof_bridge, neck_state
+  velocity smoother), goal_server               /imu/data_raw, /zupt, /neck/state, the camera's
+  (127.0.0.1:3337), run_recorder                tf), EKF (odom -> base_link), rf2o, tof_bridge
 pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, the wheels),
   camera, depth, visual odometry, the           pepin-tof.service (:3335), ser2net (:3333,
   volume, foxglove_bridge (ws 8765)             the servo bus, the base server's own link)
@@ -368,7 +368,8 @@ the camera's depth (`Grid/Sensor 1`), ray-traced so the floor it flew over becom
 With the lidar present the 2D grid is the scan's (`Grid/Sensor 0`). Other `vslam` options:
 `--fresh` (an empty database), `--no-vo` (no visual odometry), `--vo-depth` (the visual odometry
 on the picture and the depth instead of the two eyes), `--fixed-head` (the static camera edge,
-for a run with the board's neck node off).
+for a rig without neck servos; otherwise the board's base bridge publishes it from the neck's
+encoders at every state line).
 
 ### The depth law
 
@@ -454,7 +455,7 @@ minute, and every live flag on it back to its default.
 | `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
-| `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight |
+| `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's base bridge publishes that edge live from the neck's encoders, because two publishers of one edge fight |
 | `contact_scan` | `contact_scan` | bool | on | yes | the contact line is published; off, the node is a subscriber that costs nothing — the costmap's own contact_layer.enabled is the other end of the same demo switch, and either one alone takes the camera's floor line out |
 | `contact_scan` | `shadow` | bool | on | yes | the last floor pixel on a face stands a band's width UP that face, so its ray lands past the foot: on, that width is taken back off the range (pepin.contact.band_shadow); off is the raw boundary ray |
 | `contact_scan` | `imu_lean` | bool | on | yes | the floor plane leans with the gyro as well as the accelerometer (pepin.lean: the lean of a wheel climbing a threshold is followed within a sample instead of being gated away as a push); off, the accelerometer alone, as it always has been |
@@ -476,7 +477,6 @@ minute, and every live flag on it back to its default.
 | `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
 | `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
-| `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node then keeps its static edge off (ros/laptop.sh vslam's default, not --fixed-head), or two nodes publish that edge |
 | `rtabmap_frame` | `visual_features` | choice: orb, xfeat | xfeat | yes | which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only strategy, and the visual half of 2) matches when it checks a node the words recognised. xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live; under ICP alone, and unless RTAB-Map is certainly localising (told so and answered, no switch to mapping waiting), the set is always orb, and a switch to mapping waits until orb's set is in force. xfeat needs the pepin-laptop:xfeat image (/opt/xfeat/rtabmap_xfeat.py); in another image this node sends orb and the report line says why |
 | `rtabmap_frame` | `visual_confirm` | choice: rtabmap, aggressive, single | aggressive | yes | how RTAB-Map CONFIRMS a localisation while the camera registers alone: RTAB-Map 0.22 delays a first good localisation into its odometry cache and accepts it only with a second one inside RGBD/MaxOdomCacheSize updates, and that second try has to reach Rtabmap/LoopThr. rtabmap: its stock 0.11 and 10. aggressive: Rtabmap/LoopThr 0.05, the threshold the first try already used, so the second comes on the next update; the confirmation stays. single: RGBD/MaxOdomCacheSize 0, the first good localisation is accepted. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always rtabmap |
 | `rtabmap_frame` | `visual_proximity` | bool | on | yes | whether a localised camera also registers every update against the database nodes near its pose (RGBD/ProximityBySpace), each an XFeat re-extraction and a LighterGlue match; off, only the words' own hypothesis is registered, one at most per update. Sent with the visual strategy while the database localises and changed live; under ICP and while it maps, always on (the lidar's proximity links are cheap and most of the graph's) |

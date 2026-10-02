@@ -22,9 +22,9 @@
 #                            at the depth's rate; the default reads the two eyes (stereo_odometry) at
 #                            the camera's: 8 poses/s, 0.15-0.2 s behind, measured at rest 2026-10-02
 #   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
-#                            config/camera.json: for a run with the board's neck node off (ros/feature.sh
-#                            neck off). By default the neck node owns that edge; --neck, the old way to
-#                            say the default, is still accepted
+#                            config/camera.json: for a rig without neck servos. By default the board's
+#                            base bridge owns that edge (from the neck's encoders); --neck, the old way
+#                            to say the default, is still accepted
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
 #   ros/laptop.sh vslam      runs the camera mapping container on pepin-laptop:xfeat whenever that
 #                            image exists and was built on the laptop image below
@@ -271,10 +271,10 @@ case "${1:-}" in
         # vo_publish true).
         VO=true
         VO_INPUT=stereo
-        # The board's neck node publishes base_link -> camera_link live (ros/feature.sh neck on, the
-        # default), so the camera node's static edge is off; --fixed-head puts it back for a run
-        # with the neck node off. A wrong choice is two publishers of one edge, or none; the
-        # camera node's report warns of a mismatch.
+        # The board's base bridge publishes base_link -> camera_link live from the neck's
+        # encoders, so the camera node's static edge is off; --fixed-head puts it back for a rig
+        # without a neck. A wrong choice is two publishers of one edge, or none; the camera node's
+        # report warns of a mismatch.
         STATIC_CAMERA_TF=false
         for arg in ${*:2}; do
             case "$arg" in

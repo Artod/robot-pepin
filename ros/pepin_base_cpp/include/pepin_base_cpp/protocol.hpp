@@ -8,7 +8,8 @@
 //
 //   base -> us   {"type":"state","t":..,"x":..,"y":..,"theta":..,"dl":..,"dr":..,
 //                 "v":..,"w":..,"moving":bool,"armed":bool,"deadman":bool,
-//                 "bus_ok":bool,"bus_p95_ms":..}
+//                 "bus_ok":bool,"bus_p95_ms":..,"pan_ticks":..,"tilt_ticks":..}
+//                (the neck's two encoders of the same read, only when both answered it)
 //   base -> us   {"type":"pong",...}                     answer to a ping; ignored here
 //   us -> base   {"cmd":"twist","v":<m/s>,"w":<rad/s>}   drive; re-arms the deadman
 //   us -> base   {"cmd":"stop"}                          stop the wheels now
@@ -21,6 +22,7 @@
 #include <nlohmann/json.hpp>
 
 #include <array>
+#include <cmath>
 #include <cstddef>
 #include <optional>
 #include <string>
@@ -47,6 +49,9 @@ struct BaseState
   bool deadman;      ///< the board stopped the wheels because commands stopped arriving
   bool bus_ok;       ///< the servos answered on the last tick
   double bus_p95_ms; ///< board-local servo round trip, 95th percentile
+  bool neck_read;    ///< the neck's encoders rode in this read (both answered)
+  int pan_ticks;     ///< ... and what they read, under the same stamp; 0 when not read
+  int tilt_ticks;
 };
 
 namespace detail
@@ -160,6 +165,18 @@ inline std::optional<BaseState> parse_state(const nlohmann::json & message)
     state.bus_p95_ms = 0.0;
   } else if (!detail::as_double(*p95, state.bus_p95_ms)) {
     return std::nullopt;
+  }
+  // The neck rides along when both servos answered the read. Anything wrong with these two
+  // fields costs the neck its sample and never the line: odometry does not wait for the head.
+  double pan = 0.0;
+  double tilt = 0.0;
+  if (detail::number_field(message, "pan_ticks", pan) &&
+    detail::number_field(message, "tilt_ticks", tilt) && std::isfinite(pan) &&
+    std::isfinite(tilt) && std::fabs(pan) < 1e6 && std::fabs(tilt) < 1e6)
+  {
+    state.neck_read = true;
+    state.pan_ticks = static_cast<int>(std::lround(pan));
+    state.tilt_ticks = static_cast<int>(std::lround(tilt));
   }
   return state;
 }

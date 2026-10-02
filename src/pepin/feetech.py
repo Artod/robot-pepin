@@ -15,9 +15,11 @@ at bit 15 (sign-magnitude), not two's complement.
 
 from __future__ import annotations
 
+import itertools
 import logging
 import socket
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 from types import TracebackType
 
@@ -46,8 +48,12 @@ class Register:
 REGISTERS = {
     "Operating_Mode": Register(33, 1),
     "Torque_Enable": Register(40, 1),
+    # A position move's ramp, 100 ticks/s^2 a unit (0..254; 0 is the servo's own maximum).
+    "Acceleration": Register(41, 1),
     # A position-mode goal, 0..4095 within one turn: no sign bit, unlike the velocities below.
     "Goal_Position": Register(42, 2),
+    "Goal_Time": Register(44, 2),  # a timed move; 0 leaves the speed below in charge
+    # In position mode the profile's top speed in ticks/s; in velocity mode the wheel's command.
     "Goal_Velocity": Register(46, 2, sign_magnitude=True),
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
@@ -232,6 +238,21 @@ class FeetechTcpClient:
             pass
         self._parser.reset()
 
+    def _discard_arrived(self) -> None:
+        """Drop the bytes already received, without waiting for the line to go quiet: what a
+        write needs. Nothing comes back for a write, and the next request's :meth:`flush` waits
+        out a full quiet window anyway; that wait before every write cost the wheels' twist 5 ms
+        of a 20 ms tick. Raises ``ConnectionError`` if the bridge has closed the connection."""
+        sock = self._socket
+        sock.settimeout(0.0)
+        try:
+            while True:
+                if not sock.recv(4096):
+                    raise ConnectionError("bus bridge closed the connection")
+        except (TimeoutError, BlockingIOError):
+            pass
+        self._parser.reset()
+
     def _reconnect(self) -> None:
         """Best effort: drop the dead socket and open a fresh one; failure is only logged."""
         self.close()
@@ -244,16 +265,29 @@ class FeetechTcpClient:
 
     # -- transactions -----------------------------------------------------
 
-    def _collect(self, expected: set[int], deadline: float) -> dict[int, StatusPacket]:
-        """Read replies until every id in ``expected`` answered or ``deadline`` passes.
+    def _collect(
+        self,
+        expected: set[int],
+        deadline: float,
+        optional: frozenset[int] = frozenset(),
+        window_s: float = 0.0,
+    ) -> dict[int, StatusPacket]:
+        """Read replies until every id in ``expected`` answered or ``deadline`` passes, and the
+        ``optional`` ids for at most ``window_s`` more (counted from the send when nothing is
+        expected).
 
         ``deadline`` is a ``time.monotonic()`` instant. Replies from other ids are
         logged and dropped; a closed bridge raises instead of timing out silently.
         """
         replies: dict[int, StatusPacket] = {}
         sock = self._socket
-        while expected - replies.keys():
-            remaining = deadline - time.monotonic()
+        wanted = expected | optional
+        settled_at = time.monotonic() if not expected else None  # when the expected were in
+        while wanted - replies.keys():
+            if settled_at is None and not expected - replies.keys():
+                settled_at = time.monotonic()
+            until = deadline if settled_at is None else min(deadline, settled_at + window_s)
+            remaining = until - time.monotonic()
             if remaining <= 0:
                 break
             sock.settimeout(remaining)
@@ -264,7 +298,7 @@ class FeetechTcpClient:
             if not data:
                 raise ConnectionError("bridge closed the connection")
             for packet in self._parser.feed(data):
-                if packet.motor_id in expected:
+                if packet.motor_id in wanted:
                     if packet.error:
                         logger.warning(
                             "servo %d reports error byte 0x%02x", packet.motor_id, packet.error
@@ -274,8 +308,15 @@ class FeetechTcpClient:
                     logger.debug("ignoring reply from unexpected id %d", packet.motor_id)
         return replies
 
-    def _transaction(self, packet: bytes, expected: set[int]) -> dict[int, StatusPacket]:
-        """Send one packet and wait for a reply from every expected id, with retries.
+    def _transaction(
+        self,
+        packet: bytes,
+        expected: set[int],
+        optional: frozenset[int] = frozenset(),
+        window_s: float = 0.0,
+    ) -> dict[int, StatusPacket]:
+        """Send one packet and wait for a reply from every expected id, with retries; the
+        ``optional`` ids are waited for ``window_s`` past the expected ones and never retried.
 
         Raises ``TimeoutError`` when ids stay silent through the retries, and also
         when the link is lost and cannot be reopened — one failure path for callers.
@@ -293,7 +334,9 @@ class FeetechTcpClient:
                 sock.settimeout(self._timeout)
                 start = time.perf_counter()
                 sock.sendall(packet)
-                replies = self._collect(expected, time.monotonic() + self._timeout)
+                replies = self._collect(
+                    expected, time.monotonic() + self._timeout, optional, window_s
+                )
             except ConnectionError as exc:
                 logger.warning("bus link lost (%s), attempt %d", exc, attempt)
                 if attempt > self._retries or not self._reconnect_enabled:
@@ -343,15 +386,31 @@ class FeetechTcpClient:
     def sync_write(self, data_name: str, values: dict[str, int], *, normalize: bool = True) -> None:
         """Broadcast one register to several motors; servos send no reply to this."""
         self._raw_only(normalize)
-        register = REGISTERS[data_name]
-        params = bytes([register.address, register.size]) + b"".join(
-            bytes([self._id(name)]) + encode_value(value, register)
-            for name, value in values.items()
-        )
-        packet = build_packet(BROADCAST_ID, INST_SYNC_WRITE, params)
+        self.sync_write_block([data_name], {name: [value] for name, value in values.items()})
+
+    def sync_write_block(self, data_names: Sequence[str], values: dict[str, Sequence[int]]) -> None:
+        """Broadcast several ADJACENT registers to several motors in one packet, raw units:
+        ``values`` maps each motor to one value per register, in ``data_names``' order. No
+        servo replies, and nothing is waited for: the packet is on its way when this returns.
+
+        One packet for a neck that must be energised, ramped, aimed and given its speed in the
+        same tick (Torque_Enable .. Goal_Velocity, eight bytes a servo). Raises ``ValueError``
+        for registers that are not contiguous, or a motor with the wrong number of values."""
+        registers = [REGISTERS[name] for name in data_names]
+        for before, after in itertools.pairwise(registers):
+            if before.address + before.size != after.address:
+                raise ValueError(f"registers {list(data_names)} are not contiguous")
+        params = bytearray([registers[0].address, sum(r.size for r in registers)])
+        for name, row in values.items():
+            if len(row) != len(registers):
+                raise ValueError(f"{name}: {len(row)} values for {len(registers)} registers")
+            params.append(self._id(name))
+            for value, register in zip(row, registers, strict=True):
+                params += encode_value(value, register)
+        packet = build_packet(BROADCAST_ID, INST_SYNC_WRITE, bytes(params))
         for attempt in (1, 2):
             try:
-                self.flush()
+                self._discard_arrived()
                 sock = self._socket
                 sock.settimeout(self._timeout)
                 sock.sendall(packet)
@@ -363,18 +422,36 @@ class FeetechTcpClient:
                 self._reconnect()
 
     def sync_read(
-        self, data_name: str, motors: list[str], *, normalize: bool = True
+        self,
+        data_name: str,
+        motors: list[str],
+        *,
+        normalize: bool = True,
+        optional: Sequence[str] = (),
+        optional_window_s: float = 0.0,
     ) -> dict[str, int]:
         """Read one register from several motors in a single round trip, keyed by motor name.
 
-        Raises ``TimeoutError`` if any motor stays silent through the retries, so the
+        Raises ``TimeoutError`` if any of ``motors`` stays silent through the retries, so the
         caller never gets a partially stale set of encoder readings.
+
+        ``optional`` motors ride in the same packet AFTER ``motors`` (a servo answers in its
+        place in the list, so a dead one cannot hold the others up) and are waited for at most
+        ``optional_window_s`` past the last of ``motors``; a silent or malformed one is simply
+        absent from the answer and never causes a retry. The neck's encoders ride with the
+        wheels' this way: a dead head costs the odometry that window and nothing more.
         """
         self._raw_only(normalize)
         register = REGISTERS[data_name]
         ids = [self._id(name) for name in motors]
-        params = bytes([register.address, register.size, *ids])
-        replies = self._transaction(build_packet(BROADCAST_ID, INST_SYNC_READ, params), set(ids))
+        extra = [self._id(name) for name in optional if name not in motors]
+        params = bytes([register.address, register.size, *ids, *extra])
+        replies = self._transaction(
+            build_packet(BROADCAST_ID, INST_SYNC_READ, params),
+            set(ids),
+            frozenset(extra),
+            optional_window_s,
+        )
         for i in ids:
             if len(replies[i].params) != register.size:
                 # A reply to some other request (a ping, a different register) must not be
@@ -382,7 +459,10 @@ class FeetechTcpClient:
                 raise TimeoutError(
                     f"malformed reply from id {i}: {len(replies[i].params)} bytes for {data_name}"
                 )
-        return {self._ids[i]: decode_value(replies[i].params, register) for i in ids}
+        answered = ids + [
+            i for i in extra if i in replies and len(replies[i].params) == register.size
+        ]
+        return {self._ids[i]: decode_value(replies[i].params, register) for i in answered}
 
     def enable_torque(self, motors: list[str] | None = None) -> None:
         """Energise the named motors (all of them by default); they hold against being pushed."""

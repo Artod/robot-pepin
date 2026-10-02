@@ -288,13 +288,13 @@ def test_the_window_loop_runs_headless_and_stops_everything_on_exit(
     pygame = pytest.importorskip("pygame")
     monkeypatch.setenv("SDL_VIDEODRIVER", "dummy")
     monkeypatch.setenv("SDL_AUDIODRIVER", "dummy")
-    from test_base_server import make_move_core
+    from test_base_server import energised, make_neck_core
 
     from pepin.base_server import DRIVING_COMMANDS, serve
     from pepin.streams import JsonLinesServer
     from pepin.teleop import run_game
 
-    core, bus = make_move_core()
+    core, bus = make_neck_core()
     server = JsonLinesServer(
         0, on_last_client_left={"cmd": "release"}, driving_commands=DRIVING_COMMANDS
     ).start()
@@ -326,7 +326,8 @@ def test_the_window_loop_runs_headless_and_stops_everything_on_exit(
     # was driven.
     driving = [cmd for cmd in seen_commands if cmd not in ("neck", "release")]
     assert driving == ["stop", "neck_jog"] * 3, "the exit stopped the wheels and the head, thrice"
-    assert not core.moving and bus.torque == [], "nothing moved, the head was never energised"
+    assert not core.moving and bus.torque == [], "the wheels were never armed"
+    assert not energised(bus), "the head was never energised"
 
 
 def test_the_keys_are_read_by_place_not_by_letter() -> None:

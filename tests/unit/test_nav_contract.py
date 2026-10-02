@@ -1236,50 +1236,28 @@ def test_both_publishers_of_base_link_to_laser_agree_and_the_driver_turns_ccw() 
 
 
 def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() -> None:
-    """The camera rides a two-servo neck. The board's node (pepin_bringup.neck_state) asks the
-    base server for the encoders and publishes /neck/state and, behind its live ``neck_tf``,
-    base_link -> camera_link from them; the laptop's camera node must then stop broadcasting its
-    static copy of that edge — two publishers of one edge fight, and a static transform cannot
-    be withdrawn, so that one is a launch switch (``static_camera_tf``), read once at start.
+    """The camera rides a two-servo neck. The board's C++ base bridge turns the neck's ticks of
+    every state line into /neck/state and base_link -> camera_link (neck.hpp, the twin of
+    pepin.neck), its geometry handed over by robot.launch.py from config/neck.json and the
+    camera's link frame from config/camera.json; the laptop's camera node must then stop
+    broadcasting its static copy of that edge — two publishers of one edge fight, and a static
+    transform cannot be withdrawn, so that one is a launch switch (``static_camera_tf``), read
+    once at start.
 
-    One operator gesture per side, each carried by one launch argument: ``ros/feature.sh neck
-    on`` sets PEPIN_NECK, the unit passes ``neck:=`` down through bringup to robot.launch.py;
-    ``ros/laptop.sh vslam --neck`` passes ``static_camera_tf:=false`` into vslam.launch.py, which
-    hands it to the camera node alone. The board is never asked what it is doing: this launch
-    talks to no one, and a guess would be the two-publisher case.
+    No switch on the board: a neck that does not answer publishes nothing, and a rig without
+    one runs ``ros/laptop.sh vslam --fixed-head``, which passes ``static_camera_tf:=true`` into
+    vslam.launch.py, which hands it to the camera node alone. The board is never asked what it
+    is doing: this launch talks to no one, and a guess would be the two-publisher case.
     """
-    node = sf.tree(f"{NODES}/neck_state.py")
-    declared = {
-        ast.unparse(c.args[0]): c.args[1] for c in sf.calls_to(node, "self.declare_parameter")
-    }
-    assert {"'host'", "'port'", "'poll_hz'", "'tf_hz'", "'config'"} <= declared.keys()
-    neck_flags = load_table(REPO / NODES / "neck_state.py")
-    assert "neck_tf" in neck_flags and neck_flags.flag("neck_tf").live
-    assert sf.assignments(node)["_NECK_REQUEST"] == 'b\'{"cmd":"neck"}\\n\''
-    assert {"parse_neck", "joint_angles", "camera_pose", "NeckConfig"} <= sf.imported(node)
-    assert "JsonLineLink" in sf.imported(node), "the reconnecting link, not a socket of its own"
-    assert "super().__init__('neck_state')" in sf.unparsed(node, ast.Call)
-    # The bus is polled at 2 Hz and the edge published at 10: a read costs 13.5 ms of a core and
-    # the head is still while the cart drives, so the last edge is republished with a fresh stamp.
-    # A 2 Hz TF stream would fail lookups at recent stamps.
-    assert ast.unparse(declared["'poll_hz'"]) == "2.0"
-    assert ast.unparse(declared["'tf_hz'"]) == "_TF_HZ"
-    assert sf.assignments(node)["_TF_HZ"] == "10.0"
-    assert "_hold_tf" in {f.name for f in ast.walk(node) if isinstance(f, ast.FunctionDef)}
-    # The switch defaults off while the model is unchecked against the hardware: the reference
-    # ticks unread (every pose is then the static mount) or the servo signs unverified.
-    from pepin.neck import NeckConfig
+    from pepin.neck import NeckConfig, bridge_parameters
 
-    reference = NeckConfig.from_json(REPO / "config/neck.json").reference
-    if not (reference.known and reference.signs_verified):
-        assert neck_flags["neck_tf"] is False, "unverified: no transform by default"
     camera = sf.tree(f"{NODES}/camera_stream.py")
     # The switch is one of the camera node's flags (node_kit.Switches over its FLAGS table,
     # CLAUDE.md rule 19) and is printed in its report line — but it is declared not live: the
     # transform went out at start, and a static transform cannot be withdrawn.
     camera_flags = load_table(REPO / NODES / "camera_stream.py")
     assert "static_camera_tf" in camera_flags and not camera_flags.flag("static_camera_tf").live
-    assert camera_flags["static_camera_tf"] is False, "the board's neck node owns the edge"
+    assert camera_flags["static_camera_tf"] is False, "the board's base bridge owns the edge"
     assert "Switches" in sf.imported(camera)
     report = sf.calls_to(camera, "self._switches.state")
     assert report and all(ast.unparse(sf.keywords(c)["live_only"]) == "False" for c in report), (
@@ -1311,20 +1289,33 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     commands = [s for s in sf.unparsed(vslam, ast.List) if "'pepin_bringup." in s]
     passes = [s for s in commands if "static_camera_tf:=" in s]
     assert len(passes) == 1 and "pepin_bringup.camera_stream" in passes[0], "the camera node only"
+    # The board's side: the bridge's parameters carry the geometry and the frame, nothing else
+    # publishes the edge, and no switch is left to turn it off.
     robot = sf.tree(ROBOT_LAUNCH)
-    assert "pepin_bringup.neck_state" in sf.strings(robot)
-    neck_arg = next(
-        c for c in sf.calls_to(robot, "DeclareLaunchArgument") if ast.unparse(c.args[0]) == "'neck'"
+    neck = next(
+        ast.unparse(f)
+        for f in ast.walk(robot)
+        if isinstance(f, ast.FunctionDef) and f.name == "neck_parameters"
     )
-    assert ast.unparse(sf.keywords(neck_arg)["default_value"]) == "'true'"
+    for piece in ("bridge_parameters(neck)", "MOUNTS.camera.link_frame", "list(JOINT_NAMES)"):
+        assert piece in neck, piece
+    assert "**neck_parameters()" in ast.unparse(robot), "the base bridge's parameters"
+    assert "pepin_bringup.neck_state" not in sf.strings(robot)
+    assert "'neck'" not in {
+        ast.unparse(c.args[0]) for c in sf.calls_to(robot, "DeclareLaunchArgument")
+    }
+    bridge = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
+    names = [*bridge_parameters(NeckConfig.from_json(REPO / "config/neck.json"))]
+    names += ["neck_camera_frame", "neck_parent_frame", "neck_joint_names", "neck_publish_hz"]
+    for name in names:
+        assert f'"{name}"' in bridge, f"{name}: declared by the bridge"
     bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
-    assert bringup and "LaunchConfiguration('neck')" in sf.unparsed(bringup, ast.Call)
+    assert bringup and "LaunchConfiguration('neck')" not in sf.unparsed(bringup, ast.Call)
     unit = (REPO / "board/pepin-ros.service").read_text()
-    assert "Environment=PEPIN_NECK=true" in unit and "neck:=${PEPIN_NECK}" in unit
-    feature = (REPO / "ros/feature.sh").read_text()
-    assert "neck) VAR=PEPIN_NECK ;;" in feature
+    assert "PEPIN_NECK" not in unit and "neck:=" not in unit
+    assert "PEPIN_NECK" not in (REPO / "ros/feature.sh").read_text()
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "STATIC_CAMERA_TF=false\n" in laptop, "the neck node owns the edge by default"
+    assert "STATIC_CAMERA_TF=false\n" in laptop, "the board owns the edge by default"
     assert "--fixed-head) STATIC_CAMERA_TF=true ;;" in laptop, (
         "a flag anywhere after the subcommand"
     )
@@ -1483,7 +1474,7 @@ def test_every_node_s_flags_are_one_table_the_kit_declares_and_the_report_line_p
         assert not declared & set(knobs.names), f"{path.name}: a knob declared by hand"
         for flag in flags:
             assert flag.description, f"{path.name}: {flag.name} needs a sentence"
-    assert {"depth_stream", "depth_fusion", "goal_server", "neck_state"} <= tables.keys()
+    assert {"depth_stream", "depth_fusion", "goal_server"} <= tables.keys()
 
 
 def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_two_names() -> None:
@@ -1992,8 +1983,9 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     # JSONL tape, or `ros2 bag record` under a node that subscribes to nothing. Both respawn, and
     # a kick reaches whichever is running.
     assert _respawning(nav) == {"run_recorder", "bag_recorder", "goal_server"}
-    # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
-    # neck on). The drivers around it are ROS packages the container restarts with the launch.
+    # The board's sensor launch runs our processes too (the neck node among them until it went
+    # into the base bridge, 2026-10-02). The drivers around them are ROS packages the container
+    # restarts with the launch.
     robot = _launch_processes("robot.launch.py")
     # tof_bridge since 2026-09-21: it died once on the robot and stayed dead, and a near-field
     # sensor that silently never comes back is worse than one that was never on.
@@ -2002,7 +1994,6 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     # ...and the board's own recording's supervisor (pepin.board_bag, board_bag:=true): a dead
     # one takes its recorder with it, and the respawn starts both on a new directory.
     assert _respawning(robot) == {
-        "neck_state",
         "tof_bridge",
         "rf2o_laser_odometry_node",
         "board_bag",

@@ -23,10 +23,9 @@ census_py() { (cd "$HERE/.." && uv run -q python -m pepin.census "$@"); }
 # The nodes a kick can reach on the board and the line each prints once up (the kick waits for
 # it): our own respawned processes of robot.launch.py. The navigation nodes are the Mac's
 # (ros/laptop.sh kick).
-KICKABLE="neck_state tof_bridge"
+KICKABLE="tof_bridge"
 kick_line() {  # node name -> start-up line
     case "$1" in
-        neck_state) echo "neck state up: " ;;
         tof_bridge) echo "tof ceilings: " ;;
         *) return 1 ;;
     esac

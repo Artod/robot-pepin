@@ -135,6 +135,28 @@ def test_a_bad_sign_in_the_file_is_refused(tmp_path: Path) -> None:
         NeckConfig.from_json(bad)
 
 
+def test_the_motion_block_is_read_and_held_to_the_registers_reach(tmp_path: Path) -> None:
+    """The seeds of 2026-10-02 in the file; the register units they become; a file without the
+    block moves the head at the same defaults; a value the register cannot hold is refused."""
+    from pepin.neck import ACC_UNIT_DEG_S2, NeckMotion, acc_units, speed_ticks
+
+    motion = NeckConfig.from_json(NECK).motion
+    assert (motion.max_speed_deg_s, motion.max_acc_deg_s2, motion.lease_s) == (120.0, 1000.0, 2.0)
+    assert (motion.read_window_ms, motion.silent_ticks, motion.retry_s) == (3.0, 3, 5.0)
+    assert speed_ticks(120.0) == 1365 and speed_ticks(35.0) == 398  # ~ the old 400 ticks/s
+    assert round(ACC_UNIT_DEG_S2, 3) == 8.789
+    assert (acc_units(1000.0), acc_units(1.0), acc_units(1e6)) == (114, 1, 254)
+    data = json.loads(NECK.read_text())
+    del data["motion"]
+    bare = tmp_path / "neck.json"
+    bare.write_text(json.dumps(data))
+    assert NeckConfig.from_json(bare).motion == NeckMotion()
+    data["motion"] = {"max_speed_deg_s": 400.0}
+    bare.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="max_speed_deg_s"):
+        NeckConfig.from_json(bare)
+
+
 def test_a_pan_turns_the_camera_about_the_vertical_and_a_tilt_dips_it() -> None:
     """A pan is a turn about base_link's z and nothing else: the yaw follows it, the height does
     not move, and the lens rides round the pan pivot at the radius the measured arm gives it

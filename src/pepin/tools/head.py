@@ -1,7 +1,7 @@
 """The head and what it sees: point it, sweep it, take a picture.
 
-The head is the base server's (its neck commands); it refuses to move while the wheels turn,
-and a move gives up after three seconds. What was seen is ``world``'s: a sweep only reports the
+The head is the base server's (its neck commands); it turns whether or not the wheels do,
+and a move gives up after a few seconds. What was seen is ``world``'s: a sweep only reports the
 sightings the memory filed while the head dwelt at each direction, so no picture is judged here.
 """
 
@@ -24,7 +24,7 @@ MAX_SEEN = 8  # labels reported per direction
 @tool
 def look(robot: Robot, pan_deg: float, tilt_deg: float | None = None) -> Result:
     """Turn the head (the camera) and wait until it gets there; see() then gives the picture.
-    Angles are relative to the robot's body. The head does not move while the wheels turn.
+    Angles are relative to the robot's body.
 
     Args:
         pan_deg: degrees left of straight ahead (+) or right of it (-); the neck reaches about
