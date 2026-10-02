@@ -144,7 +144,7 @@ def test_a_fresh_transform_is_the_pose_and_the_goal_goes(tmp_path) -> None:  # t
     assert abs(pose["age_s"] - 0.1) < 1e-3
     assert "fit" not in pose, "TF carries no fit, and none is invented"
     ready = node._ready()
-    assert ready.ready and not ready.search
+    assert ready.ready
 
     wire = Wire()
     node._handle({"cmd": "go", "x": 1.0, "y": 0.3, "yaw_deg": 0.0}, wire)
@@ -156,7 +156,7 @@ def test_without_a_transform_the_goal_is_refused_with_the_reason(tmp_path) -> No
     """Nothing knows where the cart is: the refusal says so."""
     node = server(tmp_path)
     ready = node._ready()
-    assert not ready.ready and not ready.search
+    assert not ready.ready
     assert node._pose_now() == {}
 
     wire = Wire()
@@ -175,7 +175,7 @@ def test_a_transform_that_stopped_coming_is_as_good_as_none(tmp_path) -> None:  
     placed(node)
     standing_at(node, at(0.0, 0.0, 0.0, age_s=4.2))
     ready = node._ready()
-    assert not ready.ready and not ready.search
+    assert not ready.ready
     assert "map -> base_link is 4.2 s old" in ready.reason
     standing_at(node, at(0.0, 0.0, 0.0, age_s=TF_FRESH_S - 0.01))
     assert node._ready().ready

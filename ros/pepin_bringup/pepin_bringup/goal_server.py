@@ -517,13 +517,13 @@ class GoalServer(Node):
         whether this start of RTAB-Map is placed (flag ``start_needs_placement``). ``pose`` is a
         reading already taken by the caller, so the edge is not looked up twice."""
         edge = self._tf_pose() if pose is None else pose
-        ready = self._gate.verdict(None, edge.get("age_s"))
+        ready = self._gate.verdict(edge.get("age_s"))
         if ready.ready:
             placed = Preflight.placement(
                 self._placement_standing(), asked=self._switches.on("start_needs_placement")
             )
             if not placed.ok:
-                return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+                return Readiness(False, rule=BY_PLACEMENT, reason=placed.detail)
         return ready
 
     def pick_planner(self, name: str) -> dict[str, Any]:
