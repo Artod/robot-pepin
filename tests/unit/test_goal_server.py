@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import math
+import types
 from pathlib import Path
 from typing import Any
 
@@ -392,3 +393,117 @@ def test_the_flag_off_cancels_only_this_node_s_own_goal(tmp_path: Path) -> None:
     assert own.cancelled == 1
     assert all(node.service_clients[name].calls == [] for name in CANCEL_SERVICES.values())
     assert "cancel_every_goal=off" in node._switches.state()
+
+
+# ---- a cancel stops a drive at every stage of it ----------------------------------------------
+
+
+class Finished:
+    """A result future that is already done with Nav2's ``status``."""
+
+    def __init__(self, status: int, on_wait: Any = None) -> None:
+        self._status, self._on_wait = status, on_wait
+
+    def done(self) -> bool:
+        return True
+
+    def add_done_callback(self, callback: Any) -> None:
+        if self._on_wait is not None:
+            self._on_wait()  # the operator's cancel lands while this is awaited
+        callback(self)
+
+    def result(self) -> Any:
+        return types.SimpleNamespace(status=self._status)
+
+
+class Goal:
+    """A goal handle that Nav2 accepted, its result ``status``, counting its cancellations."""
+
+    def __init__(self, status: int, on_wait: Any = None) -> None:
+        self.accepted, self.cancelled = True, 0
+        self._result = Finished(status, on_wait)
+
+    def get_result_async(self) -> Finished:
+        return self._result
+
+    def cancel_goal_async(self) -> None:
+        self.cancelled += 1
+
+
+def ready_to_drive(tmp_path: Path) -> Any:
+    """A placed node with a fresh pose, Nav2 up, and no recorder to wait for."""
+    node = server(tmp_path)
+    standing_at(node, at(0.0, 0.0, 0.0, age_s=0.1))
+    placed(node)
+    node._client.server = True
+    node.start_recording = lambda name: None
+    node.stop_recording = lambda: None
+    return node
+
+
+def test_a_cancel_before_nav2_has_the_goal_means_the_goal_is_never_sent(tmp_path: Path) -> None:
+    """The recorder alone may hold a drive up to 8 s between `_driving` and the goal going to
+    Nav2; a cancel in that window used to clear the flag and the goal went out anyway."""
+    node = ready_to_drive(tmp_path)
+
+    def recorder_slow_and_a_cancel_meanwhile(name: str) -> None:
+        node.cancel()
+
+    node.start_recording = recorder_slow_and_a_cancel_meanwhile
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.3}, wire)
+    assert node._client.goals == [], "nothing was sent to Nav2"
+    assert wire.events()[-1] == {"event": "error", "detail": "cancelled before Nav2 had the goal"}
+    assert not node._driving and not node.navigating()
+
+
+def test_a_handle_that_arrives_after_the_cancel_is_cancelled_at_once(tmp_path: Path) -> None:
+    node = ready_to_drive(tmp_path)
+    goal = Goal(status=4)
+    sent = node._client.send_goal_async
+
+    def nav2_takes_it_while_the_operator_cancels(request: Any, feedback: Any = None) -> Any:
+        future = sent(request, feedback)
+        node.cancel()
+        return future
+
+    node._client.handle = goal
+    node._client.send_goal_async = nav2_takes_it_while_the_operator_cancels
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.3}, wire)
+    assert goal.cancelled == 1, "the late handle is cancelled, not driven"
+    assert [e["event"] for e in wire.events()] == ["error"]
+    assert node._goal_handle is None and not node._driving
+
+
+def test_a_cancel_during_the_pivot_stops_the_spin(tmp_path: Path) -> None:
+    """The drive ends on position (status 4) and the behaviour server's Spin turns the cart to
+    the mark's heading: no navigator owns that goal, so the cancel stops it by its own handle."""
+    node = ready_to_drive(tmp_path)
+    node._client.handle = Goal(status=4)
+    node._spin.server = True
+    spin = Goal(status=5, on_wait=lambda: node._handle({"cmd": "cancel"}, Wire()))
+    node._spin.handle = spin
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.3, "yaw_deg": 90.0}, wire)
+    assert len(node._spin.goals) == 1, "the pivot started"
+    assert spin.cancelled == 1, "and the cancel stopped it"
+    assert node._spin_handle is None and not node.navigating()
+    assert [e["event"] for e in wire.events()] == ["accepted", "pivot", "done"]
+
+
+def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> None:
+    """The measured motions (ros/goto.sh round, move) refuse unless the goal server says idle:
+    a goal of anyone's on a navigator counts, from its latched status list."""
+    node = server(tmp_path)
+    wire = Wire()
+    node._handle({"cmd": "where"}, wire)
+    assert wire.events()[0]["navigating"] is False
+    executing = ros_stubs.GoalStatusArray(status_list=[ros_stubs.GoalStatus(status=2)])
+    node.subs["/navigate_through_poses/_action/status"][1](executing)
+    wire = Wire()
+    node._handle({"cmd": "where"}, wire)
+    assert wire.events()[0]["navigating"] is True
+    done = ros_stubs.GoalStatusArray(status_list=[ros_stubs.GoalStatus(status=4)])
+    node.subs["/navigate_through_poses/_action/status"][1](done)
+    assert not node.navigating()
