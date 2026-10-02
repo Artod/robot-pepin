@@ -53,3 +53,11 @@ models/
 
 # the simulator's run directory: tapes, scores, the goal server's planner pick (ros/sim.sh)
 ros/sim/run/
+
+# API keys of the LLM test loop (scratch/llm): never tracked
+.env
+
+# written by the depth node at run time (the stereo law witness), like depth_law.json
+ros/maps/depth_law_stereo.json
+# editor settings
+.vscode/
