@@ -49,6 +49,7 @@ from pepin.camera import (  # noqa: E402
     camera_info_arrays,
     mount_transform,
 )
+from pepin.contact import fan_min_z  # noqa: E402
 from pepin.depth import (  # noqa: E402
     LAW_VERSION,
     UP_LEVEL,
@@ -70,11 +71,7 @@ from pepin.depth import (  # noqa: E402
     scan_points,
     to_base,
 )
-from pepin.depth_pipeline import (  # noqa: E402
-    LIDAR_SIGMA_M,
-    FrameContext,
-    LidarAnchor,
-)
+from pepin.depth_pipeline import FrameContext  # noqa: E402
 from pepin.flags import load_knobs  # noqa: E402
 from pepin.mounts import load_lidar_mount, rotation_from_rpy  # noqa: E402
 from pepin.stereo_depth import StereoMatcher  # noqa: E402
@@ -220,12 +217,14 @@ def legacy_process(
     """``DepthStream._process`` before the pipeline, line for line: the edge mask on the raw
     depth, the beams of the scan projected through the static mounts (the cart stood still:
     the carry is the identity), the beam pairs into the law, the law applied, the edges
-    dropped, the scan before the floor anchor, the floor anchored, both published; ``None``
-    when the law did not exist yet. Returns the published image's bytes and scan's ranges.
+    dropped, the scan before the floor anchor (its band raised by the floor's own noise,
+    pepin.contact.fan_min_z), the floor anchored, the image NaN past DEPTH_REACH_M, both
+    published; ``None`` when the law did not exist yet. Returns the published image's bytes and
+    scan's ranges.
 
-    ``pan`` is the head's heading the fan is folded through (``scan_honours_pan``): 0 is the
-    chain of before 2026-09-15, and a reference built against a TF edge passes that edge's own
-    yaw, which a quaternion round trip leaves non-zero even for a head pointing straight."""
+    ``pan`` is the head's heading the fan is folded through: 0 is a head looking along the
+    cart's x, and a reference built against a TF edge passes that edge's own yaw, which a
+    quaternion round trip leaves non-zero even for a head pointing straight."""
     edge = edge_mask(depth32)
     xy = scan_points(np.asarray(scan.ranges), scan.angle_min, scan.angle_increment, SCAN_RANGE_M)
     samples = project(to_base(xy, LIDAR_MOUNT.rotation, LIDAR_MOUNT.translation), cam, INTR)
@@ -234,11 +233,16 @@ def legacy_process(
         return None
     metric = apply_affine(depth32, a, b)
     metric, _dropped = drop_edges(metric, edge)
-    angle_min, step, ranges = depth_to_scan(metric, INTR, cam, pan=pan, max_range=SCAN_MAX_RANGE)
+    min_z = fan_min_z(floor_depth(INTR, cam, UP_LEVEL), cam.z)
+    angle_min, step, ranges = depth_to_scan(
+        metric, INTR, cam, pan=pan, min_z=min_z, max_range=SCAN_MAX_RANGE
+    )
     published_scan = scan_from_ranges(
         ranges, float(angle_min), float(step), stamp, "base_link", 0.1, SCAN_MAX_RANGE
     )
     metric, _anchored = floor_anchor(metric, floor_depth(INTR, cam, UP_LEVEL), cam.z)
+    metric = np.array(metric, copy=True)
+    metric[metric > DEPTH_REACH_M] = np.nan
     image = image_from_array(metric, "32FC1", stamp, "camera_optical")
     return bytes(image.data), list(published_scan.ranges)
 
@@ -318,14 +322,9 @@ def test_the_default_flags_publish_today_s_depth_and_scan_bit_for_bit(build: Bui
     is the pose, as it was): after every frame the node's law is the reference's law to the
     last bit, it withholds exactly the frames the reference withheld, and every published
     image and scan is byte for byte the reference's."""
-    node, net = build(
-        lidar_sigma_m=0.0,
-        fan_floor_gate="off",
-        depth_reach=False,
-    )
-    # the affine law on the beams, every beam weighing the same, the fan's floor gate off and the
-    # camera's reach not yet gated: this reference is the chain of before 2026-09-15, and every
-    # switch that has moved it since is named here
+    node, net = build()
+    # the affine law on the beams, every beam weighing the same, the fan's band raised by the
+    # floor's noise and the camera's reach gated: the chain as it ships
     assert node._pipeline.switches == {name: FLAGS[name] for name in node._pipeline.names}, (
         "the flags' defaults are the chain's"
     )
@@ -383,12 +382,7 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     reference's with that pose, and not the reference's with the config's — and the report
     line no longer counts a config fallback. A head panned 20 deg is counted as such."""
     edge = _optical_edge(31.5)
-    node, net = build(
-        camera_edge=edge,
-        law=LAW,
-        fan_floor_gate="off",
-        depth_reach=False,
-    )  # the gate off: this test is about WHICH pose the chain uses, not about the fan's floor
+    node, net = build(camera_edge=edge, law=LAW)
     on_neck = pose_from_transform(edge)
     tf_cam = CameraPose.from_optical(on_neck.rotation, on_neck.translation)
     assert tf_cam.pitch == pytest.approx(math.radians(31.5)) and tf_cam.z == 1.2
@@ -424,10 +418,6 @@ def test_the_camera_pose_is_tf_s_at_the_frame_s_stamp_and_the_config_only_withou
     frame(node, net, turned, 2.0, 1)  # the second count: the frame's own lookup
     node._report()
     assert "head panned 2 frames (projected with the pan)" in node.logger.texts("info")[-1]
-    node._switches.set("scan_honours_pan", False)  # the old fan, and the report line says so
-    frame(node, net, turned, 2.0, 2)
-    node._report()
-    assert "head panned 1 frames (projected as if not)" in node.logger.texts("info")[-1]
 
 
 def test_without_a_camera_edge_the_config_pose_stands_in_and_is_counted(build: Build) -> None:
@@ -498,15 +488,9 @@ def test_a_dead_neck_edge_gives_the_last_edge_at_once_instead_of_waiting(build: 
 def test_an_edge_younger_than_tf_dead_s_is_still_waited_for(build: Build) -> None:
     """The live case the wait exists for: the neck publishes, its newest edge is behind the
     frame's stamp and does not cover it yet. That wait stays — the guard refuses only the
-    lookups that cannot be answered. Both ways round the newest-edge shortcut: an edge half a
-    second old with ``camera_tf_latest`` off (the old ask at the exact stamp), and one two
-    seconds old, which that shortcut refuses (CAMERA_TF_MAX_AGE_S) and the wait then takes.
-    The wait unanswered, the last edge stands in."""
-    old_ask, _net = build(camera_tf_latest=False)
-    fake = stopped_tf(old_ask, age_s=0.5, wait_s=0.0)
-    assert old_ask._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
-    assert fake.waits == 1, "a young edge is still waited for at the frame's stamp"
-    assert old_ask._tally.take().counts["neck_edge_dead"] == 0
+    lookups that cannot be answered. An edge two seconds old is refused by the newest-edge
+    shortcut (CAMERA_TF_MAX_AGE_S) and the wait then takes it. The wait unanswered, the last
+    edge stands in."""
     node, _net = build()
     older = stopped_tf(node, age_s=2.0, wait_s=0.0)
     assert node._camera_at(_stamp(0)) == (LAST_CAM, LAST_EDGE)
@@ -535,7 +519,7 @@ class TurningTf(StoppedTf):
 
 
 def test_the_newest_edge_stands_in_only_for_a_head_that_stands_still(build: Build) -> None:
-    """``camera_tf_latest``: a frame newer than the neck's newest edge takes that edge without
+    """A frame newer than the neck's newest edge takes that edge without
     a wait when the head did not move over the half second before it — and waits for its own
     stamp when the head was turning (at 35 deg/s a 1 s old sample is 35 deg off)."""
     node, _net = build()
@@ -628,25 +612,6 @@ def test_a_flag_switches_its_stage_and_a_launch_override_reaches_it(build: Build
     line = node.logger.texts("info")[-1]
     assert "floor_anchor off [tolerance 4 cm]" in line and "affine_law off" in line
     assert "flags: edge_filter=off lidar_anchor=on affine_law=off" in line
-
-
-def test_a_beam_s_weight_is_a_live_flag_and_the_report_prints_it(build: Build) -> None:
-    """What a beam is trusted to (lidar_sigma_m) is a live parameter that reaches the lidar
-    anchor, which prints what it is set to in the report line."""
-    node, net = build()
-    beams = node._pipeline.stage("lidar_anchor")
-    assert isinstance(beams, LidarAnchor)
-    assert beams.sigma_m == LIDAR_SIGMA_M
-    assert node.set_parameters([Param("lidar_sigma_m", 0.015)])[0].successful
-    assert beams.sigma_m == 0.015
-    assert node.set_parameters([Param("lidar_sigma_m", 0.03)])[0].successful
-    assert beams.sigma_m == 0.03
-    for k, wall_x in enumerate(WALLS):
-        frame(node, net, CONFIG_CAM, wall_x, k)
-    node._report()
-    line = node.logger.texts("info")[-1]
-    assert "lidar_anchor on [weight 1 / sigma^2, sigma 3.0 cm]" in line
-    assert "lidar_sigma_m=0.03 " in line
 
 
 def test_the_scan_is_built_from_the_depth_before_the_floor_anchor(
@@ -856,25 +821,6 @@ def test_the_insane_carry_is_named_in_the_report_line(build: Build) -> None:
     assert "carry_max_speed_mps=1.0" in line
 
 
-def test_the_shipped_floor_gate_raises_the_fan_s_band_and_says_so(build: Build) -> None:
-    """The default is no longer the flat 0.15 m edge: with ``fan_floor_gate`` band the fan marks
-    from the floor's own noise upward (pepin.contact.fan_min_z), so a bearing the flat edge
-    marked on a noisy floor can come back clear, and ``off`` still reproduces the old fan
-    exactly. The chain is otherwise the reference's."""
-    gated, net_gated = build(lidar_sigma_m=0.0)
-    assert str(gated._switches["fan_floor_gate"]) == "band", "the shipped gate"
-    plain, net_plain = build(lidar_sigma_m=0.0, fan_floor_gate="off")
-    for k, wall_x in enumerate(WALLS):
-        frame(gated, net_gated, CONFIG_CAM, wall_x, k)
-        frame(plain, net_plain, CONFIG_CAM, wall_x, k)
-    _d, gated_scans = published(gated)
-    _p, plain_scans = published(plain)
-    assert len(gated_scans) == len(plain_scans) and gated_scans
-    marked_gated = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in gated_scans)
-    marked_plain = sum(np.count_nonzero(np.isfinite(np.asarray(s.ranges))) for s in plain_scans)
-    assert marked_gated <= marked_plain  # a gate removes marks, it never invents them
-
-
 # ---- the fan and the neck's pan ---------------------------------------------------------------
 def _post(range_m: float = 2.0) -> np.ndarray:
     """A depth image of one narrow post straight ahead of the LENS at ``range_m`` and nothing
@@ -908,7 +854,7 @@ def test_the_fan_s_bearings_turn_with_the_neck_s_pan(build: Build) -> None:
     turned 10 deg left and -25 with it turned right: the fan's bearings are the cart's, not the
     camera's. The window turns with them — angle_min is pan - 40 deg — and the frame stays
     base_link, which is what Nav2's obstacle layer is handed."""
-    node, _net = build(fan_floor_gate="off")  # this test is about bearings, not the floor
+    node, _net = build()
     for pan_deg in (0.0, 10.0, -25.0):
         scan = _fan_of(node, pan_deg)
         marked = _marked_deg(scan)
@@ -921,21 +867,6 @@ def test_the_fan_s_bearings_turn_with_the_neck_s_pan(build: Build) -> None:
         assert scan.header.frame_id == "base_link"
 
 
-def test_scan_honours_pan_off_folds_the_fan_as_if_the_head_looked_ahead(build: Build) -> None:
-    """The old projection is one live parameter away: with ``scan_honours_pan`` off the same
-    post marks bearing 0 whatever the neck does, and the fan's window sits on base_link's x —
-    which is the costmap of before 2026-09-15, wrong by the whole pan."""
-    node, _net = build(fan_floor_gate="off")
-    assert node.set_parameters([Param("scan_honours_pan", False)])[0].successful
-    assert not node._switches.on("scan_honours_pan"), "the flag reaches the node live"
-    for pan_deg in (0.0, 10.0, -25.0):
-        scan = _fan_of(node, pan_deg)
-        assert float(np.mean(_marked_deg(scan))) == pytest.approx(0.0, abs=0.6)
-        assert math.degrees(scan.angle_min) == pytest.approx(-40.0, abs=1e-6)
-    node.set_parameters([Param("scan_honours_pan", True)])  # and back, without a restart
-    assert float(np.mean(_marked_deg(_fan_of(node, 10.0)))) == pytest.approx(10.0, abs=0.6)
-
-
 # ---- the camera answers for its own depth ---------------------------------------------------
 def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
     """The published depth's reach and /depth_scan's cap are the same physical claim, so they are
@@ -943,56 +874,29 @@ def test_the_reach_is_one_number_for_the_image_and_for_the_scan() -> None:
     to stay under both."""
     assert DEPTH_REACH_M == 4.0
     assert load_knobs("depth_stream")["depth_reach_m"] == 4.0
-    assert FLAGS["depth_reach"] is True
     assert SCAN_MAX_RANGE == DEPTH_REACH_M, "this file's own reference uses the node's default"
 
 
-def test_the_published_depth_is_nan_past_the_reach_and_the_scan_is_untouched(
-    build: Build,
-) -> None:
-    """Two nodes, the same seeded law and the same frame of a wall 4.5 m off: the one with
-    ``depth_reach`` on publishes NaN exactly where the other published more than 4 m, and nothing
-    else moves — same finite pixels to the bit, same /depth_scan to the bit."""
-    # Every ruler off and the law seeded: the two nodes then publish the SAME pixels bit for bit,
-    # because a law that still moves moves at so much per SECOND of wall time (``law_slew``) and
-    # two nodes never see the same wall time.
-    frozen = dict(
-        law=LAW,
-        fan_floor_gate="off",
-        lidar_anchor=False,
-    )
-    off, off_net = build(**frozen)
-    on, on_net = build(**frozen)
-    assert off.set_parameters([Param("depth_reach", False)])[0].successful
-    assert off._switches.on("depth_reach") is False and on._switches.on("depth_reach") is True
-    frame(off, off_net, CONFIG_CAM, 4.5, 0)
-    frame(on, on_net, CONFIG_CAM, 4.5, 0)
-    raw = np.asarray(array_from_image(published(off)[0][0]), dtype=float)
-    gated = np.asarray(array_from_image(published(on)[0][0]), dtype=float)
-    assert raw.shape == gated.shape == (HEIGHT, WIDTH)
-    beyond = raw > DEPTH_REACH_M
-    assert beyond.any() and (~beyond & np.isfinite(raw)).any(), "the frame has both halves"
-    assert np.all(np.isnan(gated[beyond])), "past the reach the camera says nothing"
-    assert np.array_equal(gated[~beyond], raw[~beyond], equal_nan=True), "and nothing else moves"
-    assert np.array_equal(
-        np.asarray(published(off)[1][0].ranges),
-        np.asarray(published(on)[1][0].ranges),
-        equal_nan=True,
-    ), "/depth_scan is built before the gate and is unchanged"
-    on._report()
-    line = on.logger.texts("info")[-1]
-    share = int(beyond.sum()) / (HEIGHT * WIDTH) * 100.0
-    assert f"published NaN past {DEPTH_REACH_M:.1f} m over {share:.1f}% of the pixels" in line
-    assert "depth_reach=on " in line and "depth_reach_m=4.0" in line
-    off._report()
-    assert "published NaN past" not in off.logger.texts("info")[-1]
+def test_the_published_depth_is_nan_past_the_reach(build: Build) -> None:
+    """A frame of a wall 4.5 m off: the published depth says nothing past DEPTH_REACH_M, keeps
+    what stands within it, and the report line says over how much of the picture."""
+    node, net = build(law=LAW, lidar_anchor=False)
+    frame(node, net, CONFIG_CAM, 4.5, 0)
+    gated = np.asarray(array_from_image(published(node)[0][0]), dtype=float)
+    assert gated.shape == (HEIGHT, WIDTH)
+    assert np.isnan(gated).any() and np.isfinite(gated).any(), "the frame has both halves"
+    assert float(np.nanmax(gated)) <= DEPTH_REACH_M, "past the reach the camera says nothing"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert f"published NaN past {DEPTH_REACH_M:.1f} m over" in line
+    assert "depth_reach_m=4.0" in line
 
 
 def test_the_reach_moves_live_and_a_nearer_one_says_less(build: Build) -> None:
     """The flag is a number a drive may move without a restart: at 1.5 m the same frame of a wall
     3.5 m off keeps only what stands within 1.5 m, and the report line says over how much of the
     picture."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
+    node, net = build(law=LAW, lidar_anchor=False)
     frame(node, net, CONFIG_CAM, 3.5, 0)
     wide = np.asarray(array_from_image(published(node)[0][0]), dtype=float)
     assert node.set_parameters([Param("depth_reach_m", 1.5)])[0].successful
@@ -1008,7 +912,7 @@ def test_the_scan_hz_cap_thins_the_topic_and_touches_nothing_else(build: Build) 
     second fan in the same millisecond never goes on the wire — while the frame behind it is
     processed exactly as before: the depth image is published every time, the law keeps pooling
     and the fan that DOES go out is the newest frame's, not a cached one."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
+    node, net = build(law=LAW, lidar_anchor=False)
     assert node._switches["scan_hz"] == SCAN_EVERY_FRAME, "this file's nodes publish every frame"
     assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
     frame(node, net, CONFIG_CAM, 1.0, 0)
@@ -1025,7 +929,7 @@ def test_the_scan_hz_cap_thins_the_topic_and_touches_nothing_else(build: Build) 
 def test_the_report_line_says_what_the_scan_cap_held_back(build: Build) -> None:
     """A fan rate below the frame rate must read as the cap and not as a pipeline that has
     stopped answering."""
-    node, net = build(law=LAW, fan_floor_gate="off", lidar_anchor=False)
+    node, net = build(law=LAW, lidar_anchor=False)
     assert node.set_parameters([Param("scan_hz", 1.0)])[0].successful
     frame(node, net, CONFIG_CAM, 1.0, 0)
     frame(node, net, CONFIG_CAM, 1.5, 1)
@@ -1274,7 +1178,7 @@ def test_the_matcher_s_holes_survive_the_whole_chain_and_the_fan(build: Build) -
     edge filter, the laws, the floor anchor and out — and /depth_scan must answer NaN for a
     bearing with no finite pixel at all (unknown: a costmap neither marks nor clears it) rather
     than clearing it to the horizon."""
-    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, fan_floor_gate="off")
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0)
     matcher = rig(node)
     truth = _scene(CONFIG_CAM, 2.0)
     holed = _disparity(truth)
@@ -1300,9 +1204,7 @@ def test_the_real_matcher_measures_a_rendered_room_through_the_whole_node(build:
     /camera/depth is the room's metres — no lidar, no law fitted, no network anywhere. This is
     the wiring test: the eyes reach OpenCV in the right order and the answer is not mirrored,
     which a disparity of the wrong sign would make look like an empty picture."""
-    node, _net = build(
-        depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False, fan_floor_gate="off"
-    )
+    node, _net = build(depth_source="stereo", stereo_reach_m=10.0, lidar_anchor=False)
     node.subs["/camera/right/camera_info"][1](_right_info(_stamp(0)))
     truth = np.where(np.isfinite(_scene(CONFIG_CAM, 2.0)), _scene(CONFIG_CAM, 2.0), 6.0)
     texture = scenes.noise_texture((HEIGHT, WIDTH), np.random.default_rng(11))

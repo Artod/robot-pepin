@@ -18,7 +18,6 @@ import source_facts as sf
 from pepin.camera_grid import GRID_RESOLUTION_M, GRID_SIZE_M
 from pepin.contact import CONTACT_MAX_RANGE
 from pepin.depth import SCALE_CEILING
-from pepin.depth_pipeline import LIDAR_SIGMA_M
 from pepin.flags import FlagSet, knob, knobs_of, load_knobs, load_table, read_knobs, with_knobs
 from pepin.global_descriptor import MAX_NULL_SHARE
 from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
@@ -47,7 +46,6 @@ NAMED = {
     ("depth_fusion", "band_half_z"): band_half_z_m(REPO / "config/fusion.json"),
     ("depth_stream", "scale_ceiling"): SCALE_CEILING,
     ("depth_stream", "lean_min_quality"): LEAN_QUALITY_FLOOR,
-    ("depth_stream", "lidar_sigma_m"): LIDAR_SIGMA_M,
     ("marks_audit", "radius_m"): RADIUS_M,
     ("marks_audit", "match_cells"): MATCH_CELLS,
     ("rtabmap_frame", "pnp_reproj_px"): PNP_REPROJ_PX,
