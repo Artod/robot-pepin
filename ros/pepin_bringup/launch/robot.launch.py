@@ -23,7 +23,7 @@ Arguments:
   ws://localhost:8765) and it sees the board's topics through the zenoh bridge, so a second
   bridge on a 4-core A53 only serialises every topic a second time and logs "rtabmap_msgs not
   found" 26 times a minute. ``foxglove:=true`` brings it back for watching the board alone.
-- ``tof`` (default false): the ToF bridge, once Nav2 has a layer that reads it.
+- ``tof`` (default false): the ToF bridge (its scan fans reach the laptop's costmaps).
 - ``base_bridge_cpp`` (default false): run the C++ base bridge (``pepin_base_cpp``, ~25 MB)
   instead of the Python one. Same node, parameters and wire protocol; the default flips
   once it has driven the cart.
@@ -122,7 +122,7 @@ def lidar_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "lidar.rot_verse": "CCW",
                     "lidar.units": "M",
                     "lidar.frame_id": "laser",
-                    "lidar.bins": 455,  # fixed size: slam_toolbox wants it
+                    "lidar.bins": 455,  # a fixed beam count, scan after scan
                     "lidar.range_min": 0.05,
                     "lidar.range_max": 12.0,
                     "lidar.enable_angle_crop": False,
@@ -285,7 +285,7 @@ def base_bridge(
     condition: Condition,
     parameters: list | None = None,  # type: ignore[type-arg]
 ) -> Node:
-    """The base bridge from ``package`` (the Python or the C++ build), niced above Nav2."""
+    """The base bridge from ``package`` (the Python or the C++ build), niced above the rest."""
     return Node(
         package=package,
         executable="base_bridge",
@@ -326,7 +326,7 @@ def generate_launch_description() -> LaunchDescription:
             )
         ),
     )
-    # Off by default for now: a rclpy process costs ~140 MB and Nav2 does not read Range yet.
+    # Off by default: a rclpy process costs ~140 MB on this board.
     # Respawned like every other node of this launch: on 2026-09-21 the bridge died once (a
     # logging call rclpy refuses) and stayed dead — a near-field sensor that silently never comes
     # back is worse than one that was never on.
@@ -349,7 +349,7 @@ def generate_launch_description() -> LaunchDescription:
         package="rf2o_laser_odometry",
         executable="rf2o_laser_odometry_node",
         output="screen",
-        # Above Nav2 with the filter it feeds: a scan matched late is a velocity measured late.
+        # Niced with the filter it feeds: a scan matched late is a velocity measured late.
         # TWO names, because this one process holds two rclcpp nodes: the matcher itself is a
         # Node too, which is also why no ``name=`` is passed here — that is a process-wide
         # ``__node:=`` remap and it would give both of them the same name. The names are the
