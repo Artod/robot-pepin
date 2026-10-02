@@ -877,17 +877,16 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
 
 
 @pytest.mark.slow
-def test_the_operators_window_is_checked_and_the_app_is_reconnected_last(tmp_path) -> None:  # type: ignore[no-untyped-def]
+def test_the_operators_window_is_checked_and_never_reopened(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """A restart kills the bridge and with it the desktop app's socket: the panels stay on screen,
-    empty, until a client re-attaches. So `ros/foxglove.sh check` is check 2.9 and `reopen` is the
-    last thing the restart does — and a bridge that does not answer turns the run red like any
-    other check."""
+    empty, until a client re-attaches. `ros/foxglove.sh check` is check 2.9; the restart never opens
+    a connection itself (the operator does) — and a bridge that does not answer turns the run red
+    like any other check."""
     code, out, sent = _restart(tmp_path, "both")
     assert code == 0, out
     assert "PASS 2.9" in out and "none failed" in out
     calls = [c for c in sent if c.startswith("foxglove.sh")]
-    assert calls == ["foxglove.sh check", "foxglove.sh reopen"]
-    assert out.index("== foxglove ==") < out.index("== verdict ==")
+    assert calls == ["foxglove.sh check"]
 
     code, out, sent = _restart(
         tmp_path,

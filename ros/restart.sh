@@ -37,9 +37,6 @@
 # every direction is not repaired: no restart moves furniture. With the laptop half down there is
 # no map to plan on, and 4.1 fails saying so.
 #
-# After a laptop restart the desktop Foxglove is told to reconnect (ros/foxglove.sh reopen): its
-# old websocket died with the container and its panels stay empty until a client re-attaches.
-#
 # The checks (one PASS/FAIL line each, numbered; WARN never fails the run) are listed under
 # "Restarting" in ros/README.md. Exit status: 1 if any check failed, 0 otherwise. Everything
 # waits with an explicit timeout, and a check that blows up never stops the ones after it —
@@ -294,7 +291,6 @@ describe() {
         laptop) say "the checks: laptop (2.x), flags (3.x)" ;;
         both) say "the checks: board (1.x), laptop (2.x), flags (3.x)" ;;
     esac
-    [ "$HALF" = board ] || say "tell Foxglove to reconnect (ros/foxglove.sh reopen)"
     say "the verdict: green only if no check failed"
 }
 
@@ -661,13 +657,6 @@ ensure_planner  # before the checks: they then read the stack as it will be driv
 [ "$HALF" = laptop ] || check_board
 [ "$HALF" = board ] || check_laptop
 check_flags   # last: one `ros2 param dump` per node, the slowest thing here
-# The restart took the bridge with it, and a Foxglove client bound to the dead socket shows empty
-# panels until it reconnects. So the app is told to, as the last act of the restart (it is only
-# told when it is running; PEPIN_FOXGLOVE_REOPEN=0 leaves it alone).
-if [ "$HALF" != board ] && [ "${PEPIN_FOXGLOVE_REOPEN:-1}" = 1 ]; then
-    step "foxglove"
-    "$HERE/foxglove.sh" reopen || true
-fi
 step "verdict"
 if [ "$FAILED" -eq 0 ]; then
     echo "green: $TOTAL checks, none failed"

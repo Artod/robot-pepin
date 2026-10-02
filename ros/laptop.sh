@@ -362,16 +362,7 @@ case "${1:-}" in
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
         echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
-        # The desktop app's socket died with the old container, and a Foxglove client never
-        # re-attaches by itself: its panels stay on screen, empty, bound to channel ids this new
-        # bridge does not have. So the app is told to reconnect (ros/foxglove.sh reopen waits for
-        # the port first, and does nothing but print the link when the app is not running).
-        # PEPIN_FOXGLOVE_REOPEN=0 leaves the app alone and prints the link instead.
-        if [ "${PEPIN_FOXGLOVE_REOPEN:-1}" = 1 ]; then
-            "$HERE/foxglove.sh" reopen || true
-        else
-            echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
-        fi
+        echo "foxglove: reconnect the app to $("$HERE/foxglove.sh" url) when you want it (nothing is opened for you)"
         exit 0 ;;
     *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
 esac

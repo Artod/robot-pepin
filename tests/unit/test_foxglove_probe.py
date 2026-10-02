@@ -166,8 +166,9 @@ def test_the_scripts_parse_and_say_what_they_do() -> None:
     restart = (REPO / "ros/restart.sh").read_text()
     assert "check_foxglove" in restart and "PEPIN_FOXGLOVE_PREFIX=2.9" in restart
     assert restart.index("check_foxglove") < restart.index('step "verdict"')
-    assert '"$HERE/foxglove.sh" reopen' in restart
+    # No script opens a Foxglove connection on its own: each one costs ~26 MB/s through Docker's
+    # proxy and six piled up (2026-10-02); the operator connects the app.
+    assert '"$HERE/foxglove.sh" reopen' not in restart
 
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert '"$HERE/foxglove.sh" reopen' in laptop
-    assert "PEPIN_FOXGLOVE_REOPEN" in laptop
+    assert '"$HERE/foxglove.sh" reopen' not in laptop
