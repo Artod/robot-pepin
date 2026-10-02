@@ -54,9 +54,9 @@ def _started_by_describe(launch: ast.Module) -> set[str]:
 
 def _rtabmap(table: str) -> dict[str, object]:
     """One of vslam.launch.py's RTAB-Map tables as a dict. Since 2026-09-19 there is ONE — the
-    ``RTABMAP`` table that serves every situation — beside ``LOCALIZE``, ``TF_ODOMETRY_VARIANCE``
-    and ``TRIPLE_SUBSCRIPTIONS`` (the way back to the three subscriptions), so a contract names
-    the one it means instead of the union of every dict literal in the file."""
+    ``RTABMAP`` table that serves every situation — beside ``LOCALIZE`` and
+    ``TF_ODOMETRY_VARIANCE``, so a contract names the one it means instead of the union of every
+    dict literal in the file."""
     return dict(ast.literal_eval(sf.assignments(sf.tree(VSLAM_LAUNCH))[table]))
 
 
@@ -864,7 +864,6 @@ def test_the_camera_is_a_depth_sensor_scaled_by_the_lidar() -> None:
     assert "pepin_bringup.depth_stream" in sf.strings(vslam)
     table = _rtabmap("RTABMAP")
     assert table["subscribe_depth"] is False and table["subscribe_sensor_data"] is True
-    assert _rtabmap("TRIPLE_SUBSCRIPTIONS")["subscribe_depth"] is True, "the way back, and only it"
     assert "('depth/image', '/camera/depth')" in sf.unparsed(vslam, ast.Tuple)
     assert table["Grid/Sensor"] == "0", (
         "the grid starts on the scan and follows the snapshots at run time (pepin.graphmode):"
@@ -1720,18 +1719,17 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     """Stage one of World R, held as a contract. A "mode" was which sensors are alive, which is
     data: so there is exactly ONE RTAB-Map table, it reads ONE topic
     (``subscribe_sensor_data``, mutually exclusive with every other subscription), and the
-    transform it publishes is RTAB-Map's own (publish_tf). The way back to the synchronised
-    triple is one launch argument, and it is the only other place a subscription is named."""
+    transform it publishes is RTAB-Map's own (publish_tf). The synchronised triple of before
+    2026-09-19 is in git history."""
     vslam = sf.tree(VSLAM_LAUNCH)
     tables = _launch_dicts(VSLAM_LAUNCH)
     assert [name for name, t in tables.items() if any(k.startswith("Grid/") for k in t)] == [
         "RTABMAP"
     ], "one grid, one table"
     assert [name for name, t in tables.items() if "map_frame_id" in t] == ["RTABMAP"], "one frame"
-    assert [name for name, t in tables.items() if "subscribe_sensor_data" in t] == [
-        "RTABMAP",
-        "TRIPLE_SUBSCRIPTIONS",
-    ], "the table and the way back, and nothing else"
+    assert [name for name, t in tables.items() if "subscribe_sensor_data" in t] == ["RTABMAP"], (
+        "one table, and nothing else"
+    )
     table = tables["RTABMAP"]
     assert table["subscribe_sensor_data"] is True
     for name in ("subscribe_depth", "subscribe_rgb", "subscribe_scan", "subscribe_odom"):
@@ -1763,8 +1761,11 @@ def test_rtabmap_is_told_one_table_reading_one_snapshot_topic_and_owns_no_transf
     assert passed <= arguments, (
         f"ros/laptop.sh passes what this launch no longer declares: {passed - arguments}"
     )
-    assert "'sensor_pack'" in arguments
     for gone in (
+        "'sensor_pack'",
+        "'neighbor_refining'",
+        "'database'",
+        "'camera'",
         "'graph_odom'",
         "'slam'",
         "'resume'",
@@ -1791,16 +1792,15 @@ def test_no_launch_argument_reaches_a_node_as_an_empty_parameter_override() -> N
     overrides = [ln.strip() for ln in launch.splitlines() if ":={" in ln]
     assert overrides, "the launch still hands the nodes parameter overrides"
     # Every one of them interpolates a word this file chooses, never a launch argument that may
-    # arrive empty. Two arguments default to empty and each is resolved BEFORE it is used:
-    # ``database`` to a path (``... or DATABASE``), which reaches no node as an override at all,
-    # and ``camera`` to the rig ``camera_rig`` answers with — a name from config/camera.json,
-    # which is never empty because that reader raises instead of shrugging.
+    # arrive empty: no argument defaults to empty, and the rig is the word ``camera_rig`` answers
+    # with — a name from config/camera.json, which is never empty because that reader raises
+    # instead of shrugging.
     empty_by_default = {
         ast.unparse(c.args[0]).strip("'")
         for c in sf.calls_to(sf.tree(VSLAM_LAUNCH), "DeclareLaunchArgument")
         if ast.unparse(sf.keywords(c).get("default_value", ast.Constant(None))) == "''"
     }
-    assert empty_by_default == {"database", "camera"}
+    assert empty_by_default == set()
     assert not [ln for ln in overrides if "database:=" in ln]
     assert "rig = camera_rig(" in launch, "the rig is resolved in the launch, once"
     assert 'f"camera:={rig}"' in launch, "and it is the resolved word that reaches the node"

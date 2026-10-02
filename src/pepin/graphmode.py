@@ -171,8 +171,8 @@ STRATEGY_NAMES = {
 # KNOWN COST of refined links, measured 2026-09-14 beside a known map: a refined link carries
 # ICP's own tiny covariance (median 0.75 cm / 0.135 deg), and RGBD/OptimizeMaxError then rejects a
 # closure that asks more than ~2 cm of any one of them — every closure ACROSS two sessions did.
-# Watch the log for "Rejecting all added loop closures"; the launch's neighbor_refining argument
-# and graph_memory are the ways out.
+# Watch the log for "Rejecting all added loop closures"; RTABMAP's RGBD/NeighborLinkRefining
+# (vslam.launch.py) and graph_memory are the ways out.
 #
 # Grid/Sensor DOES NOT TRAVEL WITH THEM — it did for half a day and that was wrong (2026-09-19,
 # first camera-only drive under World R). A change of Grid/Sensor makes RTAB-Map re-render its

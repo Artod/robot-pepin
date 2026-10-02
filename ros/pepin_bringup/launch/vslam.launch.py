@@ -58,17 +58,12 @@ owns heading). Nothing reaches the filter until that node's ``vo_publish`` flag 
 ``vo:=false`` neither process starts at all.
 
 Arguments: ``board`` (the robot's address for the camera stream), ``camera_only``
-(sensor_pack's ``sources``), ``sensor_pack`` (false: the way back to the synchronised
-triple — this node does not start and RTAB-Map subscribes to the picture, the depth and the scan
-itself, :data:`TRIPLE_SUBSCRIPTIONS`), ``neighbor_refining`` (whether ICP refines the neighbour
-links and stiffens them with its own covariance — false, or no closure the graph finds survives
-RGBD/OptimizeMaxError), ``vo``, ``database`` (empty: :data:`DATABASE`), ``static_camera_tf``
-(default false: the board's neck node publishes base_link -> camera_link live, ros/feature.sh
-neck on; true, ``ros/laptop.sh vslam --fixed-head``, the camera node broadcasts it from
-config/camera.json — never both, since two publishers of one edge fight), ``camera`` (which rig of
-config/camera.json the head is; empty, the default, means that file's own ``"active"`` or
-``PEPIN_CAMERA`` — :func:`camera_rig` resolves it once for the whole launch and the report line
-names it).
+(sensor_pack's ``sources``), ``vo``, ``vo_input``, ``static_camera_tf`` (default false: the
+board's neck node publishes base_link -> camera_link live, ros/feature.sh neck on; true,
+``ros/laptop.sh vslam --fixed-head``, the camera node broadcasts it from config/camera.json —
+never both, since two publishers of one edge fight). The database is always :data:`DATABASE`,
+and the camera rig is config/camera.json's own ``"active"`` or ``PEPIN_CAMERA``
+(:func:`camera_rig` resolves it once for the whole launch and the report line names it).
 """
 
 import json
@@ -124,7 +119,7 @@ RTABMAP = {
     # with subscribe_depth / subscribe_rgb / subscribe_stereo / subscribe_rgbd / subscribe_scan /
     # subscribe_scan_cloud, each of which rtabmap turns OFF with a warning when this is on
     # (rtabmap_sync/CommonDataSubscriber.cpp:453-509). They are said false here anyway: a reader of
-    # this table must not have to know the precedence, and TRIPLE_SUBSCRIPTIONS puts them back.
+    # this table must not have to know the precedence.
     "subscribe_sensor_data": True,
     "subscribe_depth": False,
     "subscribe_rgb": False,
@@ -220,10 +215,10 @@ RTABMAP = {
     # is not gated on the signature being good: Rtabmap.cpp:2631-2634, unlike the appearance-based
     # global closure at Rtabmap.cpp:1971, which a node with no picture cannot take part in).
     "Mem/BadSignaturesIgnored": "false",
-    # WHY THE NEIGHBOUR LINKS ARE NOT REFINED (2026-09-14, the second rejection disease; back with
-    # ``neighbor_refining:=true``). With the graph on the EKF's odometry RTAB-Map finds its
-    # closures — 5 or 6 an iteration, 8459 against 1, 1137, 1462, 1813, 2398, registered with 211
-    # visual inliers against a Vis/MinInliers of 20 — and threw every one of them away on
+    # WHY THE NEIGHBOUR LINKS ARE NOT REFINED (2026-09-14, the second rejection disease). With
+    # the graph on the EKF's odometry RTAB-Map finds its closures — 5 or 6 an iteration, 8459
+    # against 1, 1137, 1462, 1813, 2398, registered with 211 visual inliers against a
+    # Vis/MinInliers of 20 — and threw every one of them away on
     # RGBD/OptimizeMaxError, which compares each link's residual after optimisation with that
     # link's own standard deviation:
     #   "Rejecting all added loop closures (5, first is 8459 <-> 1) ... maximum graph error ratio
@@ -522,21 +517,6 @@ PUBLISH_MAP_TO_ODOM = {
 }
 TF_DELAY_S = float(PUBLISH_MAP_TO_ODOM["tf_delay"])  # for the report line, from the table itself
 
-# THE WAY BACK (``sensor_pack:=false``, CLAUDE.md rule 19): RTAB-Map on the three subscriptions it
-# read until 2026-09-19, so a regression in the snapshots is turned off in the field instead of
-# reverted. Nothing else in the table moves — the mode tables are gone, and this arrangement ran
-# for nine days with exactly the Grid/Sensor 2 grid above. What comes back with it is the bug the
-# snapshots exist to fix: the synchroniser needs the picture, the depth AND the scan for one
-# moment, so a camera that stops takes RTAB-Map down with it while the lidar keeps delivering.
-TRIPLE_SUBSCRIPTIONS = {
-    "subscribe_sensor_data": False,
-    "subscribe_depth": True,  # rgb + depth + camera_info from the camera nodes
-    "subscribe_scan": True,
-    "approx_sync": True,  # the board's stamps and ours share nothing
-    "sync_queue_size": 30,
-    "odom_sensor_sync": False,
-}
-
 # The database is the map. Beside a known map it is kept across restarts (a launch that wiped it
 # lost the map every time); a SLAM session starts empty by default and writes a file of its own, so
 # an evening of mapping can never delete the graph the known-map mode accumulated.
@@ -642,18 +622,9 @@ def rtabmap_memory(loaded: bool) -> str:
     return "localise" if loaded else "map"
 
 
-def rtabmap_parameters(
-    neighbor_refining: bool = False,
-    memory: str = "localise",
-    sensor_pack: bool = True,
-    descriptors: bool = False,
-) -> dict[str, object]:
+def rtabmap_parameters(memory: str = "localise", descriptors: bool = False) -> dict[str, object]:
     """Everything RTAB-Map is told, for every situation: :data:`RTABMAP` under the odometry links'
     covariance, and at most two overlays that are not modes.
-
-    ``neighbor_refining`` true puts ICP's own covariance back on the neighbour links, on which no
-    loop closure survives the error-ratio check (see :data:`RTABMAP`); ``sensor_pack`` false is the
-    way back to the three subscriptions (:data:`TRIPLE_SUBSCRIPTIONS`).
 
     ``memory`` is the session's mode (:func:`rtabmap_memory`): anything but ``map`` starts
     RTAB-Map localising (:data:`LOCALIZE`), because that is what a wake-up in a known room needs
@@ -666,24 +637,18 @@ def rtabmap_parameters(
     table: dict[str, object] = dict(RTABMAP)
     table.update(TF_ODOMETRY_VARIANCE)
     table.update(PUBLISH_MAP_TO_ODOM)
-    if neighbor_refining:
-        table["RGBD/NeighborLinkRefining"] = "true"
     if memory != "map":
         table.update(LOCALIZE)
-    if not sensor_pack:
-        table.update(TRIPLE_SUBSCRIPTIONS)
-    elif descriptors:
+    if descriptors:
         table.update(DESCRIPTOR_REHEARSAL)
     return table
 
 
-def place_descriptors(packing: bool) -> bool:
-    """Whether this start's snapshots carry place descriptors: sensor_pack runs (``packing``) and
-    its global_descriptor, read from this environment exactly as the node reads it, attaches them
-    on this image's RTAB-Map (pepin.global_descriptor.descriptors_attached)."""
-    return packing and descriptors_attached(
-        global_descriptor_setting(os.environ), rtabmap_keeps_descriptors()
-    )
+def place_descriptors() -> bool:
+    """Whether this start's snapshots carry place descriptors: sensor_pack's global_descriptor,
+    read from this environment exactly as the node reads it, attaches them on this image's
+    RTAB-Map (pepin.global_descriptor.descriptors_attached)."""
+    return descriptors_attached(global_descriptor_setting(os.environ), rtabmap_keeps_descriptors())
 
 
 def census_env(database: str) -> tuple[dict[str, str], str]:
@@ -705,11 +670,10 @@ def _flag(context: LaunchContext, name: str) -> bool:
     return LaunchConfiguration(name).perform(context).lower() == "true"
 
 
-def camera_rig(name: str) -> str:
-    """Which camera of ``config/camera.json`` this launch's nodes read: the ``camera`` argument
-    if it says anything, else ``PEPIN_CAMERA`` in the container's environment (ros/laptop.sh
-    passes it in), else the file's own ``"active"`` (pepin.camera.active_camera decides, here as
-    everywhere).
+def camera_rig(name: str = "") -> str:
+    """Which camera of ``config/camera.json`` this launch's nodes read: ``name`` if it says
+    anything, else ``PEPIN_CAMERA`` in the container's environment (ros/laptop.sh passes it in),
+    else the file's own ``"active"`` (pepin.camera.active_camera decides, here as everywhere).
 
     Resolved ONCE, here, and handed to the camera node, so the launch's report line names the
     rig that is actually being published and a typo stops the launch at start instead of leaving
@@ -730,12 +694,10 @@ def depth_source(rig: str) -> str:
 def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The nodes of this launch, once the arguments have values."""
     board = LaunchConfiguration("board")
-    rig = camera_rig(LaunchConfiguration("camera").perform(context).strip())
+    rig = camera_rig()
     camera_only = _flag(context, "camera_only")
     resume_volume = _flag(context, "resume_volume")
-    neighbor_refining = _flag(context, "neighbor_refining")
-    packing = _flag(context, "sensor_pack")
-    database = LaunchConfiguration("database").perform(context) or DATABASE
+    database = DATABASE
     # An empty room is a database that is not there yet, and that is the only thing the session
     # still decides (:func:`rtabmap_memory`): a file nobody has written cannot be localised in.
     loaded = Path(database).is_file()
@@ -768,8 +730,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # place is the cart's pose relative to a labelled RTAB-Map node, so it rides the node when a
     # loop closes. The book lives beside the database whose ids it uses.
     places = ExecuteProcess(
-        # No database override: the argument may be empty, and the node's own default is the
-        # same /maps/rtabmap.db the launch falls back to (as for depth_fusion).
+        # No database override: the node's own default is the same /maps/rtabmap.db.
         cmd=["python3", "-m", "pepin_bringup.places"],
         output="screen",
         **RESPAWN,
@@ -782,7 +743,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     audit = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.marks_audit"],
         output="screen",
-        condition=IfCondition(LaunchConfiguration("marks_audit")),
         **RESPAWN,
     )
     # THE DATABASE'S PLACE-DESCRIPTOR CENSUS, taken here on every start of this launch of the very
@@ -947,21 +907,12 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             f"sources:={'camera' if camera_only else 'camera,lidar'}",
         ],
         output="screen",
-        condition=IfCondition(LaunchConfiguration("sensor_pack")),
         **RESPAWN,
     )
     # RTAB-Map's own subscription is the snapshot topic, spelled out rather than left to the
     # namespace: the name is the contract between this launch and sensor_pack, and one literal on
     # both sides is what a test can pin.
     remappings = [("sensor_data", SENSOR_DATA_TOPIC)]
-    if not packing:
-        # The way back (TRIPLE_SUBSCRIPTIONS): RTAB-Map reads the three topics itself again.
-        remappings += [
-            ("rgb/image", "/camera/image"),
-            ("rgb/camera_info", "/camera/camera_info"),
-            ("depth/image", "/camera/depth"),
-            ("scan", "/scan"),
-        ]
     # THE GRID IS THE MAP (World R): rtabmap's own "map" publisher, remapped onto /map in every
     # session. It is transient-local, depth 1, reliable (rtabmap_util/MapsManager.cpp: latch, true
     # by default), so whoever subscribes late is handed the current grid at once; it crosses the
@@ -996,8 +947,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 "delete_db_on_start": False,
                 # The subscription's own depth. There is no synchroniser on the snapshot path
                 # (CommonDataSubscriberSensorData.cpp:104), so this is the DDS history of one
-                # plain subscription; approx_sync and sync_queue_size come back with
-                # TRIPLE_SUBSCRIPTIONS and are read only there.
+                # plain subscription.
                 "topic_queue_size": 10,
                 "wait_for_transform": 0.5,
                 # The grid is the DATABASE's nodes and nothing else (false since 2026-09-23; true
@@ -1019,9 +969,7 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 # grid painted through a stale map -> odom (217 x 247 m on 2026-09-22). The 169 node
                 # grids rebuild in seconds at start; True is the way back.
                 "use_saved_map": False,
-                **rtabmap_parameters(
-                    neighbor_refining, memory, packing, place_descriptors(packing)
-                ),
+                **rtabmap_parameters(memory, place_descriptors()),
             }
         ],
         remappings=remappings,
@@ -1039,9 +987,6 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         f"one {SENSOR_DATA_TOPIC} per moment from pepin_bringup.sensor_pack (sources"
         f" {'camera' if camera_only else 'camera,lidar'}; ros/flags.sh set sensor_pack sources"
         " lidar for the lidar alone)"
-        if packing
-        else "the old synchronised triple straight off /camera/image, /camera/depth and /scan"
-        " (sensor_pack:=false): RTAB-Map starves when the camera stops"
     )
     session = (
         f"{'the loaded' if loaded else 'a NEW, empty'} database {database}, memory {memory}"
@@ -1053,17 +998,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         " map -> odom"
     )
     report = (
-        f"vslam up: {session}; camera rig: {rig} (config/camera.json's active, or PEPIN_CAMERA,"
-        f" or camera:=); RTAB-Map reads {feed}; one parameter table for every situation,"
-        f" {frame_note};"
-        f" neighbor_refining={'on' if neighbor_refining else 'off'} (off: the neighbour links"
-        " carry the odometry's own covariance, so a loop closure has somewhere to go);" + vo_note
+        f"vslam up: {session}; camera rig: {rig} (config/camera.json's active, or PEPIN_CAMERA);"
+        f" RTAB-Map reads {feed}; one parameter table for every situation, {frame_note};" + vo_note
     )
     # What the snapshots carry for place recognition, and what the database carries.
     descriptors = (
         "the snapshots carry place descriptors (rehearsal"
         f" {DESCRIPTOR_REHEARSAL['Mem/RehearsalSimilarity']})"
-        if place_descriptors(packing)
+        if place_descriptors()
         else "the snapshots carry no place descriptor (sensor_pack's global_descriptor)"
     )
     report += f"; {descriptors}; {census_note}"
@@ -1093,15 +1035,6 @@ def generate_launch_description() -> LaunchDescription:
             # what the SLAM_CAMERA_ONLY table used to say by unsubscribing the scan. Live either
             # way: ros/flags.sh set sensor_pack sources camera / lidar / camera,lidar.
             DeclareLaunchArgument("camera_only", default_value="false"),
-            # The input. True: one snapshot topic from pepin_bringup.sensor_pack. False: the
-            # arrangement of before 2026-09-19 — no packer, and RTAB-Map back on the synchronised
-            # triple (TRIPLE_SUBSCRIPTIONS), where a camera that stops starves the mapper.
-            DeclareLaunchArgument("sensor_pack", default_value="true"),
-            # ICP refines the neighbour links and its own covariance comes with them
-            # (RGBD/NeighborLinkRefining, see RTABMAP). Default false since 2026-09-14: refined
-            # links are stiffer than the odometry they replace and RGBD/OptimizeMaxError then
-            # rejects every closure the graph finds.
-            DeclareLaunchArgument("neighbor_refining", default_value="false"),
             # The volume resumes the database's own snapshot (pepin.worldmap.world_path_for names
             # it after the database, since it is painted in that graph's frame). False is
             # ros/laptop.sh vslam --fresh: a room built from nothing whatever is on disk.
@@ -1114,20 +1047,7 @@ def generate_launch_description() -> LaunchDescription:
             # What that odometry reads: depth (rgbd_odometry, at the depth's rate) or stereo
             # (stereo_odometry on the two eyes, at the camera's). See the node's comment above.
             DeclareLaunchArgument("vo_input", default_value="stereo"),
-            # The live phantom count (pepin_bringup.marks_audit): who painted each lethal cell of
-            # the local costmap, once a second. On by default — it only reads, it costs this
-            # laptop a few milliseconds a second, and the drive it is needed on is the drive
-            # nobody knew would go wrong. marks_audit:=false leaves the node out entirely; the
-            # node's own `marks_audit` flag switches it off live without a restart.
-            DeclareLaunchArgument("marks_audit", default_value="true"),
-            DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
             DeclareLaunchArgument("static_camera_tf", default_value="false"),
-            # WHICH CAMERA the head is, by the name of a block in config/camera.json ("overview",
-            # the mono webcam; "stereo", the side-by-side module). Empty — the default — leaves it
-            # to PEPIN_CAMERA in the container (ros/laptop.sh forwards it) and then to that file's
-            # own "active", so switching the rig is one word in one file and no launch argument at
-            # all. A name no block answers to stops this launch at start.
-            DeclareLaunchArgument("camera", default_value=""),
             OpaqueFunction(function=_describe),
         ]
     )

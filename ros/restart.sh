@@ -579,11 +579,11 @@ print(("BAD " if bad else "OK ") + "; ".join(
     # 2.11 is INFORMATIONAL and never fails a restart: who painted the lethal cells of the local
     # costmap right now (pepin_bringup.marks_audit). There is no healthy value — a room with a
     # table in it SHOULD show camera-only cells — so this prints the split and leaves the verdict
-    # to the person in front of the robot. Absent when the node is out (marks_audit:=false) or
-    # when no grid has crossed yet, and that absence is worth seeing too.
+    # to the person in front of the robot. Absent when the node is down or when no grid has
+    # crossed yet, and that absence is worth seeing too.
     line="$(last '\]: marks audit: ')"
     if [ -z "$line" ]; then
-        warn 2.11 "marks audit: no report line (marks_audit:=false, or no local costmap has reached this laptop yet)"
+        warn 2.11 "marks audit: no report line (the node is down, or no local costmap has reached this laptop yet)"
     else
         warn 2.11 "marks audit: ${line#*: marks audit: }"
     fi

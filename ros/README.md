@@ -513,7 +513,7 @@ middle (it says so, with both sizes, in every report line).
   `board/pepin-camera.service`; `systemctl restart pepin-camera` after an edit.
 * **The laptop** — which block of `config/camera.json` every node reads: the top-level `"active"`.
   `PEPIN_CAMERA=overview ros/laptop.sh vslam` overrides it for one container (the variable is
-  forwarded in), and `camera:=<name>` overrides both for one launch. The order lives in one
+  forwarded in). The order lives in one
   function, `pepin.camera.active_camera`; a name no block answers to stops the launch at start.
 
 **What stereo publishes.** The laptop decodes the side-by-side frame once, cuts it into the two
@@ -864,7 +864,7 @@ is looking at the room. Out go `/marks_audit` (a `std_msgs/String` of JSON: `let
 `/marks_audit/phantoms` (a `sensor_msgs/PointCloud2`, red, in the grid's frame) for the 3D panel
 beside the costmap, plus a report line every 10 s: `marks audit: lethal 214 (lidar 97, camera-only
 106, unexplained 11), nearest camera-only 0.42 m`. It runs in the SLAM half by default
-(`marks_audit:=false` leaves it out; the `marks_audit` flag switches it off live) and costs the
+(the `marks_audit` flag switches it off live) and costs the
 laptop a few milliseconds of numpy a second — brute-force distances over a 60x60 grid, no scipy in
 the image — and the board nothing at all.
 
@@ -1375,7 +1375,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 
 - **`sensor_pack`** — bool, default on
   - *What:* snapshots are published; off, the node subscribes and counts and RTAB-Map is fed nothing at all
-  - *Default:* on — on by design: with subscribe_sensor_data there is no other input, so off is a mapper that stops adding nodes, and at Rtabmap/DetectionRate 1.0 that shows in RTAB-Map's own report within 1 s and in this node's within the 30 s of a window. It is the switch for isolating this node during a live test, not a behaviour A/B: the A/B against the old synchronised triple is the launch argument sensor_pack:=false, which also puts subscribe_depth and subscribe_scan back on RTAB-Map
+  - *Default:* on — on by design: with subscribe_sensor_data there is no other input, so off is a mapper that stops adding nodes, and at Rtabmap/DetectionRate 1.0 that shows in RTAB-Map's own report within 1 s and in this node's within the 30 s of a window. It is the switch for isolating this node during a live test, not a behaviour A/B
   - *On when:* always, whenever the map is meant to grow or to localise
   - *Off when:* to prove that a node RTAB-Map reports is this node's and not a leftover subscription, and to take the camera's bytes off DDS while something else is measured
 - **`sources`** — list of: camera, lidar, default camera,lidar

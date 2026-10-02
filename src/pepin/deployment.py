@@ -136,7 +136,7 @@ LAPTOP_SLAM_NODES = (
     "/rtabmap/rtabmap",
     "/rtabmap_frame",
     "/places",  # the room's vocabulary, resolved against the graph
-    "/marks_audit",  # who painted the costmap's lethal cells, live (marks_audit:=false: absent)
+    "/marks_audit",  # who painted the costmap's lethal cells, live
     "/foxglove_bridge",
     "/rgbd_odometry",  # the camera's odometry (vo:=true, the default)
     "/stereo_odometry",  # the same role from the two eyes (vo_input:=stereo; one of the two runs)

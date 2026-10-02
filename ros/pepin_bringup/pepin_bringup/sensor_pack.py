@@ -138,9 +138,7 @@ counts of full, lidar-only and camera-only snapshots, and the place descriptors 
 why); the flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set sensor_pack
 <flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``, ``tf_retry``,
 ``global_descriptor``, ``place_descriptor`` and ``place_timeout_s``. The arrangement of before this
-node — RTAB-Map on its own synchronised triple — is one launch argument away: ``ros/laptop.sh
-vslam`` passing ``sensor_pack:=false`` does not start this node and puts ``subscribe_depth`` and
-``subscribe_scan`` back on RTAB-Map.
+node — RTAB-Map on its own synchronised triple — is in git history (before 2026-10-02).
 """
 
 from __future__ import annotations
@@ -226,9 +224,7 @@ FLAGS = FlagSet(
         why="on by design: with subscribe_sensor_data there is no other input, so off is a mapper"
         " that stops adding nodes, and at Rtabmap/DetectionRate 1.0 that shows in RTAB-Map's own"
         " report within 1 s and in this node's within the 30 s of a window. It is the switch for"
-        " isolating this node during a live test, not a behaviour A/B: the A/B against the old"
-        " synchronised triple is the launch argument sensor_pack:=false, which also puts"
-        " subscribe_depth and subscribe_scan back on RTAB-Map",
+        " isolating this node during a live test, not a behaviour A/B",
         on_when="always, whenever the map is meant to grow or to localise",
         off_when="to prove that a node RTAB-Map reports is this node's and not a leftover"
         " subscription, and to take the camera's bytes off DDS while something else is measured",
