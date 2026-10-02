@@ -998,7 +998,7 @@ def test_a_whisker_hit_reaches_the_marks_the_costmaps_read(tmp_path: Path) -> No
     report counts the hits."""
     node = whisker_node(tmp_path)
     speak = fans_to_speak(float(node._switches["min_weight"]))
-    assert speak == 8
+    assert speak == 4
     for i in range(speak - 1):
         node._on_tof_work(tof_msg(0.4, TOF_S + 0.07 * i))
     assert math.isnan(ahead_in_marks(node)), "seven fans are not yet agreement"
@@ -1055,4 +1055,4 @@ def test_the_report_line_counts_the_whiskers_and_states_the_clearing_arithmetic(
     node._on_tof_work(tof_msg(math.nan, TOF_S + 0.14))
     line = node._tof_line(node._tally.take())
     assert "2 fans" in line and "1 hits, 1 misses, 1 silent" in line
-    assert "carved by 29 misses (1.9 s at 15 Hz)" in line
+    assert "carved by 15 misses (1.0 s at 15 Hz)" in line

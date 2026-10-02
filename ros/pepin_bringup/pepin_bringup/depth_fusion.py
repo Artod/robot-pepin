@@ -347,13 +347,14 @@ FLAGS = FlagSet(
         " stereo rig, so only the ToF saw it, only the local costmap's reflex layers knew, and the"
         " global planner kept routing through it (2026-10-01). The volume is the one memory of"
         " what is where and both costmaps already read it, so the whiskers write it too. At"
-        " weight 0.5 a hit speaks in the marks after 8 fans (the node's min_weight 4.0, 0.5 s at"
-        " 15 Hz)"
-        " and a saturated one (max_weight 20) is carved by 29 misses, 1.9 s (pepin.tof_rays,"
-        " tests/unit/test_tof_rays.py). Unmeasured on the cart as of this writing",
+        " weight 1.0 a hit speaks in the marks after 4 fans (the node's min_weight 4.0, 0.27 s at"
+        " 15 Hz) and a saturated one (max_weight 20) is carved by 15 misses, 1.0 s"
+        " (pepin.tof_rays). Checked live 2026-10-01 with the camera's frames off: the front"
+        " whisker at 0.75 m put its marks at 0.75-0.78 m inside its cone, none under the cart; a"
+        " hand at 0.15 m marks (the ToF's own near limit, 0.08 m)",
         on_when="on every drive: the planner must know what the whiskers saw",
         off_when="a sensor reading its own surroundings (a cable hanging in its cone) paints"
-        " phantoms into the volume that the planner cannot pass — the local costmap's layers"
+        " phantoms into the volume that the planner cannot pass; the local costmap's own layers"
         " still get the fans either way",
     ),
     Flag(
