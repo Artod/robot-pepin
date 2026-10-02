@@ -72,7 +72,7 @@ POSITION_MODE = 0  # Operating_Mode of a servo that obeys Goal_Position; 1 would
 NECK_PROFILE_SPEED = 400  # ticks/s, ~35 deg/s: the gentle profile speed scripts/jog.py moves at
 NECK_TOLERANCE_TICKS = 4  # ~0.35 deg: arrived, as far as a 12-bit encoder is concerned
 NECK_MOVE_TIMEOUT_S = 3.0  # a move that has not arrived by then is answered as not reached
-NECK_JOG_FAST_DEG_S = 40.0  # a held key: the whole tilt range in about two seconds
+NECK_JOG_FAST_DEG_S = 52.0  # a held key: the tilt range in under two seconds (40 -> 52, 2026-10-01)
 NECK_JOG_SLOW_DEG_S = 8.0  # a held key with Shift: aiming
 NECK_JOG_DEADMAN_S = DEADMAN_S  # no jog message for this long: the head stops, torque off
 NECK_JOG_LAG_TICKS = 120  # ~10 deg: a goal this far ahead of the head waits for it
@@ -550,6 +550,8 @@ class BaseServerCore:
         self._still_travel = [0.0, 0.0]  # signed wheel travel since that moment, per wheel
         self._acc = [0.0, 0.0]  # wheel travel since the last snapshot
         self._primed = False
+        self._temperature: dict[str, int] | None = None
+        self._temperature_at = float("-inf")  # the first state line reads it
 
     @property
     def moving(self) -> bool:
@@ -685,6 +687,17 @@ class BaseServerCore:
             "bus_p95_ms": p95,
         }
         self._acc = [0.0, 0.0]
+        # The wheel servos' temperature, read at most every 5 s and only while the bus answers:
+        # the speed cap was raised to what the servos can do (2026-09-30), and the servo's own
+        # cut-out is 70 C. None until the first read.
+        if self.bus_ok and now - self._temperature_at >= 5.0:
+            self._temperature_at = now
+            try:
+                raw = self._bus.sync_read("Present_Temperature", ["left", "right"], normalize=False)
+                self._temperature = {name: int(v) for name, v in raw.items()}
+            except Exception as exc:  # a missed read never touches the wheels
+                logger.debug("temperature read failed: %r", exc)
+        message["temp_c"] = self._temperature
         return message
 
     def release(self) -> None:

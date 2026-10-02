@@ -35,7 +35,7 @@ import sys
 import termios
 import time
 import tty
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection
 from dataclasses import dataclass, field
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Protocol
@@ -49,8 +49,8 @@ if TYPE_CHECKING:
 
 FAST_LINEAR_M_S = 0.45  # config/base.json max_speed_m_s: the base clips anything above
 FAST_ANGULAR_RAD_S = 1.0  # config/base.json max_yaw_rate_rad_s
-SLOW_LINEAR_M_S = 0.04  # Shift: aiming and parking
-SLOW_ANGULAR_RAD_S = 0.15
+SLOW_LINEAR_M_S = 0.064  # Shift: aiming and parking
+SLOW_ANGULAR_RAD_S = 0.24
 
 HELP = "arrows drive, Shift+arrows slow, space stops, Ctrl-C stops and exits"
 
@@ -322,19 +322,21 @@ def status_lines(
     return lines
 
 
-def _held_keys(pressed: Sequence[bool], pg: Any) -> HeldKeys:
-    """pygame's key state as :class:`HeldKeys` (``pg`` is the pygame module, for its codes)."""
+def _held_keys(held: Collection[int], pg: Any) -> HeldKeys:
+    """The physical keys held, by SDL scancode, as :class:`HeldKeys` (``pg`` is the pygame
+    module, for its KSCAN_* constants). Scancodes name the key's PLACE on the keyboard, so W/A/S/D
+    work under any layout — a Russian layout puts a different character on the same key."""
     return HeldKeys(
-        up=bool(pressed[pg.K_UP]),
-        down=bool(pressed[pg.K_DOWN]),
-        left=bool(pressed[pg.K_LEFT]),
-        right=bool(pressed[pg.K_RIGHT]),
-        tilt_up=bool(pressed[pg.K_w]),
-        tilt_down=bool(pressed[pg.K_s]),
-        pan_left=bool(pressed[pg.K_a]),
-        pan_right=bool(pressed[pg.K_d]),
-        shift=bool(pressed[pg.K_LSHIFT] or pressed[pg.K_RSHIFT]),
-        space=bool(pressed[pg.K_SPACE]),
+        up=pg.KSCAN_UP in held,
+        down=pg.KSCAN_DOWN in held,
+        left=pg.KSCAN_LEFT in held,
+        right=pg.KSCAN_RIGHT in held,
+        tilt_up=pg.KSCAN_W in held,
+        tilt_down=pg.KSCAN_S in held,
+        pan_left=pg.KSCAN_A in held,
+        pan_right=pg.KSCAN_D in held,
+        shift=pg.KSCAN_LSHIFT in held or pg.KSCAN_RSHIFT in held,
+        space=pg.KSCAN_SPACE in held,
     )
 
 
@@ -355,13 +357,21 @@ def run_game(host: str, port: int = BASE_PORT, *, hz: float = GAME_HZ) -> None:
         font = pygame.font.Font(None, 26)
         clock = pygame.time.Clock()
         running = True
+        held: set[int] = set()  # scancodes down right now, from the key events
         while running:
             for event in pygame.event.get():
-                quit_key = event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
-                if event.type == pygame.QUIT or quit_key:
+                if event.type == pygame.KEYDOWN:
+                    held.add(int(event.scancode))
+                    if event.scancode == pygame.KSCAN_ESCAPE:
+                        running = False
+                elif event.type == pygame.KEYUP:
+                    held.discard(int(event.scancode))
+                elif event.type == pygame.QUIT:
                     running = False
             focused = bool(pygame.key.get_focused())
-            keys = _held_keys(pygame.key.get_pressed(), pygame) if focused else HeldKeys()
+            if not focused:
+                held.clear()  # a release while unfocused never reaches this window
+            keys = _held_keys(held, pygame) if focused else HeldKeys()
             command = game_command(keys)
             stream.tick(command)
             client.ask_neck()

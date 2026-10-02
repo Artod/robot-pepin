@@ -485,6 +485,7 @@ class DepthLaw:
     # a hit leaves behind the surface can outlive the sensor's own power to carve it. Off, the
     # camera's law: carve one truncation short of the reach, write a hit's whole halo.
     carve_to_reach: bool = False
+    near_m: float = NEAR_M  # nearer, a pixel writes nothing: the camera 0.20, a ToF 0.08
 
     def carve_to_m(self, truncation_m: float) -> float:
         """How far down a depthless ray free space may be written, metres: the source's reach
@@ -782,7 +783,7 @@ class Tsdf:
         # metre, far above float32's 1e-7, and the frame is millions of voxels
         cam = centres @ inv.rotation.T.astype(np.float32) + inv.translation.astype(np.float32)
         z = cam[:, 2]
-        front = z > NEAR_M
+        front = z > depth_law.near_m
         with np.errstate(divide="ignore", invalid="ignore"):
             u = np.where(front, intr.fx * cam[:, 0] / z + intr.cx, -1.0)
             v = np.where(front, intr.fy * cam[:, 1] / z + intr.cy, -1.0)
@@ -795,15 +796,15 @@ class Tsdf:
         d = np.full(centres.shape[0], np.nan, dtype=np.float32)
         d[seen] = d_all[vi[seen], ui[seen]]
         finite = np.isfinite(d)
-        measured = finite & (d > NEAR_M) & (d <= s.range_max_m)
+        measured = finite & (d > depth_law.near_m) & (d <= s.range_max_m)
         sdf = d - z  # positive: the voxel is between the camera and the surface
         touch = measured & (sdf > -s.truncation_m) & (z <= depth_law.write_limit_m)
         # A pixel with NO depth: its ray is free space as far as the source answers for it, at a
         # weight that says so (:class:`DepthLaw`). The two masks are disjoint by construction —
         # a voxel reads one pixel, and that pixel either measured something or did not.
-        carving = carve_to > NEAR_M
+        carving = carve_to > depth_law.near_m
         carve = (
-            seen & ~finite & (z > NEAR_M) & (z <= carve_to)
+            seen & ~finite & (z > depth_law.near_m) & (z <= carve_to)
             if carving
             else np.zeros(centres.shape[0], dtype=bool)
         )

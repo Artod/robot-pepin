@@ -19,14 +19,18 @@ surface comes nearer, so every fan weighs :data:`TOF_WEIGHT`, hit or miss, inste
 With the volume's ``max_weight`` W = 20 (config/fusion.json) and the fans at ~15 Hz:
 
 * a hit speaks in the costmap's marks once its voxel carries the marks' ``min_weight``: 4.0 on
-  the fusion node (config/knobs.json), 4.0 / 0.5 = 8 fans, 0.5 s (:func:`fans_to_speak`);
-* a voxel is saturated after W / 0.5 = 40 fans, 2.7 s — a pillow stared at for ten seconds is
+  the fusion node (config/knobs.json), 4.0 / 1.0 = 4 fans, 0.27 s (:func:`fans_to_speak`);
+* a voxel is saturated after W / 1.0 = 20 fans, 1.3 s — a pillow stared at for two seconds is
   one;
 * a saturated hit is carved by misses: each one moves the field 1 - (1 - t) * W / (W + w) toward
   free, so the deepest voxel a return writes (t -> -1, one truncation behind the surface) turns
   positive — and the zero crossing the marks read vanishes — after ln(2) / ln((W + w) / W) =
-  ln 2 / ln 1.025 = 28.1, i.e. 29 fans, 1.9 s (:func:`fans_to_clear`). The surface voxel itself
-  (t = 0) leaves "occupied" after ln(4/3) / ln 1.025 = 11.7 -> 12 fans, 0.8 s.
+  ln 2 / ln 1.05 = 14.2, i.e. 15 fans, 1.0 s (:func:`fans_to_clear`). The surface voxel itself
+  (t = 0) leaves "occupied" after ln(4/3) / ln 1.05 = 5.9 -> 6 fans, 0.4 s.
+
+A ToF measures from 4-8 cm, so its law's near limit is :data:`NEAR_M` 0.08 m, not the camera's
+0.20 m (:data:`pepin.depth.NEAR_M`, where a stereo rig stops matching): a hand 15 cm in front of
+the bumper is a mark.
 
 The camera's own rays through the spot carve it the same way at their own weight (a measured
 pixel at 2 m weighs 1.0: 15 frames; at 1 m, 4.0: 4 frames).
@@ -41,7 +45,8 @@ import numpy as np
 from pepin.depth import Intrinsics
 from pepin.tsdf import Array, DepthLaw, RigidPose
 
-TOF_WEIGHT = 0.5  # per fan, hit or miss (see the module docstring for the arithmetic)
+TOF_WEIGHT = 1.0  # per fan, hit or miss (see the module docstring for the arithmetic)
+NEAR_M = 0.08  # the VL53L1X's own minimum range, metres: nearer returns write nothing
 TOF_RATE_HZ = 15.0  # what the board's ToF server delivers (pepin_bringup.tof_bridge)
 SILENT_M = -1.0  # a pixel that says nothing: finite and below the lens, so nothing is written
 # optical (x right, y down, z forward) axes in the sensor's frame (x forward, y left, z up):
@@ -55,6 +60,7 @@ def tof_law(reach_m: float) -> DepthLaw:
     for 1.2 s before calling it a miss, pepin.tof_horizon), and a hit that writes nothing
     beyond that reach."""
     return DepthLaw(
+        near_m=NEAR_M,
         no_depth_free=True,
         no_depth_weight=1.0,
         reach_m=reach_m,
@@ -84,7 +90,7 @@ def fan_image(ranges: Array, angle_min: float, angle_increment: float) -> tuple[
     """One fan as an n x n depth image (metres, optical frame) and the pinhole that sees it,
     n being the fan's beam count: pixel (row, col) carries the beam nearest its own bearing
     inside the cone's disc and :data:`SILENT_M` outside it; +inf becomes NaN (a depthless pixel,
-    the carving kind), NaN stays silent. A return nearer than :data:`pepin.depth.NEAR_M` is
+    the carving kind), NaN stays silent. A return nearer than :data:`NEAR_M` is
     inside the integrator's dead zone and writes nothing either."""
     r = np.asarray(ranges, dtype=float)
     n = int(r.size)

@@ -81,10 +81,10 @@ def test_a_fan_is_a_disc_of_one_range_seen_through_a_pinhole() -> None:
     assert silent[int(centre), int(centre)] == SILENT_M, "NaN says nothing"
 
 
-def test_a_hit_marks_the_sensor_s_height_once_four_fans_agree() -> None:
+def test_a_hit_marks_the_sensor_s_height_once_two_fans_agree() -> None:
     world = WorldMap(SPEC)
     speak = fans_to_speak(LAW.min_weight)
-    assert speak == 4
+    assert speak == 2  # the test law's min_weight 2.0 at TOF_WEIGHT 1.0
     for _ in range(speak - 1):
         integrate(world, HIT_M)
     assert math.isnan(ahead(world)), "three fans are not yet agreement (min_weight 2.0)"
@@ -108,7 +108,7 @@ def test_a_hit_weighs_the_same_near_and_far() -> None:
 
 def test_misses_carve_a_saturated_hit_within_two_seconds() -> None:
     """40 fans saturate the pillow (20 / 0.5); then the pillow is gone and the fan says +inf.
-    The marks stop reading it within fans_to_clear misses — 29 at W 20, w 0.5 — which is under
+    The marks stop reading it within fans_to_clear misses — 15 at W 20, w 1.0 — which is under
     the 30 fans two seconds hold at 15 Hz."""
     world = WorldMap(SPEC)
     for _ in range(40):
@@ -116,7 +116,7 @@ def test_misses_carve_a_saturated_hit_within_two_seconds() -> None:
     ix, iy, iz = spot(world)
     assert world.volume.weight[ix, iy, iz] == SPEC.max_weight, "saturated"
     promised = fans_to_clear(SPEC.max_weight)
-    assert promised == 29 and promised <= 30
+    assert promised == 15 and promised <= 30
     misses = 0
     while not math.isnan(ahead(world)):
         integrate(world, math.inf)
@@ -182,3 +182,20 @@ def test_a_hit_near_the_reach_leaves_no_halo_the_misses_cannot_carve() -> None:
         integrate(world, math.inf)
         misses += 1
         assert misses <= fans_to_clear(SPEC.max_weight)
+
+
+def test_a_hand_fifteen_centimetres_ahead_is_a_mark() -> None:
+    """The ToF's law cuts at its own near limit (0.08 m), not the camera's 0.20: a return at
+    0.15 m writes a surface; at 0.06 m, inside the sensor's dead zone, nothing."""
+    from pepin.tof_rays import NEAR_M, fan_image, optical_pose, tof_law
+    from pepin.tsdf import RigidPose, Tsdf
+
+    assert tof_law(0.96).near_m == NEAR_M == 0.08
+    pose = optical_pose(RigidPose(np.eye(3), np.array([0.027, 0.0, 0.27])))
+    for range_m, expected in ((0.15, True), (0.06, False)):
+        volume = Tsdf(SPEC)
+        depth, intr = fan_image(np.array([range_m] * 3), -0.235, 0.235)
+        for _ in range(4):
+            volume.integrate(depth.astype(np.float32), None, intr, pose, tof_law(0.96))
+        points, _ = volume.surface(min_weight=2.0)
+        assert (len(points) > 0) == expected, range_m

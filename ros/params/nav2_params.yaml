@@ -118,7 +118,7 @@ controller_server:
       # running at 3-5 Hz took longer than the allowance, and Nav2 answered with a 6 s reverse
       # into the cables. A turn is progress; standing still is not.
       plugin: "nav2_controller::PoseProgressChecker"
-      required_movement_radius: 0.15  # 0.5 aborted every goal closer than half a metre
+      required_movement_radius: 0.10  # 0.5 aborted every goal closer than half a metre
       required_movement_angle: 0.5  # ...or 29 degrees of turning, which a pivot delivers in a second
       movement_time_allowance: 6.0  # stuck is obvious after six seconds; ten wasted a recovery slot
     # Goal checker parameters
@@ -146,10 +146,10 @@ controller_server:
       # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
       # cap while the wheels had never been asked for more. The smoother below carries the same
       # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.30
+      desired_linear_vel: 0.45
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
-      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
+      max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
@@ -205,10 +205,10 @@ controller_server:
       # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
       # cap while the wheels had never been asked for more. The smoother below carries the same
       # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.30
+      desired_linear_vel: 0.45
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
-      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
+      max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
@@ -280,10 +280,10 @@ controller_server:
       # The base's own cap (config/base.json); every tape until 2026-09-09 sat at the old 0.20
       # cap while the wheels had never been asked for more. The smoother below carries the same
       # number; the contract test keeps the two equal and under the base's.
-      desired_linear_vel: 0.30
+      desired_linear_vel: 0.45
       lookahead_dist: 0.55
       min_lookahead_dist: 0.40
-      max_lookahead_dist: 0.80  # lookahead_time x desired_linear_vel, else the scaling is clipped
+      max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
       rotate_to_heading_angular_vel: 0.5
@@ -350,21 +350,21 @@ controller_server:
       # sharp turns are sampled at all; a lower temperature so the average follows the best
       # samples instead of all of them.
       plugin: "nav2_mppi_controller::MPPIController"
-      time_steps: 20
+      time_steps: 30
       model_dt: 0.1  # = 1 / controller_frequency: the model steps as the controller does
-      batch_size: 750
+      batch_size: 2000
       iteration_count: 1
       vx_std: 0.3
       vy_std: 0.2
       wz_std: 0.6
       # The base's caps, the velocity smoother's: forward 0.30, reverse half of it, 0.6 rad/s.
-      vx_max: 0.30
-      vx_min: -0.15
+      vx_max: 0.45
+      vx_min: -0.45  # reverse at the cap too; the rear is unsensed (no ToF, lidar masked)
       vy_max: 0.0
-      wz_max: 0.6
-      ax_max: 0.5  # the smoother's max_accel / max_decel, so a sampled sequence is one it passes
+      wz_max: 1.0
+      ax_max: 0.8
       ax_min: -1.5
-      az_max: 1.0
+      az_max: 2.0
       temperature: 0.2
       gamma: 0.015
       motion_model: "DiffDrive"
@@ -373,7 +373,7 @@ controller_server:
       retry_attempt_limit: 1
       reset_period: 1.0
       # map -> odom crosses the WiFi (the RPP pair's 1.0 s, same reason: drive 0437).
-      transform_tolerance: 1.0
+      transform_tolerance: 2.0
       prune_distance: 1.2  # the plan it scores is cut this far ahead: 4 s at the cap
       max_robot_pose_search_dist: 10.0
       # A Reeds-Shepp plan reverses out of a dock through a cusp: prune the plan at the cusp so
@@ -418,7 +418,7 @@ controller_server:
         # 3.81 (the Nav2 default) weighed our wide inflation into a crawl; 2.0 still kept the
         # cart shy of furniture it may pass at contact (Artem, 2026-09-23: "nothing here is glass").
         # Collision itself is untouched: collision_cost still drops any sample that touches.
-        cost_weight: 1.0
+        cost_weight: 0.7
         critical_cost: 300.0
         # The true rectangle, not a disc: base_link sits at the front edge, so a disc of the
         # circumscribed radius (0.407 m) would be a cart twice its size.
@@ -431,7 +431,7 @@ controller_server:
       PathAlignCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 14.0
+        cost_weight: 14.0  # holds the plan's shape: at 6 MPPI cut its arcs into the printer
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
         threshold_to_consider: 0.5
@@ -459,8 +459,8 @@ local_costmap:
       # 3 Hz, not 5: raising it did shorten the delay before a ToF return became cost, but it
       # pushed the board's load average from 6.5 to 9.6 and the controller loop is already the
       # thing that starves. The free half of that latency came from mark_threshold instead.
-      update_frequency: 5.0  # the stop reflex's slowest link: a mark waits for this tick
-      publish_frequency: 1.0
+      update_frequency: 10.0  # the lidar's rate: Nav2 runs on the Mac
+      publish_frequency: 10.0
       transform_tolerance: 0.3  # a sensor stamped 'now' waits at most this long for odom->base_link
       # Activation waits for odom -> base_link (the board's own EKF) instead of failing after
       # Nav2's default 60 s: the lifecycle manager never retries a failed bring-up (the
@@ -842,6 +842,7 @@ local_costmap:
       # `ros2 param set /local_costmap/local_costmap camera_grid_layer.enabled false` (board-side).
       camera_grid_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        footprint_clearing_enabled: true  # a cell under the cart is free: the cart stands there
         enabled: False
         map_topic: /camera_grid
         map_subscribe_transient_local: True
@@ -898,8 +899,8 @@ local_costmap:
 global_costmap:
   global_costmap:
     ros__parameters:
-      update_frequency: 2.0  # a person walking in: 0.5 Hz left the plan through them for 2 s
-      publish_frequency: 1.0
+      update_frequency: 5.0
+      publish_frequency: 2.0
       transform_tolerance: 1.0
       # How long activation waits for base_link -> map, i.e. for the laptop's RTAB-Map. Nav2's
       # default 60 s FAILS the activation and its lifecycle manager never retries: a board whose
@@ -1053,6 +1054,7 @@ global_costmap:
       # StaticLayer without touching its cells) cannot wipe what the volume still holds.
       camera_grid_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        footprint_clearing_enabled: true  # a cell under the cart is free: the cart stands there
         enabled: False
         map_topic: /camera_grid_map
         map_subscribe_transient_local: True
@@ -1141,6 +1143,7 @@ global_costmap:
         input_sensor_type: ALL
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
+        footprint_clearing_enabled: true  # a cell under the cart is free: the cart stands there
         # IT READS /map: RTAB-Map's grid, the map RTAB-Map's own map -> odom is measured against,
         # relayed onto that name by pepin_bringup.rtabmap_frame. Nobody else publishes /map (the
         # board's map_server is off by default, ros/nav.launch.py's map_server argument).
@@ -1452,11 +1455,11 @@ velocity_smoother:
     stamp_smoothed_velocity_with_smoothing_time: False
     scale_velocities: False
     feedback: "OPEN_LOOP"
-    max_velocity: [0.30, 0.0, 0.6]
+    max_velocity: [0.45, 0.0, 1.0]
     # Reverse at half speed: the rear is unsensed, but 0.075 made every BackUp and every Hybrid
     # cusp a crawl the progress checker timed out on (review 2026-09-09).
-    min_velocity: [-0.15, 0.0, -0.6]
-    max_accel: [0.5, 0.0, 1.0]  # full speed in 0.6 s; braking twice as hard as that
+    min_velocity: [-0.45, 0.0, -1.0]
+    max_accel: [0.8, 0.0, 2.0]  # full speed in 0.6 s; braking twice as hard as that
     max_decel: [-1.5, 0.0, -2.0]  # 0.3 m/s to 0 in 0.2 s and 3 cm
     odom_topic: "odom"
     odom_duration: 0.1

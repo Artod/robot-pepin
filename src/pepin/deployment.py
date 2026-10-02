@@ -78,7 +78,7 @@ LASER_ODOM_TWIST_VARIANCE: dict[str, float] = {"vx": 0.0009, "vy": 0.01, "vyaw":
 # The base's speed caps (config/base.json, the base server's own clamp). The C++ bridge on the
 # board clamps /cmd_vel too, at 0.25 m/s by default: for half a day every tape sat at 0.20 and
 # the bridge would have cut anything faster — one cap, the base's, passed to it at launch.
-BASE_MAX_LINEAR_M_S = 0.30
+BASE_MAX_LINEAR_M_S = 0.45  # raised 0.30 -> 0.45 on 2026-09-30, with config/base.json
 BASE_MAX_ANGULAR_RAD_S = 1.0
 
 

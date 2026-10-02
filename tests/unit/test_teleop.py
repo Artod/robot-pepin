@@ -48,8 +48,8 @@ def test_each_arrow_latches_its_twist(key: str, twist: Twist) -> None:
 def test_speeds_are_the_max_and_the_parking_min() -> None:
     assert apply_key(DriveState(), UP).twist == Twist(0.45, 0.0)
     assert apply_key(DriveState(), LEFT).twist == Twist(0.0, 1.0)
-    assert apply_key(DriveState(), S_UP).twist == Twist(0.04, 0.0)
-    assert apply_key(DriveState(), S_LEFT).twist == Twist(0.0, 0.15)
+    assert apply_key(DriveState(), S_UP).twist == Twist(0.064, 0.0)
+    assert apply_key(DriveState(), S_LEFT).twist == Twist(0.0, 0.24)
 
 
 def test_a_key_replaces_the_latched_command_and_repeats_do_not_accumulate() -> None:
@@ -327,3 +327,20 @@ def test_the_window_loop_runs_headless_and_stops_everything_on_exit(
     driving = [cmd for cmd in seen_commands if cmd not in ("neck", "release")]
     assert driving == ["stop", "neck_jog"] * 3, "the exit stopped the wheels and the head, thrice"
     assert not core.moving and bus.torque == [], "nothing moved, the head was never energised"
+
+
+def test_the_keys_are_read_by_place_not_by_letter() -> None:
+    """A Russian layout puts 'ц' on the W key: the window reads SDL scancodes (the key's place),
+    so W/A/S/D and the arrows work under any layout. ``pg`` stands in for pygame's constants."""
+    from types import SimpleNamespace
+
+    from pepin.teleop import _held_keys
+
+    pg = SimpleNamespace(
+        KSCAN_UP=82, KSCAN_DOWN=81, KSCAN_LEFT=80, KSCAN_RIGHT=79, KSCAN_W=26, KSCAN_S=22,
+        KSCAN_A=4, KSCAN_D=7, KSCAN_LSHIFT=225, KSCAN_RSHIFT=229, KSCAN_SPACE=44,
+    )  # fmt: skip
+    held = _held_keys({26, 4, 229}, pg)  # W, A and the right Shift, whatever their letters
+    assert held.tilt_up and held.pan_left and held.shift
+    assert not (held.up or held.down or held.tilt_down or held.pan_right or held.space)
+    assert _held_keys(set(), pg) == HeldKeys()
