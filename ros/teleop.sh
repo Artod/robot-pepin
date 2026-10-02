@@ -7,7 +7,7 @@
 #                            and on Ctrl-C stops the wheels, closes both recordings and copies
 #                            everything to the laptop (ros/maps/rec/). The map itself is built
 #                            OFFLINE afterwards — no other command for you to run.
-# Keys: arrows drive at full speed (0.45 m/s, 1.0 rad/s), Shift+arrows slow (0.04 m/s, 0.15 rad/s);
+# Keys: arrows drive at full speed (0.45 m/s, 1.0 rad/s), Shift+arrows slow (0.064 m/s, 0.24 rad/s);
 # a key latches until the next one; space STOPS; Ctrl-C stops the wheels and ends the run. The
 # keyboard node runs on the LAPTOP in pepin-vslam (a new process on the board stalls its link for
 # 3-4 s). PEPIN_TELEOP=twist_keyboard: the old teleop_twist_keyboard on the board (i/,/j/l, k stops).
