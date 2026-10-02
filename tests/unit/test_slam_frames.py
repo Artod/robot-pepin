@@ -159,19 +159,6 @@ def test_a_state_older_than_its_own_refresh_leaves_the_strategy_where_it_is() ->
     assert "STALE" in node.logger.texts("info")[-1]
 
 
-def test_the_switch_is_a_flag_and_off_it_only_reports() -> None:
-    node = rtabmap_frame.RtabmapFrame()
-    tuner, _ = _tuner_ready(node)
-    node._switches.set("registration_follows_snapshots", False)
-    for seconds in (10.0, 10.6, 12.0):
-        node.clock.seconds = seconds
-        _snapshots(node, ("camera",), "camera-only")
-        node.timers[0][1]()
-    assert not _strategies(tuner)
-    node._report()
-    assert "rtabmap registration ICP on the scans" in node.logger.texts("info")[-1]
-
-
 def test_a_parameter_path_that_is_not_up_is_counted_and_retried() -> None:
     """A switch the path could not take must not be forgotten: it is counted once, the report says
     the pipeline is still the old one, and the moment the path is up the switch goes out — a
@@ -409,39 +396,15 @@ def test_an_unknown_or_unanswered_mode_keeps_orb_and_xfeat_follows_the_answer(
     assert _sent(tuner)[-1]["RGBD/LoopClosureReextractFeatures"] == "true"
 
 
-def test_a_set_lands_whole_and_one_parameter_at_a_time_is_a_flag_away(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Any
-) -> None:
+def test_a_set_lands_whole(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
     """rtabmap_slam applies each /parameter_events notification as it arrives: a set_parameters
     request of five names landed as five parseParameters, Reg/Strategy first, re-extraction
-    fourth (scratch/xfeat_critic/atomic_set.sh). Atomically it lands as one. The old request is a
-    flag away, and there re-extraction is ordered so it is never on beside another set's values."""
+    fourth (scratch/xfeat_critic/atomic_set.sh). Atomically it lands as one, and that is the only
+    request this node makes."""
     _adapters(monkeypatch, tmp_path, present=True)
     node = rtabmap_frame.RtabmapFrame()
     _localising(node)
     atomic, _ = _tuner_ready(node)
-    one_by_one = node.service_clients[f"{rtabmap_frame.RTABMAP_NODE}/set_parameters"]
-    one_by_one.ready = True
     _go_visual(node)
-    assert _sent(atomic)[-1]["Vis/FeatureType"] == "15" and not one_by_one.calls
-    node._switches.set("atomic_parameter_sets", False)
-    for seconds in (11.0, 11.6):  # the lidar alone: ICP with ORB's set
-        node.clock.seconds = seconds
-        _snapshots(node, ("lidar",), "lidar-only")
-        node.timers[0][1]()
-    (back,) = one_by_one.calls
-    names = [p.name for p in back.parameters]
-    assert names[0] == "RGBD/LoopClosureReextractFeatures", "off first, before Reg/Strategy 1"
-    assert [p.value.string_value for p in back.parameters][:1] == ["false"]
-    assert "Reg/Strategy" in names[1:]
-    node._report()
-    assert "atomic_parameter_sets" in node.logger.texts("info")[-1]
-
-
-def test_re_extraction_is_ordered_off_first_and_on_last() -> None:
-    order = rtabmap_frame.reextract_ordered
-    on = order({"Reg/Strategy": "0", "RGBD/LoopClosureReextractFeatures": "true", "Vis/X": "1"})
-    assert list(on) == ["Reg/Strategy", "Vis/X", "RGBD/LoopClosureReextractFeatures"]
-    off = order({"Reg/Strategy": "1", "Vis/X": "8", "RGBD/LoopClosureReextractFeatures": "false"})
-    assert list(off) == ["RGBD/LoopClosureReextractFeatures", "Reg/Strategy", "Vis/X"]
-    assert order({"RGBD/LinearUpdate": "0"}) == {"RGBD/LinearUpdate": "0"}
+    assert _sent(atomic)[-1]["Vis/FeatureType"] == "15"
+    assert f"{rtabmap_frame.RTABMAP_NODE}/set_parameters" not in node.service_clients

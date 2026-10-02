@@ -153,8 +153,8 @@ RTABMAP = {
     # therefore still carries its words and its depth, is still recognised by appearance, and
     # still gets its neighbour link from the odometry — but contributes no metric closure. That is
     # the honest limit of one table, and the live check for it is named in the report.
-    #   This is the START value, safe for any composition: pepin_bringup.rtabmap_frame
-    # (registration_follows_snapshots) then switches it live by what the snapshots carry — 2 for
+    #   This is the START value, safe for any composition: pepin_bringup.rtabmap_frame then
+    # switches it live by what the snapshots carry — 2 for
     # camera+lidar, 1 for lidar only, 0 for camera only (pepin.graphmode.registration_verdict).
     "Reg/Strategy": "1",
     "Reg/Force3DoF": "true",

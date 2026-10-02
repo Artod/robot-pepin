@@ -54,7 +54,7 @@ rtabmap_slam ALSO applies every change it hears on its own ``/parameter_events``
 (CoreWrapper.cpp:907-970, the same launch-table filter): a ``set_parameters`` request of five names
 lands as five notifications and five ``parseParameters``, a ``set_parameters_atomically`` request
 as one (measured 2026-09-24, scratch/xfeat_critic/atomic_set.sh) — so a set that must land whole
-goes atomically (``atomic_parameter_sets`` in pepin_bringup.rtabmap_frame).
+goes atomically (pepin_bringup.rtabmap_frame sends nothing else).
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
 database; in LOCALISATION mode nothing is written and the graph only recognises what it already

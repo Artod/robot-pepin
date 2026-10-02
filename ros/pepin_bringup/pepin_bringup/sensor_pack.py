@@ -136,7 +136,7 @@ words (mapping's rehearsal compares nodes too).
 THE REPORT LINE says what went into the last snapshot, every source's measured cadence and the
 counts of full, lidar-only and camera-only snapshots, and the place descriptors (described, null and
 why); the flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set sensor_pack
-<flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``, ``tf_retry``,
+<flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``,
 ``global_descriptor``, ``place_descriptor`` and ``place_timeout_s``. The arrangement of before this
 node — RTAB-Map on its own synchronised triple — is in git history (before 2026-10-02).
 """
@@ -242,28 +242,6 @@ FLAGS = FlagSet(
         " camera-only test — the map is then only as true as the network's scale",
         off_when="never empty: with no source there is nothing to pack and RTAB-Map starves",
         choices=(CAMERA, LIDAR),
-    ),
-    Flag(
-        "tf_retry",
-        True,
-        description="a member whose transform TF cannot answer for yet does not cost the snapshot:"
-        " the moment is put back and offered again on the next arrival, until it has left that"
-        " member's own pairing patience (pair_periods of its measured period). Off, the member is"
-        " dropped at once and the snapshot goes out without it — the behaviour of before"
-        " 2026-09-19",
-        why="about 5 % of camera frames answered 'base_link<-camera_optical: Lookup would require"
-        " extrapolation into the future' and became lidar-only snapshots (measured live"
-        " 2026-09-18): the neck's dynamic edge is published on the board and arrives over the"
-        " bridge tens of milliseconds behind the frame it belongs to. The old answer was a 0.2 s"
-        " BLOCKING wait inside the subscription callback, which both stalled the executor on every"
-        " late frame — no picture, no depth and no revolution read while it waited — and still"
-        " dropped those 5 %. A retry costs nothing and waits longer: arrivals come eighteen a"
-        " second, so the patience is spent on the bridge rather than on this thread. The bound is"
-        " the pairing bound itself and not a new number (176 ms for the camera at 8.5 Hz)",
-        on_when="always: a camera frame is the only thing in a snapshot that can recognise a place,"
-        " and it is the one whose transform is late",
-        off_when="to measure what the retry is worth — the report line's 'tf waits' against its"
-        " 'frames TF could not place' is the same comparison with it on",
     ),
     Flag(
         "global_descriptor",
@@ -629,8 +607,12 @@ class SensorPack(Node):
         revolution — eighteen a second between them — asks for it again, by which time the neck's
         edge has landed. Past the patience the snapshot goes out with whatever could be placed,
         which is the behaviour this replaces, and the give-up is counted under its own name.
+
+        Measured live 2026-09-18: about 5 % of camera frames answered 'Lookup would require
+        extrapolation into the future' — the neck's edge arrives over the bridge tens of
+        milliseconds behind its frame — and became lidar-only snapshots before this retry.
         """
-        if not packed.unplaced or not self._switches.on("tf_retry"):
+        if not packed.unplaced:
             return False
         for name in packed.unplaced:
             patience = self._packer.cadence(name).patience_s
