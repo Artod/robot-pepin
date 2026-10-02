@@ -15,23 +15,30 @@ segfault in one test takes the whole suite with it. The corner detector is not e
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from pepin.calibration import Board, View, view_shape
-from pepin.stereo import Rectifier
+from pepin.stereo import Rectifier, StereoCalibration
 from pepin.stereo_calibration import (
     BASELINE_NOMINAL_M,
     EPIPOLAR_MAX_PX,
     TARGET_VIEWS,
+    DepthCheck,
     EyeFit,
     PairCollector,
     StereoFit,
+    board_depth_check,
     calibrate_pairs,
     choose_model,
     corner_spacings,
     match_order,
     moved_enough,
+    rectified_rows,
+    refit_rotation,
+    rotation_deg,
     row_offset,
     stereo_fit,
     subpix_half_window,
@@ -166,6 +173,8 @@ def test_a_good_fit_is_written_and_every_bad_one_says_what_to_reshoot() -> None:
     assert "disagree about where the board" in str(_fit(rms_px=2.0).refusal())
     assert "--square" in str(_fit(baseline_m=0.24).refusal())
     assert "along a row" in str(_fit(epipolar_px=EPIPOLAR_MAX_PX + 0.3).refusal())
+    turned = replace(_fit(), depth=DepthCheck((0.94, 0.95, 0.93), (3.7, 3.6, 3.9)))
+    assert "--refit-rotation" in str(turned.refusal())
 
 
 def test_the_file_it_writes_carries_the_evidence_and_the_baseline() -> None:
@@ -199,16 +208,20 @@ def test_the_simplest_model_that_is_good_enough_wins() -> None:
 
 
 # ---- the whole solve, against a head whose answer is known --------------------------------------
-def _true_pose() -> tuple[np.ndarray, np.ndarray]:
-    """The bar: the right eye's rotation and translation in the left eye's frame."""
+def _true_pose(turn_deg: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """The bar: the right eye's rotation and translation in the left eye's frame, the right eye
+    turned ``turn_deg`` more in yaw (about its own vertical) when asked."""
     import cv2
 
-    rotation = np.asarray(cv2.Rodrigues(TRUE_RVEC)[0], dtype=np.float64)
+    turn = np.asarray(cv2.Rodrigues(np.array([0.0, np.radians(turn_deg), 0.0]))[0])
+    rotation = turn @ np.asarray(cv2.Rodrigues(TRUE_RVEC)[0], dtype=np.float64)
     translation = np.array([-TRUE_BASELINE_M, 0.0008, 0.0012])
     return rotation, translation
 
 
-def _synthetic_pairs(noise_px: float = 0.05) -> list[tuple[np.ndarray, np.ndarray]]:
+def _synthetic_pairs(
+    noise_px: float = 0.05, turn_deg: float = 0.0
+) -> list[tuple[np.ndarray, np.ndarray]]:
     """Thirty views of the board through both synthetic eyes: spread over the frame, tilted both
     ways, at three distances — what a careful person collects in five minutes.
 
@@ -220,7 +233,7 @@ def _synthetic_pairs(noise_px: float = 0.05) -> list[tuple[np.ndarray, np.ndarra
     import cv2
 
     rng = np.random.default_rng(20260920)
-    rotation, translation = _true_pose()
+    rotation, translation = _true_pose(turn_deg)
     grid = BOARD.object_points()
     centre = grid.mean(axis=0)
     pairs: list[tuple[np.ndarray, np.ndarray]] = []
@@ -303,6 +316,7 @@ def test_the_solve_gives_back_the_head_it_was_shown() -> None:
     assert fit.epipolar_px < 0.2
     assert fit.rms_px < 0.5
     assert fit.acceptable, fit.refusal()
+    assert fit.depth is not None and fit.depth.ratio == pytest.approx(1.0, abs=0.002)
     # the noiseless board is explained by plumb_bob, which is the model it was drawn with
     assert "plumb_bob" in left_evidence and "rational" in right_evidence
     assert fit.left.model == "plumb_bob"
@@ -370,3 +384,37 @@ def test_a_pair_whose_right_eye_is_numbered_backwards_is_caught_before_the_solve
     wrong = stereo_fit(broken, BOARD, SIZE, left_fit, right_fit, refine=False)
     assert abs(wrong.baseline_m - TRUE_BASELINE_M) > 0.05
     assert wrong.refusal() is not None
+
+
+def _true_head() -> StereoCalibration:
+    """The synthetic head as config/stereo_calibration.json would carry it."""
+    rotation, translation = _true_pose()
+    return StereoFit(
+        left=EyeFit("plumb_bob", TRUE_K_LEFT, TRUE_D_LEFT, 0.1, 0.1, 30),
+        right=EyeFit("plumb_bob", TRUE_K_RIGHT, TRUE_D_RIGHT, 0.1, 0.1, 30),
+        rotation=rotation,
+        translation_m=translation,
+        rms_px=0.1,
+        epipolar_px=0.1,
+        size=SIZE,
+        views=30,
+    ).to_calibration(BOARD)
+
+
+def test_a_right_eye_turned_since_the_file_is_seen_by_the_board_depth_and_refitted() -> None:
+    """The remount of 2026-09-30 in miniature: the right eye turned 0.4 deg in yaw after the file
+    was written. The rows stay level, the board's depth does not, and the refit puts the rotation
+    back with the lenses and the baseline untouched."""
+    head = _true_head()
+    pairs = _synthetic_pairs(turn_deg=0.4)
+    assert rectified_rows(head, pairs) < EPIPOLAR_MAX_PX  # the rows check lets it through
+    before = board_depth_check(head, pairs, BOARD)
+    assert abs(before.ratio - 1.0) > 0.05 and abs(before.offset_px) > 3.0
+    assert before.refusal() is not None
+    refitted, _yaw_deg = refit_rotation(head, pairs, BOARD)
+    after = board_depth_check(refitted, pairs, BOARD)
+    assert after.refusal() is None and after.ratio == pytest.approx(1.0, abs=0.002)
+    error = np.asarray(refitted.rotation) @ _true_pose(turn_deg=0.4)[0].T
+    assert np.linalg.norm(rotation_deg(error)) < 0.02
+    assert refitted.k_right == head.k_right and refitted.d_left == head.d_left
+    assert refitted.translation_m == head.translation_m

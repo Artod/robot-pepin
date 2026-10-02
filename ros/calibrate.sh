@@ -14,10 +14,11 @@
 #   ros/calibrate.sh stereo           calibrate the stereo head: both eyes of every frame
 #   ros/calibrate.sh stereo --no-window          the same over ssh
 #   ros/calibrate.sh stereo --images DIR         re-fit a saved session under data/stereo_calib/
+#   ros/calibrate.sh stereo --images DIR --refit-rotation   only the eyes' rotation, after a remount
 #   ros/calibrate.sh stereo --square 0.0245      the square really on the paper, metres
-# It refuses to write a result whose stereo RMS, baseline or rectified epipolar error is bad,
-# and says what to reshoot; the accepted pairs are saved first, so a bad run is re-fitted and
-# not reshot.
+# It refuses to write a result whose stereo RMS, baseline, rectified epipolar error or board depth
+# (stereo against PnP) is bad, and says what to reshoot; the accepted pairs are saved first, so a
+# bad run is re-fitted and not reshot.
 # No keys to press: hold the board where the hint says, keep it still, and the shot is taken on
 # its own countdown. About 25 well-spread views, then the fit is printed and written to
 # config/camera.json — but only when the RMS reprojection error is under 0.5 px and the views

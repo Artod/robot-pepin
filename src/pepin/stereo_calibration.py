@@ -24,6 +24,9 @@ So this module is the mono module's shape with a second eye bolted on:
   answers a :class:`StereoFit` that knows whether it may be written: the baseline it found, the
   RMS of the stereo solve, and the epipolar error left after rectification — the one number that
   says whether a block matcher will find anything along a row.
+* :func:`board_depth_check` holds the board's depth by stereo against its depth by PnP in the
+  left eye alone: the one check that sees the eyes' yaw, which shifts every disparity alike and
+  leaves the rows level. :func:`refit_rotation` refits only that rotation after a remount.
 
 OpenCV is imported inside the functions that need it, and no function here touches a camera, a
 window or a file: the runner (``ros/tools/stereo_calibrate.py``, wrapped by
@@ -36,7 +39,7 @@ detector plus ``cornerSubPix`` is what runs, and it is what the unit tests may s
 from __future__ import annotations
 
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Any
 
@@ -78,6 +81,10 @@ EYE_RMS_MAX_PX = 0.6
 STEREO_RMS_MAX_PX = 1.0
 EPIPOLAR_MAX_PX = 0.7
 EPIPOLAR_GOOD_PX = 0.5
+# The board's stereo depth over its PnP depth, median of the pairs. The remount of 2026-09-30
+# turned the eyes 0.4 deg apart in yaw: this read 0.94 while the rows stayed level.
+DEPTH_RATIO_MIN = 0.99
+DEPTH_RATIO_MAX = 1.01
 # The module's nominal bar is 63 mm. A baseline far from it means the square size was wrong —
 # the board's square is the only length in the whole calibration, and every metre scales with it.
 BASELINE_MIN_M = 0.03
@@ -522,6 +529,53 @@ def choose_model(evidence: dict[str, EyeFit], order: Sequence[str] = MODELS) -> 
 
 # ---- the bar between the eyes ------------------------------------------------------------------
 @dataclass(frozen=True)
+class DepthCheck:
+    """The board's depth by stereo against its depth by PnP in the left eye alone, per pair.
+
+    Rows and reprojection are blind to the eyes' yaw: an eye turned about the vertical shifts
+    every disparity by the same pixels and leaves the rows level. Only a length sees it — the
+    board's own size, through the left eye's PnP.
+    """
+
+    ratios: tuple[float, ...]  # per pair: median over the corners of stereo depth / PnP depth
+    offsets_px: tuple[float, ...]  # per pair: median of measured minus PnP-implied disparity
+
+    @property
+    def ratio(self) -> float:
+        """The median ratio over the pairs; ``nan`` with none."""
+        return float(np.median(self.ratios)) if self.ratios else float("nan")
+
+    @property
+    def offset_px(self) -> float:
+        """The median disparity offset over the pairs, pixels; ``nan`` with none."""
+        return float(np.median(self.offsets_px)) if self.offsets_px else float("nan")
+
+    def refusal(self) -> str | None:
+        """Why a calibration that reads this must not be written, or ``None`` when it may be."""
+        if DEPTH_RATIO_MIN <= self.ratio <= DEPTH_RATIO_MAX:
+            return None
+        return (
+            f"the board's stereo depth reads {self.ratio:.4f} of its PnP depth"
+            f" ({self.offset_px:+.2f} px of disparity), outside"
+            f" {DEPTH_RATIO_MIN:.2f}..{DEPTH_RATIO_MAX:.2f}: the rotation between the eyes is off"
+            " — refit it from the saved pairs with --images DIR --refit-rotation"
+        )
+
+    def report(self) -> str:
+        """Every pair's ratio and disparity offset, then the medians."""
+        lines = [
+            f"  pair {i:2d}  depth ratio {ratio:.4f}  disparity offset {offset:+.2f} px"
+            for i, (ratio, offset) in enumerate(zip(self.ratios, self.offsets_px, strict=True), 1)
+        ]
+        lines.append(
+            f"board depth by stereo / by PnP: median {self.ratio:.4f} over {len(self.ratios)}"
+            f" pairs (accepted {DEPTH_RATIO_MIN:.2f}..{DEPTH_RATIO_MAX:.2f}), disparity offset"
+            f" {self.offset_px:+.2f} px"
+        )
+        return "\n".join(lines)
+
+
+@dataclass(frozen=True)
 class StereoFit:
     """What the stereo solve measured, and whether it may be written.
 
@@ -539,6 +593,7 @@ class StereoFit:
     size: tuple[int, int]
     views: int
     fisheye_px: float = float("nan")
+    depth: DepthCheck | None = None
 
     @property
     def baseline_m(self) -> float:
@@ -547,10 +602,7 @@ class StereoFit:
 
     def tilt_deg(self) -> float:
         """How far the two eyes are turned from parallel, degrees — the bar's twist."""
-        import cv2
-
-        rvec = np.asarray(cv2.Rodrigues(self.rotation)[0], dtype=np.float64).reshape(3)
-        return float(np.degrees(np.linalg.norm(rvec)))
+        return float(np.linalg.norm(rotation_deg(self.rotation)))
 
     def refusal(self) -> str | None:
         """Why this fit must not be written, or ``None`` when it may be — with what to reshoot."""
@@ -580,7 +632,7 @@ class StereoFit:
                 " one would match the wrong row — reshoot with more tilted views and views in"
                 " the corners of the frame"
             )
-        return None
+        return self.depth.refusal() if self.depth is not None else None
 
     @property
     def acceptable(self) -> bool:
@@ -611,6 +663,8 @@ class StereoFit:
                 f"a fisheye model would fit the left eye to {self.fisheye_px:.3f} px"
                 f" against the pinhole's {self.left.rms_px:.3f}"
             )
+        if self.depth is not None:
+            lines.append(self.depth.report())
         return "\n".join(lines)
 
     def to_calibration(
@@ -642,44 +696,133 @@ class StereoFit:
         )
 
 
-def rectified_rows(
-    k_left: Array,
-    d_left: Array,
-    k_right: Array,
-    d_right: Array,
-    rotation: Array,
-    translation: Array,
-    size: tuple[int, int],
-    pairs: Sequence[tuple[Corners, Corners]],
-) -> float:
-    """Mean |y_left - y_right| of the board's corners after rectification, pixels.
+def rotation_deg(rotation: Any) -> Array:
+    """A rotation matrix as its rotation vector, degrees: about x (pitch), y (yaw), z (roll)."""
+    import cv2
 
-    The corners are carried through the same ``stereoRectify`` transform
-    :class:`pepin.stereo.Rectifier` builds its remap tables from (``CALIB_ZERO_DISPARITY``,
-    ``alpha`` 0), as points rather than as images: remapping and re-detecting would add the
-    detector's own noise to the number being measured.
+    rvec = cv2.Rodrigues(np.asarray(rotation, dtype=np.float64))[0]
+    return np.asarray(np.degrees(np.asarray(rvec, dtype=np.float64).reshape(3)), dtype=np.float64)
+
+
+def _lenses(calibration: StereoCalibration) -> tuple[Array, Array, Array, Array]:
+    """The file's two lenses as OpenCV wants them: K and distortion, left then right."""
+    return (
+        np.asarray(calibration.k_left, dtype=np.float64),
+        np.asarray(calibration.d_left, dtype=np.float64),
+        np.asarray(calibration.k_right, dtype=np.float64),
+        np.asarray(calibration.d_right, dtype=np.float64),
+    )
+
+
+def _rectify_corners(
+    calibration: StereoCalibration, pairs: Sequence[tuple[Corners, Corners]]
+) -> tuple[Array, float, list[tuple[Array, Array]]]:
+    """Each pair's corners carried through the rectification :class:`pepin.stereo.Rectifier`
+    builds from this file (``CALIB_ZERO_DISPARITY``, ``alpha`` 0) as ``(n, 2)`` points, with the
+    left eye's turn into the rectified frame (R1) and fx times the baseline (pixel-metres).
+
+    Points rather than images: remapping and re-detecting would add the detector's own noise to
+    the number being measured.
     """
     import cv2
 
-    if not pairs:
-        return float("nan")
+    k_l, d_l, k_r, d_r = _lenses(calibration)
     r1, r2, p1, p2, _q, _roi1, _roi2 = cv2.stereoRectify(
-        k_left, d_left, k_right, d_right, size,
-        rotation, translation.reshape(3, 1),
+        k_l, d_l, k_r, d_r, (calibration.width, calibration.height),
+        np.asarray(calibration.rotation, dtype=np.float64),
+        np.asarray(calibration.translation_m, dtype=np.float64).reshape(3, 1),
         flags=cv2.CALIB_ZERO_DISPARITY, alpha=0.0,
     )  # fmt: skip
-    errors: list[float] = []
+
+    def carry(corners: Corners, k: Array, d: Array, r: Any, p: Any) -> Array:
+        points = np.asarray(corners, dtype=np.float64).reshape(-1, 1, 2)
+        return np.asarray(cv2.undistortPoints(points, k, d, R=r, P=p), dtype=np.float64).reshape(
+            -1, 2
+        )
+
+    rectified = [
+        (carry(left, k_l, d_l, r1, p1), carry(right, k_r, d_r, r2, p2)) for left, right in pairs
+    ]
+    return np.asarray(r1, dtype=np.float64), float(abs(p2[0, 3])), rectified
+
+
+def rectified_rows(
+    calibration: StereoCalibration, pairs: Sequence[tuple[Corners, Corners]]
+) -> float:
+    """Mean |y_left - y_right| of the board's corners after rectification with this file,
+    pixels; ``nan`` with no pairs."""
+    if not pairs:
+        return float("nan")
+    _r1, _fx_baseline, rectified = _rectify_corners(calibration, pairs)
+    return float(np.mean(np.concatenate([np.abs(a[:, 1] - b[:, 1]) for a, b in rectified])))
+
+
+def board_depth_check(
+    calibration: StereoCalibration, pairs: Sequence[tuple[Corners, Corners]], board: Board
+) -> DepthCheck:
+    """Each pair's board depth by stereo (corners rectified with this file, z = fx * B / d)
+    against its depth by PnP in the left eye alone, carried into the rectified frame."""
+    import cv2
+
+    k_l, d_l, _k_r, _d_r = _lenses(calibration)
+    r1, fx_baseline, rectified = _rectify_corners(calibration, pairs)
+    grid = board.object_points()
+    ratios: list[float] = []
+    offsets: list[float] = []
+    for (left, _right), (a, b) in zip(pairs, rectified, strict=True):
+        image = np.asarray(left, dtype=np.float64).reshape(-1, 1, 2)
+        ok, rvec, tvec = cv2.solvePnP(grid, image, k_l, d_l)
+        if not ok:
+            continue
+        turn = np.asarray(cv2.Rodrigues(rvec)[0], dtype=np.float64)
+        in_eye = turn @ grid.T + np.asarray(tvec, dtype=np.float64).reshape(3, 1)
+        expected = fx_baseline / (r1 @ in_eye)[2]
+        measured = a[:, 0] - b[:, 0]
+        ratios.append(float(np.median(expected / measured)))
+        offsets.append(float(np.median(measured - expected)))
+    return DepthCheck(tuple(ratios), tuple(offsets))
+
+
+def refit_rotation(
+    calibration: StereoCalibration, pairs: Sequence[tuple[Corners, Corners]], board: Board
+) -> tuple[StereoCalibration, float]:
+    """The file with only its eye-to-eye rotation refitted (lenses and baseline kept), and the
+    yaw, degrees, the board's depth turned it by.
+
+    The rotation is the median of the per-pair rotations PnP finds between the two eyes; its yaw
+    is then set so the board's median disparity agrees with its PnP depth: per-eye PnP sees yaw
+    worst and the depth sees it best (0.1 deg is a pixel of disparity at fx 530).
+    """
+    import cv2
+
+    k_l, d_l, k_r, d_r = _lenses(calibration)
+    grid = board.object_points()
+    rvecs: list[Array] = []
     for left, right in pairs:
-        a = cv2.undistortPoints(
-            np.asarray(left, dtype=np.float64).reshape(-1, 1, 2), k_left, d_left, R=r1, P=p1
-        )
-        b = cv2.undistortPoints(
-            np.asarray(right, dtype=np.float64).reshape(-1, 1, 2), k_right, d_right, R=r2, P=p2
-        )
-        rows_a = np.asarray(a, dtype=np.float64).reshape(-1, 2)[:, 1]
-        rows_b = np.asarray(b, dtype=np.float64).reshape(-1, 2)[:, 1]
-        errors.extend(np.abs(rows_a - rows_b).tolist())
-    return float(np.mean(errors))
+        turns: list[Array] = []
+        for corners, k, d in ((left, k_l, d_l), (right, k_r, d_r)):
+            image = np.asarray(corners, dtype=np.float64).reshape(-1, 1, 2)
+            _ok, rvec, _tvec = cv2.solvePnP(grid, image, k, d)
+            turns.append(np.asarray(cv2.Rodrigues(rvec)[0], dtype=np.float64))
+        relative = cv2.Rodrigues(turns[1] @ turns[0].T)[0]
+        rvecs.append(np.asarray(relative, dtype=np.float64).reshape(3))
+    median = np.asarray(cv2.Rodrigues(np.median(np.asarray(rvecs), axis=0))[0], dtype=np.float64)
+
+    def turned(yaw: float) -> StereoCalibration:
+        about_y = np.asarray(cv2.Rodrigues(np.array([0.0, yaw, 0.0]))[0], dtype=np.float64)
+        rotation = about_y @ median
+        return replace(calibration, rotation=tuple(tuple(float(v) for v in r) for r in rotation))
+
+    def offset(yaw: float) -> float:
+        return board_depth_check(turned(yaw), pairs, board).offset_px
+
+    # the offset is linear in the yaw to a hundredth of a pixel: a secant, then one more step
+    step = 1e-3
+    start = offset(0.0)
+    slope = (offset(step) - start) / step
+    yaw = -start / slope
+    yaw -= offset(yaw) / slope
+    return turned(yaw), float(np.degrees(yaw))
 
 
 def stereo_fit(
@@ -731,16 +874,21 @@ def stereo_fit(
             d_r = np.asarray(joint[4], dtype=np.float64).reshape(-1)
             rotation = np.asarray(joint[5], dtype=np.float64)
             translation = np.asarray(joint[6], dtype=np.float64).reshape(3)
-    epipolar = rectified_rows(k_l, d_l, k_r, d_r, rotation, translation, size, pairs)
-    return StereoFit(
+    fit = StereoFit(
         left=EyeFit(left.model, k_l, d_l, left.rms_px, left.holdout_px, left.views),
         right=EyeFit(right.model, k_r, d_r, right.rms_px, right.holdout_px, right.views),
         rotation=rotation,
         translation_m=translation,
         rms_px=rms,
-        epipolar_px=epipolar,
+        epipolar_px=float("nan"),
         size=size,
         views=len(pairs),
+    )
+    written = fit.to_calibration(board)
+    return replace(
+        fit,
+        epipolar_px=rectified_rows(written, pairs),
+        depth=board_depth_check(written, pairs, board),
     )
 
 
@@ -776,8 +924,5 @@ def calibrate_pairs(
     )
     fit = stereo_fit(pairs, board, size, left_evidence[chosen], right_evidence[chosen])
     if fisheye:
-        fit = StereoFit(
-            fit.left, fit.right, fit.rotation, fit.translation_m, fit.rms_px, fit.epipolar_px,
-            fit.size, fit.views, fisheye_rms(left_corners, board, size),
-        )  # fmt: skip
+        fit = replace(fit, fisheye_px=fisheye_rms(left_corners, board, size))
     return fit, left_evidence, right_evidence
