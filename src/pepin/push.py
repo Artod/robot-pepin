@@ -38,22 +38,21 @@ BOARD_LIB_DIR = f"{BOARD_ROS_DIR}/pepin_src"
 # reaches there, and the ready line each node prints lives beside it in the same script.
 KICK_SCRIPTS = {"board": "ros/thin.sh", "laptop": "ros/laptop.sh"}
 
-# Each launch file and the halves that run it (nav.launch.py runs on both: side=board or all on
-# the board, side=laptop on the laptop).
+# Each launch file and the halves that run it (the board runs sensors only: navigation is the
+# laptop's).
 LAUNCH_HALVES: dict[str, tuple[str, ...]] = {
     "bringup.launch.py": ("board",),
     "robot.launch.py": ("board",),
-    "slam.launch.py": ("board",),
-    "nav.launch.py": ("board", "laptop"),
+    "nav.launch.py": ("laptop",),
     "vslam.launch.py": ("laptop",),
 }
 
 # Each params file and the halves whose processes read it at start.
 PARAMS_HALVES: dict[str, tuple[str, ...]] = {
-    "nav2_params.yaml": ("board", "laptop"),
+    "nav2_params.yaml": ("laptop",),
     "ekf.yaml": ("board",),
-    "rosbag_qos.yaml": ("board",),
-    "pepin_nav_to_pose.xml": ("board",),
+    "rosbag_qos.yaml": ("laptop",),
+    "pepin_nav_to_pose.xml": ("laptop",),
 }
 
 
@@ -420,7 +419,7 @@ def _classify(path: str) -> Refusal | str | None:
             "ros/sync.sh and the routers' or bridges' restart (ros/README.md)",
         )
     if path.startswith("ros/maps/"):
-        return Refusal(path, "maps are data the board writes too", "ros/sync.sh")
+        return "skip: maps stay on the laptop, whose containers mount them"
     if path.startswith("ros/foxglove/"):
         return "skip: a Foxglove layout, the laptop's app reads it"
     if path.startswith(("ros/", "src/pepin/")):

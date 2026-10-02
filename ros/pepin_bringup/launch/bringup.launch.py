@@ -1,15 +1,9 @@
-"""Everything in one launch process: sensors and bridges, and Nav2 when ``nav:=true``.
+"""The board's one launch process: robot.launch.py's sensors and bridges, with the stop window.
 
-Two separate ``ros2 launch`` processes cost ~110 MB of Python each on a 1.5 GB
-board that also runs Nav2; this file includes robot.launch.py and, optionally,
-nav.launch.py so there is exactly one. Arguments are those of the two files
-(``map``, ``params_file``, ``laser_roll``, ``tof``, ...) plus:
-
-- ``nav``: Nav2 on the laptop's map (RTAB-Map's grid on ``/map``, its ``map -> odom``).
-- ``recorder``: ``jsonl`` (default) or ``bag`` — who writes a drive down (ros/README.md,
-  "Two recorders").
-- ``slam_toolbox``: the old lidar-only mapper (ros/mode.sh slam_toolbox), which builds a map to
-  SAVE and cannot navigate on it. Never together with ``nav``: two map -> odom publishers.
+The board is a sensor box; navigation runs on the laptop. This file includes robot.launch.py
+under the container's stop window and passes on the switches of the board's unit
+(board/pepin-ros.service): ``base_bridge_cpp``, ``imu``, ``ekf``, ``laser_odom``, ``tof``,
+``neck``.
 """
 
 import os
@@ -21,19 +15,17 @@ from launch.actions import (
     IncludeLaunchDescription,
     SetLaunchConfiguration,
 )
-from launch.conditions import IfCondition
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration
 
 from pepin.deployment import CONTAINER_STOP_TIMEOUT_S
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
-# SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
-# under RTAB-Map's close of a 20-28 GB database and under the board's dozen nodes leaving DDS:
-# every shutdown ended in SIGKILLs mid-write, and eight of them left ros/maps/rtabmap.db
-# malformed (2026-09-13). The window is the container's own stop window
-# (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh, board/pepin-ros.service), so on a
-# `docker stop` nothing inside escalates before docker's SIGKILL at its end.
+# SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, under the
+# board's nodes leaving the middleware: every shutdown ended in SIGKILLs mid-write. The window is
+# the container's own stop window (pepin.deployment.CONTAINER_STOP_TIMEOUT_S, ros/lib.sh,
+# board/pepin-ros.service), so on a `docker stop` nothing inside escalates before docker's
+# SIGKILL at its end.
 SHUTDOWN = [
     SetLaunchConfiguration("sigterm_timeout", str(CONTAINER_STOP_TIMEOUT_S)),
     SetLaunchConfiguration("sigkill_timeout", "5"),
@@ -53,36 +45,15 @@ def generate_launch_description() -> LaunchDescription:
             "neck": LaunchConfiguration("neck"),
         }.items(),
     )
-    nav = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(launch_dir, "nav.launch.py")),
-        condition=IfCondition(LaunchConfiguration("nav")),
-        launch_arguments={
-            "side": LaunchConfiguration("side"),
-            "recorder": LaunchConfiguration("recorder"),
-        }.items(),
-    )
-    slam_toolbox = IncludeLaunchDescription(
-        PythonLaunchDescriptionSource(os.path.join(launch_dir, "slam.launch.py")),
-        condition=IfCondition(LaunchConfiguration("slam_toolbox")),
-    )
     return LaunchDescription(
         [
-            *SHUTDOWN,  # before the includes: a scoped include inherits what is set above it
-            DeclareLaunchArgument("nav", default_value="false"),
-            DeclareLaunchArgument("side", default_value="all"),  # all | board | laptop
-            DeclareLaunchArgument("slam_toolbox", default_value="false"),  # never with nav
+            *SHUTDOWN,  # before the include: a scoped include inherits what is set above it
             DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
             DeclareLaunchArgument("imu", default_value="false"),
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("tof", default_value="false"),
             DeclareLaunchArgument("neck", default_value="false"),
-            # Which recorder writes a drive: jsonl (the Python node, the default) or bag
-            # (`ros2 bag record` + ros/tools/bag_to_tape.py). The board carries it as
-            # PEPIN_RECORDER in /etc/default/pepin-ros.
-            DeclareLaunchArgument("recorder", default_value="jsonl"),
             robot,
-            nav,
-            slam_toolbox,
         ]
     )

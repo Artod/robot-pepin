@@ -177,7 +177,7 @@ def test_a_module_a_launch_file_imports_is_refused_with_that_launch_s_halves(rep
     ("path", "fix"),
     [
         ("ros/params/ekf.yaml", "ros/restart.sh board --deploy"),
-        ("ros/params/nav2_params.yaml", "ros/restart.sh both --deploy"),
+        ("ros/params/nav2_params.yaml", "ros/restart.sh laptop"),
         ("ros/pepin_bringup/launch/vslam.launch.py", "ros/restart.sh laptop"),
         ("ros/pepin_bringup/launch/robot.launch.py", "ros/restart.sh board --deploy"),
         ("board/pepin-ros.service", "ros/restart.sh board after the install"),

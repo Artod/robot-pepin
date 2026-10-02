@@ -287,7 +287,6 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "goto.sh",
         "go.sh",
         "lib.sh",
-        "mode.sh",
         "map.sh",
         "feature.sh",
         "laptop.sh",
@@ -1371,9 +1370,6 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     assert "Environment=PEPIN_NECK=false" in unit and "neck:=${PEPIN_NECK}" in unit
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
-    assert (
-        "PEPIN_(CPP_BRIDGE|IMU|EKF|TOF|NECK|SIDE|RECORDER)" in (REPO / "ros/mode.sh").read_text()
-    ), "a mode change must not wipe the side and the features the board was told to run"
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "--neck) STATIC_CAMERA_TF=false ;;" in laptop, "a flag anywhere after the subcommand"
     assert any(
@@ -2197,11 +2193,8 @@ def test_the_hook_checks_the_shell_scripts_and_the_board_s_books_come_home() -> 
     assert "--include='*.places.yaml' --exclude='*'" in fetch
     assert "root@$BOARD:/root/pepin-ros/maps/" in fetch
     sync = (REPO / "ros/sync.sh").read_text()
-    assert "--exclude 'maps/*.places.yaml'" in sync, "the board's book is the truth: never pushed"
-    assert "--exclude 'maps/map_cache.json'" in sync, (
-        "the board's own map cache exists only there: a deploy with --delete must not remove it"
-    )
-    assert "--exclude 'maps/last_pose.json'" in sync, "nor the pose the tracker wrote down"
+    # No map goes to the sensor box, and --delete never reaches what the board wrote under maps/.
+    assert "--exclude 'maps/*'" in sync
     tracked = subprocess.run(
         ["git", "ls-files", "ros/maps"], capture_output=True, text=True, cwd=REPO, check=True
     ).stdout
@@ -2353,11 +2346,12 @@ def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> Non
     for branch in ("on", "vision|off"):
         assert "$CLEAN" in thin[branch], f"{branch} leaves the retired lines behind"
         assert "board-slam" not in thin[branch], branch
+    # The board is a sensor box (2026-10-01): its unit and launch name no navigation at all.
     unit = (REPO / "board/pepin-ros.service").read_text()
-    assert "slam_toolbox:=${PEPIN_SLAM_TOOLBOX}" in unit and "slam:=${PEPIN_SLAM}" not in unit
+    assert not re.search(r"\b(nav|slam|slam_toolbox|map|side|recorder):=", unit)
     bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
     args = {ast.unparse(c.args[0]) for c in sf.calls_to(bringup, "DeclareLaunchArgument")}
-    assert {"'slam_toolbox'", "'nav'"} <= args and "'slam'" not in args
+    assert not {"'nav'", "'slam'", "'slam_toolbox'", "'map'", "'side'", "'recorder'"} & args
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "MODE=split" in laptop and "laptop-slam" not in laptop
     assert 'printf \'%s\\n\' "$MODE" > "$HERE/.mode"' in laptop

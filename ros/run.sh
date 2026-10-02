@@ -2,11 +2,11 @@
 # Run the ROS 2 container on the board (used by board/pepin-ros.service and by hand). Usage:
 #   ros/run.sh                      -> interactive shell inside the container
 #   ros/run.sh ros2 launch pepin_bringup robot.launch.py
-# Development mounts: the Python package, launch files, tools, params, maps and our pepin
-# library come from /root/pepin-ros on the host, over the paths baked into the image — so an
-# edit needs `ros/push.sh FILE` (rsync + a kick of the nodes it reaches) or `ros/sync.sh
-# --restart` (rsync + container restart), not an image rebuild. The image is rebuilt
-# (ros/build.sh, container stopped) only when the Dockerfile changes.
+# Development mounts: the Python package, launch files, tools, params (ekf.yaml), maps (the
+# recordings written here) and our pepin library come from /root/pepin-ros on the host, over the
+# paths baked into the image — so an edit needs `ros/push.sh FILE` (rsync + a kick of the nodes it
+# reaches) or `ros/sync.sh --restart` (rsync + container restart), not an image rebuild. The image
+# is rebuilt on the laptop (ros/build-image.sh --ship) only when the Dockerfile changes.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # The lidar's port comes and goes (unplugged, re-plugged, enumerated late at boot): the host's /dev

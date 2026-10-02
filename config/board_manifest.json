@@ -1,11 +1,11 @@
 {
   "cores": 4,
   "unlisted_cpu_percent": 1.0,
-  "note": "Everything the Orange Pi Zero 3 (4x A53 @ 1.5 GHz, 1.5 GB) is allowed to run, and what each thing may cost. CLAUDE.md rule 20: the board carries only what is real-time critical or must survive a WiFi loss or is wired to its own pins; everything that consumes the camera lives on the laptop. Nothing is added to the board without an entry here with a measured budget (pepin.census reads this file; ros/board.sh census compares it against a live ps). Budgets are today's measurement +50 % unless the entry's note says the number is a guess. The measurement is ps's %CPU, which is the process's average over its whole life, not an instant sample: read a census taken in the first minute after a start as start-up cost, not as the running cost (the census prints the age of the youngest process for that reason). Percentages are of ONE core: 400 % is the whole board. Census of 2026-09-14 12:40 EDT, stack up 2 min 22 s, nav:=true imu:=true tof:=true neck:=true side:=all, load 7.3.",
+  "note": "Everything the Orange Pi Zero 3 (4x A53 @ 1.5 GHz, 1.5 GB) is allowed to run, and what each thing may cost. CLAUDE.md rule 20: the board carries only what is real-time critical or must survive a WiFi loss or is wired to its own pins; everything that consumes the camera lives on the laptop. Nothing is added to the board without an entry here with a measured budget (pepin.census reads this file; ros/board.sh census compares it against a live ps). Budgets are today's measurement +50 % unless the entry's note says the number is a guess. The measurement is ps's %CPU, which is the process's average over its whole life, not an instant sample: read a census taken in the first minute after a start as start-up cost, not as the running cost (the census prints the age of the youngest process for that reason). Percentages are of ONE core: 400 % is the whole board. Census of 2026-09-14 12:40 EDT, stack up 2 min 22 s, nav:=true imu:=true tof:=true neck:=true side:=all, load 7.3. Since 2026-10-01 the board is a sensor box: Nav2, the goal server and the drive recorders run on the laptop.",
   "ignore": [
     {
       "match": "^\\[",
-      "why": "kernel threads (kworker, SPRDWL/sdiohal for the WiFi-over-SDIO, ksoftirqd): no RSS, not started by us, not ours to budget. They do cost real CPU — the WiFi threads alone run 5-8 % — which is why the manifest promises well under 400 %."
+      "why": "kernel threads (kworker, SPRDWL/sdiohal for the WiFi-over-SDIO, ksoftirqd): no RSS, not started by us, not ours to budget. They do cost real CPU \u2014 the WiFi threads alone run 5-8 % \u2014 which is why the manifest promises well under 400 %."
     },
     {
       "match": "(^|/)sshd|^ssh:",
@@ -21,51 +21,6 @@
     }
   ],
   "processes": [
-    {
-      "name": "nav2_container",
-      "match": "component_container_isolated .*__node:=nav2_container",
-      "role": "Nav2 in one process: the AMCL-seat tracker's costmaps, the planner, the controller loop that drives the wheels, the behaviours and the behaviour tree (and a map server only when one is asked for).",
-      "on_board_because": [
-        "real-time",
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (ComposableNodeContainer, nice 5)",
-      "components": [
-        {
-          "name": "map_server",
-          "role": "serves a pgm (nav.launch.py map_server:=true, OFF by default: the one map is the tracker's live grid and its cache, and a file is only the seed of a room nobody has mapped)"
-        },
-        {
-          "name": "planner_server",
-          "role": "global path (absent when side=board: the laptop plans)"
-        },
-        {
-          "name": "controller_server",
-          "role": "the 8 Hz loop that turns a path into wheel speeds"
-        },
-        {
-          "name": "behavior_server",
-          "role": "spin, back up, wait"
-        },
-        {
-          "name": "bt_navigator",
-          "role": "the behaviour tree that calls the rest"
-        },
-        {
-          "name": "velocity_smoother",
-          "role": "cmd_vel_nav -> /cmd_vel, acceleration-limited"
-        },
-        {
-          "name": "lifecycle_manager_navigation_all",
-          "role": "brings those nodes up and bonds with them"
-        }
-      ],
-      "budget": {
-        "cpu_percent": 120.0,
-        "rss_mb": 152.0
-      },
-      "note": "Measured 80 % / 101 MB with a goal running nothing — this is the idle cost of a stack that is merely alive. The single biggest consumer on the board and the reason nice 5 exists: the sensors must not wait for the planner."
-    },
     {
       "name": "lidar_container",
       "match": "component_container_isolated .*__node:=lidar_container",
@@ -125,54 +80,24 @@
       "note": "Measured 5-6 % / 43-54 MB on 2026-09-24; split from sensors_container. Each process carries its own zenoh session (~40 MB)."
     },
     {
-      "name": "run_recorder",
-      "match": "pepin_bringup\\.run_recorder",
-      "role": "Writes every drive to disk (scans, odometry, pose, cmd_vel, camera): any run may be the one worth showing.",
-      "on_board_because": [
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn)",
-      "budget": {
-        "cpu_percent": 24.0,
-        "rss_mb": 93.0
-      },
-      "note": "Measured 16 % / 62 MB while idle (subscribed, nothing driving). Group 'recorder' with bag_recorder: the one not started is IDLE while the other runs.",
-      "group": "recorder"
-    },
-    {
-      "name": "bag_recorder",
-      "match": "pepin_bringup\\.bag_recorder",
-      "role": "The other recorder (PEPIN_RECORDER=bag): a node with no subscription to any topic of a drive, which only starts and stops the `ros2 bag record` below on the goal's word and copies the camera clip beside the bag. Never runs together with run_recorder — the launch starts one of the two.",
-      "on_board_because": [
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (recorder:=bag, respawn)",
-      "budget": {
-        "cpu_percent": 8.0,
-        "rss_mb": 100.0
-      },
-      "note": "Measured 0.5-7 % / 78-93 MB idle on 2026-09-24 (the estimate before it was 8 % / 60 MB). Group 'recorder' with run_recorder: the launch starts one of the two, the census wants one.",
-      "group": "recorder"
-    },
-    {
       "name": "bag_record",
       "match": "ros2 bag record|rosbag2_transport",
-      "role": "rosbag2 writing one run's MCAP bag in /maps/rec: generic subscriptions, so the messages are copied as serialised bytes and nothing on this board deserialises a scan. Lives only while a drive does, started by bag_recorder.",
+      "role": "rosbag2 writing a recorded drive's MCAP bag in /maps/rec (ros/teleop.sh NAME): generic subscriptions, so the messages are copied as serialised bytes and nothing on this board deserialises a scan. Lives only while that drive does.",
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "pepin_bringup.bag_recorder (a subprocess, one per run)",
+      "owner": "ros/teleop.sh NAME (docker exec in pepin-ros)",
       "when": "sometimes",
       "budget": {
         "cpu_percent": 30.0,
         "rss_mb": 120.0
       },
-      "note": "AN ESTIMATE: a Python CLI process (~60 MB like every ros2 CLI here) plus rosbag2's writer cache and the serialised copies of a 55 kB/s scan stream. It should come out well under run_recorder's cost, and until a census during a bag drive says so this entry is a guess wide enough not to go red on the first try."
+      "note": "AN ESTIMATE: a Python CLI process (~60 MB like every ros2 CLI here) plus rosbag2's writer cache and the serialised copies of a 55 kB/s scan stream; wide enough not to go red on the first try until a census during a recorded drive measures it."
     },
     {
       "name": "tof_bridge",
       "match": "pepin_bringup/tof_bridge|pepin_bringup\\.tof_bridge",
-      "role": "Publishes the three VL53L1X ranges from the ToF server as ROS Range messages for Nav2's contact layer.",
+      "role": "Publishes the three VL53L1X ranges from the ToF server as ROS Range messages for the costmaps' contact layer.",
       "on_board_because": [
         "real-time",
         "hardware-attached"
@@ -229,20 +154,6 @@
       "note": "Measured 9 % / 28 MB."
     },
     {
-      "name": "goal_server",
-      "match": "pepin_bringup/goal_server|pepin_bringup\\.goal_server",
-      "role": "Takes goals on a socket so ordering a drive costs a socket write instead of a client boot; keeps the places book of the map in use.",
-      "on_board_because": [
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (respawn)",
-      "budget": {
-        "cpu_percent": 30.0,
-        "rss_mb": 120.0
-      },
-      "note": "Measured 27-29 % / 93-112 MB at rest on 2026-09-24 once its TF listener spins a node of its own (45 % before: /tf woke its main executor, node_kit TF_LISTENER_NODE); the listener's own thread is 17 % of it. The goal_server breakup (.claude/tasks) is where the rest goes. Moves to the laptop when side=laptop."
-    },
-    {
       "name": "ros2_launch",
       "match": "ros2 launch pepin_bringup bringup\\.launch\\.py",
       "role": "The launch process itself: it started every ROS node above and respawns the ones that may come back alone.",
@@ -254,12 +165,12 @@
         "cpu_percent": 10.0,
         "rss_mb": 150.0
       },
-      "note": "Measured 7 % / 70 MB. One launch process for sensors and Nav2 together, on purpose: two cost ~110 MB of Python each."
+      "note": "Measured 7 % / 70 MB on 2026-09-14, when it also started Nav2. One launch process for every node, on purpose: two cost ~110 MB of Python each."
     },
     {
       "name": "zenoh_router",
       "match": "rmw_zenohd|docker run .*--name pepin-zrouter",
-      "role": "The board's half of the rmw_zenoh transport: the one process that carries this board's graph to the laptop's router. Board-internal traffic does NOT pass through it — every node here is a zenoh peer of every other over the host loopback (measured 0.0 % router CPU for a 10 Hz x 100 kB board-internal flow, against 1.4 % with the same two nodes as clients).",
+      "role": "The board's half of the rmw_zenoh transport: the one process that carries this board's graph to the laptop's router. Board-internal traffic does NOT pass through it \u2014 every node here is a zenoh peer of every other over the host loopback (measured 0.0 % router CPU for a 10 Hz x 100 kB board-internal flow, against 1.4 % with the same two nodes as clients).",
       "on_board_because": [
         "real-time",
         "wifi-loss"
@@ -274,7 +185,7 @@
     {
       "name": "chronyd",
       "match": "(^|/)chronyd( |$)",
-      "role": "The board's clock (board/chrony.sh, installed with `ros/time.sh install`): follows the laptop's time server — the Docker VM's clock, which every laptop ROS node stamps with — and keeps the internet pool as its fallback and its vote. Replaces systemd-timesyncd; `ros/time.sh uninstall` puts that back.",
+      "role": "The board's clock (board/chrony.sh, installed with `ros/time.sh install`): follows the laptop's time server \u2014 the Docker VM's clock, which every laptop ROS node stamps with \u2014 and keeps the internet pool as its fallback and its vote. Replaces systemd-timesyncd; `ros/time.sh uninstall` puts that back.",
       "on_board_because": [
         "wifi-loss"
       ],
@@ -343,7 +254,7 @@
         "cpu_percent": 3.0,
         "rss_mb": 19.0
       },
-      "note": "Measured 2 % / 13 MB at 1280x720, 15 fps, --drop-same-frames 30. The image is passed through, not encoded; anything that LOOKS at these frames (depth, scans, matching) belongs on the laptop — rule 20."
+      "note": "Measured 2 % / 13 MB at 1280x720, 15 fps, --drop-same-frames 30. The image is passed through, not encoded; anything that LOOKS at these frames (depth, scans, matching) belongs on the laptop \u2014 rule 20."
     },
     {
       "name": "docker",
@@ -376,7 +287,7 @@
     {
       "name": "reap_ros2_cli",
       "match": "reap_ros2_cli\\.sh",
-      "role": "Every minute, kills ros2 CLI tools older than 90 s left inside the container — a dozen leftovers took the board to load 12 on 2026-09-13.",
+      "role": "Every minute, kills ros2 CLI tools older than 90 s left inside the container \u2014 a dozen leftovers took the board to load 12 on 2026-09-13.",
       "on_board_because": [
         "real-time"
       ],
@@ -404,22 +315,6 @@
       "note": "A guess: it has never been measured on its own, and it only runs during a drive, which is when the board is busiest. Measure it on the next recorded drive and replace this number."
     },
     {
-      "name": "link_watch",
-      "match": "pepin_bringup\\.link_watch",
-      "role": "In the thin-client split, watches the link to the laptop and stops the cart when the planner half goes away.",
-      "on_board_because": [
-        "real-time",
-        "wifi-loss"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/nav.launch.py (side=board, no respawn: its exit is the signal)",
-      "when": "sometimes",
-      "budget": {
-        "cpu_percent": 15.0,
-        "rss_mb": 90.0
-      },
-      "note": "A guess from the other small rclpy nodes; it runs only when side=board."
-    },
-    {
       "name": "foxglove_bridge",
       "match": "foxglove_bridge",
       "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh routers, and a second serialiser of every topic is a luxury on four A53 cores.",
@@ -430,7 +325,7 @@
         "cpu_percent": 0.0,
         "rss_mb": 0.0
       },
-      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh routers. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps — the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
+      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh routers. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps \u2014 the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
     }
   ]
 }
