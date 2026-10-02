@@ -136,12 +136,14 @@ def test_a_bad_sign_in_the_file_is_refused(tmp_path: Path) -> None:
 
 
 def test_the_motion_block_is_read_and_held_to_the_registers_reach(tmp_path: Path) -> None:
-    """The seeds of 2026-10-02 in the file; the register units they become; a file without the
-    block moves the head at the same defaults; a value the register cannot hold is refused."""
+    """The registers' tops in the file (2026-10-02, the bench); the register units they become;
+    a file without the block moves the head at the same defaults; a value the register cannot
+    hold is refused."""
     from pepin.neck import ACC_UNIT_DEG_S2, NeckMotion, acc_units, speed_ticks
 
     motion = NeckConfig.from_json(NECK).motion
-    assert (motion.max_speed_deg_s, motion.max_acc_deg_s2, motion.lease_s) == (120.0, 1000.0, 2.0)
+    assert (motion.max_speed_deg_s, motion.max_acc_deg_s2, motion.lease_s) == (299.0, 2232.0, 2.0)
+    assert (speed_ticks(299.0), acc_units(2232.0)) == (3402, 254)
     assert (motion.read_window_ms, motion.silent_ticks, motion.retry_s) == (3.0, 3, 5.0)
     assert speed_ticks(120.0) == 1365 and speed_ticks(35.0) == 398  # ~ the old 400 ticks/s
     assert round(ACC_UNIT_DEG_S2, 3) == 8.789

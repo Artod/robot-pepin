@@ -60,6 +60,7 @@ from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import STOP, Twist
 from pepin.neck import (
+    ACC_UNIT_DEG_S2,
     MOTION_RANGES,
     PAN,
     RAD_PER_TICK,
@@ -92,6 +93,9 @@ NECK_JOG_DEADMAN_S = DEADMAN_S  # no jog message for this long: the head stops, 
 NECK_JOG_LAG_TICKS = 120  # ~10 deg: a goal this far ahead of the head waits for it
 NECK_TICK_S = 0.02  # the board's 50 Hz tick: a stalled tick advances a jog by at most two of these
 MODE_CHECK_WINDOW_S = 0.03  # the operating-mode read's whole wait: one reply burst, never 0.4 s
+# Maximum_Acceleration for the neck: the register's top, so the Acceleration written with every
+# block is the ramp. At the servos' own 50 every ramp above 439 deg/s^2 ran at 439 (2026-10-02).
+NECK_ACC_CEILING = 254
 # Torque_Enable .. Goal_Velocity, eight bytes a servo: ONE packet energises, ramps, aims and paces
 # both servos, so a head that starts moving costs one write, never a sequence of them.
 NECK_BLOCK = ("Torque_Enable", "Acceleration", "Goal_Position", "Goal_Time", "Goal_Velocity")
@@ -737,6 +741,39 @@ class NeckMover:
             logger.error("neck %s", self._mode_error)
         else:
             logger.info("neck servos in position mode: goals allowed")
+            self._lift_acc_ceiling(names)
+
+    def _lift_acc_ceiling(self, names: list[str]) -> None:
+        """Maximum_Acceleration to :data:`NECK_ACC_CEILING` on both servos, read back: in RAM
+        only (the EEPROM lock stays on), so the check after every power-up writes it again.
+        Unacknowledged, and the read bounded like the mode's; a ceiling that will not take is
+        logged — the head still moves, at the ceiling's ramp."""
+        try:
+            self._bus.sync_write(
+                "Maximum_Acceleration", dict.fromkeys(names, NECK_ACC_CEILING), normalize=False
+            )
+            held = self._bus.sync_read(
+                "Maximum_Acceleration",
+                [],
+                normalize=False,
+                optional=names,
+                optional_window_s=MODE_CHECK_WINDOW_S,
+            )
+        except (TimeoutError, OSError) as exc:
+            logger.warning("neck acceleration ceiling unwritten: %s", exc)
+            return
+        if len(held) == len(names) and min(held.values()) >= NECK_ACC_CEILING:
+            logger.info(
+                "neck acceleration ceiling %d units: the ramp is the motion's", NECK_ACC_CEILING
+            )
+            return
+        logger.warning(
+            "neck acceleration ceiling reads %s units of %.1f deg/s^2 after writing %d: ramps"
+            " above it run at it",
+            held,
+            ACC_UNIT_DEG_S2,
+            NECK_ACC_CEILING,
+        )
 
 
 class BaseServerCore:
@@ -813,7 +850,7 @@ class BaseServerCore:
 
     def command(self, message: dict[str, Any], now: float) -> dict[str, Any] | None:
         """Apply one client message; returns a reply for requests that have one (``ping``,
-        ``neck``, ``neck_motion``, ``max_wheel_speed``, a refused neck command).
+        ``neck``, ``neck_motion``, ``max_wheel_speed``, ``registers``, a refused neck command).
 
         An accepted move answers nothing here: its reply is born when the head stops, and
         leaves through :meth:`take_replies`. An accepted jog or target answers nothing at all.
@@ -858,6 +895,8 @@ class BaseServerCore:
             return self._mover.motion_command(message)
         elif cmd == "max_wheel_speed":
             return self._max_wheel_speed(message)
+        elif cmd == "registers":
+            return self._registers(message)
         else:
             logger.warning("unknown command %r", message)
         return None
@@ -1039,6 +1078,22 @@ class BaseServerCore:
             )
         reply["m_s"] = self._base.max_wheel_speed_m_s
         return reply
+
+    def _registers(self, message: dict[str, Any]) -> dict[str, Any]:
+        """The ``registers`` request: ``size`` raw bytes of one roster servo's control table from
+        ``address``, read on this thread (one round trip), so never while the wheels turn."""
+        servo = str(message.get("servo", ""))
+        reply: dict[str, Any] = {"type": "registers", "servo": servo}
+        if self.moving:
+            return {**reply, "busy": True}
+        if servo not in self._servo_names:
+            return {**reply, "error": f"{servo!r} is not on the roster {self._servo_names}"}
+        try:
+            address, size = int(message["address"]), int(message.get("size", 1))
+            data = self._bus.read_block(servo, address, size)
+        except (KeyError, TypeError, ValueError, TimeoutError, OSError) as exc:
+            return {**reply, "error": f"{type(exc).__name__}: {exc}"}
+        return {**reply, "address": address, "values": list(data)}
 
     def _start_neck_move(
         self, cmd: str, message: dict[str, Any], now: float

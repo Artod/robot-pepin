@@ -37,6 +37,10 @@ class MotorBus(Protocol):
         are absent from the answer when silent."""
         ...
 
+    def read_block(self, motor: str, address: int, size: int) -> bytes:
+        """``size`` raw bytes of one motor's control table from ``address`` (diagnostics)."""
+        ...
+
     def enable_torque(self, motors: list[str] | None = None) -> None:
         """Energise the listed motors, or every known motor when none are listed."""
         ...

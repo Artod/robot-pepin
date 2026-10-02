@@ -14,6 +14,7 @@ from pepin.base import LEFT, RIGHT
 from pepin.base_link import decode_state
 from pepin.base_server import (
     MODE_CHECK_WINDOW_S,
+    NECK_ACC_CEILING,
     NECK_BLOCK,
     BaseServerCore,
     PublishGrid,
@@ -352,6 +353,8 @@ class NeckBus(PingableBus):
         super().__init__()
         self.positions.update({"neck": 2048, "head": 2360})
         self.modes = {"neck": 0, "head": 0}  # 0: position mode, the only one a goal makes sense in
+        self.ceilings = {"neck": 50, "head": 50}  # Maximum_Acceleration as the servos came
+        self.keeps_ceiling = True  # False: a servo that ignores the ceiling's write
         self.silent: set[str] = set()
         self.reads: list[tuple[str, list[str], tuple[str, ...], float]] = []
         self.link_down = False
@@ -368,6 +371,8 @@ class NeckBus(PingableBus):
         self.reads.append((data_name, list(motors), tuple(optional), optional_window_s))
         if data_name == "Operating_Mode":
             return {m: self.modes[m] for m in [*motors, *optional] if m not in self.silent}
+        if data_name == "Maximum_Acceleration":
+            return {m: self.ceilings[m] for m in [*motors, *optional] if m not in self.silent}
         read = super().sync_read(data_name, motors, normalize=normalize)
         read.update({m: self.positions[m] for m in optional if m not in self.silent})
         return read
@@ -375,6 +380,8 @@ class NeckBus(PingableBus):
     def sync_write(self, data_name: str, values: dict[str, int], *, normalize: bool = True) -> None:
         if self.link_down:
             raise TimeoutError("bus link lost: connection reset")
+        if data_name == "Maximum_Acceleration" and self.keeps_ceiling:
+            self.ceilings.update(values)
         super().sync_write(data_name, values, normalize=normalize)
 
     def sync_write_block(self, data_names: Sequence[str], values: dict[str, Sequence[int]]) -> None:
@@ -386,8 +393,8 @@ class NeckBus(PingableBus):
 
 NECK_CFG = NeckConfig.from_json(REPO / "config/neck.json")
 REF = NECK_CFG.reference
-TOP_SPEED = speed_ticks(NECK_CFG.motion.max_speed_deg_s)  # 120 deg/s: 1365 ticks/s
-TOP_ACC = acc_units(NECK_CFG.motion.max_acc_deg_s2)  # 1000 deg/s^2: 114 units
+TOP_SPEED = speed_ticks(NECK_CFG.motion.max_speed_deg_s)  # 299 deg/s: 3402 ticks/s
+TOP_ACC = acc_units(NECK_CFG.motion.max_acc_deg_s2)  # 2232 deg/s^2: 254 units
 HOME_TILT_RAD = math.radians(REF.pitch_deg)
 
 
@@ -440,6 +447,7 @@ def block(pan: int, tilt: int, speed: int = TOP_SPEED, acc: int = TOP_ACC) -> tu
 
 
 RELEASE = ("Torque_Enable", {"neck": 0, "head": 0})
+CEILING = ("Maximum_Acceleration", {"neck": NECK_ACC_CEILING, "head": NECK_ACC_CEILING})
 
 
 def target(core: BaseServerCore, now: float, pan_rad: float = 0.0, **extra: Any) -> Any:
@@ -470,7 +478,8 @@ def test_the_neck_rides_in_the_wheels_read_and_the_state_line_carries_its_ticks(
 
 def test_the_first_read_that_hears_the_neck_checks_its_mode_and_lets_it_go() -> None:
     """The mode is read once, bounded by its own window and never retried in the tick; a pair
-    nobody has told anything yet is let go — one unacknowledged packet."""
+    in position mode has its acceleration ceiling lifted and read back the same way; a pair
+    nobody has told anything yet is let go — all of it unacknowledged packets."""
     bus = NeckBus()
     encoders, mover = neck_parts(bus, NECK_CFG)
     core = BaseServerCore(bus, CFG, neck=encoders, mover=mover)
@@ -478,10 +487,29 @@ def test_the_first_read_that_hears_the_neck_checks_its_mode_and_lets_it_go() -> 
     assert bus.reads == [
         ("Present_Position", [LEFT, RIGHT], ("neck", "head"), 0.003),
         ("Operating_Mode", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
+        ("Maximum_Acceleration", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
     ]
-    assert neck_writes(bus) == [RELEASE]
+    assert neck_writes(bus) == [CEILING, RELEASE]
     core.tick(0.02)
-    assert len(bus.reads) == 3 and len(neck_writes(bus)) == 1, "then nothing: one read a tick"
+    assert len(bus.reads) == 4 and len(neck_writes(bus)) == 2, "then nothing: one read a tick"
+
+
+def test_the_acceleration_ceiling_is_lifted_or_its_refusal_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """2026-10-02: the servos keep Acceleration under Maximum_Acceleration (50 units, 439
+    deg/s^2, as delivered), so every ramp asked above it ran at it. The check lifts it to the
+    register's top; a servo that will not keep it is logged, and the head still moves."""
+    core, bus = make_neck_core()
+    assert bus.ceilings == {"neck": NECK_ACC_CEILING, "head": NECK_ACC_CEILING}
+    stubborn = NeckBus()
+    stubborn.keeps_ceiling = False
+    with caplog.at_level("WARNING"):
+        core, stubborn = make_neck_core(bus=stubborn)
+    assert "ceiling reads {'neck': 50, 'head': 50}" in caplog.text
+    assert target(core, 1.0) is None
+    core.tick(1.0)
+    assert energised(stubborn), "a low ceiling slows the head, it does not stop it"
 
 
 def test_a_silent_neck_leaves_the_read_and_is_asked_again_every_five_seconds() -> None:
@@ -513,8 +541,12 @@ def test_a_silent_neck_leaves_the_read_and_is_asked_again_every_five_seconds() -
     bus.silent = set()
     bus.writes.clear()
     core.tick(1.04 + 10.1)
-    assert [r[0] for r in bus.reads[-2:]] == ["Present_Position", "Operating_Mode"]
-    assert neck_writes(bus) == [RELEASE], "back: the mode read again, the servos let go"
+    assert [r[0] for r in bus.reads[-3:]] == [
+        "Present_Position",
+        "Operating_Mode",
+        "Maximum_Acceleration",
+    ]
+    assert neck_writes(bus) == [CEILING, RELEASE], "back: checked and lifted again, let go"
 
 
 def test_a_neck_in_velocity_mode_is_never_given_a_goal() -> None:
@@ -523,6 +555,7 @@ def test_a_neck_in_velocity_mode_is_never_given_a_goal() -> None:
     bus = NeckBus()
     bus.modes["head"] = 1
     core, bus = make_neck_core(bus=bus)
+    assert bus.ceilings == {"neck": 50, "head": 50}, "nothing written to a servo in that mode"
     refused = target(core, 1.0)
     assert (
         refused is not None
@@ -759,19 +792,21 @@ def test_the_motion_settings_are_answered_set_live_and_refused_outside_their_ran
     """ros/neck.sh motion: the settings in force beside the file's; a set lasts until the server
     restarts and reaches the head on the next tick; a bad value refuses the whole message."""
     core, bus = make_neck_core()
-    reply = core.command({"cmd": "neck_motion"}, now=1.0)
-    assert reply == {
-        "type": "neck_motion",
-        "max_speed_deg_s": 120.0,
-        "max_acc_deg_s2": 1000.0,
-        "lease_s": 2.0,
-        "config": {"max_speed_deg_s": 120.0, "max_acc_deg_s2": 1000.0, "lease_s": 2.0},
+    motion = NECK_CFG.motion
+    filed = {
+        "max_speed_deg_s": motion.max_speed_deg_s,
+        "max_acc_deg_s2": motion.max_acc_deg_s2,
+        "lease_s": motion.lease_s,
     }
+    reply = core.command({"cmd": "neck_motion"}, now=1.0)
+    assert reply == {"type": "neck_motion", **filed, "config": filed}
     target(core, 1.0)
     core.tick(1.0)
     changed = core.command({"cmd": "neck_motion", "max_speed_deg_s": 60, "lease_s": 5.0}, now=1.1)
-    assert changed is not None and changed["was"] == {"max_speed_deg_s": 120.0, "lease_s": 2.0}
-    assert changed["max_speed_deg_s"] == 60.0 and changed["config"]["max_speed_deg_s"] == 120.0
+    assert changed is not None
+    assert changed["was"] == {"max_speed_deg_s": motion.max_speed_deg_s, "lease_s": motion.lease_s}
+    assert changed["max_speed_deg_s"] == 60.0
+    assert changed["config"]["max_speed_deg_s"] == motion.max_speed_deg_s
     core.tick(1.1)
     assert neck_writes(bus)[-1] == block(REF.pan_ticks, REF.tilt_ticks, speed=speed_ticks(60.0))
     for bad in (
@@ -1290,7 +1325,9 @@ def wired(silent: set[int] | None = None, latency_s: float = 0.002) -> tuple[Ser
 def test_on_the_wire_a_tick_is_one_round_trip_and_at_most_one_neck_write() -> None:
     """Driving and aiming the head on every tick: one sync_read a tick with all four servos in
     it, and the twist and the neck as two unacknowledged writes; the servos end up holding what
-    the core asked, torque, ramp, goal and speed."""
+    the core asked, torque, ramp, goal and speed — the ramp too, because the neck's acceleration
+    ceiling was lifted first (the fake stores a larger Acceleration as the ceiling, as the
+    STS3215 does), and only the neck's."""
     wire, bus = wired()
     try:
         encoders, mover = neck_parts(bus, NECK_CFG)
@@ -1318,7 +1355,44 @@ def test_on_the_wire_a_tick_is_one_round_trip_and_at_most_one_neck_write() -> No
             0,
         ]
         assert wire.word(9, 46) == TOP_SPEED and wire.word(10, 42) == tilt
+        assert wire.byte(10, 41) == TOP_ACC
+        ceilings = [wire.byte(i, 85) for i in MOTORS.values()]
+        assert ceilings == [50, 50, NECK_ACC_CEILING, NECK_ACC_CEILING]
         assert (line["pan_ticks"], line["tilt_ticks"]) == (2048, 2048)
+    finally:
+        bus.close()
+        wire.stop()
+
+
+@pytest.mark.slow
+def test_on_the_wire_the_registers_command_reads_a_servo_s_table() -> None:
+    """ros/neck.sh registers: raw bytes of one roster servo's table through the server that owns
+    the bus (what found the neck's acceleration ceiling, 2026-10-02); refused while the wheels
+    turn, and a servo off the roster or a read past the limit answers an error."""
+    wire, bus = wired()
+    try:
+        encoders, mover = neck_parts(bus, NECK_CFG)
+        core = BaseServerCore(bus, CFG, servo_names=list(MOTORS), neck=encoders, mover=mover)
+        core.tick(0.0)
+
+        def ask(now: float = 0.1, **message: Any) -> Any:
+            return core.command({"cmd": "registers", **message}, now)
+
+        assert ask(servo="neck", address=84, size=2) == {
+            "type": "registers",
+            "servo": "neck",
+            "address": 84,
+            "values": [0, NECK_ACC_CEILING],
+        }
+        assert ask(servo=LEFT, address=85)["values"] == [50]
+        assert "ValueError" in ask(servo="neck", address=0, size=65)["error"]
+        assert "roster" in ask(servo="tail", address=0)["error"]
+        core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, 0.2)
+        assert ask(0.2, servo="neck", address=85) == {
+            "type": "registers",
+            "servo": "neck",
+            "busy": True,
+        }
     finally:
         bus.close()
         wire.stop()

@@ -111,7 +111,10 @@ ramp, goal, speed in one packet) when the head is energised or changes pace, els
 — so nothing a servo can fail to answer runs on the wheels' thread, and the head moves while the
 cart drives. The operating mode is read once each time the pair (re)appears; a servo that is not
 in position mode (`scripts/jog.py wheel` writes velocity mode into its EEPROM, and the head would
-turn forever) is never given a goal.
+turn forever) is never given a goal. A pair in position mode then has its Maximum_Acceleration
+(register 85) lifted to 254 and read back, in RAM (the EEPROM lock stays on, so every power-up
+gets it again): the servos came with 50, 439 deg/s^2, and stored every larger Acceleration as
+50, so the motion's ramp did nothing above it.
 
 | Line | What happens |
 | --- | --- |
@@ -122,6 +125,7 @@ turn forever) is never given a goal.
 | `{"cmd":"neck_jog","pan":-1\|0\|1,"tilt":-1\|0\|1,"slow":false}` | walks the head at a rate (52 deg/s, `slow` 8 deg/s) in those directions — pan +1 left, tilt +1 down, the signs of `pepin.neck.NeckAngles` — for as long as the lines keep coming: each one re-arms the jog's own 0.5 s deadman, after which the head stops where it is and the servos are released. Both zero: stop where it is, still held until the deadman. Accepted silently; refused as `{"type":"neck_jog","error":".."}` |
 | `{"cmd":"neck_motion","max_speed_deg_s":..,"max_acc_deg_s2":..,"lease_s":..}` | the motion in force beside `config/neck.json`'s; each key given is set until the server restarts (`ros/neck.sh motion`), a value outside its range refuses the whole line |
 | `{"cmd":"ping"}` | the servo roster, ids 1–10 (refused while the wheels turn: a ping waits for its answer) |
+| `{"cmd":"registers","servo":"neck","address":85,"size":1}` | `{"type":"registers","servo":..,"address":..,"values":[..]}`: raw bytes (at most 64) of a roster servo's control table, one acknowledged read (`ros/neck.sh registers`); refused as `"busy":true` while the wheels turn |
 
 Who holds the head, one at a time: a jog is the operator's and takes it from a lease; a lease takes
 it from a move, which answers `"error":"preempted by neck_target"`; a move is refused while a lease

@@ -11,6 +11,10 @@
 #                               config/neck.json's; KEY is max_speed_deg_s, max_acc_deg_s2 or
 #                               lease_s, set live until pepin-base restarts (every start reads the
 #                               file's motion block)
+#   ros/neck.sh registers SERVO ADDRESS [SIZE]
+#                               raw bytes of a roster servo's control table (neck, head, left, ...),
+#                               read by the server that owns the bus; e.g. "head 85" is the
+#                               acceleration ceiling the server lifts to 254, "neck 41 1" the ramp
 # Ticks, not degrees, on purpose: the encoders are what the server speaks, and config/neck.json's
 # limits are in ticks (pan 257..3812, tilt 1814..2760). A target outside them is refused by the
 # server, never quietly clamped; a move runs at the motion's top speed, wheels turning or not, and
@@ -32,7 +36,10 @@ from typing import Any
 
 from pepin.neck import NeckConfig, joint_angles
 
-USAGE = "usage: ros/neck.sh read | home | goto PAN TILT | hold PAN TILT | motion [KEY VALUE ...]"
+USAGE = (
+    "usage: ros/neck.sh read | home | goto PAN TILT | hold PAN TILT | motion [KEY VALUE ...]"
+    " | registers SERVO ADDRESS [SIZE]"
+)
 
 
 def request(argv: list[str]) -> tuple[dict[str, Any], str, float]:
@@ -45,6 +52,10 @@ def request(argv: list[str]) -> tuple[dict[str, Any], str, float]:
     if action in ("goto", "hold") and len(argv) == 3:
         goal = {"cmd": "neck_goto", "pan_ticks": int(argv[1]), "tilt_ticks": int(argv[2])}
         return {**goal, "hold": action == "hold"}, "neck_goto", 20.0
+    if action == "registers" and len(argv) in (3, 4):
+        size = int(argv[3]) if len(argv) == 4 else 1
+        read = {"cmd": "registers", "servo": argv[1], "address": int(argv[2]), "size": size}
+        return read, "registers", 3.0
     if action == "motion" and len(argv) % 2 == 1:
         pairs = zip(argv[1::2], argv[2::2], strict=True)
         return {"cmd": "neck_motion", **{k: float(v) for k, v in pairs}}, "neck_motion", 3.0
@@ -61,6 +72,15 @@ def report(cfg: NeckConfig, message: dict[str, Any]) -> None:
             + f" [file {message.get('config', {}).get(k)}]"
             for k in keys
         ))
+        if message.get("error"):
+            print(f"error: {message['error']}", file=sys.stderr)
+            raise SystemExit(1)
+        return
+    if message.get("type") == "registers":
+        if message.get("busy"):
+            message["error"] = "refused while the wheels turn"
+        if "values" in message:
+            print(f"{message['servo']} {message['address']}: {' '.join(map(str, message['values']))}")
         if message.get("error"):
             print(f"error: {message['error']}", file=sys.stderr)
             raise SystemExit(1)

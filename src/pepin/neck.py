@@ -111,8 +111,8 @@ class NeckMotion:
     ``retry_s`` later it is asked again.
     """
 
-    max_speed_deg_s: float = 120.0
-    max_acc_deg_s2: float = 1000.0
+    max_speed_deg_s: float = 299.0
+    max_acc_deg_s2: float = 2232.0
     lease_s: float = 2.0
     read_window_ms: float = 3.0
     silent_ticks: int = 3

@@ -36,12 +36,12 @@
     "camera_from_tilt_z_m": 0.086
   },
   "motion": {
-    "max_speed_deg_s": 120.0,
-    "max_acc_deg_s2": 1000.0,
+    "max_speed_deg_s": 299.0,
+    "max_acc_deg_s2": 2232.0,
     "lease_s": 2.0,
     "read_window_ms": 3.0,
     "silent_ticks": 3,
     "retry_s": 5.0,
-    "note": "How the base server moves the head (pepin.neck.NeckMotion). max_speed_deg_s and max_acc_deg_s2 are the profile every move runs at unless it asks for less (the Goal_Velocity and Acceleration registers, written with the goal in one packet); SEEDS, not measurements: 120 deg/s is Artem's starting point (2026-10-02), 1000 deg/s^2 reaches it in 0.12 s; the bench tunes both. lease_s: a neck_target holds the head this long, then it goes home and lets go. The three are live until pepin-base restarts: ros/neck.sh motion [KEY VALUE ...]. read_window_ms: how long past the wheels' replies the neck's are waited for in the one encoder read of a tick; silent_ticks missed reads take the neck out of that read, and it is asked again every retry_s."
+    "note": "How the base server moves the head (pepin.neck.NeckMotion). max_speed_deg_s and max_acc_deg_s2 are the profile every move runs at unless it asks for less (the Goal_Velocity and Acceleration registers, written with the goal in one packet). Both sit at their registers' tops since 2026-10-02, MEASURED at rest (scratch/gaze/neck_bench3.py): pans of 30/60/90 deg done (within 0.35 deg) in 0.26/0.36-0.54/0.46 s (90 % of the way in 0.18-0.20/0.28/0.36 s), tilts of 15/30 deg in 0.18-0.22/0.26-0.28 s, ramps fitted at 2030-2210 deg/s^2, no overshoot past 1 tick (0.09 deg) and no ring in either direction (the last 1-4 ticks creep in from one side). The speed peaks at 284-289 deg/s by the same estimate that reads 124-125 for 120 asked: the servos' own top, register 84 (Maximum_Velocity_Limit) reads 65 and is left alone. The ramp counts only because the base server lifts the servos' Maximum_Acceleration (register 85) from the 50 units they came with (439 deg/s^2) to 254 each time it checks them (pepin.base_server.NECK_ACC_CEILING): before that the servos stored every larger Acceleration as 50, and the 120 / 1000 seeds this replaced ran 30/60/90 deg in 0.46/0.70/0.95 s. Lower either here, or live, for a gentler head. lease_s: a neck_target holds the head this long, then it goes home and lets go. The three are live until pepin-base restarts: ros/neck.sh motion [KEY VALUE ...]. read_window_ms: how long past the wheels' replies the neck's are waited for in the one encoder read of a tick; silent_ticks missed reads take the neck out of that read, and it is asked again every retry_s."
   }
 }

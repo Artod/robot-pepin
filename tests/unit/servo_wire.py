@@ -29,6 +29,9 @@ from pepin.feetech import (
 )
 
 BYTE_S = 10e-6  # 1 Mbaud, 8N1: ten bits a byte
+ACCELERATION = 41  # the ramp a position move runs at, 100 ticks/s^2 a unit
+MAX_ACCELERATION = 85  # the firmware's ceiling on it: a larger Acceleration is stored as this
+DELIVERED_MAX_ACCELERATION = 50  # what the neck's STS3215 read before anyone wrote it (2026-10-02)
 
 
 def status(motor_id: int, params: bytes = b"", error: int = 0) -> bytes:
@@ -55,8 +58,11 @@ class ServoWire:
     """The fake: :meth:`start` returns the port to connect a client to; :meth:`stop` ends it."""
 
     def __init__(self, ids: list[int], *, reply_latency_s: float = 0.0045) -> None:
-        """``ids`` are the servos on the bus; each starts with a zeroed control table."""
+        """``ids`` are the servos on the bus; each starts with a zeroed control table but for the
+        acceleration ceiling the servos came with."""
         self.memory = {motor_id: bytearray(128) for motor_id in ids}
+        for table in self.memory.values():
+            table[MAX_ACCELERATION] = DELIVERED_MAX_ACCELERATION
         self.silent: set[int] = set()
         self.reply_latency_s = reply_latency_s
         self.counts = WireCounts()
@@ -147,16 +153,13 @@ class ServoWire:
                 for start in range(2, len(params), size + 1):
                     i = params[start]
                     if i in self.memory and i not in self.silent:
-                        self.memory[i][address : address + size] = params[
-                            start + 1 : start + 1 + size
-                        ]
+                        self._store(i, address, params[start + 1 : start + 1 + size])
                 return b""
             if motor_id not in self.memory or motor_id in self.silent:
                 return b""
             if instruction == INST_WRITE:
                 self.counts.writes += 1
-                address = params[0]
-                self.memory[motor_id][address : address + len(params) - 1] = params[1:]
+                self._store(motor_id, params[0], params[1:])
                 return status(motor_id)
             if instruction == INST_READ:
                 self.counts.reads += 1
@@ -166,6 +169,14 @@ class ServoWire:
                 self.counts.pings += 1
                 return status(motor_id)
         return b""
+
+    def _store(self, motor_id: int, address: int, data: bytes) -> None:
+        """A write into one servo's table, as the STS3215 keeps it: an Acceleration above the
+        Maximum_Acceleration ceiling is stored as the ceiling (read back 50 for 114 written)."""
+        table = self.memory[motor_id]
+        table[address : address + len(data)] = data
+        if address <= ACCELERATION < address + len(data):
+            table[ACCELERATION] = min(table[ACCELERATION], table[MAX_ACCELERATION])
 
 
 def _take_packet(buffer: bytearray) -> tuple[int, int, bytes] | None:

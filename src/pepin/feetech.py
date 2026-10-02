@@ -34,6 +34,7 @@ INST_READ = 0x02
 INST_WRITE = 0x03
 INST_SYNC_READ = 0x82
 INST_SYNC_WRITE = 0x83
+MAX_READ_BYTES = 64  # one diagnostic read; the whole table is two of them
 
 
 @dataclass(frozen=True)
@@ -58,6 +59,10 @@ REGISTERS = {
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
     "Present_Temperature": Register(63, 1),  # degrees C; the servo cuts out by itself at 70
+    # The firmware's ceiling on Acceleration, same units: a ramp asked above it runs at it. The
+    # neck's two STS3215 came with 50 (439 deg/s^2); written with the EEPROM lock on (Lock, 55,
+    # left at 1) it holds until the servo loses power.
+    "Maximum_Acceleration": Register(85, 1),
 }
 
 
@@ -374,6 +379,19 @@ class FeetechTcpClient:
         except TimeoutError:
             return None
         return reply[motor_id].error
+
+    def read_block(self, motor: str, address: int, size: int) -> bytes:
+        """``size`` raw bytes of one motor's control table from ``address`` (a diagnostic read,
+        one round trip). Raises ``TimeoutError`` when the servo stays silent or answers short."""
+        if not (0 <= address < 256 and 1 <= size <= MAX_READ_BYTES):
+            raise ValueError(f"read of {size} bytes at {address}: outside the table")
+        motor_id = self._id(motor)
+        params = bytes([address, size])
+        reply = self._transaction(build_packet(motor_id, INST_READ, params), {motor_id})
+        data = reply[motor_id].params
+        if len(data) != size:
+            raise TimeoutError(f"malformed reply from id {motor_id}: {len(data)} of {size} bytes")
+        return data
 
     def write(self, data_name: str, motor: str, value: int, *, normalize: bool = False) -> None:
         """Write one control-table register on one motor in raw units, waiting for its ack."""
