@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import sys
 import types
+import xml.etree.ElementTree as ET
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -86,3 +88,44 @@ def test_the_container_itself_respawns_and_carries_no_nodes_of_its_own(
     assert container.kwargs["name"] == "nav2_container_board"
     assert container.kwargs["prefix"] == "nice -n 5"
     assert container.kwargs["executable"] == "component_container_isolated"
+
+
+TREE = Path(__file__).resolve().parents[2] / "ros/params/pepin_nav_to_pose.xml"
+
+
+def test_an_image_with_askgaze_loads_the_plugin_and_the_tree_as_it_is(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    kit = _kit(monkeypatch)
+    overrides = kit.bt_navigator_overrides(TREE, True, tmp_path / "cut.xml")
+    assert overrides == {"plugin_lib_names": ["pepin_ask_gaze_bt_node"]}
+    assert not (tmp_path / "cut.xml").exists()
+    assert kit.gaze_bt_installed() is False  # no ament index here
+
+
+def test_an_image_without_askgaze_gets_the_tree_before_the_stall_look(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Cut out, the stall look leaves the FollowPath recovery exactly as it was: the controller
+    check, the two clears, the wait and the replan."""
+    kit = _kit(monkeypatch)
+    overrides = kit.bt_navigator_overrides(TREE, False, tmp_path / "cut.xml")
+    assert overrides == {"default_nav_to_pose_bt_xml": str(tmp_path / "cut.xml")}
+    cut = ET.parse(tmp_path / "cut.xml")
+    assert not list(cut.iter("AskGaze")) and not cut.findall(".//Fallback[@name='StallLook']")
+    recovery = cut.find(".//RecoveryNode[@name='FollowPath']/Sequence")
+    assert recovery is not None
+    assert [child.tag for child in recovery] == [
+        "WouldAControllerRecoveryHelp",
+        "ClearEntireCostmap",
+        "ClearEntireCostmap",
+        "Wait",
+        "ComputePathToPose",
+    ]
+    whole = ET.parse(TREE)
+    assert len(list(whole.iter("AskGaze"))) == 2
+    assert len(list(cut.iter())) == len(list(whole.iter())) - 6  # the look's six nodes
+    stray = '<root><Sequence><Wait/><Fallback name="x"><AskGaze/></Fallback></Sequence></root>'
+    with pytest.raises(ValueError, match="outside an element named StallLook"):
+        kit.without_ask_gaze(stray)
+    assert "<!--" in (tmp_path / "cut.xml").read_text(), "the tree's comments stay"

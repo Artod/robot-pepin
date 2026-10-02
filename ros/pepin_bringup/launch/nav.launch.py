@@ -15,6 +15,7 @@ owned the edge before, and the message-path owner of it (``slam:=true``), are on
 alt/tracker-2026-09-22.
 """
 
+from pathlib import Path
 from typing import Any
 
 import yaml
@@ -29,7 +30,7 @@ from launch.launch_context import LaunchContext
 from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
-from pepin_bringup.launch_kit import respawned_container
+from pepin_bringup.launch_kit import bt_navigator_overrides, gaze_bt_installed, respawned_container
 
 from pepin.deployment import CONTAINER_STOP_TIMEOUT_S, NAV_NODES, config_file
 from pepin.geometry import BaseConfig
@@ -54,6 +55,24 @@ def speed_overrides(context: LaunchContext) -> dict[str, dict[str, Any]]:
     print(
         f"nav speed {speed:.2f} m/s (config/base.json max_wheel_speed_m_s) on"
         f" {len(NAV2_SPEED)} parameters: " + ", ".join(p.label for p in NAV2_SPEED),
+        flush=True,
+    )
+    return overrides
+
+
+def gaze_overrides(context: LaunchContext) -> dict[str, Any]:
+    """The stall look's BT node for bt_navigator (pepin_bringup.launch_kit): the AskGaze plugin
+    when this image carries it (ros/laptop-build.sh gaze), else the tree without the look."""
+    path = LaunchConfiguration("params_file").perform(context)
+    with open(path) as f:
+        tree = yaml.safe_load(f)["bt_navigator"]["ros__parameters"]["default_nav_to_pose_bt_xml"]
+    installed = gaze_bt_installed()
+    overrides = bt_navigator_overrides(Path(tree), installed)
+    print(
+        "nav: the stall look's AskGaze is loaded (pepin_gaze_bt)"
+        if installed
+        else "nav: no pepin_gaze_bt in this image: the tree runs without the stall look"
+        f" ({overrides['default_nav_to_pose_bt_xml']}; ros/laptop-build.sh gaze)",
         flush=True,
     )
     return overrides
@@ -92,7 +111,7 @@ def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
             package="nav2_bt_navigator",
             plugin="nav2_bt_navigator::BtNavigator",
             name="bt_navigator",
-            parameters=[params],
+            parameters=[params, gaze_overrides(context)],
         ),
         "velocity_smoother": ComposableNode(
             package="nav2_velocity_smoother",
@@ -168,6 +187,16 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         Node(
             package="pepin_bringup",
             executable="goal_server",
+            output="screen",
+            **RESPAWN,
+        )
+    )
+    # The gaze arbiter: the one owner of the head (pepin_bringup.gaze). Beside Nav2 because the
+    # tree's AskGaze, the plan, the local costmap and the goal status are its inputs; its door
+    # for the tools is :3339, published on this Mac's loopback by ros/laptop.sh nav.
+    actions.append(
+        ExecuteProcess(
+            cmd=["python3", "-m", "pepin_bringup.gaze"],
             output="screen",
             **RESPAWN,
         )
