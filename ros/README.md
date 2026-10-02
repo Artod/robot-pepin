@@ -110,13 +110,6 @@ silence as good news. What is checked:
 | 1.14 | `/odom_laser` is flowing (the EKF's `odom3`), measured the same way. Skipped with a `WARN` when `PEPIN_LASER_ODOM=false` on the board |
 | 1.15 | **informational (`PASS`/`WARN`, never fails, never a drive gate)**: the board's clock minus the laptop's — the Docker VM's, which every laptop ROS node stamps with — over NTP from the board to the laptop's time server (`ros/time.sh offset`: `scripts/timesync.py` piped into the board's `python3`, best of eight round trips). `WARN` over `PEPIN_CLOCK_WARN_MS` (100 ms), `WARN` "not measured" when the board cannot reach the server or `PEPIN_TIME_SOURCE=laptop` and no server runs here, `WARN` on a value that is neither `laptop` nor `pool`. Under `PEPIN_TIME_SOURCE=pool` (the default) with no server here it is a `PASS` "not measured, as configured": that is the configuration, not a fault. See "One clock" below |
 
-`ros/tools/coldstart_soak.sh [N]` is the acceptance test behind checks 1.11 and 1.12: N cold starts of the
-board half (10 by default), each timed from `Activating planner_server` to the bond, with the
-range-layer and `Invalid frame ID` counts beside it, one row per start and a non-zero exit unless
-every start passed. It restarts processes and reads logs — **the robot does not move**, and it
-refuses to begin while a navigation goal is running. The hang appeared on 4 of 7 starts on
-2026-09-21, which is why one green restart is not an answer.
-
 | # | laptop |
 |---|---|
 | 2.2 | `depth_stream` over 5 frames/s, with a fitted law in its line |

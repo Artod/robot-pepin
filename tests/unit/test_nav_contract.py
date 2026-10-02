@@ -293,7 +293,6 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
         "thin.sh",
         "flags.sh",
         "restart.sh",
-        "tools/coldstart_soak.sh",
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
     stop = (REPO / "ros/stop.sh").read_text()
@@ -395,17 +394,13 @@ def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> No
     )
 
 
-def test_a_cold_start_is_judged_and_can_be_soaked() -> None:
-    """The gap that let the wedge ship: the transport's acceptance had no "N cold starts, Nav2
-    fully active" test, so a hang that appears on 4 of 7 starts looked like bad luck. The
-    restart's checks now name it, and the soak repeats it without ever moving the robot."""
+def test_a_cold_start_is_judged() -> None:
+    """The gap that let the wedge ship: the transport's acceptance had no "Nav2 fully active"
+    check, so a hang that appears on 4 of 7 starts looked like bad luck. The restart's checks
+    name it. (The board half's cold-start soak left with Nav2 on the board, 2026-10-01.)"""
     restart = (REPO / "ros/restart.sh").read_text()
     assert "planner_server connected with bond" in restart, "active, not merely running"
     assert "Range sensor layer can't transform" in restart, "the wedge's own line"
-    soak = REPO / "ros/tools/coldstart_soak.sh"
-    assert soak.stat().st_mode & 0o111, "it is run as a command"
-    text = soak.read_text()
-    assert "nav_goal_running.py" in text, "it refuses to restart the stack under a live goal"
     # The other half of a cold start: `docker run` returns before rmw_zenohd accepts, and the
     # stack started behind a router that was still binding is what delayed /tf_static by 157 s.
     router = (REPO / "board/pepin-zrouter.service").read_text()

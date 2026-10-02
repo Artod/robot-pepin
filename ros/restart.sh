@@ -406,7 +406,7 @@ check_board() {
     if [ -z "$value" ]; then
         warn 1.11 "nav2: no 'Activating planner_server' in the board's log — Nav2 does not run on this half (PEPIN_NAV), nothing to judge"
     elif [ -z "$line" ]; then
-        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in a costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board) and, if it comes back, ros/tools/coldstart_soak.sh"
+        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in a costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board)"
     elif [ "$n" = "?" ]; then
         fail 1.11 "nav2: planner_server bonded, but the board's log could not be read for the range-layer complaint (ssh root@$BOARD docker logs pepin-ros)"
     elif [ "$n" != 0 ]; then
