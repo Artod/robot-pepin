@@ -50,7 +50,7 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
-. "$HERE/lib.sh"  # one multiplexed ssh with a connect timeout: a frozen board fails fast, not silently
+. "$HERE/lib.sh"  # the router, container and clock helpers shared with the other scripts
 NET=pepin-net
 NAV=pepin-macnav  # = pepin.deployment.NAV_CONTAINER
 # The library is mounted live, like the ROS package: a copy went stale whenever a container was
@@ -230,7 +230,7 @@ case "${1:-}" in
         # start-ups after the respawn pause: camera/fusion/frame 0.3 s, depth 2.1 s (the
         # network), so a kick is 3-5 s here.
         #   The wait proves the ready line is the NEW process's (ros/kick_ready.awk, the same
-        # matcher as ros/thin.sh kick): the exit line of the signalled pid, the successor's start
+        # matcher as ros/board.sh kick): the exit line of the signalled pid, the successor's start
         # under the same launch tag, then its ready line. The times are the container's clock
         # (the VM's on this Mac, whose timestamps are the log's): its `date` before the SIGINT.
         NAME="${2:-}"; TARGET="$(kick_target "$NAME")" || { echo "usage: ros/laptop.sh kick <node>; nodes: $KICKABLE"; exit 2; }

@@ -2,7 +2,7 @@
 odometry's travelled distance, turns judged by its swept heading, /cmd_vel at 20 Hz, recorded
 as one tape by the run recorder under the given name. Meant for calibration drives where Nav2's
 planning (its spins, reversals and recoveries) is exactly what must not happen. Run from the
-laptop through ros/go.sh move; on the board itself:
+laptop through ros/goto.sh move; on the board itself:
   docker exec -i pepin-ros /pepin_entrypoint.sh python3 - NAME SEG... < /tools/move.py
 Segments, executed in order with a short rest between: ``f0.40`` drives 0.40 m straight
 (negative = backwards), ``t90`` turns 90 deg to the left (negative = right).
@@ -167,7 +167,7 @@ for _extra in range(30):
         break
     spin(0.5)
 if any(navigating.values()):
-    finish(2, "refused: a navigation goal is running; ros/go.sh cancel first")
+    finish(2, "refused: a navigation goal is running; ros/goto.sh cancel first")
 if travel.heard == 0:
     finish(3, f"aborted: no odometry on /odometry/filtered or /odom within {ODOM_WAIT_S:.0f} s")
 if cone.scan is None:

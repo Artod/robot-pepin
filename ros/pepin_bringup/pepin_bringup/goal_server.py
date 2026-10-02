@@ -171,10 +171,9 @@ FLAGS = FlagSet(
         True,
         description=f"the pose this node reads out of TF is republished as {POSE_TOPIC}"
         f" (geometry_msgs/PoseStamped in {MAP_FRAME}, {POSE_HZ:.0f} Hz, stamped with the"
-        " transform's own stamp), so the other nodes on this board can have the pose without a"
-        " TF listener of their own. Inert on a split stack, where the reader is on the other"
-        " machine and reads the edge itself. Off, nothing is published and this node's"
-        " listener goes back to being started on the first ask",
+        " transform's own stamp), so the other nodes beside it can have the pose without a TF"
+        " listener of their own. Off, nothing is published and this node's listener goes back"
+        " to being started on the first ask",
         why="a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at"
         " 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in"
         " Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read"

@@ -175,14 +175,13 @@ pepin_zenoh_session_override() {
 pepin_zenoh_router_override() {  # <board ip>
     printf 'connect/endpoints=["tcp/%s:%s"]' "$1" "$PEPIN_ZROUTER_PORT"
 }
-# WHO WRITES A DRIVE DOWN on the board (board/pepin-ros.service's PEPIN_RECORDER, flipped with
-# `ros/feature.sh recorder jsonl|bag`): jsonl is pepin_bringup.run_recorder, the numbered JSONL
-# tape written on the board itself (34-43 % of a core: rclpy deserialisation, the TF buffer and
-# json.dumps of 450 floats ten times a second); bag is pepin_bringup.bag_recorder, which only
-# starts and stops `ros2 bag record` (MCAP, no compression) and subscribes to nothing, so the
-# board copies serialised bytes and the laptop makes the tape afterwards. The scripts here do not
-# have to be told which one runs — the board names the file it opened, and a bag is a DIRECTORY
-# without the .jsonl suffix — so this is only the default for anything that must ask beforehand.
+# WHO WRITES A DRIVE DOWN beside Nav2 (nav.launch.py's recorder argument, which ros/laptop.sh nav
+# passes from PEPIN_RECORDER): jsonl is pepin_bringup.run_recorder, the numbered JSONL tape (34-43 %
+# of a core: rclpy deserialisation, the TF buffer and json.dumps of 450 floats ten times a second);
+# bag is pepin_bringup.bag_recorder, which only starts and stops `ros2 bag record` (MCAP, no
+# compression) and subscribes to nothing, and the tape is made from the bag afterwards. The scripts
+# here do not have to be told which one runs — the recorder names the file it opened, and a bag is
+# a DIRECTORY without the .jsonl suffix — so this is only the default for the start.
 PEPIN_RECORDER="${PEPIN_RECORDER:-jsonl}"
 PEPIN_VSLAM_CONTAINER="${PEPIN_VSLAM_CONTAINER:-pepin-vslam}"
 
@@ -257,7 +256,7 @@ pepin_render() {  # "[proc] [LEVEL] [epoch] [node]: text" -> "HH:MM:SS LEVEL nod
 # new lines into each goal's log. Started with the container (ros/laptop.sh nav) and again by
 # goto when a container restarted without it: started per goal, it came up 1-2 s late and missed
 # the first recoveries (2026-09-30).
-PEPIN_BT_LOG="$PEPIN_ROS_DIR/maps/rec/bt_live.log"
+PEPIN_BT_LOG="${PEPIN_BT_LOG:-$PEPIN_ROS_DIR/maps/rec/bt_live.log}"
 pepin_bt_watch() {
     docker exec pepin-macnav pgrep -f /tools/bt_watch.py >/dev/null 2>&1 && return 0
     mkdir -p "$(dirname "$PEPIN_BT_LOG")"

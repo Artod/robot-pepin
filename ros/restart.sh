@@ -4,26 +4,27 @@
 #
 #   ros/restart.sh board|laptop|both [--deploy] [--fresh-graph] [--no-check] [--fast] [--dry-run]
 #
-#   board          the board's stack WITH its zenoh router (ros/lib.sh pepin_board_restart: stack
-#                  stopped, router restarted, stack started), then the run recorder's ready line
+#   board          the board's sensor stack WITH its zenoh router (ros/lib.sh pepin_board_restart:
+#                  stack stopped, router restarted, stack started), then the sensors' ready line
 #                  (90 s). If the laptop half is up, its vslam is restarted after it: RTAB-Map
 #                  follows the board's new odometry only from a fresh start (journal 2026-09-22)
 #   --deploy       ros/sync.sh --restart instead: code + the library + config to the board, the
 #                  same router-and-stack restart, and its census tail
-#   laptop         ros/laptop.sh start, then ros/laptop.sh vslam --neck. Nothing about the map is
-#                  passed: the database IS the map, the launch reads whether it exists
+#   laptop         ros/laptop.sh vslam --neck, then ros/laptop.sh nav (Nav2 on this Mac). Nothing
+#                  about the map is passed: the database IS the map, the launch reads whether it
+#                  exists
 #   --fresh-graph  the camera half starts on an empty RTAB-Map database (laptop.sh vslam --fresh)
 #                  AND the volume of the old frame is moved aside: the volume is painted in the
 #                  graph's frame, so a kept snapshot beside an empty database is a room painted
 #                  somewhere else
 #   both           board first, then laptop. Never the other way: a board restart re-zeroes the
-#                  odometry under a running RTAB-Map. The board's Nav2 waits for the laptop's map
+#                  odometry under a running RTAB-Map. Nav2 waits for the map and map -> odom
 #                  (initial_transform_timeout, ros/params/nav2_params.yaml) and the proof below
 #                  catches whatever still races
 #   --no-check     restart only: no proof, no repair, no checks
 #   --fast         --no-check, and no waiting for either half's first report line: the commands
 #                  are sent and the script returns; the stack still needs its own time to come
-#                  up (Nav2 on the board about a minute), and nothing here says whether it did
+#                  up, and nothing here says whether it did
 #   --dry-run      print the order of everything above and touch nothing
 #
 # THE PROOF (4.1), whenever the laptop half is up after the restart: from pepin-vslam, the pose
@@ -31,7 +32,7 @@
 # global costmap within 10 s, one ComputePathToPose 0.5 m ahead — a plan, never motion), asked
 # again for up to PEPIN_PLANNER_WAIT_S (180) while Nav2 comes up. Broken, it REPAIRS itself: first
 # the Nav2 container alone (SIGINT; the launch respawns it in 2 s with fresh nodes, odometry and
-# RTAB-Map untouched), then the board half once more with its router and the laptop's vslam after
+# RTAB-Map untouched), then the board half once more with its router and the laptop half after
 # it, and fails loudly if the planner still does not plan. A planner that answers "no path" in
 # every direction is not repaired: no restart moves furniture. With the laptop half down there is
 # no map to plan on, and 4.1 fails saying so.
@@ -57,8 +58,8 @@ WAIT_BOARD_S="${PEPIN_RESTART_WAIT_S:-90}"    # the board's stack to the recorde
 WAIT_LAPTOP_S="${PEPIN_RESTART_WAIT_S:-120}"  # the camera half to the depth stream's first line
                                               # (a 30 s report timer, the ghost wait, the network)
 POLL_S="${PEPIN_RESTART_POLL_S:-5}"
-# How long the proof keeps asking the planner: the board's Nav2 bring-up is ~54 s on the A53 once
-# the map is there (journal 2026-09-25), RTAB-Map's first correction comes on top.
+# How long the proof keeps asking the planner: Nav2 comes up once the map and RTAB-Map's first
+# correction are there, and that correction can take a minute after a restart.
 PLANNER_WAIT_S="${PEPIN_PLANNER_WAIT_S:-${PEPIN_RESTART_WAIT_S:-180}}"
 REPORT_WINDOW_S=90  # the nodes report every 30 s: three windows, so one missed line is not a verdict
 ERROR_WINDOW_S=60   # how far back the error counts look
@@ -97,27 +98,6 @@ board_last() {  # WINDOW_S PATTERN -> the last matching line of the board contai
     ssh "root@$BOARD" "docker logs --since ${1}s pepin-ros 2>&1 | grep -aE $(printf '%q' "$2") | tail -1" \
         2>/dev/null || true
 }
-board_count() {  # WINDOW_S PATTERN -> how many lines of the board container's log match, or ?
-    # A log that could not be read prints ?, never 0: "no errors" and "no answer" are not the
-    # same sentence, and only one of them is good news.
-    local answer
-    answer="$(ssh "root@$BOARD" "docker logs --since ${1}s pepin-ros 2>&1 | grep -acE $(printf '%q' "$2")" 2>/dev/null || true)"
-    [[ "$answer" =~ ^[0-9]+$ ]] && printf '%s\n' "$answer" || printf '?\n'
-}
-board_hot_thread() {  # -> "TID SHARE COMM" for the busiest thread of the board's Nav2 component
-    # container, or nothing at all when the board could not be asked. SHARE is that thread's
-    # cumulative CPU time divided by the process's own lifetime, so 1.00 means "has done nothing
-    # but run since it started" — the signature of a costmap loop spinning under its mutex, which
-    # writes no log line of any kind. One `ps` over the multiplexed ssh and nothing else: the ROS
-    # CLI costs seconds of A53 on this board, and `ps -L` reads /proc, which the host sees for
-    # every process in every container.
-    ssh "root@$BOARD" '
-        pid=$(pgrep -f component_container_isolated | head -1)
-        [ -n "$pid" ] || exit 0
-        ps -L -p "$pid" -o tid=,times=,etimes=,comm= 2>/dev/null |
-            awk "\$3 > 0 { printf \"%s %.2f %s\n\", \$1, \$2 / \$3, \$4 }" |
-            sort -k2 -rn | head -1' 2>/dev/null || true
-}
 board_rate() {  # TOPIC [latched] -> one line: is it reaching the board, and how fast.
     # ros/tools/topic_rate.py, not `ros2 topic hz`: the CLI costs ~4.5 s of start-up on four A53
     # cores before it measures anything, the tool is one rclpy node and answers in one line.
@@ -127,6 +107,9 @@ board_rate() {  # TOPIC [latched] -> one line: is it reaching the board, and how
         2>&1 || true
 }
 over() { awk -v v="${1:-0}" -v t="$2" 'BEGIN { exit !(v + 0 > t) }'; }  # VALUE > THRESHOLD, floats
+nav_log() {  # WINDOW_S -> that much of the Mac's Nav2 container log (ros/laptop.sh nav)
+    docker logs --since "${1}s" pepin-macnav 2>&1
+}
 
 # ---- the restarts -----------------------------------------------------------------------------
 wait_for() {  # WHAT TIMEOUT_S CONTAINER PATTERN: poll a container's log from now until it appears.
@@ -158,12 +141,12 @@ restart_board() {
     else
         pepin_board_restart
     fi
-    # Which line says this half is back: the recorder's, the one node of ours that runs on the
-    # board in every arrangement.
+    # Which line says this half is back: the sensors' lifecycle manager activating the lidar,
+    # which the board's stack starts in every arrangement.
     if [ "$WAIT" != true ]; then
         echo "--fast: not waiting for the board's first report line"
     else
-        wait_for "board" "$WAIT_BOARD_S" pepin-ros "run recorder ready" || true
+        wait_for "board" "$WAIT_BOARD_S" pepin-ros "lifecycle_manager_sensors.*Managed nodes are active" || true
     fi
 }
 
@@ -178,7 +161,7 @@ drop_volume() {  # --fresh-graph: the volume shares the database's frame, so it 
     fi
 }
 
-restart_laptop() {  # [vslam]: the camera half only (after a board restart), else the whole half
+restart_laptop() {  # [vslam]: the camera half only (after a board restart), else vslam then Nav2
     local what="restarting the laptop"
     [ "${1:-}" != vslam ] || what="restarting the laptop's vslam (RTAB-Map onto the new odometry)"
     step "$what"
@@ -190,8 +173,8 @@ restart_laptop() {  # [vslam]: the camera half only (after a board restart), els
         args+=(--fresh)
         drop_volume
     fi
-    [ "${1:-}" = vslam ] || "$HERE/laptop.sh" start
     "$HERE/laptop.sh" "${args[@]}"
+    [ "${1:-}" = vslam ] || "$HERE/laptop.sh" nav
     if [ "$WAIT" != true ]; then
         echo "--fast: not waiting for the laptop's first depth line"
         return 0
@@ -202,19 +185,14 @@ restart_laptop() {  # [vslam]: the camera half only (after a board restart), els
 laptop_up() { docker ps --format '{{.Names}}' 2>/dev/null | grep -qx pepin-vslam; }
 
 # ---- the proof: the planner plans -------------------------------------------------------------
-renav() {  # every Nav2 component container, SIGINT; its launch respawns it in 2 s, fresh nodes
-    # The container is launch_kit's respawned_container on either half (nav2_container,
-    # nav2_container_board, nav2_container_laptop); odometry, the sensors and RTAB-Map are other
-    # processes and never notice. A board whose bring-up gave up before the map came (the
+renav() {  # the Nav2 component container, SIGINT; its launch respawns it in 2 s, fresh nodes
+    # launch_kit's respawned_container in pepin-macnav; odometry, the sensors and RTAB-Map are
+    # other processes and never notice. A bring-up that gave up before the map came (the
     # start-order race) comes back active in seconds — the sim: 5.7 s on the Mac.
-    if ssh "root@$BOARD" "docker exec pepin-ros pkill -INT -f '__node:=nav2_container'" 2>/dev/null; then
-        echo "  board: Nav2 container respawning"
+    if docker exec pepin-macnav pkill -INT -f '__node:=nav2_container' 2>/dev/null; then
+        echo "  Nav2 container respawning"
     else
-        echo "  board: no Nav2 container to respawn (PEPIN_NAV=false, or the board is unreachable)"
-    fi
-    if docker ps --format '{{.Names}}' 2>/dev/null | grep -qx pepin-laptop &&
-        docker exec pepin-laptop pkill -INT -f '__node:=nav2_container' 2>/dev/null; then
-        echo "  laptop: Nav2 container respawning"
+        echo "  no Nav2 container to respawn (is pepin-macnav up? ros/laptop.sh nav)"
     fi
 }
 
@@ -245,10 +223,10 @@ prove_planner() {  # -> 0 plans, 1 broken, 3 boxed; PROOF is the planner check's
     done
 }
 
-ensure_planner() {  # 4.1: prove it, repair it (Nav2 alone, then the board once more), or fail
+ensure_planner() {  # 4.1: prove it, repair it (Nav2 alone, then both halves once more), or fail
     step "the planner"
     if ! laptop_up; then
-        fail 4.1 "planner: not proven — the laptop half is down, so there is no map and no map -> odom to plan on (the board's Nav2 waits for them); ros/restart.sh laptop brings them and proves the planner"
+        fail 4.1 "planner: not proven — the laptop half is down, so there is no map and no map -> odom to plan on (Nav2 waits for them); ros/restart.sh laptop brings them and proves the planner"
         return 0
     fi
     local status=0 repaired=""
@@ -262,17 +240,17 @@ ensure_planner() {  # 4.1: prove it, repair it (Nav2 alone, then the board once 
     fi
     if [ "$status" -eq 1 ]; then
         echo "  $PROOF"
-        echo "repair 2: the board half once more (router and stack), then the laptop's vslam on its new odometry"
+        echo "repair 2: the board half once more (router and stack), then the laptop half (vslam on its new odometry, Nav2)"
         DEPLOY=false; FRESH_GRAPH=false  # the code went out, and the new database stays
         restart_board || true
-        restart_laptop vslam || true
+        restart_laptop || true
         repaired="a Nav2 respawn and a board restart"
         status=0; prove_planner || status=$?
     fi
     case "$status" in
         0) pass 4.1 "${PROOF#planner: }${repaired:+ — after $repaired}" ;;
         3) fail 4.1 "${PROOF#planner: } — the planner itself works, so no restart can help: the cart is boxed in, or the global costmap is full of marks (Foxglove's planner panel)" ;;
-        *) fail 4.1 "${PROOF#planner: } — STILL BROKEN after $repaired: nothing will plan; 1.11 and 1.12 below say where" ;;
+        *) fail 4.1 "${PROOF#planner: } — STILL BROKEN after $repaired: nothing will plan (ros/laptop.sh nav logs)" ;;
     esac
 }
 
@@ -294,7 +272,7 @@ describe() {
     [ "$WAIT" != true ] || waits="; wait up to ${WAIT_LAPTOP_S} s for the first depth line"
     case "$HALF" in
         board) say "ask docker ps whether the laptop half is up (pepin-vslam): if it is, ros/laptop.sh vslam --neck — RTAB-Map onto the board's new odometry — and wait up to ${WAIT_LAPTOP_S} s for its first depth line; if it is down, say so" ;;
-        *) say "laptop: ros/laptop.sh start, then ros/laptop.sh vslam --neck$fresh$waits" ;;
+        *) say "laptop: ros/laptop.sh vslam --neck$fresh$waits, then ros/laptop.sh nav (Nav2 on this Mac)" ;;
     esac
     if [ "$CHECK" != true ]; then
         if [ "$WAIT" = true ]; then
@@ -305,8 +283,8 @@ describe() {
         return 0
     fi
     say "the proof (4.1), if the laptop half is up (else 4.1 fails: no map to plan on): from pepin-vslam, ros/tools/map_odom.py and ros/tools/planner_check.py — a new global costmap within 10 s, one path 0.5 m ahead — asked again for up to ${PLANNER_WAIT_S} s"
-    say "broken -> repair 1: SIGINT to the Nav2 container (board, and pepin-laptop if it runs); its launch respawns it; the proof again"
-    say "still broken -> repair 2: the board once more (stop pepin-ros, restart pepin-zrouter, start pepin-ros; no sync), ros/laptop.sh vslam --neck, the proof again; still broken -> FAIL 4.1, loudly. \"No path around\" is never repaired"
+    say "broken -> repair 1: SIGINT to the Nav2 container in pepin-macnav; its launch respawns it; the proof again"
+    say "still broken -> repair 2: the board once more (stop pepin-ros, restart pepin-zrouter, start pepin-ros; no sync), ros/laptop.sh vslam --neck and ros/laptop.sh nav, the proof again; still broken -> FAIL 4.1, loudly. \"No path around\" is never repaired"
     case "$HALF" in
         board) say "the checks: board (1.x), flags (3.x)" ;;
         laptop) say "the checks: laptop (2.x), flags (3.x)" ;;
@@ -329,7 +307,7 @@ check_board() {
 
     # WHERE THE CART THINKS IT IS: the goal server's socket `where`, composed from TF
     # (map -> base_link) — RTAB-Map's correction with the board's own odometry.
-    out="$("$HERE/go.sh" where 2>&1 || true)"
+    out="$("$HERE/goto.sh" where 2>&1 || true)"
     if [[ "$out" != *'"event": "where"'* ]]; then
         fail 1.3 "pose: the goal server did not answer 'where' on its socket: $(tail -1 <<<"$out" | cut -c1-140)"
     elif [[ "$out" == *'"pose": "tf"'* ]]; then
@@ -338,40 +316,35 @@ check_board() {
         fail 1.3 "pose: the goal server answers '$(sed -n 's/.*"pose": "\([a-z]*\)".*/\1/p' <<<"$out" | tail -1)', not 'tf' — nothing publishes map -> base_link (is ros/laptop.sh vslam up?)"
     fi
 
-    n="$(board_count "$ERROR_WINDOW_S" 'Failed to meet update rate')"
-    if [ "$n" = "?" ]; then
-        fail 1.4 "loop rate: the board's log could not be read (ssh root@$BOARD docker logs pepin-ros)"
-    elif [ "$n" = 0 ]; then
-        pass 1.4 "loop rate: no 'Failed to meet update rate' in the last ${ERROR_WINDOW_S} s"
-    else
-        fail 1.4 "loop rate: $n x 'Failed to meet update rate' in the last ${ERROR_WINDOW_S} s (a starved loop: ros/board.sh census)"
-    fi
-
-    n="$(board_count "$ERROR_WINDOW_S" 'Extrapolation|out of map bounds|Off Grid')"
-    if [ "$n" = "?" ]; then
-        fail 1.5 "tf and costmaps: the board's log could not be read (ssh root@$BOARD docker logs pepin-ros)"
-    elif [ "$n" = 0 ]; then
-        pass 1.5 "tf and costmaps: no extrapolation / off-grid error in the last ${ERROR_WINDOW_S} s"
-    else
-        fail 1.5 "tf and costmaps: $n error(s) in the last ${ERROR_WINDOW_S} s: $(board_last "$ERROR_WINDOW_S" 'Extrapolation|out of map bounds|Off Grid' | cut -c1-140)"
-    fi
-
-    n=6
-    # /map first: it is THE map (World R), RTAB-Map's grid, LATCHED — republished when it changes,
-    # and while RTAB-Map localises that is once a start (2026-09-24: "1 grids relayed" in a whole
-    # start, while the board's static layer held it), so it is asked for its held copy, not a
-    # rate. Then the camera's other two words, which do have one.
-    for value in /map /depth_scan /vo; do
-        mode=""
-        [ "$value" = /map ] && mode=latched
-        out="$(board_rate "$value" $mode)"
-        if [[ "$out" == *" Hz over "* || "$out" == *"latched copy received"* ]]; then
-            pass "1.$n" "$value reaches the board: ${out#*: }"
+    # Nav2's own complaints, from the Mac's container (ros/laptop.sh nav): a starved costmap or
+    # controller loop, and transforms the costmaps could not place.
+    local navlog
+    if navlog="$(nav_log "$ERROR_WINDOW_S")"; then
+        n="$(grep -ac 'Failed to meet update rate' <<<"$navlog" || true)"
+        if [ "$n" = 0 ]; then
+            pass 1.4 "loop rate: no 'Failed to meet update rate' in the last ${ERROR_WINDOW_S} s"
         else
-            fail "1.$n" "$value does not reach the board: $(tail -1 <<<"$out" | cut -c1-140) (the laptop half and the bridge)"
+            fail 1.4 "loop rate: $n x 'Failed to meet update rate' in the last ${ERROR_WINDOW_S} s (ros/laptop.sh nav logs)"
         fi
-        n=$((n + 1))
-    done
+        line="$(grep -aE 'Extrapolation|out of map bounds|Off Grid' <<<"$navlog" | tail -1 || true)"
+        n="$(grep -acE 'Extrapolation|out of map bounds|Off Grid' <<<"$navlog" || true)"
+        if [ "$n" = 0 ]; then
+            pass 1.5 "tf and costmaps: no extrapolation / off-grid error in the last ${ERROR_WINDOW_S} s"
+        else
+            fail 1.5 "tf and costmaps: $n error(s) in the last ${ERROR_WINDOW_S} s: $(cut -c1-140 <<<"$line")"
+        fi
+    else
+        fail 1.4 "loop rate: Nav2's log could not be read (is pepin-macnav up? ros/laptop.sh nav)"
+        fail 1.5 "tf and costmaps: Nav2's log could not be read (ros/laptop.sh nav)"
+    fi
+
+    # The camera's odometry the board's EKF fuses (odom1): the one laptop topic the board needs.
+    out="$(board_rate /vo)"
+    if [[ "$out" == *" Hz over "* ]]; then
+        pass 1.8 "/vo reaches the board: ${out#*: }"
+    else
+        fail 1.8 "/vo does not reach the board: $(tail -1 <<<"$out" | cut -c1-140) (the laptop half and the routers)"
+    fi
 
     out="$(ssh "root@$BOARD" "systemctl is-active pepin-base; journalctl -u pepin-base -n 200 --no-pager 2>/dev/null | grep -aE 'torque (on|off)' | tail -1" 2>/dev/null || true)"
     value="$(head -1 <<<"$out")"; line="$(sed -n '2p' <<<"$out")"
@@ -381,64 +354,6 @@ check_board() {
         fail 1.10 "base: the wheels are still armed — its last word is '${line#*: }' (a torque left standing holds the wheels and heats the servos)"
     else
         pass 1.10 "base: active, no torque left standing${line:+ (last: ${line##*: })}"
-    fi
-
-    # Nav2 is not "up" until it is ACTIVE. planner_server's activation blocks inside its global
-    # costmap's first update, and a costmap whose range layers cannot transform a Range never
-    # finishes one: tf2's canTransform costs its whole transform_tolerance per message, the ToF
-    # layers receive 15 Hz each, and the backlog outgrows the drain until the update never
-    # returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/wedge_gain.py, and the
-    # tof_bridge module docstring for the fix: the whiskers feed ObstacleLayers, which drop
-    # what they cannot place instead of blocking on it). Two questions, one line: did the lifecycle
-    # manager get planner_server's bond, and is the log free of the complaint that says the
-    # wedge is running. The bond is printed once at activation, so it is looked for across the
-    # whole restart, not the report window; the container is recreated on every restart
-    # (board/pepin-ros.service), so no older start can match. A board that runs no Nav2
-    # (PEPIN_NAV=false) has nothing to judge here and is not failed for it.
-    # Since 2026-09-21 the whiskers feed ObstacleLayers instead and no RangeSensorLayer is
-    # listed in either costmap, so the count below is zero by construction — which is exactly
-    # why it is KEPT: one of these lines means a range layer is running again (an old
-    # nav2_params.yaml on the board, a plugins list edited back by hand), and that is worth a
-    # failed check on its own.
-    value="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'Activating planner_server')"
-    line="$(board_last "$((WAIT_BOARD_S + REPORT_WINDOW_S))" 'planner_server connected with bond')"
-    n="$(board_count "$REPORT_WINDOW_S" "Range sensor layer can't transform")"
-    if [ -z "$value" ]; then
-        warn 1.11 "nav2: no 'Activating planner_server' in the board's log — Nav2 does not run on this half (PEPIN_NAV), nothing to judge"
-    elif [ -z "$line" ]; then
-        fail 1.11 "nav2: planner_server was activated and never bonded — it is WEDGED in a costmap's first update ($n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s). Goals are accepted and nothing is planned; restart the board half (ros/restart.sh board)"
-    elif [ "$n" = "?" ]; then
-        fail 1.11 "nav2: planner_server bonded, but the board's log could not be read for the range-layer complaint (ssh root@$BOARD docker logs pepin-ros)"
-    elif [ "$n" != 0 ]; then
-        fail 1.11 "nav2: $n x 'Range sensor layer can't transform' in the last ${REPORT_WINDOW_S} s — a RangeSensorLayer is running on this board although no costmap lists one any more: the board's ros/params/nav2_params.yaml is older than this checkout (ros/restart.sh board --deploy), and that plugin is the Nav2 wedge of 2026-09-21"
-    else
-        pass 1.11 "nav2: planner_server connected with bond, no RangeSensorLayer running (0 range-layer transform failures in the last ${REPORT_WINDOW_S} s)"
-    fi
-
-    # ...and the failure that leaves no line in any log: a costmap thread spinning on its own.
-    # range_sensor_layer.cpp:362-369 clamps bx0/by0 at zero, clamps bx1/by1 at the grid's size
-    # and then walks `for (unsigned int x = bx0; x <= (unsigned int)bx1; x++)`, so a cone that
-    # falls entirely off the grid's left or bottom edge leaves bx1 NEGATIVE and the cast turns
-    # it into about 4e9 iterations under the costmap mutex. Nothing is printed; the symptoms are
-    # "Pose Goes Off Grid", services timing out, zero plans — and one thread at 100 %. That is
-    # the measurement, and it is taken the only way this board is ever measured: /proc through
-    # `ps` over ssh, never the ROS CLI (a `ros2 node list` costs seconds of A53 here). The share
-    # is a thread's cumulative CPU time over the process's own lifetime — 1.00 is a thread that
-    # has done nothing else since it started, and the wedged one measured 415 s of 700 s (0.59)
-    # on 2026-09-21 because it only began to spin partway through. Nobody has yet measured what
-    # the busiest thread of a HEALTHY container costs, so only the unmistakable case fails and
-    # the middle is a WARN carrying the number; tighten it once a few healthy restarts have
-    # printed theirs. A board that could not be read says so and is not failed for it.
-    line="$(board_hot_thread)"
-    value="${line#* }"; value="${value%% *}"   # the share
-    if [[ ! "$value" =~ ^[0-9]+\.[0-9]+$ ]]; then
-        warn 1.12 "nav2 threads: could not read the container's threads over ssh (ps -L on the board); the pegged-thread check did not run"
-    elif over "$value" 0.90; then
-        fail 1.12 "nav2 threads: thread ${line%% *} has used $value of the Nav2 container's whole lifetime (${line##* }) — that is a costmap update spinning under the mutex, not work: goals will be accepted and nothing planned. Restart the board half and check that no RangeSensorLayer is listed (ros/params/nav2_params.yaml)"
-    elif over "$value" 0.50; then
-        warn 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }) — high, but this board has never been measured at rest; watch it (ros/board.sh census)"
-    else
-        pass 1.12 "nav2 threads: busiest thread ${line%% *} at $value of the container's lifetime (${line##* }), none pegged"
     fi
 
     check_map_odom
@@ -721,8 +636,8 @@ if [ "$DRY" = true ]; then
     describe
     exit 0
 fi
-# Both halves come back before anything is checked: the two topics the board is asked about
-# (/depth_scan, /vo) are fed BY the laptop, so checking the board first would fail them on purpose.
+# Both halves come back before anything is checked: the topic the board is asked about (/vo) is
+# fed BY the laptop, so checking the board first would fail it on purpose.
 # Board first, always: its restart re-zeroes the odometry RTAB-Map runs on.
 [ "$HALF" = laptop ] || restart_board || fail 0.1 "the board's restart did not finish (above); the checks say what is missing"
 if [ "$HALF" != board ]; then
@@ -731,7 +646,7 @@ elif laptop_up; then
     restart_laptop vslam || fail 0.2 "the laptop's vslam restart did not finish (above); the checks say what is missing"
 else
     step "the laptop half is down"
-    echo "nothing publishes the map or map -> odom: the board's Nav2 waits for them, and ros/restart.sh laptop brings them and proves the planner"
+    echo "nothing publishes the map or map -> odom: Nav2 waits for them, and ros/restart.sh laptop brings them and proves the planner"
 fi
 if [ "$CHECK" != true ]; then
     printf '\nno proof and no checks (--no-check)\n'

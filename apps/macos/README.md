@@ -47,7 +47,7 @@ board otherwise — and which of `pepin-vslam` / `pepin-macnav` / `pepin-laptop`
 
 The first item, **■ STOP THE ROBOT**, is the red button, run in the background and reported
 as a notification. It cancels every goal through the goal server's socket wherever Nav2
-runs (`pepin.goal_link`, the same cancel as `ros/go.sh cancel`), giving it 3 s to confirm; a
+runs (`pepin.goal_link`, the same cancel as `ros/goto.sh cancel`), giving it 3 s to confirm; a
 confirmed cancel is the whole stop and the board is untouched. If no goal server answers or
 no navigator confirms, `ros/stop.sh` takes over: the board's ROS processes are killed so
 the base's deadman cuts the wheels, then that stack restarts (~45 s; the odometry starts
@@ -63,7 +63,7 @@ Three actions move the cart or the head, each in its own Terminal window so the 
 visible: **Teleop (game)** runs `uv run python -m pepin.teleop --game` (a focused window,
 keys act while held, WASD moves the neck); **Teleop in a terminal** runs `ros/teleop.sh`
 (arrows drive, Shift+arrows slow, space stops, Ctrl-C ends; needs the laptop's `pepin-vslam`
-container); **Turn once in place** runs `ros/go.sh round` (one recorded 372-degree turn
+container); **Turn once in place** runs `ros/goto.sh round` (one recorded 372-degree turn
 judged by the gyro, a ROS process on the board).
 
 The rest: refresh, the polling cadence (30 s after a refresh or any NO GO, 5 min once all go

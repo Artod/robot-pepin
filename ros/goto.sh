@@ -64,16 +64,17 @@ case "${1:-}" in
         exit ;;
 esac
 
-REC="$HERE/maps/rec"
+REC="${PEPIN_REC_DIR:-$HERE/maps/rec}"  # the containers' /maps/rec
 mkdir -p "$REC"
 STAMP=$(date +%Y%m%d_%H%M%S)
 LOG="$REC/${STAMP}_goto.log"
 NAVLOG="$REC/${STAMP}_goto.nav2.log"
 CAM="$REC/${STAMP}_goto_cam.mkv"
 # Each helper in a process group of its own: one signal ends every member, and the operator's
-# Ctrl-C reaches the goal alone (python's setpgrp: job control needs a terminal).
-own_group() { python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])' "$@"; }
-own_group bash "$HERE/clip.sh" "$CAM" "${PEPIN_CAMERA_STREAM:-http://$BOARD:8080/stream}" &
+# Ctrl-C reaches the goal alone (python's setpgrp: job control needs a terminal). A command, not
+# a function: a function run with & is a subshell, and $! would be that subshell, not the group.
+OWN_GROUP=(python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])')
+"${OWN_GROUP[@]}" bash "$HERE/clip.sh" "$CAM" "${PEPIN_CAMERA_STREAM:-http://$BOARD:8080/stream}" &
 CLIP=$!
 # Nav2's own reasons beside the goal's events, as they happen: every planner refusal, controller
 # failure and recovery the behaviour tree runs (and why), prefixed "nav2|"; and the tree's own
@@ -82,7 +83,7 @@ NAV2_REASONS="planner_server.*(failed|Start occupied|Goal occupied|exceeded|no v
 pepin_bt_watch || echo "!! no behaviour-tree watcher in $NAV: no bt| lines for this goal"
 touch "$PEPIN_BT_LOG"
 export NAV NAV2_REASONS PEPIN_BT_LOG
-own_group bash -c '
+"${OWN_GROUP[@]}" bash -c '
     { docker logs -f --since 1s "$NAV" 2>&1 | grep --line-buffered -E "$NAV2_REASONS" \
         | sed -u -E "s/^\[[^]]*\] \[[A-Z]+\] \[[0-9.]+\] /nav2| /" &
       tail -n0 -F "$PEPIN_BT_LOG" 2>/dev/null | grep --line-buffered "^bt|" &
@@ -121,7 +122,7 @@ finish() {  # everything of this drive closed and named, always, once
             echo "numbered bag: ros$taped; converting it to a tape"
             pepin_bag_to_tape "$taped" >/dev/null && echo "numbered tape: ros$taped.jsonl" ;;
     esac
-    echo "recorded: ros/maps/rec/${STAMP}_goto.log, ${STAMP}_goto.nav2.log, ${STAMP}_goto_cam.mkv"
+    echo "recorded: ${REC#"$(dirname "$HERE")/"}/${STAMP}_goto.log, ${STAMP}_goto.nav2.log$([ -s "$CAM" ] && echo ", ${STAMP}_goto_cam.mkv")"
 }
 trap 'INTERRUPTED=1' INT  # Ctrl-C reaches goal_link too, which cancels the goal it sent first
 trap finish EXIT

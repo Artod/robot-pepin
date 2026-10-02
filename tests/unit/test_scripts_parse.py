@@ -70,39 +70,6 @@ def test_the_depth_host_launcher_parses_and_is_on_wherever_the_gpu_is() -> None:
     assert wanted({**base, "PEPIN_DEPTH_HOST": "1"}, ""), "1 insists, even without torch"
 
 
-def test_go_sh_survives_a_camera_that_died_before_the_drive_ended(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """go.sh once captured the camera itself and stopped ffmpeg by writing "q" into a fifo; when
-    ffmpeg was already dead that write raised SIGPIPE in the shell's builtin printf and killed the
-    script before its verdict, so `trip` stopped after the printer (runs 0086, 0088). The clip is
-    captured on the board now and go.sh only converts a local file, but the guard stays, and the
-    two shell variants below show why: the guarded pattern lives, the old one dies silently."""
-    from pathlib import Path
-
-    src = (Path(__file__).resolve().parents[2] / "ros/go.sh").read_text()
-    assert "trap '' PIPE" in src
-    assert "ffmpeg" in src and "stream" not in src.split("ffmpeg")[1].split("\n")[0], (
-        "the laptop must not capture the camera stream itself: the board does (goal_server)"
-    )
-    setup = (
-        'set -uo pipefail; mkfifo "$1/f"; sleep 30 < "$1/f" & R=$!; exec 4>"$1/f"; '
-        "kill $R; wait $R 2>/dev/null; "
-    )
-    variants = {
-        "guarded": (
-            "trap '' PIPE; " + setup + "/usr/bin/printf q >&4 2>/dev/null; echo alive",
-            "alive",
-        ),
-        "old": (setup + "printf q >&4 2>/dev/null; echo alive", ""),
-    }
-    for name, (script, expect) in variants.items():
-        d = tmp_path / name
-        d.mkdir()
-        out = subprocess.run(
-            ["bash", "-c", script, "_", str(d)], capture_output=True, text=True, timeout=20
-        ).stdout.strip()
-        assert out == expect, (name, out)
-
-
 def test_neck_sh_asks_the_base_server_and_prints_ticks_and_degrees() -> None:
     """ros/neck.sh is the neck's hand: one JSON line to the base server's port, the answer in
     ticks and degrees. A fake server stands in for the board here — the script must pick its
@@ -186,7 +153,6 @@ log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
 answer() {  # the canned reply of the board or the laptop, by what was asked of it
     case "$1" in
         *PEPIN_SLAM*) printf '%s\n' "${FAKE_SLAM:-}" ;;
-        *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;;
         *logs*pepin-ros*) printf '%s\n' "${FAKE_TRACKER_LINE:-}" ;;
         *logs*pepin-vslam*) printf '%s\n' "${FAKE_DEPTH_LINE:-}" "${FAKE_CAMERA_LINE:-}" ;;
         *"lifecycle set"*)
@@ -264,7 +230,7 @@ def _sensor(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
 
 
 BOARD = "ssh root@10.0.0.187 docker exec pepin-ros /pepin_entrypoint.sh"
-LAPTOP = "docker exec pepin-laptop /pepin_entrypoint.sh"
+NAV = "docker exec pepin-macnav /pepin_entrypoint.sh"  # both costmaps: Nav2 on the Mac
 LOCAL, GLOBAL = "/local_costmap/local_costmap", "/global_costmap/global_costmap"
 
 
@@ -283,33 +249,20 @@ def test_sensor_sh_parses() -> None:
 
 
 def test_camera_on_sets_both_costmaps_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """One command: the camera's two layers come up on the local AND the global costmap. The
-    global costmap lives with the planner, which a split stack (PEPIN_SIDE=board) puts on the
-    laptop."""
-    code, out, sent = _sensor(
-        tmp_path, "camera", "on", FAKE_SIDE="board", FAKE_SOURCES="lidar", FAKE_LAYERS="false"
-    )
+    """One command: the camera's two layers come up on the local AND the global costmap, both in
+    the Mac's Nav2 container."""
+    code, out, sent = _sensor(tmp_path, "camera", "on", FAKE_SOURCES="lidar", FAKE_LAYERS="false")
     assert code == 0, out
     for layer in ("camera_layer", "contact_layer"):
-        assert f"{BOARD} ros2 param set {LOCAL} {layer}.enabled true" in sent
-        assert f"{LAPTOP} ros2 param set {GLOBAL} {layer}.enabled true" in sent
+        assert f"{NAV} ros2 param set {LOCAL} {layer}.enabled true" in sent
+        assert f"{NAV} ros2 param set {GLOBAL} {layer}.enabled true" in sent
     assert not [c for c in sent if "lifecycle" in c], "the camera owns no lifecycle node"
     assert not [c for c in sent if c.startswith("flags set")], "no tracker sources to move"
 
 
-def test_a_whole_stack_keeps_both_costmaps_on_the_board(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """Without the split (PEPIN_SIDE unset) the planner runs on the board too, so the global
-    costmap is reached there and never through a laptop container that does not exist."""
-    _, out, sent = _sensor(tmp_path, "camera", "on", FAKE_SIDE="", FAKE_LAYERS="false")
-    assert f"{BOARD} ros2 param set {GLOBAL} camera_layer.enabled true" in sent
-    assert not [c for c in sent if "pepin-laptop" in c], out
-
-
 def test_a_switch_that_changes_nothing_sends_no_set_and_says_so(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Idempotent: the layers are read first and only what differs is written."""
-    code, out, sent = _sensor(
-        tmp_path, "camera", "off", FAKE_SIDE="board", FAKE_SOURCES="lidar", FAKE_LAYERS="false"
-    )
+    code, out, sent = _sensor(tmp_path, "camera", "off", FAKE_SOURCES="lidar", FAKE_LAYERS="false")
     assert code == 0, out
     assert not [c for c in sent if "param set" in c], sent
     assert not [c for c in sent if c.startswith("flags set")], sent
@@ -327,7 +280,7 @@ def test_lidar_off_leaves_the_driver_alone_and_hard_off_deactivates_it(tmp_path)
         tmp_path, "lidar", "off", FAKE_SOURCES="lidar,depth,contact", FAKE_LAYERS="true"
     )
     assert not [c for c in soft if "lifecycle" in c], out
-    assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in soft
+    assert f"{NAV} ros2 param set {LOCAL} lidar_layer.enabled false" in soft
 
     _, out, hard = _sensor(
         tmp_path,
@@ -490,7 +443,6 @@ def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore
     code, out, sent = _sensor(
         tmp_path,
         "status",
-        FAKE_SIDE="board",
         FAKE_LAYERS="true",
         FAKE_CAMERA_LINE=camera,
         FAKE_DEPTH_LINE=depth,
@@ -501,7 +453,7 @@ def test_status_reads_every_end_of_the_switch(tmp_path) -> None:  # type: ignore
     for line in (depth, camera):
         assert line in out, "each node's own word, printed whole"
     assert not [c for c in sent if "param get" in c or "topic echo" in c], sent
-    assert [c for c in sent if "param dump" in c and GLOBAL in c and c.startswith(LAPTOP)]
+    assert [c for c in sent if "param dump" in c and GLOBAL in c and c.startswith(NAV)]
     assert [c for c in sent if "docker logs --since 90s pepin-vslam" in c], sent
 
 
@@ -516,9 +468,9 @@ def test_status_says_so_when_a_node_printed_no_report(tmp_path) -> None:  # type
 # One command brings a half back and then checks, in one place, every failure a restart has hidden
 # from us. The fakes below are the two hosts: a board answering over ssh and a laptop answering
 # `docker`, both scripted by environment variables so one test can break one thing at a time.
-RECORDER_LINE = (
-    "[python3-6] [INFO] [1789428031.2] [run_recorder]: run recorder ready: tapes in /maps/rec"
-    " (loc from /pose, the goal server's read of map -> base_link); flags: planner_records=on"
+SENSORS_LINE = (
+    "[lidar_container-2] [INFO] [1789428031.2] [lifecycle_manager_sensors]:"
+    " Managed nodes are active"
 )
 VSLAM_LOG = "\n".join(
     (
@@ -559,10 +511,7 @@ log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
 ssh() {
     log "ssh $*"
     case "$*" in
-        *"PEPIN_MAP"*) printf '%s\n' "PEPIN_MAP=${FAKE_MAP-/maps/flat3.yaml}" ;;
-        *"run recorder ready"*) printf '%s\n' "${FAKE_RECORDER-$FAKE_RECORDER_DEFAULT}" ;;
-        *Failed*update*rate*) printf '%s\n' "${FAKE_LATE-0}" ;;
-        *Extrapolation*) printf '%s\n' "${FAKE_TF_ERRORS-0}" ;;
+        *"lifecycle_manager_sensors"*) printf '%s\n' "${FAKE_SENSORS-$FAKE_SENSORS_DEFAULT}" ;;
         *topic_rate.py*) printf '%s\n' "${FAKE_RATE-${*##*topic_rate.py }: 9.1 Hz over 5 s}" ;;
         *"is-active pepin-base"*)
             printf '%s\n%s\n' "${FAKE_BASE-active}" "${FAKE_TORQUE-idle: parked, torque off}" ;;
@@ -574,6 +523,10 @@ ssh() {
 docker() {
     log "docker $*"
     case "$*" in
+        # Nav2's log in the Mac's container; FAKE_NAV_DOWN: the container is not there.
+        *logs*pepin-macnav*)
+            [ -z "${FAKE_NAV_DOWN-}" ] || return 1
+            printf '%s\n' "${FAKE_NAV_LOG-}" ;;
         # The planner's proof (ros/tools/planner_check.py): FAKE_PLANNER_SEQ is a file of
         # "exit|line" answers, one popped per call; empty or unset, the planner plans.
         *planner_check.py*)
@@ -616,7 +569,7 @@ printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0")$*" in
     board.shcensus) printf '%s\\n' "${FAKE_CENSUS-VERDICT: green — every process accounted for}"
                     [ -z "${FAKE_CENSUS_RED-}" ] || exit 1 ;;
-    go.shwhere) printf '%s\\n' "${FAKE_GO_WHERE-$FAKE_GO_WHERE_DEFAULT}" ;;
+    goto.shwhere) printf '%s\\n' "${FAKE_GO_WHERE-$FAKE_GO_WHERE_DEFAULT}" ;;
     flags.shdrift*) printf '%s' "${FAKE_DRIFT-}" ;;
     foxglove.shcheck) printf '%s\n' "${FAKE_FOXGLOVE-foxglove: 17 checks, none failed}"
                       [ -z "${FAKE_FOXGLOVE_RED-}" ] || exit 1 ;;
@@ -633,7 +586,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
     here = tmp_path / "ros"
     here.mkdir(exist_ok=True)
     (here / "lib.sh").write_text(FAKE_RESTART_LIB + _lib_function("pepin_board_restart"))
-    for name in ("sync.sh", "board.sh", "goto.sh", "go.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
+    for name in ("sync.sh", "board.sh", "goto.sh", "laptop.sh", "flags.sh", "foxglove.sh"):
         (here / name).write_text(FAKE_SUB)
         (here / name).chmod(0o755)
     (here / "restart.sh").write_text((REPO / "ros/restart.sh").read_text())
@@ -653,7 +606,7 @@ def _restart(tmp_path, *args, **env):  # type: ignore[no-untyped-def]
             # must not sit here for the 90 s a real board is given.
             "PEPIN_RESTART_WAIT_S": "0",
             "PEPIN_RESTART_POLL_S": "0",
-            "FAKE_RECORDER_DEFAULT": RECORDER_LINE,
+            "FAKE_SENSORS_DEFAULT": SENSORS_LINE,
             "FAKE_VSLAM_DEFAULT": VSLAM_LOG,
             "FAKE_MAP_ODOM_DEFAULT": MAP_ODOM_LINE,
             "FAKE_GO_WHERE_DEFAULT": GO_WHERE_LINE,
@@ -689,7 +642,7 @@ def test_muting_the_lidar_is_the_consumer_set_no_node_of_ours_publishes_it(tmp_p
     left running (`lidar off --hard` is the real absence)."""
     code, out, sent = _sensor(tmp_path, "mute", "lidar", FAKE_LAYERS="true")
     assert code == 0, out
-    assert f"{BOARD} ros2 param set {LOCAL} lidar_layer.enabled false" in sent
+    assert f"{NAV} ros2 param set {LOCAL} lidar_layer.enabled false" in sent
     assert not [c for c in sent if "lifecycle set" in c], "a mute never stops the driver"
     assert "scan_filter" in out
 
@@ -740,10 +693,9 @@ def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> No
     reads for itself whether it exists, and the board's tracker adopts whatever grid it publishes.
     The board is not asked which map it serves, because there is no answer that would change
     anything here. The neck owns base_link -> camera_link, so --neck always goes with it."""
-    code, out, sent = _restart(tmp_path, "laptop", "--no-check", FAKE_MAP="")
+    code, out, sent = _restart(tmp_path, "laptop", "--no-check")
     assert code == 0, out
-    assert "laptop.sh start" in sent
-    assert "laptop.sh vslam --neck" in sent
+    assert sent[:2] == ["laptop.sh vslam --neck", "laptop.sh nav"], "vslam, then Nav2 on the Mac"
     assert not [c for c in sent if "--room=" in c], "the room entity went with World R"
     assert not [c for c in sent if "--fresh" in c], "no --fresh without --fresh-graph"
     assert not [c for c in sent if c.startswith("ssh") and "pepin-ros" in c], sent
@@ -792,10 +744,10 @@ def _planner_answers(tmp_path: Path, *answers: str) -> str:
     ("args", "first", "absent"),
     [
         (("both",), "board: stop pepin-ros, restart pepin-zrouter, start pepin-ros", "sync.sh"),
-        (("board", "--deploy"), "ros/sync.sh --restart: the checkout to", "laptop.sh start"),
+        (("board", "--deploy"), "ros/sync.sh --restart: the checkout to", "laptop: ros/laptop.sh"),
         (
             ("laptop", "--fresh-graph"),
-            "laptop: ros/laptop.sh start, then ros/laptop.sh vslam --neck --fresh",
+            "laptop: ros/laptop.sh vslam --neck --fresh",
             "the board's first report line",
         ),
         (("both", "--no-check"), "board: stop pepin-ros", "the proof"),
@@ -822,14 +774,14 @@ def test_a_board_restart_restarts_the_laptop_s_vslam_after_it_and_proves_the_pla
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     """RTAB-Map follows the board's new odometry only from a fresh start (journal 2026-09-22), so
-    with the laptop half up a board restart takes its vslam with it — never `laptop.sh start` —
+    with the laptop half up a board restart takes its vslam with it — never Nav2 —
     and then proves the planner plans."""
     _code, out, sent = _restart(tmp_path, "board", FAKE_LOCALIZER="rtabmap")
     board = next(i for i, c in enumerate(sent) if "restart pepin-zrouter" in c)
     vslam = sent.index("laptop.sh vslam --neck")
     proof = next(i for i, c in enumerate(sent) if "planner_check.py" in c)
     assert board < vslam < proof, sent
-    assert "laptop.sh start" not in sent
+    assert "laptop.sh nav" not in sent
     assert "PASS 4.1  OK — path of 9 poses" in out, out
     assert not [c for c in sent if "pkill" in c], "a planner that plans is not repaired"
 
@@ -848,8 +800,8 @@ def test_a_board_restart_with_the_laptop_down_says_so_and_fails_the_planner(tmp_
 def test_a_broken_planner_is_repaired_by_a_nav2_respawn_before_anything_bigger(tmp_path) -> None:  # type: ignore[no-untyped-def]
     seq = _planner_answers(tmp_path, BROKEN_LINE, OK_LINE)
     _code, out, sent = _restart(tmp_path, "both", FAKE_PLANNER_SEQ=seq, FAKE_LOCALIZER="rtabmap")
-    respawn = [c for c in sent if "pkill -INT -f '__node:=nav2_container'" in c]
-    assert len(respawn) == 1 and respawn[0].startswith("ssh root@"), sent
+    respawn = [c for c in sent if "pkill -INT -f __node:=nav2_container" in c]
+    assert respawn == ["docker exec pepin-macnav pkill -INT -f __node:=nav2_container"], sent
     assert sum("restart pepin-zrouter" in c for c in sent) == 1, "the board is not restarted again"
     assert "repair 1: the Nav2 container alone" in out
     assert (
@@ -867,7 +819,7 @@ def test_a_planner_still_broken_restarts_the_board_once_more_then_fails_loudly(t
     assert code == 1, out
     assert sent.count("sync.sh --restart") == 1, "the code goes out once; the repair only restarts"
     assert sum("restart pepin-zrouter" in c for c in sent) == 1, "repair 2 restarts with the router"
-    assert sent.count("laptop.sh vslam --neck") == 2 and sent.count("laptop.sh start") == 1, sent
+    assert sent.count("laptop.sh vslam --neck") == 2 and sent.count("laptop.sh nav") == 2, sent
     repair = next(i for i, c in enumerate(sent) if "restart pepin-zrouter" in c)
     assert repair < [i for i, c in enumerate(sent) if c == "laptop.sh vslam --neck"][1]
     assert "repair 2: the board half once more" in out
@@ -892,8 +844,8 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
     tmp_path,
 ) -> None:  # type: ignore[no-untyped-def]
     """Order matters twice: the board restarts first, and NOTHING is checked until the laptop is
-    up — /depth_scan and /vo are fed by the laptop, so checking the board first would fail two
-    checks by construction."""
+    up — /vo is fed by the laptop, so checking the board first would fail a check by
+    construction."""
     code, out, sent = _restart(tmp_path, "both")
     assert code == 0, out
     order = [
@@ -903,7 +855,7 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
         "systemctl stop pepin-ros; systemctl restart pepin-zrouter && systemctl start pepin-ros"
         " && sleep 8 && systemctl is-active pepin-zrouter pepin-ros"
     ), "the board's stack with its router, the stack stopped before the router goes"
-    assert sent[order[1]] == "laptop.sh start"
+    assert sent[order[1]] == "laptop.sh vslam --neck" and sent[order[2]] == "laptop.sh nav"
     first_rate = next(i for i, c in enumerate(sent) if "topic_rate.py" in c)
     assert first_rate > order[-1], "the board is asked about the laptop's topics after it is up"
     for number in (
@@ -911,8 +863,6 @@ def test_both_brings_the_board_back_first_and_checks_only_once_the_laptop_feeds_
         "1.3",
         "1.4",
         "1.5",
-        "1.6",
-        "1.7",
         "1.8",
         "2.8",
         "2.9",
@@ -1004,18 +954,14 @@ def test_the_clock_check_passes_the_default_and_warns_where_a_look_is_needed(tmp
 
 
 @pytest.mark.slow
-def test_the_map_is_asked_for_its_latched_copy_not_a_rate(tmp_path) -> None:
-    """RTAB-Map's /map is latched and, while it localises, published once a start: five seconds
-    of counting found 0 messages on a board whose static layer held the grid (2026-09-24)."""
-    code, out, sent = _restart(
-        tmp_path, "board", FAKE_RATE="/map: latched copy received (a latched topic has no rate)"
-    )
-    assert "PASS 1.6  /map reaches the board: latched copy received" in out, out
+def test_the_board_is_asked_for_the_one_laptop_topic_it_fuses(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """The board is a sensor box: its EKF fuses the camera's odometry (/vo) and nothing else of
+    the laptop's. /map and /depth_scan go to Nav2 on the Mac and are not asked of the board."""
+    _code, out, sent = _restart(tmp_path, "board")
+    assert "PASS 1.8  /vo reaches the board" in out, out
     asked = [c for c in sent if "topic_rate.py" in c]
-    assert any("topic_rate.py /map 5 latched" in c for c in asked), asked
-    assert any("topic_rate.py /vo 5 " in c + " " and "latched" not in c for c in asked), asked
-    code, out, _ = _restart(tmp_path, "board", FAKE_RATE="/map: no latched copy in 5 s")
-    assert code == 1 and "FAIL 1.6  /map does not reach the board: /map: no latched copy" in out
+    assert any("topic_rate.py /vo 5" in c for c in asked), asked
+    assert not [c for c in asked if "/map" in c or "/depth_scan" in c], asked
 
 
 @pytest.mark.slow
@@ -1039,11 +985,15 @@ def test_a_pose_nobody_has_corrected_is_a_failure_once_the_grace_is_over(tmp_pat
     ("broken", "number", "why"),
     [
         ({"FAKE_CENSUS_RED": "1"}, "1.1", "census"),
-        ({"FAKE_LATE": "7"}, "1.4", "Failed to meet update rate"),
-        ({"FAKE_TF_ERRORS": "3"}, "1.5", "error(s)"),
+        (
+            {"FAKE_NAV_LOG": "x: Failed to meet update rate\nx: Failed to meet update rate"},
+            "1.4",
+            "2 x 'Failed to meet update rate'",
+        ),
+        ({"FAKE_NAV_LOG": "[global_costmap]: Extrapolation into the future"}, "1.5", "error(s)"),
         # a log that cannot be read is never counted as zero errors
-        ({"FAKE_LATE": "ssh: connect to host: No route"}, "1.4", "could not be read"),
-        ({"FAKE_RATE": "/vo: not advertised"}, "1.6", "does not reach the board"),
+        ({"FAKE_NAV_DOWN": "1"}, "1.4", "could not be read"),
+        ({"FAKE_RATE": "/vo: not advertised"}, "1.8", "does not reach the board"),
         ({"FAKE_GO_WHERE": "connection refused"}, "1.3", "did not answer"),
         ({"FAKE_PROCS": "python3"}, "2.6", "no rtabmap process"),
     ],
@@ -1167,8 +1117,6 @@ def test_the_board_s_containers_answer_sigint_and_the_unit_waits_for_them() -> N
 # so the one on PATH answers). What is under test is WHICH CONTAINER a node is reached in.
 FAKE_HOST = r"""#!/bin/bash
 printf '%s %s\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
-if [ "$(basename "$0")" = ssh ] && [ -n "${FAKE_SSH_DOWN:-}" ]; then exit 255; fi
-case "$*" in *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;; esac
 exit 0
 """
 
@@ -1184,7 +1132,7 @@ def _flags_sh(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[st
         (bin_dir / name).chmod(0o755)
     log = tmp_path / "log"
     log.write_text("")
-    base = {k: v for k, v in os.environ.items() if k != "PEPIN_BOARD_SIDE"}
+    base = dict(os.environ)
     run = subprocess.run(
         ["bash", str(REPO / "ros/flags.sh"), *args],
         capture_output=True,
@@ -1203,53 +1151,18 @@ def _flags_sh(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[st
 
 
 @pytest.mark.slow
-def test_flags_sh_reaches_the_goal_server_where_the_board_s_side_runs_it(tmp_path: Path) -> None:
-    """On a whole board (no PEPIN_SIDE line: ros/thin.sh vision, the stack of 2026-09-23) the goal
-    server runs in the board's pepin-ros, and `set` used to exec into pepin-laptop, which only
-    the split starts ("No such container"). The side is read from the board once, then the
-    parameter goes where the node is; a split still reaches pepin-laptop; the camera nodes are
-    pepin-vslam's either way."""
-    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "pose_topic", "true", FAKE_SIDE="")
+def test_flags_sh_reaches_each_node_in_its_own_container(tmp_path: Path) -> None:
+    """The goal server and Nav2 are pepin-macnav's, the camera nodes pepin-vslam's, both by docker
+    exec; the board is asked nothing about where they run (no side any more, 2026-10-01)."""
+    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "pose_topic", "true")
     assert code == 0, out
-    assert any("PEPIN_SIDE" in c for c in calls), "the board's side is asked"
     sets = [c for c in calls if "param set /goal_server pose_topic true" in c]
-    assert len(sets) == 1 and sets[0].startswith("ssh ") and "docker exec pepin-ros" in sets[0]
-    assert not [c for c in calls if "pepin-laptop" in c], calls
+    assert len(sets) == 1 and sets[0].startswith("docker exec pepin-macnav"), calls
+    assert not [c for c in calls if c.startswith("ssh")], calls
 
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", FAKE_SIDE="board")
+    code, out, calls = _flags_sh(tmp_path, "get", "depth_fusion", "align")
     assert code == 0, out
-    assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
-
-    code, out, calls = _flags_sh(
-        tmp_path, "get", "depth_fusion", "align", PEPIN_BOARD_SIDE="", FAKE_SIDE="board"
-    )
-    assert code == 0, out
-    assert not [c for c in calls if "PEPIN_SIDE" in c], "a side handed over is not asked again"
     assert [c for c in calls if c.startswith("docker exec pepin-vslam") and "param get" in c]
-
-
-@pytest.mark.slow
-def test_flags_sh_does_not_read_a_silent_board_as_a_whole_one(tmp_path: Path) -> None:
-    """A board that does not answer used to be read as a whole board, so on a split stack
-    `drift laptop` (ros/restart.sh's flag check) silently lost the goal server and the planner,
-    which run on the laptop there. The mode ros/laptop.sh recorded answers instead; with none
-    recorded the call is refused with the reason, not guessed."""
-    mode = tmp_path / "mode"
-    mode.write_text("split\n")
-    down = {"FAKE_SSH_DOWN": "1", "PEPIN_MODE_FILE": str(mode)}
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", **down)
-    assert code == 0, out
-    assert "taken from" in out and "(split)" in out, "the fallback says so"
-    assert [c for c in calls if c.startswith("docker exec pepin-laptop") and "param get" in c]
-
-    code, out, calls = _flags_sh(tmp_path, "drift", "laptop", **down)
-    dumped = " ".join(c for c in calls if "param dump" in c)
-    assert "/goal_server" in dumped, calls
-
-    nowhere = {**down, "PEPIN_MODE_FILE": str(tmp_path / "none")}
-    code, out, calls = _flags_sh(tmp_path, "get", "goal_server", "pose_topic", **nowhere)
-    assert code == 1 and "cannot read the board's side" in out, out
-    assert not [c for c in calls if "param get" in c], "nothing is sent to a guessed container"
 
 
 # ---- ros/camera_grid.sh: the camera grid A/B, against the same kind of fakes ------------------
@@ -1258,7 +1171,6 @@ BOARD="${BOARD:-${PEPIN_HOST:-10.0.0.187}}"
 log() { printf '%s\n' "$*" >> "$FAKE_LOG"; }
 answer() {
     case "$1" in
-        *PEPIN_SIDE*) printf '%s\n' "${FAKE_SIDE:-}" ;;
         *"topic echo"*)
             for topic in ${FAKE_GRIDS-/camera_grid /camera_grid_map}; do
                 case "$1" in *" $topic "*) printf 'width: 120\nheight: 120\n' ;; esac
@@ -1323,14 +1235,14 @@ def test_camera_grid_sh_parses_and_never_drives() -> None:
 def test_camera_grid_on_starts_the_grids_first_then_swaps_each_costmap_s_layers(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """The publisher first, then per costmap — once its grid is read back from the topic — the
     grid layer on BEFORE camera_layer goes off. The split puts the global costmap on the laptop."""
-    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="board")
+    code, out, sent = _grid(tmp_path, "on")
     assert code == 0, out
     assert _sets(sent) == [
         "flags set depth_fusion grid_out true",
-        f"{BOARD} ros2 param set {LOCAL} camera_grid_layer.enabled true",
-        f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled false",
-        f"{LAPTOP} ros2 param set {GLOBAL} camera_grid_layer.enabled true",
-        f"{LAPTOP} ros2 param set {GLOBAL} camera_layer.enabled false",
+        f"{NAV} ros2 param set {LOCAL} camera_grid_layer.enabled true",
+        f"{NAV} ros2 param set {LOCAL} camera_layer.enabled false",
+        f"{NAV} ros2 param set {GLOBAL} camera_grid_layer.enabled true",
+        f"{NAV} ros2 param set {GLOBAL} camera_layer.enabled false",
     ]
     echoes = [c for c in sent if "topic echo" in c]
     assert any("/camera_grid " in c for c in echoes)
@@ -1341,34 +1253,34 @@ def test_camera_grid_on_starts_the_grids_first_then_swaps_each_costmap_s_layers(
 def test_a_grid_that_never_came_leaves_that_costmap_on_camera_layer(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """No map yet: /camera_grid_map is silent, and a StaticLayer enabled without its first grid
     would never be current — so the global costmap is not touched and the exit says so."""
-    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="board", FAKE_GRIDS="/camera_grid")
+    code, out, sent = _grid(tmp_path, "on", FAKE_GRIDS="/camera_grid")
     assert code == 1
     assert "no grid on /camera_grid_map" in out and "keeps camera_layer" in out
     assert not [c for c in _sets(sent) if GLOBAL in c]
-    assert f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled false" in sent
+    assert f"{NAV} ros2 param set {LOCAL} camera_layer.enabled false" in sent
 
 
 def test_a_nav2_without_the_layer_keeps_camera_layer(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Nav2 still on the old nav2_params.yaml has no camera_grid_layer: camera_layer stays on."""
-    code, out, sent = _grid(tmp_path, "on", FAKE_SIDE="", FAKE_GRID="none")
+    code, out, sent = _grid(tmp_path, "on", FAKE_GRID="none")
     assert code == 1 and "restart it" in out
     assert not [c for c in sent if "camera_layer.enabled false" in c]
 
 
 def test_camera_grid_off_brings_camera_layer_back_first_and_the_flag_last(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    code, out, sent = _grid(tmp_path, "off", FAKE_SIDE="", FAKE_CAMERA="false", FAKE_GRID="true")
+    code, out, sent = _grid(tmp_path, "off", FAKE_CAMERA="false", FAKE_GRID="true")
     assert code == 0, out
     assert _sets(sent) == [
-        f"{BOARD} ros2 param set {LOCAL} camera_layer.enabled true",
-        f"{BOARD} ros2 param set {LOCAL} camera_grid_layer.enabled false",
-        f"{BOARD} ros2 param set {GLOBAL} camera_layer.enabled true",
-        f"{BOARD} ros2 param set {GLOBAL} camera_grid_layer.enabled false",
+        f"{NAV} ros2 param set {LOCAL} camera_layer.enabled true",
+        f"{NAV} ros2 param set {LOCAL} camera_grid_layer.enabled false",
+        f"{NAV} ros2 param set {GLOBAL} camera_layer.enabled true",
+        f"{NAV} ros2 param set {GLOBAL} camera_grid_layer.enabled false",
         "flags set depth_fusion grid_out false",
     ]
 
 
 def test_camera_grid_status_reads_the_flag_the_layers_and_the_report(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    code, out, sent = _grid(tmp_path, "status", FAKE_SIDE="board", FAKE_GRID="true")
+    code, out, sent = _grid(tmp_path, "status", FAKE_GRID="true")
     assert code == 0, out
     assert "depth_fusion grid_out: True" in out
     assert f"costmap {LOCAL}:  camera_layer=on  camera_grid_layer=on" in out

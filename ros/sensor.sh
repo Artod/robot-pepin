@@ -144,7 +144,7 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
         verdict="$(goal_running "$line" "$action")"
         case "$verdict" in
             no) ;;
-            yes) echo "  refused: a navigation goal is running ($action); ros/go.sh cancel first"
+            yes) echo "  refused: a navigation goal is running ($action); ros/goto.sh cancel first"
                  exit 1 ;;
             *) echo "  refused: the guard could not read /$action/_action/status, so it cannot"
                echo "  see whether the robot is driving; ros/watch.sh, or leave --hard off"
@@ -239,7 +239,7 @@ switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
             *:'?')
                 [ "$hard" != --hard ] || {
                     echo "  refused: $LIDAR_DRIVER did not answer a lifecycle get, so --hard"
-                    echo "  cannot know what it is turning off; is the stack up? ros/thin.sh"
+                    echo "  cannot know what it is turning off; is the stack up? ros/board.sh census"
                     exit 1
                 }
                 echo "  $LIDAR_DRIVER did not answer a lifecycle get: the driver is left alone"

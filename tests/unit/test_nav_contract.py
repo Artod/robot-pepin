@@ -285,13 +285,16 @@ def test_the_operator_scripts_parse_and_keep_their_safety_lines() -> None:
     for script in (
         "stop.sh",
         "goto.sh",
-        "go.sh",
+        "clip.sh",
         "lib.sh",
         "map.sh",
         "feature.sh",
         "laptop.sh",
-        "thin.sh",
+        "board.sh",
         "flags.sh",
+        "preflight.sh",
+        "ready.sh",
+        "reset_world.sh",
         "restart.sh",
     ):
         subprocess.run(["bash", "-n", str(REPO / "ros" / script)], check=True)
@@ -394,13 +397,8 @@ def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> No
     )
 
 
-def test_a_cold_start_is_judged() -> None:
-    """The gap that let the wedge ship: the transport's acceptance had no "Nav2 fully active"
-    check, so a hang that appears on 4 of 7 starts looked like bad luck. The restart's checks
-    name it. (The board half's cold-start soak left with Nav2 on the board, 2026-10-01.)"""
-    restart = (REPO / "ros/restart.sh").read_text()
-    assert "planner_server connected with bond" in restart, "active, not merely running"
-    assert "Range sensor layer can't transform" in restart, "the wedge's own line"
+def test_the_board_s_stack_starts_behind_a_router_that_accepts() -> None:
+    """A cold start of the board: its stack must not start behind a router still binding."""
     # The other half of a cold start: `docker run` returns before rmw_zenohd accepts, and the
     # stack started behind a router that was still binding is what delayed /tf_static by 157 s.
     router = (REPO / "board/pepin-zrouter.service").read_text()
@@ -634,12 +632,13 @@ def test_the_stop_reflex_has_a_budget() -> None:
     assert float(forget.get("hz")) <= 0.25, "a fresh ToF mark was wiped 0.1 s after it appeared"
 
 
-def test_the_board_half_does_not_autostart_and_the_laptop_knows_its_side() -> None:
+def test_the_whole_nav2_starts_by_itself_with_the_goal_server_beside_it() -> None:
+    """One machine, one manager: Nav2 on the Mac activates its own nodes, and nothing is left
+    of the split's laptop-driven bring-up of a board half."""
     nav = sf.dict_items(sf.tree(NAV_LAUNCH))
-    assert "autostart_for(side)" in nav["autostart"]
-    assert "side" in nav["side"], "the goal server must know it is the laptop half"
+    assert nav["autostart"] == {"True"}
     server = sf.tree(f"{NODES}/goal_server.py")
-    assert "next_transition" in sf.calls(server) and "ChangeState" in sf.imported(server)
+    assert "next_transition" not in sf.calls(server) and "ChangeState" not in sf.imported(server)
 
 
 def test_a_goal_is_judged_on_the_transform_rtabmap_s_correction_composes() -> None:
@@ -656,12 +655,12 @@ def test_a_goal_is_judged_on_the_transform_rtabmap_s_correction_composes() -> No
     assert "self._switches.state" in sf.calls(server), "and it is printed in the node's own line"
 
 
-def test_the_recorder_is_its_own_node_on_the_board_side() -> None:
-    """The split's first tapes were written on the laptop and had no scans: the recorder lives
-    where the sensors are, and the goal server only sends it a command."""
+def test_the_recorder_is_its_own_node_beside_the_goal_server() -> None:
+    """The recorder is a node of its own, started with Nav2, and reads the pose the goal server
+    republishes on /pose; the goal server only sends it a command."""
     nav = sf.tree(NAV_LAUNCH)
-    assert "runs_here(side, 'run_recorder')" in sf.unparsed(nav, ast.Call)
     assert "pepin_bringup.run_recorder" in sf.strings(nav)
+    assert "loc_from:=pose_topic" in sf.strings(nav)
     setup = sf.dict_items(sf.tree("ros/pepin_bringup/setup.py"))
     scripts = ast.literal_eval(next(iter(setup["console_scripts"])))
     assert "run_recorder = pepin_bringup.run_recorder:main" in scripts
@@ -692,7 +691,7 @@ def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
     assert any("taped" in text for text in sf.strings(goto)), "the log must name the tape"
     assert "--no-tape" in sf.strings(goto), "the drive without a numbered tape stays reachable"
     script = (REPO / "ros/goto.sh").read_text()
-    assert "--no-tape" in script and "PEPIN_GOTO_TAPE" in script
+    assert "taped /maps/rec/" in script and "NO TAPE" in script, "the operator is told either way"
 
 
 def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_served() -> None:
@@ -712,7 +711,7 @@ def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_serve
     }, "rtabmap_frame must carry the same literal"
     launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
     assert 'DeclareLaunchArgument("map_server", default_value="false"' in launch
-    assert 'if map_server and runs_here(side, "map_server"):' in launch
+    assert "    if map_server:\n" in launch
 
 
 def test_ctrl_c_cancels_the_goal_before_it_can_do_anything_else() -> None:
@@ -759,28 +758,24 @@ def test_goto_judges_a_goal_on_the_map_frame_and_the_placement_not_on_a_fit() ->
 
 
 def test_one_recorder_writes_a_drive_not_two() -> None:
-    """ros/goto.sh started ros/tools/session_logger.py for every drive while the board's run
-    recorder was already subscribed to the same topics: two rclpy processes turning the same
-    10 Hz LaserScan into Python objects on four A53 cores (15 % of a core and ~140 MB for the
-    second one). goto starts it only when there is no numbered tape."""
+    """ros/goto.sh started ros/tools/session_logger.py for every drive while the run recorder was
+    already subscribed to the same topics: two rclpy processes turning the same 10 Hz LaserScan
+    into Python objects. The recorder beside Nav2 tapes every goal; goto starts no recorder."""
     script = (REPO / "ros/goto.sh").read_text()
-    starter = next(ln for ln in script.splitlines() if "session_logger.py $REC" in ln)
-    assert starter.startswith("    "), "the session logger is started inside a condition now"
-    assert "PEPIN_SESSION_LOGGER" in script, "and by name when a drive wants it anyway"
+    assert "session_logger" not in script
 
 
-def test_goto_waits_on_its_log_watcher_instead_of_blocking_on_it() -> None:
-    """bash defers a trap until the running foreground command returns. goto.sh's last command
-    was a foreground `ssh | sed` that ends only when the board writes GOTO_EXIT, and a TERM to
-    the script never reached that ssh: three goto.sh survived their SIGTERM on 2026-09-13, 1-2 h
-    old, each holding an ssh. The watcher is a background job now, `wait`ed on — which a trapped
-    signal does interrupt — killed by a `finish` that runs exactly once."""
+def test_goto_ends_every_helper_it_started_whatever_ends_it() -> None:
+    """bash defers a trap until the running foreground command returns, and three goto.sh
+    survived their SIGTERM on 2026-09-13, each holding a watcher. The goal is the one foreground
+    command; the film and the streams run in process groups of their own (one signal ends every
+    member, and the operator's Ctrl-C reaches the goal alone), ended by a `finish` that runs
+    exactly once (tests/unit/test_goal_link.py drives it against fakes)."""
     script = (REPO / "ros/goto.sh").read_text()
     assert "trap finish EXIT\n" in script and "trap 'finish; exit 143' HUP TERM" in script
-    assert 'wait "$TAILPID"' in script and "TAILPID=$!" in script
     assert 'if [ "$FINISHED" = 1 ]; then return 0; fi' in script, "finish must not run twice"
-    watcher = next(ln for ln in script.splitlines() if "GOTO_EXIT=/q" in ln)
-    assert watcher.rstrip().endswith("&"), "the watcher must never be the foreground command"
+    assert "os.setpgrp()" in script and 'kill -TERM -- "-$STREAMS"' in script
+    assert 'kill -TERM "$CLIP"' in script and 'wait "$CLIP"' in script
 
 
 def test_the_numbered_tape_says_which_clock_named_it() -> None:
@@ -827,20 +822,16 @@ def test_the_camera_slam_owns_the_one_map_frame() -> None:
     }
 
 
-def test_the_laptop_halves_restart_on_their_own_and_ask_the_board_only_at_start() -> None:
-    """The two node containers restart on their own, and a board that does not answer is fatal
-    and loud: the script sources lib.sh (a connect timeout, one ssh master) and never silently
-    ends on a failed command substitution (2026-09-10 20:02)."""
+def test_the_laptop_containers_restart_on_their_own_and_never_ask_the_board() -> None:
+    """The two node containers restart on their own, and nothing in laptop.sh talks to the
+    board: the script sources lib.sh (a connect timeout, one ssh master) for the helpers only."""
     laptop = (REPO / "ros/laptop.sh").read_text()
-    for container in ("pepin-vslam", "pepin-laptop"):
+    for container in ('"$NAV"', "pepin-vslam"):
         line = next(ln for ln in laptop.splitlines() if f"docker run -d --name {container} " in ln)
         assert "--restart unless-stopped" in line, container
     assert '. "$HERE/lib.sh"' in laptop and "SITE=" not in laptop
-    assert "cannot read the board's side over ssh" in laptop
-    # The board is asked only on the start path: stop, logs, vslam and kick never ssh.
-    subcommands = laptop[laptop.index('case "${1:-start}"') : laptop.index("esac")]
-    assert "ssh " not in subcommands and "MAP=" not in subcommands
-    assert laptop.index("MAP=") > laptop.index("esac")
+    acted = "\n".join(ln for ln in laptop.splitlines() if not ln.lstrip().startswith("#"))
+    assert "ssh " not in acted and "/etc/default/pepin-ros" not in acted
 
 
 def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
@@ -857,9 +848,9 @@ def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
         assert f"super().__init__('{module}')" in sf.unparsed(node, ast.Call), module
     nav = sf.tree(NAV_LAUNCH)
     composed = {ast.unparse(sf.keywords(c)["name"]) for c in sf.calls_to(nav, "ComposableNode")}
-    assert "f'lifecycle_manager_navigation_{side}'" in composed
+    assert "'lifecycle_manager_navigation'" in composed
     container = sf.calls_to(nav, "respawned_container")[0]
-    assert ast.unparse(container.args[0]).startswith("f'nav2_container_{side}' if side != 'all'")
+    assert ast.unparse(container.args[0]) == "'nav2_container'"
     laptop = (REPO / "ros/laptop.sh").read_text()
     # The stop itself is ros/lib.sh's now (one way to stop a container, one window); what this
     # contract still owns is that nothing here removes a container without stopping it first.
@@ -869,8 +860,11 @@ def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
     # `docker stop` sends the container's stop signal: SIGINT is the one the launch answers by
     # shutting its nodes down (SIGTERM it answers by cancelling itself and the nodes are
     # SIGKILLed mid-write). A run wrapped over several lines is read as one command.
-    runs = [c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-" in c]
-    assert len(runs) == 2, "the navigation half, the SLAM half"
+    runs = [
+        c for c in sf.shell_commands(laptop) if "docker run -d --name " in c and "zrouter" not in c
+    ]
+    runs = [c for c in runs if "rmw_zenohd" not in c]
+    assert len(runs) == 2, "the navigation container, the SLAM container"
     for command in runs:
         assert "--stop-signal SIGINT" in command, command
 
@@ -2074,7 +2068,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
     for callee in ("Node", "ExecuteProcess"):
         assert not any("arguments" in sf.keywords(c) for c in sf.calls_to(vslam_launch, callee))
     laptop = (REPO / "ros/laptop.sh").read_text()
-    fresh = laptop[laptop.index("    vslam)") : laptop.index("    start)")]
+    fresh = laptop[laptop.index("    vslam)") : laptop.rindex("    *)")]
     assert "--fresh) FRESH=true ;;" in fresh and 'rm -f "$HERE"/maps/rtabmap.db' in fresh
     assert fresh.index("rm -f") < fresh.index("docker run")
     vslam = _launch_processes("vslam.launch.py")
@@ -2102,9 +2096,9 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         "rgbd_odometry",
         "visual_odometry",
     }
-    # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument, the
-    # board's PEPIN_RECORDER): the JSONL tape written here, or `ros2 bag record` under a node
-    # that subscribes to nothing. Both respawn, and a kick reaches whichever is running.
+    # Two recorders, one of which the launch starts (nav.launch.py's ``recorder`` argument): the
+    # JSONL tape, or `ros2 bag record` under a node that subscribes to nothing. Both respawn, and
+    # a kick reaches whichever is running.
     assert _respawning(nav) == {"run_recorder", "bag_recorder", "goal_server"}
     # The board's sensor launch runs one of our processes too: the neck node (ros/feature.sh
     # neck on). The drivers around it are ROS packages the container restarts with the launch.
@@ -2118,7 +2112,7 @@ def test_a_node_comes_back_by_itself_but_the_watches_exit_on_purpose() -> None:
         for name, keywords in launch.items():
             if keywords.get("respawn"):
                 assert 0.0 < float(str(keywords["respawn_delay"])) <= 5.0, name
-    assert "respawn" not in nav["link_watch"] and "respawn" not in vslam["rtabmap"]
+    assert "link_watch" not in nav and "respawn" not in vslam["rtabmap"]
 
 
 def test_the_laptop_image_provides_what_the_laptop_nodes_import() -> None:
@@ -2211,15 +2205,10 @@ def test_the_hook_checks_the_shell_scripts_and_the_books_stay_on_the_mac() -> No
         ast.literal_eval(c.args[0]) for c in sf.calls_to(turn, "sys.exit") if c.lineno < tape_starts
     }
     assert {2, 3} <= refusals, "refuse before the tape starts"
-    link = sf.tree(f"{NODES}/link_watch.py")
-    assert any(
-        isinstance(n, ast.For) and ast.unparse(n.iter) == "BOARD_ACTIONS" for n in ast.walk(link)
-    )
-    assert "f'/{action}/_action/cancel_goal'" in sf.unparsed(link, ast.JoinedStr)
 
 
 def test_one_node_can_be_kicked_without_a_container_restart() -> None:
-    """laptop.sh kick / thin.sh kick: SIGINT to one process (never -9, never the container),
+    """laptop.sh kick / board.sh kick: SIGINT to one process (never -9, never the container),
     then the log is read for the line the node prints once up — a line its source really
     contains, from the new pid (ros/kick_ready.awk, tests/unit/test_kick.py). The names a kick
     knows are exactly the nodes the launches respawn, and an unknown name is refused before any
@@ -2227,7 +2216,7 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     import os
 
     known: dict[str, set[str]] = {}
-    for script in ("laptop.sh", "thin.sh"):
+    for script in ("laptop.sh", "board.sh"):
         src = (REPO / "ros" / script).read_text()
         kick = src[src.index("    kick)") :].split("\n    *)")[0]
         assert 'pgrep -f "pepin_bringup[./]$1"' in kick and "kill -INT" in kick, script
@@ -2257,15 +2246,13 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
     robot = _launch_processes("robot.launch.py")
     # Foxglove's bridge and rtabmap's rgbd_odometry are not ours to kick: the kick sends SIGINT
     # to a "pepin_bringup.<module>" command line, and neither is one.
-    kickable = (_respawning(vslam) - {"foxglove_bridge", "rgbd_odometry"}) | {"goal_server"}
+    kickable = (_respawning(vslam) - {"foxglove_bridge", "rgbd_odometry"}) | _respawning(nav)
     assert known["laptop.sh"] == kickable
-    # Everything of OURS the board respawns is kickable: the navigation half and the neck node
-    # of the sensor launch (a code change on the board is one kicked process, never a restart).
-    # rf2o's binary is not ours and not a "pepin_bringup.<module>" command line — it changes only
-    # when the image is rebuilt, so there is nothing to kick it for.
-    assert known["thin.sh"] == (_respawning(nav) | _respawning(robot)) - {
-        "rf2o_laser_odometry_node"
-    }
+    # Everything of OURS the board respawns is kickable: the sensor launch's own nodes (a code
+    # change on the board is one kicked process, never a restart). rf2o's binary is not ours and
+    # not a "pepin_bringup.<module>" command line — it changes only when the image is rebuilt, so
+    # there is nothing to kick it for.
+    assert known["board.sh"] == _respawning(robot) - {"rf2o_laser_odometry_node"}
 
 
 def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
@@ -2314,10 +2301,9 @@ def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
         " it no longer is: unsaid it falls back to 0, which disables one-to-many proximity"
     )
     assert table["RGBD/OptimizeFromGraphEnd"] == "false", "the jump belongs in map -> odom"
-    # The board: no tracker, no retired frame owner; a served pgm answers to its own argument.
+    # Nav2: no tracker, no retired frame owner; a served pgm answers to its own argument.
     nav = sf.tree(NAV_LAUNCH)
-    calls = sf.unparsed(nav, ast.Call)
-    assert "runs_here(side, 'map_server')" in calls
+    assert "    if map_server:\n" in (REPO / NAV_LAUNCH).read_text()
     assert not {"pepin_bringup.slam_frame", "relocalizer"} & set(sf.strings(nav))
     # The grid the board plans on: the static layer takes /map, latched, and every
     # planner may route through what nobody has looked at yet — a map that is still growing.
@@ -2328,29 +2314,18 @@ def test_the_graphs_grid_is_the_one_map_and_rtabmap_owns_map_to_odom() -> None:
 
 
 def test_one_gesture_per_side_brings_the_stack_up_and_one_saves_the_map() -> None:
-    """Two gestures, and neither of them names a mode any more (World R). ros/thin.sh puts the
-    board on a side; every branch of it deletes a stale PEPIN_SLAM line of an older board, a
-    switch that is gone.
-    The laptop learns the board's side once, on the only path that talks to it, and records it
-    (ros/.mode) for the subcommand that never does. ros/map.sh save freezes the grid into the pair
-    map_server would read."""
-    thin = _case_blocks((REPO / "ros/thin.sh").read_text())
-    assert "slam" not in thin, "the SLAM mode went with World R (2026-09-19)"
-    thin_text = (REPO / "ros/thin.sh").read_text()
-    assert "/^PEPIN_SLAM=/d" in thin_text, "the retired owner's line is deleted"
-    for branch in ("on", "vision|off"):
-        assert "$CLEAN" in thin[branch], f"{branch} leaves the retired lines behind"
-        assert "board-slam" not in thin[branch], branch
-    # The board is a sensor box (2026-10-01): its unit and launch name no navigation at all.
+    """Two gestures, and neither of them names a mode any more (World R): ros/laptop.sh nav and
+    ros/laptop.sh vslam, neither of which asks the board anything. ros/map.sh save freezes the
+    grid into the pair map_server would read."""
     unit = (REPO / "board/pepin-ros.service").read_text()
     assert not re.search(r"\b(nav|slam|slam_toolbox|map|side|recorder):=", unit)
     bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
     args = {ast.unparse(c.args[0]) for c in sf.calls_to(bringup, "DeclareLaunchArgument")}
     assert not {"'nav'", "'slam'", "'slam_toolbox'", "'map'", "'side'", "'recorder'"} & args
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "MODE=split" in laptop and "laptop-slam" not in laptop
-    assert 'printf \'%s\\n\' "$MODE" > "$HERE/.mode"' in laptop
-    assert "ros/.mode" in (REPO / ".gitignore").read_text().splitlines()
+    blocks = _case_blocks(laptop)
+    assert "nav" in blocks and "start" not in blocks and "laptop-slam" not in laptop
+    assert "nav.launch.py" in blocks["nav"] and "side:=" not in laptop and ".mode" not in laptop
     vslam_run = next(
         c for c in sf.shell_commands(laptop) if "docker run -d --name pepin-vslam" in c
     )

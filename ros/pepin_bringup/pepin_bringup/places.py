@@ -102,7 +102,7 @@ FLAGS = FlagSet(
         " moves; off, the book is still kept and marked but nothing is published and every"
         " consumer falls back to the coordinates beside the map",
         why="default by design, unmeasured: it is the one output of this node. The switch exists"
-        " to prove which book a drive resolved a name from — with it off, ros/go.sh printer must"
+        " to prove which book a drive resolved a name from — with it off, ros/goto.sh printer must"
         " print the fallback warning and reach the same furniture, which is the A/B between a"
         " place that rides its node and a coordinate that does not",
         on_when="always: a coordinate written before a loop closure names a spot beside the"
