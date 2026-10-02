@@ -357,8 +357,9 @@ a cusp. A 3.9 m leg to the printer took 34 s with 1% of the time spent turning i
 35% under the point planners.
 
 **The rest stay selectable per run** — `ros/goto.sh planner navfn|theta|smac|lattice|hybrid` picks
-the planner and the controller that can follow it, and the board remembers the choice across a
-restart, so no drive is credited to a planner that never ran:
+the planner (under the goal server's default `mppi` controller one controller follows them all;
+the `rpp` flag value pairs each with its own RPP), and the goal server remembers the choice across
+a restart, so no drive is credited to a planner that never ran:
 
 | Plugin | What it gives |
 | --- | --- |
@@ -484,9 +485,9 @@ ros/goto.sh printer                     # go to a named place; Ctrl-C cancels
 ros/goto.sh -1.0 0.3 90                 # ...or to map coordinates, with a heading
 ros/goto.sh mark sofa                   # name the spot the robot is standing on
 ros/goto.sh where | places | cancel
-ros/goto.sh planner hybrid              # swap the planner (and its controller) for the next run
+ros/goto.sh planner hybrid              # swap the planner for the next run
 ros/goto.sh printer && ros/goto.sh home # printer, then home
-ros/stop.sh                             # the red button: wheels stopped within a second
+ros/stop.sh                             # the red button: the base's stop, the cancel, believed from the wheels
 
 # a new map
 ros/teleop.sh lap                       # a recorded drive by hand, fetched here when it ends

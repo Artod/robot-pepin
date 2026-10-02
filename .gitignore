@@ -29,6 +29,9 @@ ros/maps/*.data
 ros/maps/*_throttle*
 .coverage
 ros/maps/rtabmap*.db*
+# left behind by the retired ros/laptop.sh start (the board's side and map)
+ros/.mode
+ros/.map
 ros/maps/last_pose.json
 
 # written by the depth node at run time (the persisted affine law)

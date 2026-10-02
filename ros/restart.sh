@@ -136,6 +136,9 @@ wait_for() {  # WHAT TIMEOUT_S CONTAINER PATTERN: poll a container's log from no
 
 restart_board() {
     step "restarting the board (its zenoh router with it)"
+    # Never under a drive: the restart zeroes the odometry a running goal is steered by. Every
+    # goal is cancelled first; a goal server that does not answer has none to cancel.
+    "$HERE/goto.sh" cancel || echo "no goal confirmed cancelled (is Nav2 up?): the board restarts all the same"
     if [ "$DEPLOY" = true ]; then
         "$HERE/sync.sh" --restart  # code + params + router and stack + the census tail; a red census is information
     else
@@ -261,6 +264,7 @@ describe() {
     say() { n=$((n + 1)); printf '%2d. %s\n' "$n" "$1"; }
     echo "dry run, nothing is touched — ros/restart.sh $HALF would:"
     if [ "$HALF" != laptop ]; then
+        say "cancel every goal (ros/goto.sh cancel): the board's restart zeroes the odometry a drive is steered by"
         if [ "$DEPLOY" = true ]; then
             say "ros/sync.sh --restart: the checkout to root@$BOARD, then its zenoh router and its stack (stop pepin-ros, restart pepin-zrouter, start pepin-ros), then the census"
         else
@@ -284,7 +288,7 @@ describe() {
     fi
     say "the proof (4.1), if the laptop half is up (else 4.1 fails: no map to plan on): from pepin-vslam, ros/tools/map_odom.py and ros/tools/planner_check.py — a new global costmap within 10 s, one path 0.5 m ahead — asked again for up to ${PLANNER_WAIT_S} s"
     say "broken -> repair 1: SIGINT to the Nav2 container in pepin-macnav; its launch respawns it; the proof again"
-    say "still broken -> repair 2: the board once more (stop pepin-ros, restart pepin-zrouter, start pepin-ros; no sync), ros/laptop.sh vslam --neck and ros/laptop.sh nav, the proof again; still broken -> FAIL 4.1, loudly. \"No path around\" is never repaired"
+    say "still broken -> repair 2: every goal cancelled, the board once more (stop pepin-ros, restart pepin-zrouter, start pepin-ros; no sync), ros/laptop.sh vslam --neck and ros/laptop.sh nav, the proof again; still broken -> FAIL 4.1, loudly. \"No path around\" is never repaired"
     case "$HALF" in
         board) say "the checks: board (1.x), flags (3.x)" ;;
         laptop) say "the checks: laptop (2.x), flags (3.x)" ;;

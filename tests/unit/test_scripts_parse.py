@@ -743,14 +743,14 @@ def _planner_answers(tmp_path: Path, *answers: str) -> str:
 @pytest.mark.parametrize(
     ("args", "first", "absent"),
     [
-        (("both",), "board: stop pepin-ros, restart pepin-zrouter, start pepin-ros", "sync.sh"),
-        (("board", "--deploy"), "ros/sync.sh --restart: the checkout to", "laptop: ros/laptop.sh"),
+        (("both",), "cancel every goal (ros/goto.sh cancel)", "sync.sh"),
+        (("board", "--deploy"), "cancel every goal (ros/goto.sh cancel)", "laptop: ros/laptop.sh"),
         (
             ("laptop", "--fresh-graph"),
             "laptop: ros/laptop.sh vslam --neck --fresh",
             "the board's first report line",
         ),
-        (("both", "--no-check"), "board: stop pepin-ros", "the proof"),
+        (("both", "--no-check"), "cancel every goal", "the proof"),
     ],
 )
 def test_a_dry_run_prints_the_order_and_touches_nothing(tmp_path, args, first, absent) -> None:  # type: ignore[no-untyped-def]
@@ -781,6 +781,7 @@ def test_a_board_restart_restarts_the_laptop_s_vslam_after_it_and_proves_the_pla
     vslam = sent.index("laptop.sh vslam --neck")
     proof = next(i for i, c in enumerate(sent) if "planner_check.py" in c)
     assert board < vslam < proof, sent
+    assert sent.index("goto.sh cancel") < board, "never a board restart under a running goal"
     assert "laptop.sh nav" not in sent
     assert "PASS 4.1  OK — path of 9 poses" in out, out
     assert not [c for c in sent if "pkill" in c], "a planner that plans is not repaired"
