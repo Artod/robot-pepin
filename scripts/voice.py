@@ -4,7 +4,8 @@ The array's voice from the board -> an utterance cut by its
 loudness -> Gemini hears the audio itself (no separate speech-to-text), decides whether it was
 addressed ("Пепин"), calls the robot's tools (pepin.tools: go_to, where_am_i, list_places, ...)
 -> its answer is spoken through the speaker on the board (macOS say rendered, played by the
-board's audio server). Every turn is logged to data/voice/<day>.jsonl with timings.
+board's audio server). Every turn is logged to data/voice/<day>.jsonl with timings, and every
+utterance heard (answered or not) is kept as data/voice/<day>/<HHMMSS_mmm>.wav ("wav" in its line).
 
     uv run python scripts/voice.py [--model gemini-3.1-flash-lite]
 
@@ -80,6 +81,20 @@ def wav_bytes(pcm: bytes) -> bytes:
         w.setframerate(RATE)
         w.writeframes(pcm)
     return buf.getvalue()
+
+
+def wav_name(t: float) -> str:
+    """``<YYYYMMDD>/<HHMMSS_mmm>.wav`` for local time ``t``: the utterance's path under the logs."""
+    stamp = time.localtime(t)
+    return f"{time.strftime('%Y%m%d/%H%M%S', stamp)}_{int(t % 1 * 1000):03d}.wav"
+
+
+def save_wav(pcm: bytes, logs: Path, t: float) -> str:
+    """The utterance as ``<logs>/<wav_name(t)>``; the path relative to ``logs``."""
+    rel = wav_name(t)
+    (logs / rel).parent.mkdir(parents=True, exist_ok=True)
+    (logs / rel).write_bytes(wav_bytes(pcm))
+    return rel
 
 
 class Ears:
@@ -238,7 +253,7 @@ class Mind:
     def speak(self, text: str, log: dict[str, Any]) -> float:
         print(f"pepin> {text}", flush=True)
         t0 = time.monotonic()
-        seconds = self.robot.speech.say(text)
+        seconds = float(self.robot.speech.say(text))
         log.setdefault("said", []).append(
             {"text": text, "s": round(seconds, 1), "ms": round((time.monotonic() - t0) * 1000)}
         )
@@ -296,6 +311,8 @@ def main() -> int:
                 "audio_s": round(seconds, 2),
                 "floor_db": round(ears.floor, 1),
             }
+            log["wav"] = wav_name(log["t"])  # written beside the model call, off its latency
+            threading.Thread(target=save_wav, args=(pcm, logs, log["t"]), daemon=True).start()
             t0 = time.monotonic()
             print(f"\n[{seconds:.1f} s of speech] thinking...", flush=True)
             try:
