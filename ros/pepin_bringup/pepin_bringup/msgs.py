@@ -232,8 +232,8 @@ def scan_arrays(msg: Any) -> tuple[Array, Array]:
 # ---- maps ----------------------------------------------------------------------------------
 def occupancy_grid(fields: OccupancyGridFields, stamp: Any, frame_id: str) -> Any:
     """A grid of 0 free / 100 occupied / -1 unknown as a ``nav_msgs/OccupancyGrid``: the cells
-    row-major from the origin corner, which is where the map's own (0, 0) cell sits. What
-    :meth:`pepin.worldmap.WorldMap.to_occupancy_grid_message_fields` hands over, packed."""
+    row-major from the origin corner, which is where the map's own (0, 0) cell sits: the fields
+    :class:`pepin.worldmap.OccupancyGridFields` (or :mod:`pepin.camera_grid`) hands over, packed."""
     msg = OccupancyGridMsg()
     msg.header = header(stamp, frame_id)
     msg.info.resolution = float(fields.resolution)

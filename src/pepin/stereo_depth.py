@@ -532,26 +532,6 @@ class RaftMatcher:
         )
 
 
-def build_matcher(
-    name: str,
-    settings: MatcherSettings | None = None,
-    url: str = "",
-    timeout_s: float = 2.0,
-) -> DisparityMatcher:
-    """The engine ``name`` asks for: ``sgbm`` (OpenCV, the default everywhere until a live drive
-    says otherwise) or ``raft`` (the network on the host at ``url``, falling back to that same
-    SGBM). An unknown name raises rather than quietly falling back — a costmap marked from a
-    matcher nobody chose is the bug this prevents."""
-    if name not in MATCHERS:
-        raise ValueError(f"matcher must be one of {MATCHERS}, not {name!r}")
-    sgbm = StereoMatcher(settings)
-    if name == "sgbm":
-        return sgbm
-    if not url:
-        raise ValueError("the raft matcher needs the stereo host's URL")
-    return RaftMatcher(url, sgbm, timeout_s=timeout_s)
-
-
 def _grey(picture: Array) -> Array:
     """One eye as the contiguous uint8 single channel the matcher demands: a colour picture
     through the luma weights, a grey one as it stands."""

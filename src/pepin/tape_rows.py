@@ -14,7 +14,7 @@ here has state; the two throttles a tape has (the global costmap's one-grid-per-
 written.
 
 Times: a record's ``t`` is the message's own stamp where it has one, and the moment it arrived
-where it has none (``cmd``, ``nav``, ``meas``, ``srcs``) — the caller passes that moment in, so
+where it has none (``cmd``, ``nav``) — the caller passes that moment in, so
 a live recorder can hand it ``time.time()`` and a converter the bag's receive time.
 """
 
@@ -36,8 +36,8 @@ UNKNOWN, FREE, INFLATED, LETHAL_BAND = -1, 0, 1, 99
 # Which ROS topic carries which record, and the only list of a drive's topics there is: the bag
 # recorder records these, the converter turns them back into rows, and the JSONL recorder
 # subscribes to exactly them. ``/tf`` and ``/tf_static`` carry no record of their own — they are
-# what the ``loc`` rows are composed from where no tracker publishes a pose — and the camera's
-# two String topics share the ``meas`` record.
+# what a bag's ``loc`` rows are composed from (the live recorder reads the goal server's
+# ``/pose``).
 TOPIC_RECORDS: dict[str, str] = {
     "/ldlidar_node/scan": "scan",
     "/odom": "pose",
@@ -45,16 +45,12 @@ TOPIC_RECORDS: dict[str, str] = {
     "/odom_laser": "laser_odom",
     "/imu/data_raw": "imu",
     "/cmd_vel": "cmd",
-    "/tracker_pose": "loc",
     "/plan": "plan",
     "/local_costmap/costmap": "costmap",
     "/global_costmap/costmap": "gcostmap",
     "/tof/front": "tof",
     "/tof/left": "tof",
     "/tof/right": "tof",
-    "/localization/measurement": "meas",
-    "/localization/graph_measurement": "meas",
-    "/localization/sources": "srcs",
     "/navigate_to_pose/_action/status": "nav",
     "/compute_path_to_pose/_action/status": "nav",
     "/follow_path/_action/status": "nav",
@@ -198,17 +194,6 @@ def nav_row(action: str, msg: Any, now: float) -> dict[str, Any]:
     }
 
 
-def meas_row(text: str, now: float) -> dict[str, Any]:
-    """One pose measured out of a camera scan or out of the pose graph, kept verbatim: ``t`` is
-    when it ARRIVED, the moment it speaks for is ``stamp`` inside the JSON."""
-    return {"t": now, "topic": "meas", "json": text}
-
-
-def srcs_row(text: str, now: float) -> dict[str, Any]:
-    """The tracker's own account of one update (Localizer.sources_report), verbatim."""
-    return {"t": now, "topic": "srcs", "json": text}
-
-
 def cmd_row(msg: Any, now: float) -> dict[str, Any]:
     """What the controller asked the wheels for: the only record of the command side."""
     return {
@@ -216,21 +201,6 @@ def cmd_row(msg: Any, now: float) -> dict[str, Any]:
         "topic": "cmd",
         "linear": round(msg.linear.x, 4),
         "angular": round(msg.angular.z, 4),
-    }
-
-
-def loc_row(msg: Any, now: float) -> dict[str, Any]:
-    """The tracker's belief in the map frame (/tracker_pose); covariance trace as a stand-in
-    confidence."""
-    cov = msg.pose.covariance
-    return {
-        "t": stamp(msg.header, now),
-        "topic": "loc",
-        "source": "tracker",
-        "x": round(msg.pose.pose.position.x, 4),
-        "y": round(msg.pose.pose.position.y, 4),
-        "theta": round(yaw(msg.pose.pose.orientation), 5),
-        "confidence": round(1.0 / (1.0 + cov[0] + cov[7] + cov[35]), 3),
     }
 
 

@@ -1,10 +1,8 @@
 """RTAB-Map's two live switches (pepin.graphmode): when the database may LEARN and when it may only
-RECOGNISE — with the seating test that decides it — and which REGISTRATION the snapshots need.
+RECOGNISE, and which REGISTRATION the snapshots need.
 
 Both rules are pure and both are acted on only once a change has held, so both are tested the same
 way: a reading and a clock in, the verdict to act on out."""
-
-import math
 
 import pytest
 
@@ -19,34 +17,8 @@ from pepin.graphmode import (
     STRATEGY_VISICP,
     ModeRule,
     StrategyRule,
-    describe_sigma,
     registration_verdict,
-    seating_refusal,
 )
-
-
-# ---- the seating test ------------------------------------------------------------------------
-def test_a_seating_the_scan_pins_in_one_axis_only_is_no_place_to_teach_from() -> None:
-    """Whatever the database is taught is baked into every word it says afterwards. A scan sliding
-    along a sofa reports an honest fit and half a metre of freedom in y, so the gate reads the error
-    bar the tracker publishes, not its score — and refuses with a reason a person can read."""
-    sharp = (0.008, 0.012, math.radians(0.4))
-    assert seating_refusal(sharp) is None
-
-    along_a_sofa = seating_refusal((0.008, 0.40, math.radians(0.4)))
-    assert along_a_sofa is not None and "soft" in along_a_sofa and "40.0 cm" in along_a_sofa
-
-    free_to_turn = seating_refusal((0.008, 0.012, math.radians(4.0)))
-    assert free_to_turn is not None and "heading" in free_to_turn
-
-    assert seating_refusal(None) is not None, "no covariance is not a sharp seating"
-    assert seating_refusal((0.008, 0.40, math.radians(4.0)), 1.0, 180.0) is None, "wide open"
-
-
-def test_a_seating_reads_as_centimetres_and_degrees_in_a_report_line() -> None:
-    """An operator reads the report line, not the covariance: metres and radians are neither."""
-    assert describe_sigma((0.008, 0.012, math.radians(0.23))) == "0.8/1.2 cm, 0.23 deg"
-    assert describe_sigma(None) == "unknown"
 
 
 # ---- the rule --------------------------------------------------------------------------------

@@ -181,16 +181,6 @@ class Frame:
         self.pairs.append(found)
         self.sources.append(source)
 
-    @property
-    def rulers(self) -> dict[str, float]:
-        """How much fit weight each anchor contributed to this frame, by the anchor's name —
-        the sum of its pairs' weights, which is the only honest measure of who is fitting the
-        law when one ruler brings 30 pairs at weight 1 and another 200 at weight 0.03."""
-        out: dict[str, float] = {}
-        for name, part in zip(self.sources, self.pairs, strict=False):
-            out[name] = out.get(name, 0.0) + float(np.sum(part.weight))
-        return out
-
     @cached_property
     def edge(self) -> Mask:
         """Pixels on a depth discontinuity of the raw depth (:func:`pepin.depth.edge_mask`)."""
@@ -263,47 +253,6 @@ class Stage(Protocol):
 
     def describe(self) -> str:
         """The stage's state in a few words, for the report line."""
-        ...
-
-
-class Law(Protocol):
-    """The map from the network's depth to metres."""
-
-    name: str
-
-    @property
-    def ready(self) -> bool:
-        """Whether there is a law worth applying."""
-        ...
-
-    def fit(self, pairs: Pairs | None) -> None:
-        """Feed a frame's pooled pairs (``None`` when no anchor had any) and refit."""
-        ...
-
-    def apply(self, depth: Array, ctx: FrameContext) -> Array:
-        """The depth image in metres (NaN where the law cannot place a pixel)."""
-        ...
-
-    def describe(self) -> str:
-        """The law's parameters in a few words."""
-        ...
-
-
-class Anchor(Protocol):
-    """An external truth about some pixels of a frame."""
-
-    name: str
-
-    def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, true) pairs for the laws' pool, from the raw depth; ``None`` for none."""
-        ...
-
-    def correct(self, depth: Array, frame: Frame) -> tuple[Array, int]:
-        """``depth`` with the pixels this anchor knows set right, and how many."""
-        ...
-
-    def describe(self) -> str:
-        """The anchor's settings in a few words."""
         ...
 
 
@@ -731,7 +680,6 @@ def standard_pipeline(law: AffineLaw | None = None) -> DepthPipeline:
 
 __all__ = [
     "AffineLaw",
-    "Anchor",
     "AnchorStage",
     "DepthPipeline",
     "EdgeFilter",
@@ -739,7 +687,6 @@ __all__ = [
     "FloorGeometry",
     "Frame",
     "FrameContext",
-    "Law",
     "LawStage",
     "LidarAnchor",
     "Pairs",

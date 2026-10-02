@@ -21,7 +21,6 @@ from pepin.lean import (
     LeanHistory,
     LevelPose,
     imu_mount_rotation,
-    scan_height_shift,
 )
 
 MOUNT = imu_mount_rotation(90.0, 0.0, 0.0)  # the GY-521 as it is bolted: its Y axis up
@@ -314,27 +313,6 @@ def test_the_history_is_bounded_by_its_length_as_well_as_by_its_horizon() -> Non
 
 
 # ---- what the lean does to a lidar, and the gate in front of it -------------------------------
-def test_the_height_a_beam_moves_is_the_range_times_the_sine_of_the_lean() -> None:
-    """The physical case for placing a scan by the body's real pose. The range to a vertical
-    wall changes by 1/cos — 0.4 % at 5 degrees, nothing anyone would chase — while the height
-    the beam lands at changes by r sin(lean): 44 cm at 5 m, which is a tabletop instead of a
-    wall. Forward beams fall under a nose-down lean, the beams behind rise by as much, and the
-    beams abeam of a pure pitch do not move at all."""
-    lean = Lean(0.0, math.radians(5.0), 0.0)
-    bearings = np.radians(np.array([0.0, 90.0, 180.0, -90.0]))
-    ranges = np.full(4, 5.0)
-    shift = scan_height_shift(ranges, bearings, lean)
-    assert shift[0] == pytest.approx(-5.0 * math.sin(math.radians(5.0)))
-    assert abs(shift[0]) == pytest.approx(0.436, abs=1e-3)
-    assert shift[2] == pytest.approx(-shift[0])
-    assert shift[1] == pytest.approx(0.0, abs=1e-12) and shift[3] == pytest.approx(0.0, abs=1e-12)
-    # a roll moves the beams abeam instead, and a level body moves nothing
-    rolled = scan_height_shift(ranges, bearings, Lean(math.radians(5.0), 0.0, 0.0))
-    assert rolled[1] == pytest.approx(5.0 * math.sin(math.radians(5.0)))
-    assert np.all(scan_height_shift(ranges, bearings, Lean(0.0, 0.0, 0.0)) == 0.0)
-    assert math.isnan(scan_height_shift(np.array([np.nan]), np.array([0.0]), lean)[0])
-
-
 def test_the_gate_drops_the_scans_taken_too_far_from_level_and_counts_them() -> None:
     """Below the gate a scan is corrected; above it there is nothing worth correcting, because
     the beams are looking at another slice of the room. A moment the IMU cannot speak for is

@@ -359,7 +359,7 @@ ekf_filter_node:
     # already measure vx at 0.001 (m/s)^2, thirty times tighter. And when they are NOT alive --
     # /odom silent past sensor_timeout 0.5 s -- the same sub-block runs the bias open loop and
     # reaches 0.98 m/s of invented speed in 5 s, three times this cart's top speed and the shape
-    # of the 2026-09-14 runaway (pepin.odometry.RunawayWatch's docstring). A source that adds
+    # of the 2026-09-14 runaway. A source that adds
     # nothing while the stack is healthy and runs away when it is not does not get fused.
     # TO TURN THEM ON AGAIN, both words on one line below (12 and 13 to true) -- and only behind
     # one of: a bias state in the filter, or an orientation this chip does not publish, or a

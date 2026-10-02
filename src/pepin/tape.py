@@ -6,8 +6,8 @@ worth watching — were never on tape, and the process cost about 100 MB on a 1.
 class holds the last seconds in memory instead: when a run starts it writes that prelude first
 and then every record as it arrives, so a tape begins before the command did.
 
-Records are `pepin.recording.SessionRecorder`'s (topics scan/pose/loc/plan/cmd); the writer is
-injected, so this is a pure object a test can drive with a StringIO.
+Records are :mod:`pepin.recording`'s and :mod:`pepin.tape_rows`'s (topics scan/pose/loc/plan/cmd);
+the writer is injected, so this is a pure object a test can drive with a StringIO.
 """
 
 from __future__ import annotations

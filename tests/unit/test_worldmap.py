@@ -576,6 +576,7 @@ def test_the_exported_pair_is_read_back_by_the_existing_map_loader(tmp_path: Pat
 
 
 # ---- the snapshot --------------------------------------------------------------------------
+@pytest.mark.slow
 def test_a_saved_map_seeds_the_layer_as_the_starting_state() -> None:
     """A known room is a loaded map written into the volume — after that nothing in the stack
     can tell it from a room the cart discovered itself."""

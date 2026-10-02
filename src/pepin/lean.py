@@ -121,9 +121,6 @@ class Lean:
         return cls(math.atan2(uy, uz), math.atan2(-ux, math.hypot(uy, uz)), stamp, quality)
 
 
-LEVEL = Lean(0.0, 0.0, 0.0, 0.0)
-
-
 class LeanSource(Protocol):
     """Where a consumer asks how the cart was leaning at a stamp: an estimator in a node, a
     tape offline, a fake in a test."""
@@ -426,24 +423,6 @@ class LeanGate:
         return True
 
 
-def scan_height_shift(ranges: Array, bearings: Array, lean: Lean) -> Array:
-    """How far each return's height in the world moves because the body leans: metres per
-    return, positive up, ``NaN`` where there was no return.
-
-    A beam of length ``r`` at robot-frame bearing ``b`` leaves the sensor in its own plane; tip
-    the body and the far end of that beam rises or falls by ``r`` times the vertical part of
-    the turned ray — ``r sin(lean)`` for a beam straight ahead under a pure pitch, 44 cm at 5 m
-    under 5 degrees. This is the whole physical case for placing a scan by the body's real
-    pose: the range itself changes by 1/cos, four parts in a thousand, and nobody would care.
-    The mount's own rise (centimetres, the same for every beam) is not in this number.
-    """
-    r = np.asarray(ranges, dtype=float)
-    b = np.asarray(bearings, dtype=float)
-    m = lean.rotation()
-    shift: Array = r * (m[2, 0] * np.cos(b) + m[2, 1] * np.sin(b))
-    return shift
-
-
 @dataclass(frozen=True)
 class LevelPose:
     """What the IMU says while the cart stands still on a floor that is level: the residual
@@ -492,7 +471,6 @@ __all__ = [
     "LEAN_NORM_TOLERANCE",
     "LEAN_QUALITY_FLOOR",
     "LEAN_TAU_S",
-    "LEVEL",
     "SCAN_LEAN_GATE_DEG",
     "Lean",
     "LeanEstimator",
@@ -501,5 +479,4 @@ __all__ = [
     "LeanSource",
     "LevelPose",
     "imu_mount_rotation",
-    "scan_height_shift",
 ]

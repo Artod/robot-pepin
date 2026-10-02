@@ -45,16 +45,6 @@ class DiffDriveKinematics:
         right = (twist.linear + twist.angular * self._half_track) / self._r
         return WheelRates(left=left, right=right)
 
-    def wheels_to_twist(self, rates: WheelRates) -> Twist:
-        """Measured wheel rates back to body motion: mean rim speed in m/s, and the
-        left/right speed difference over the track width as yaw rate in rad/s."""
-        v_left = rates.left * self._r
-        v_right = rates.right * self._r
-        return Twist(
-            linear=(v_left + v_right) / 2.0,
-            angular=(v_right - v_left) / (2.0 * self._half_track),
-        )
-
     def rad_s_to_ticks_s(self, rad_s: float) -> int:
         """Wheel rate to the servo's native velocity unit (encoder ticks per second)."""
         return round(rad_s * self._ticks_per_rad)

@@ -732,12 +732,6 @@ class WorldMap:
         lo, hi = self.spec.camera_band_m
         return self.slice(lo, hi, law)
 
-    def to_occupancy_grid_message_fields(
-        self, slice_: OccupancySlice | None = None
-    ) -> OccupancyGridFields:
-        """The fields of an occupancy-grid message for a viewer: the lidar's slice by default."""
-        return (slice_ if slice_ is not None else self.lidar_slice()).message_fields()
-
     def export_pgm_yaml(self, path: str | Path, slice_: OccupancySlice | None = None) -> Path:
         """Write ``path.pgm`` + ``path.yaml`` in map_server's format, the pair ros/maps/*.yaml
         already is, so map_server, ``pepin.mapping.grid_from_pgm`` and the operator scripts read
