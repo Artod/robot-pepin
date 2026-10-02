@@ -51,6 +51,7 @@ REGISTERS = {
     "Goal_Velocity": Register(46, 2, sign_magnitude=True),
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
+    "Present_Temperature": Register(63, 1),  # degrees C; the servo cuts out by itself at 70
 }
 
 

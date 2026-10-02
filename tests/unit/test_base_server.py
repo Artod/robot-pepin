@@ -654,15 +654,15 @@ def run_jog(
 
 
 def test_a_jog_energises_the_head_and_walks_the_goal_at_the_fast_rate() -> None:
-    """Pan +1 is left; config/neck.json's pan_sign -1 makes that a FALLING tick count. 40 deg/s
-    for one second is 455 ticks, one short Goal_Position write per tick on the way."""
+    """Pan +1 is left; config/neck.json's pan_sign -1 makes that a FALLING tick count. 52 deg/s
+    for one second is 592 ticks, one short Goal_Position write per tick on the way."""
     core, bus = make_move_core()
     assert jog(core, 1.0, pan=1) is None, "accepted: silent, like a twist"
     assert bus.torque == [("on", ["neck", "head"])]
-    assert ("Goal_Velocity", {"neck": 455, "head": 455}) in bus.writes, "the profile is the rate"
+    assert ("Goal_Velocity", {"neck": 592, "head": 592}) in bus.writes, "the profile is the rate"
     assert goals(bus) == {"neck": 2048, "head": 2360}, "seeded where the head is: no jump"
     end = run_jog(core, bus, seconds=1.0, pan=1, start=1.0 + TICK_S)  # 50 ticks after the start
-    assert goals(bus)["neck"] == pytest.approx(2048 - 455, abs=2)
+    assert goals(bus)["neck"] == pytest.approx(2048 - 592, abs=2)
     assert goals(bus)["head"] == 2360, "the axis with direction 0 is not written again"
     assert core.take_replies() == [], "a jog answers nothing on the way"
     assert bus.torque[-1][0] == "on", "still held while the messages keep coming"
@@ -675,13 +675,13 @@ def test_shift_makes_the_jog_slow_and_the_rate_changes_live() -> None:
     assert goals(bus)["head"] == pytest.approx(2360 + 91, abs=2), "8 deg/s is 91 ticks/s"
     assert ("Goal_Velocity", {"neck": 91, "head": 91}) in bus.writes
     run_jog(core, bus, seconds=1.0, pan=-1, slow=False, start=end)  # right: ticks rise
-    assert goals(bus)["neck"] == pytest.approx(2048 + 455, abs=3)
-    assert ("Goal_Velocity", {"neck": 455, "head": 455}) in bus.writes, "the profile follows"
+    assert goals(bus)["neck"] == pytest.approx(2048 + 592, abs=3)
+    assert ("Goal_Velocity", {"neck": 592, "head": 592}) in bus.writes, "the profile follows"
     assert goals(bus)["head"] == pytest.approx(2360 + 91, abs=2), "tilt released: frozen"
 
 
 def test_the_goal_never_passes_the_configured_limits() -> None:
-    """Tilting down for ten seconds would be 4550 ticks; the head stops at head.max — 2760 since
+    """Tilting down for ten seconds would be 5920 ticks; the head stops at head.max — 2760 since
     2026-09-30, the camera's own stop is at 2783."""
     core, bus = make_move_core()
     run_jog(core, bus, seconds=10.0, tilt=1)
@@ -870,16 +870,46 @@ def test_a_stalled_tick_advances_the_goal_by_at_most_two_ticks_worth() -> None:
     jog(core, 1.5, pan=-1)  # the message keeps the deadman quiet; the tick thread stalled
     core.tick(1.5)
     stride = goals(bus)["neck"] - 2048
-    assert 10 < stride <= round(2 * TICK_S * 455) + 1  # 18 ticks, two ticks' worth
+    assert 10 < stride <= round(2 * TICK_S * 592) + 1  # 18 ticks, two ticks' worth
 
 
 def test_both_axes_jogging_cost_one_write_per_tick() -> None:
     core, bus = make_move_core()
-    assert jog(core, 1.0, pan=1, tilt=-1) is None  # left and up: room on both axes for a second
+    assert jog(core, 1.0, pan=1, tilt=-1) is None  # left and up: room on both axes for 0.7 s
     assert [name for name, _ in bus.writes] == ["Goal_Velocity", "Goal_Position"]
     assert bus.writes[-1] == ("Goal_Position", {"neck": 2048, "head": 2360}), "one seed write"
     before = len(bus.writes)
-    run_jog(core, bus, seconds=1.0, pan=1, tilt=-1, start=1.0 + TICK_S)
+    run_jog(core, bus, seconds=0.7, pan=1, tilt=-1, start=1.0 + TICK_S)
     added = bus.writes[before:]
-    assert len(added) == 50, "fifty ticks, fifty transactions"
+    assert len(added) == 35, "35 ticks, 35 transactions"
     assert all(name == "Goal_Position" and set(v) == {"neck", "head"} for name, v in added)
+
+
+class WarmBus(PingableBus):
+    """A bus whose wheel servos answer Present_Temperature (register 63)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.temperatures = {LEFT: 31, RIGHT: 33}
+
+    def sync_read(
+        self, data_name: str, motors: list[str], *, normalize: bool = True
+    ) -> dict[str, int]:
+        if data_name == "Present_Temperature":
+            return {m: self.temperatures[m] for m in motors}
+        return super().sync_read(data_name, motors, normalize=normalize)
+
+
+def test_the_state_line_carries_the_wheels_temperature_read_every_five_seconds() -> None:
+    """The servos cut out at 70 C: the state line says how warm they are, read at most every
+    5 s so the wheels' loop pays for it once in 250 ticks; a bus that does not answer the read
+    leaves the field empty and nothing else."""
+    bus = WarmBus()
+    core = BaseServerCore(bus, CFG, servo_names=[LEFT, RIGHT, "servo1"])
+    core.tick(0.0)
+    assert core.snapshot(0.0)["temp_c"] == {"left": 31, "right": 33}
+    bus.temperatures = {LEFT: 50, RIGHT: 52}
+    assert core.snapshot(1.0)["temp_c"] == {"left": 31, "right": 33}, "not re-read within 5 s"
+    assert core.snapshot(6.0)["temp_c"] == {"left": 50, "right": 52}
+    silent, _ = make_core()  # FakeBus answers positions only
+    assert silent.snapshot(0.0)["temp_c"] is None

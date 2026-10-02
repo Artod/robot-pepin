@@ -75,9 +75,9 @@ def test_arc_is_a_straight_line_or_the_exact_circle() -> None:
 
 def test_the_base_clamps_each_axis_to_its_own_limits() -> None:
     base = UnicycleBase.from_config(BaseConfig.from_json(REPO / "config/base.json"))
-    assert (base.max_linear, base.max_angular) == (0.30, 1.0)  # config/base.json
+    assert (base.max_linear, base.max_angular) == (0.45, 1.0)  # config/base.json (2026-09-30)
     base.command(0.5, -2.0, now=0.0)
-    assert base.twist(0.0) == (0.30, -1.0)
+    assert base.twist(0.0) == (0.45, -1.0)
 
 
 def test_the_deadman_stops_the_base_half_a_second_after_the_last_command() -> None:
