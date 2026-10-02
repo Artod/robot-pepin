@@ -1,0 +1,14 @@
+/dts-v1/;
+// The IMU (MPU6050 0x68) and the three VL53L1X (0x30-0x32) share i2c@5002c00: at the default 100 kHz
+// the ToF transactions left the IMU at 53 of its 100 Hz; at 400 kHz it holds 100.2 Hz with the ToF
+// running (2026-10-02). Install on the board: armbian-add-overlay board/i2c3-400k.dts, then reboot.
+/plugin/;
+/ {
+	compatible = "allwinner,sun50i-h616";
+	fragment@0 {
+		target-path = "/soc/i2c@5002c00";
+		__overlay__ {
+			clock-frequency = <400000>;
+		};
+	};
+};
