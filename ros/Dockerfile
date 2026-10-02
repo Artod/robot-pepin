@@ -1,27 +1,24 @@
 # syntax=docker/dockerfile:1
-# ROS 2 Jazzy + Nav2 for the Orange Pi Zero 3 (arm64, Armbian Debian trixie host -> Ubuntu 24.04 inside).
-# Build on the board:  docker build -t pepin-ros ros/     Run: ros/run.sh
-# Pinned by digest: a moved tag rebuilds every layer (an hour on this board) without warning.
-# Refresh on purpose: ssh root@10.0.0.187 docker image inspect ros:jazzy-ros-base --format '{{index .RepoDigests 0}}'
+# The board's sensor stack: ROS 2 Jazzy for the Orange Pi Zero 3 (arm64, Armbian Debian trixie host
+# -> Ubuntu 24.04 inside). No navigation: Nav2 runs on the laptop (ros/Dockerfile.laptop).
+# Built on the Mac, natively arm64, and shipped to the board by ros/build-image.sh. Run: ros/run.sh
+# Pinned by digest: a moved tag rebuilds every layer without warning.
 FROM ros:jazzy-ros-base@sha256:2589a8fba5257307857890173c069852c2abf913a0be7970f172478baecb09e4
 
 ENV DEBIAN_FRONTEND=noninteractive
-# ros2bag + the MCAP storage plugin are here on purpose, named rather than assumed: they are how a
-# drive is recorded under PEPIN_RECORDER=bag (pepin_bringup.bag_recorder starts `ros2 bag record`,
-# and the board then copies serialised bytes instead of deserialising every scan), and how the
-# laptop image — which is built FROM this one — reads that bag back into a tape
-# (ros/tools/bag_to_tape.py needs rosbag2_py). ros_base carries rosbag2 itself; the CLI verb and
-# the storage plugin are separate packages and an image without them fails at the first goal.
+# nav2_lifecycle_manager is the one Nav2 package here: it configures and activates the LD19
+# driver, a lifecycle component (robot.launch.py, lifecycle_manager_sensors).
+# ros2bag + the MCAP storage plugin are named rather than assumed: they record a drive on the
+# board (ros/teleop.sh NAME), and the laptop image, built FROM this one, reads bags back into
+# tapes with them (ros/tools/bag_to_tape.py needs rosbag2_py). ros_base carries rosbag2 itself;
+# the CLI verb and the storage plugin are separate packages.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        ros-jazzy-navigation2 \
-        ros-jazzy-nav2-bringup \
-        ros-jazzy-slam-toolbox \
+        ros-jazzy-nav2-lifecycle-manager \
         ros-jazzy-foxglove-bridge \
         ros-jazzy-rmw-cyclonedds-cpp \
         ros-jazzy-rmw-zenoh-cpp \
         ros-jazzy-tf2-tools \
-        ros-jazzy-rqt-graph \
         python3-colcon-common-extensions \
         ros-jazzy-ros2bag \
         ros-jazzy-rosbag2-storage-mcap \
@@ -29,7 +26,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     && rm -rf /var/lib/apt/lists/*
 
 # Scan filtering: the lidar sees the cart's own rear posts; a box filter over the hull removes
-# them once for every consumer (costmaps clear the footprint anyway, the collision monitor does not).
+# them once for every consumer.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         ros-jazzy-laser-filters ros-jazzy-teleop-twist-keyboard \
@@ -53,7 +50,7 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
 # in the Jazzy arm64 index (checked 2026-09-21 against packages.ros.org's noble/arm64 Packages
 # list: 8704 packages, no rf2o and no laser_scan_matcher either), so the MAPIRlab ROS 2 port is
 # built from source at a pinned commit. Pinned and not `-b ros2`: a moved branch would silently
-# rebuild this board for an hour with code nobody read. rosdep is not used on it — its
+# rebuild with code nobody read. rosdep is not used on it — its
 # package.xml still lists ROS 1's `cmake_modules`, which has no Jazzy key — so its three real
 # system dependencies are installed by name; CMakeLists.txt asks for nothing else.
 #
@@ -65,12 +62,8 @@ RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
 #     then believes this source over the wheels AND the gyro. The diagonal is three parameters.
 #   - two RCLCPP_INFO per scan is 20 lines a second in the one log every restart check reads.
 # All three default to upstream's behaviour; ros/pepin_bringup/launch/robot.launch.py turns them on.
-# ONE compiler at a time BY DEFAULT: a -j4 build of this package (Eigen-heavy translation units)
-# put the 1.5 GB board into swap and off the network on 2026-09-22; the build stops the stack
-# first anyway. RF2O_JOBS is that limit, and it is a build argument because the limit belongs to
-# the machine and not to the package: a cross-build on the laptop (ros/build-image.sh) passes the
-# core count and compiles this layer in a fraction of the time. Leave the default alone — it is
-# what an on-board `docker build` (ros/build.sh) must get without being told.
+# RF2O_JOBS is how many compilers this layer gets (Eigen-heavy translation units: a -j4 build put
+# the 1.5 GB board into swap on 2026-09-22). ros/build-image.sh passes the build machine's budget.
 ARG RF2O_COMMIT=b38c68e46387b98845ecbfeb6660292f967a00d3
 ARG RF2O_JOBS=1
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
@@ -118,8 +111,7 @@ RUN . /opt/ros/jazzy/setup.sh \
 
 # Operator tools run inside the container (goal client, snapshots, latency probe).
 COPY tools /tools
-# Our pure-numpy localisation library (the whole-map search the relocalizer uses); ros/build.sh
-# copies src/pepin here before building.
+# Our pure-numpy library; ros/build-image.sh copies src/pepin here before building.
 COPY pepin_src /ws/pepin_src
 ENV PYTHONPATH=/ws/pepin_src
 

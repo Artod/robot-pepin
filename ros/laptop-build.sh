@@ -1,6 +1,7 @@
 #!/bin/bash
-# Build the laptop image (pepin-laptop): the board's image plus RTAB-Map and the image pipeline.
-# Usage: ros/laptop-build.sh        (a few minutes; needs pepin-ros:latest built by ros/build.sh)
+# Build the laptop image (pepin-laptop): the board's sensor image plus Nav2, RTAB-Map and the
+# image pipeline.
+# Usage: ros/laptop-build.sh        (a few minutes; needs pepin-ros:sensors from ros/build-image.sh)
 #        ros/laptop-build.sh xfeat  pepin-laptop:xfeat on top of pepin-laptop:zenoh
 #                                   (ros/Dockerfile.xfeat: RTAB-Map rebuilt with Python, XFeat and
 #                                   LighterGlue for the visual registration; about an hour)

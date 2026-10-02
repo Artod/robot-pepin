@@ -1,10 +1,11 @@
-# The laptop half of the stack: the board's image plus what only a laptop should carry —
-# RTAB-Map (camera + lidar SLAM with appearance-based loop closure), the image pipeline, and
+# The laptop half of the stack: the board's sensor image plus what only a laptop should carry —
+# Nav2, RTAB-Map (camera + lidar SLAM with appearance-based loop closure), the image pipeline, and
 # the monocular depth network that turns the camera into a depth sensor (CPU: 0.33 s a frame
-# on the Docker VM, enough for 1 Hz map nodes). Built by ros/laptop-build.sh; the board never
-# sees this image.
-FROM pepin-ros:latest
+# on the Docker VM, enough for 1 Hz map nodes). Built by ros/laptop-build.sh on top of
+# ros/build-image.sh's pepin-ros:sensors; the board never sees this image.
+FROM pepin-ros:sensors
 RUN apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends \
+        ros-jazzy-navigation2 ros-jazzy-nav2-bringup \
         ros-jazzy-rtabmap-ros ros-jazzy-rtabmap-slam ros-jazzy-rtabmap-viz \
         ros-jazzy-cv-bridge ros-jazzy-image-transport ros-jazzy-image-transport-plugins \
         ros-jazzy-camera-calibration-parsers ros-jazzy-foxglove-bridge python3-opencv python3-pip \

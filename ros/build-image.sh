@@ -1,22 +1,33 @@
 #!/bin/bash
-# Cross-build the board's image on this laptop (linux/arm64, native on Apple Silicon) and ship
-# the result to the board. The board compiles rf2o with one compiler on four A53 cores and a
-# rebuild there costs 16-30 min (ros/build.sh, which still works and stays the fallback); the
-# same image builds here in minutes and travels over the wire as a tarball.
+# Build the board's sensor image on this Mac (linux/arm64: native on Apple Silicon, minutes instead
+# of the board's half hour) and ship it to the board as a tarball over ssh.
 #
 # Usage:
-#   ros/build-image.sh                 build only — touches nothing on the board
-#   ros/build-image.sh --ship          build, then load the image on the board
-#   ros/build-image.sh --ship-only     skip the build, ship the image already built here
+#   ros/build-image.sh                 build only: pepin-ros:sensors here, the board untouched
+#   ros/build-image.sh --ship          build, then load it on the board
+#   ros/build-image.sh --ship-only     ship the image already built here
+#   PEPIN_BUILD_CPUS=4 ros/build-image.sh   build on 4 of the Docker VM's CPUs at low priority
+#                                           (a builder of its own; the live containers keep theirs)
+#
+# Tags. Here the image is pepin-ros:sensors and nothing else: this Mac's pepin-ros:latest and
+# :zenoh are the older image with Nav2 in it, which ros/Dockerfile no longer builds. On the board
+# the load tags it pepin-ros:latest and pepin-ros:zenoh, the names ros/run.sh and
+# pepin-zrouter.service ask for. The board's image from before the first sensors-only load keeps
+# the tag pepin-ros:pre-sensors-2026-10-01 (set once, never moved by a later ship).
+#
+# Rollback to that image (restarts the router and the stack, the router first):
+#   ssh root@10.0.0.187 'docker tag pepin-ros:pre-sensors-2026-10-01 pepin-ros:zenoh && docker tag pepin-ros:pre-sensors-2026-10-01 pepin-ros:latest && systemctl stop pepin-ros; systemctl restart pepin-zrouter && systemctl start pepin-ros'
 #
 # Shipping is a separate step on purpose: `docker load` on the board while the robot drives is
-# not allowed. Neither step restarts the stack — the restart command is printed at the end.
+# refused (--force overrides). Neither step restarts anything: the restart is printed at the end.
 set -euo pipefail
 
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
 IMAGE=pepin-ros
-TAGS=("$IMAGE:latest" "$IMAGE:zenoh")  # both names the board's run.sh may ask for (ros/lib.sh)
+LOCAL="$IMAGE:sensors"
+BOARD_TAGS=("$IMAGE:latest" "$IMAGE:zenoh")
+ROLLBACK="$IMAGE:pre-sensors-2026-10-01"
 # The multiplexed master of ros/lib.sh is deliberately NOT used here: this script runs while the
 # robot is being driven from another session, and a shared master is a shared failure.
 SSH=(ssh -o ControlPath=none -o ConnectTimeout=6)
@@ -33,41 +44,40 @@ for arg in "$@"; do
     esac
 done
 
+size_of() { docker image inspect "$1" --format '{{.Size}}' | awk '{printf "%.2f GB", $1/1e9}'; }
+
 if [ "$DO_BUILD" = 1 ]; then
-    # The build context is ros/, exactly as on the board, and it needs the same pepin_src tree
-    # that ros/build.sh assembles there out of src/pepin.
+    # The build context is ros/ with the library beside it (the Dockerfile's COPY pepin_src).
     mkdir -p "$HERE/pepin_src/pepin"
     rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "$HERE/pepin_src/pepin/"
 
-    # How many compilers the rf2o layer gets (Dockerfile's RF2O_JOBS, 1 on the board because of
-    # its RAM). Here the limit is pointless: the machine has cores and memory.
-    JOBS="${PEPIN_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}"
-
     BUILDX=(docker buildx build)
-    # By default the daemon's own layer cache is the cache: an unchanged rf2o layer is reused
-    # exactly as it is by `docker build`. PEPIN_BUILD_CACHE=<dir> instead exports the cache to a
-    # directory, which survives a `docker buildx prune` and needs the container driver.
-    if [ -n "${PEPIN_BUILD_CACHE:-}" ]; then
-        docker buildx inspect pepin-arm64 >/dev/null 2>&1 \
-            || docker buildx create --name pepin-arm64 --driver docker-container >/dev/null
-        mkdir -p "$PEPIN_BUILD_CACHE"
-        BUILDX+=(--builder pepin-arm64
-                 --cache-from "type=local,src=$PEPIN_BUILD_CACHE"
-                 --cache-to "type=local,dest=$PEPIN_BUILD_CACHE,mode=max")
+    if [ -n "${PEPIN_BUILD_CPUS:-}" ]; then
+        # A docker-container builder pinned to the VM's LAST N CPUs with a tenth of the default
+        # CPU weight: under contention the live stack wins. It keeps its own layer cache.
+        JOBS="$PEPIN_BUILD_CPUS"
+        TOTAL=$(docker info --format '{{.NCPU}}')
+        BUILDER="pepin-board-${JOBS}cpu"
+        docker buildx inspect "$BUILDER" >/dev/null 2>&1 \
+            || docker buildx create --name "$BUILDER" --driver docker-container \
+                --driver-opt "cpuset-cpus=$((TOTAL - JOBS))-$((TOTAL - 1))" \
+                --driver-opt cpu-shares=102 >/dev/null
+        BUILDX+=(--builder "$BUILDER")
+    else
+        JOBS="${PEPIN_BUILD_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || nproc)}"
     fi
 
-    echo "building $IMAGE for linux/arm64 with RF2O_JOBS=$JOBS"
+    echo "building $LOCAL for linux/arm64 with RF2O_JOBS=$JOBS"
     T0=$(date +%s)
     "${BUILDX[@]}" --platform linux/arm64 --load \
         --build-arg "RF2O_JOBS=$JOBS" \
-        -t "${TAGS[0]}" -t "${TAGS[1]}" \
-        -f "$HERE/Dockerfile" "$HERE"
+        -t "$LOCAL" -f "$HERE/Dockerfile" "$HERE"
     echo "build took $(( $(date +%s) - T0 )) s"
 
     # A wrong architecture is silent until the board refuses to start the container.
-    ARCH=$(docker image inspect "${TAGS[1]}" --format '{{.Os}}/{{.Architecture}}')
+    ARCH=$(docker image inspect "$LOCAL" --format '{{.Os}}/{{.Architecture}}')
     [ "$ARCH" = linux/arm64 ] || { echo "built $ARCH, not linux/arm64" >&2; exit 1; }
-    echo "$ARCH, $(docker image inspect "${TAGS[1]}" --format '{{.Size}}' | awk '{printf "%.2f GB", $1/1e9}') uncompressed"
+    echo "$LOCAL: $ARCH, $(size_of "$LOCAL")"
 fi
 
 if [ "$DO_SHIP" = 1 ]; then
@@ -75,22 +85,23 @@ if [ "$DO_SHIP" = 1 ]; then
     if "${SSH[@]}" "root@$BOARD" 'docker ps --format "{{.Names}}" | grep -qx pepin-ros'; then
         [ "$FORCE" = 1 ] || { echo "pepin-ros is running on the board: stop it first (systemctl stop pepin-ros), or --force" >&2; exit 1; }
     fi
-    # The tarball goes over the wire AS IT IS. Measured 2026-09-22: `docker save` of this image
-    # is 1.03 GB and zstd -3 takes 0.7 % off it, because Docker Desktop's containerd image store
-    # saves layers already compressed — a compressor would only spend an A53 on decompression.
-    # A daemon with the classic image store writes uncompressed tars instead, and there
-    # PEPIN_SHIP_COMPRESS=zstd (or gzip) pays for itself; the board must have the same tool.
+    # The rollback tag, once: a second ship must not move it onto a sensors-only image.
+    "${SSH[@]}" "root@$BOARD" "docker image inspect $ROLLBACK >/dev/null 2>&1 || docker tag ${BOARD_TAGS[1]} $ROLLBACK; df -h /var/lib/docker | tail -1"
+    # The tarball goes over the wire AS IT IS: Docker Desktop's containerd image store saves
+    # layers already compressed (zstd -3 took 0.7 % off it, 2026-09-22). PEPIN_SHIP_COMPRESS=zstd
+    # or gzip is for a daemon whose store writes plain tars; the board must have the same tool.
     PACK=(cat); UNPACK='docker load'
     case "${PEPIN_SHIP_COMPRESS:-}" in
         zstd) PACK=(zstd -3 -T0 -c); UNPACK='zstd -d -c | docker load' ;;
         gzip) PACK=(gzip -1 -c);     UNPACK='gzip -d -c | docker load' ;;
     esac
-    echo "shipping ${TAGS[*]} to $BOARD ($(docker image inspect "${TAGS[1]}" --format '{{.Size}}' | awk '{printf "%.2f GB", $1/1e9}'), pipe: ${PACK[0]})"
+    echo "shipping $LOCAL to $BOARD as ${BOARD_TAGS[*]} ($(size_of "$LOCAL"), pipe: ${PACK[0]})"
     T0=$(date +%s)
-    docker save "${TAGS[0]}" "${TAGS[1]}" | "${PACK[@]}" | "${SSH[@]}" "root@$BOARD" "$UNPACK"
+    docker save "$LOCAL" | "${PACK[@]}" \
+        | "${SSH[@]}" "root@$BOARD" "$UNPACK && docker tag $LOCAL ${BOARD_TAGS[0]} && docker tag $LOCAL ${BOARD_TAGS[1]}"
     echo "ship took $(( $(date +%s) - T0 )) s"
     "${SSH[@]}" "root@$BOARD" "docker images $IMAGE"
-    echo "the image is loaded, nothing was restarted. To run it:"
-    echo "  ros/restart.sh board            # or: ssh root@$BOARD systemctl restart pepin-ros"
-    echo "Code, params and maps still travel separately (ros/sync.sh): the container mounts them."
+    echo "the image is loaded, nothing was restarted. To run it (the router uses the image too):"
+    echo "  ssh root@$BOARD 'systemctl stop pepin-ros; systemctl restart pepin-zrouter && systemctl start pepin-ros'"
+    echo "Code, params and config still travel separately (ros/sync.sh): the container mounts them."
 fi
