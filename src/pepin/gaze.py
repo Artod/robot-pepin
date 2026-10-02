@@ -378,7 +378,7 @@ class Arbiter:
                 self._serve(active, now)
             phase = self._current_phase()
             if phase != self._phase:
-                self._phase, self._since = phase, now
+                self._phase, self._since = phase, self._phase_stamp(phase, now)
             self._driver.keep(now)
         self._deliver()
 
@@ -470,6 +470,16 @@ class Arbiter:
         if head.settled is None:
             return "returning" if head.home else "saccade"
         return "home" if head.home else "still"
+
+    def _phase_stamp(self, phase: Phase, now: float) -> float:
+        """When a phase began, as the gate reads it (``since``): a move at the write that
+        started it, a settled head at the reading it settled on, anything else ``now``."""
+        head = self._head
+        if head is None:
+            return now
+        if phase in ("saccade", "returning"):
+            return head.at
+        return head.settled.stamp if head.settled is not None else now
 
     def _serve(self, held: _Held, now: float) -> None:
         """Move toward the request's current view, then count its frames."""

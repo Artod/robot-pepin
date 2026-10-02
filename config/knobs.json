@@ -94,7 +94,7 @@
     "slow_deg_s": {"default": 20.0, "range": [1.0, 60.0],
       "note": "the head's speed for a 'slow' request (a detector that wants unblurred frames), with neck_target; a saccade goes at the board's own top speed"},
     "target_renew_s": {"default": 0.5, "range": [0.1, 5.0],
-      "note": "how often a held neck_target is sent again: well inside the board's lease, whose lapse sends the head home"},
+      "note": "how often a held neck_target is sent again, and never slower than half config/neck.json's motion.lease_s: the lease's lapse sends the head home"},
     "path_period_s": {"default": 0.2, "range": [0.05, 2.0],
       "note": "how often path gaze and reverse gaze are recomputed and renewed while a drive runs"},
     "path_lookahead_s": {"default": 2.0, "range": [0.5, 5.0],

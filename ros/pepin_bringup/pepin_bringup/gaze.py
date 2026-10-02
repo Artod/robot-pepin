@@ -1,11 +1,12 @@
 """ROS 2 node on the laptop: the gaze arbiter, the one owner of every head decision.
 
 Nothing else moves the neck. Consumers ask (:mod:`pepin.gaze`: bands, TTLs, preemption, home),
-and this node alone talks to the board's base server, over its JSON-lines port: ``neck_goto`` and
-``neck_home`` (one move at a time, refused while the wheels turn) to the base server the board
-runs today, ``neck_target`` (written while driving, each one renewing a lease whose lapse sends
-the head home) to the one whose state lines carry the neck's encoders — picked by itself from
-those lines (:class:`pepin.gaze.EitherHead`).
+and this node alone talks to the board's base server, over its JSON-lines port: ``neck_target``
+(joint angles, written while driving, each one renewing the board's lease, whose lapse sends the
+head home and lets it go; renewed every ``target_renew_s``, never slower than half
+config/neck.json's ``motion.lease_s``) to a base server whose state lines carry the neck's
+encoders, ``neck_goto``/``neck_home`` (one move at a time, at rest) to an older one — picked by
+itself from those lines (:class:`pepin.gaze.EitherHead`).
 
 THE DOORS. The behaviour tree's AskGaze node calls ``/gaze/stall_look`` (std_srvs/Trigger) when
 the controller has failed; the LLM tools POST requests to :data:`pepin.gaze_link.GAZE_PORT` on
@@ -13,10 +14,13 @@ this Mac's loopback (``/look``, ``/renew``, ``/state``). Path gaze and reverse g
 node's own requests while a drive runs.
 
 THE ONE GATE. ``/gaze/state`` (std_msgs/String, JSON; 10 Hz and on every change) carries the
-phase (home, still, saccade, returning), the head's pan and tilt, the request holding it, and the
-blind interval: ``blind`` from the write that starts a move until the head has settled plus one
-frame period, with ``blind_from`` and ``blind_until`` (null while the head still moves) in the
-board's clock, for every frame consumer to drop the frames stamped inside it.
+phase (home, still, saccade, returning), ``since`` (when that phase began: a move at the write
+that started it, a settled head at the reading it settled on), the head's pan and tilt, the
+request holding it, and the blind interval: ``blind`` from the write that starts a move until the
+head has settled plus one frame period, with ``blind_from`` and ``blind_until`` (null while the
+head still moves), all in the board's clock. The frame consumers' gate
+(:mod:`pepin.gaze_gate`) opens an interval at a blind state's ``since`` and closes it at the
+settled phase's ``since`` plus its own ``gate_settle_s``.
 
 THE STALL LOOK (:meth:`Gaze._stall`, behind ``stall_look``). The plan's first ``stall_ahead_m``
 swept by the hull over the local costmap gives the lethal cells that block; the ones the lidar
@@ -25,13 +29,14 @@ the candidates; depth_fusion's ``/fusion/column`` says what the volume holds ove
 weighted centroid is where the head looks — ``frames`` still frames, then the columns again: the
 verdict is carved, partly carved or confirmed, and a lidar-backed cell the look carved is
 counted as a false carve. A blocker deeper than ``stall_max_depression_deg`` below the lens
-answers FAILURE: the tree backs up 0.10 m and asks again. With the base server of today the head
-is home again before the answer, so the drive never resumes with a turned head. Every stall look
-is one JSON line on ``/gaze/stall`` and one log line.
+answers FAILURE: the tree backs up 0.10 m and asks again. With a base server that moves the neck
+only at rest the head is home again before the answer, so the drive never resumes with a turned
+head; with ``neck_target`` it goes home as the drive resumes. Every stall look is one JSON line
+on ``/gaze/stall`` and one log line.
 
 PATH GAZE and REVERSE GAZE (behind ``path_gaze`` and ``reverse_gaze``, :mod:`pepin.path_gaze`)
-run only with a base server that moves the neck while driving: with today's, a head turned during
-a pause would drive on turned.
+run only with a base server that moves the neck while driving: with one that does not, a head
+turned during a pause would drive on turned.
 
 A DRIVE'S START (a new goal on either navigator) drops every request but the operator's, so the
 head goes home (or to path gaze) before the wheels turn; a drive's end drops the navigation
@@ -166,11 +171,9 @@ FLAGS = FlagSet(
         description="while a drive runs, the head looks along the plan path_lookahead_s ahead"
         " (pan clamped to path_pan_clamp_deg, a dead-band of path_deadband_deg); only with a"
         " base server that moves the neck while driving (neck_target), otherwise idle",
-        why="off because the base server the board runs today refuses every neck move while the"
-        " wheels turn (an acknowledged write to a silent servo blocks its tick 0.4 s, and the"
-        " deadman lives there: base_server.py, 2026-09-11), so path gaze needs the neck_target"
-        " server first; then a drive measures the blind frames per drive (under 10 % is the"
-        " target) and the phantoms carved along the path before arrival",
+        why="default by design, unmeasured: the arithmetic (design gaze 4.3) says 4-6 saccades of"
+        " ~0.5 s on a 30 s drive, under 10 % of frames blind and dropped by the gaze gate, but no"
+        " drive has measured that, nor the phantoms carved along the path before arrival",
         on_when="with the board's neck_target base server and the frame gates in place",
         off_when="a drive that loses VO or paints the volume wrong while the head moves",
     ),
@@ -220,7 +223,10 @@ class Gaze(Node):
                 self._cfg,
                 self._link.send,
                 slow_deg_s=lambda: float(self._switches["slow_deg_s"]),
-                renew_s=lambda: float(self._switches["target_renew_s"]),
+                # never slower than half the board's lease (config/neck.json's motion block)
+                renew_s=lambda: min(
+                    float(self._switches["target_renew_s"]), self._cfg.motion.lease_s / 2.0
+                ),
             ),
         )
         self._arbiter = Arbiter(self._head, home_aim(self._cfg), self._settings())
@@ -520,7 +526,8 @@ class Gaze(Node):
         return answers[0]
 
     def _driving_refusal(self, look: Look) -> str | None:
-        """Why a person's or a sensor's look cannot move the head during a drive, today."""
+        """Why a person's or a sensor's look cannot move the head during a drive: only on a base
+        server that moves the neck at rest alone."""
         if self._head.moves_while_driving or look.band < PERSON:
             return None
         if self._driving or self._head.wheels_moving:

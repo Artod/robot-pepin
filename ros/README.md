@@ -416,14 +416,16 @@ switches it off live.
 `pepin_bringup.gaze` runs beside Nav2 in `pepin-macnav` and is the only thing that moves the
 neck (`pepin.gaze`): consumers ask, it decides by band (operator, navigation, the person's word,
 sensor checks, driving, idle), TTL and preemption, and the head falls home by itself when nothing
-holds it. It speaks to the board's base server on :3336 — `neck_goto`/`neck_home` at rest today,
-`neck_target` while driving once the base server carries the neck's encoders in its state lines
-(picked by itself). Its doors: `/gaze/stall_look` (std_srvs/Trigger) for the behaviour tree, and
-JSON over HTTP on `127.0.0.1:3339` (`pepin.gaze_link`: `POST /look`, `POST /renew`, `GET /state`)
-for the LLM tools. `/gaze/state` (JSON, 10 Hz and on every change) carries the phase, the pan
-and tilt, the holder and the blind interval (`blind_from`..`blind_until`, the board's clock) the
-frame consumers drop frames in; both recorders tape it (`gaze` rows) and every stall look
-(`/gaze/stall`, `stall` rows).
+holds it. It speaks to the board's base server on :3336: `neck_target` (renewed every
+`target_renew_s`, inside config/neck.json's `motion.lease_s`, so a lost laptop sends the head home)
+to a base server whose state lines carry the neck's encoders, `neck_goto`/`neck_home` at rest to
+an older one (picked by itself). Its doors: `/gaze/stall_look` (std_srvs/Trigger) for the
+behaviour tree, and JSON over HTTP on `127.0.0.1:3339` (`pepin.gaze_link`: `POST /look`,
+`POST /renew`, `GET /state`) for the LLM tools. `/gaze/state` (JSON, 10 Hz and on every change)
+carries the phase and `since` (a move's write, a settled head's settling reading), the pan and
+tilt, the holder and the blind interval (`blind_from`..`blind_until`, the board's clock): the
+gaze gate drops the frames inside it ("gaze_gate" in the flags below); both recorders tape it
+(`gaze` rows) and every stall look (`/gaze/stall`, `stall` rows).
 
 **The stall look** (`stall_look`, off as shipped): when FollowPath fails, the tree's `StallLook`
 asks first. The hull swept along the plan's first `stall_ahead_m` gives the lethal cells that
@@ -445,8 +447,10 @@ ros/laptop.sh nav logs | grep "stall look"
 ```
 
 `path_gaze` and `reverse_gaze` (off) need the `neck_target` base server; the tools' `look`,
-`look_around` and `find` are requests of the person's band, held ten seconds (`see` renews),
-refused during a drive while the base server moves the neck only at rest.
+`look_around` and `find` are requests of the person's band, held ten seconds (`see` renews); a
+base server that moves the neck only at rest has them refused during a drive. At a drive's start
+every request but the operator's is let go, and a head found more than `drive_home_tol_deg` off
+home (a jog, a hand) is sent home.
 
 ## Camera grid A/B (2026-09-24)
 
@@ -594,7 +598,7 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `stall_column_top_m` | number 0.3..2 | 1.3 | the top of the columns asked of /fusion/column over the blockers, metres above the cart's floor plane: the top of the band the marks are read in (pepin.volume_scan.MARKS_MAX_Z_M) |
 | `gaze` | `stall_max_depression_deg` | number 45..95 | 85.0 | a blocker deeper below the lens than this is in the frame's last rows: the look answers 'back off' and the tree backs up before asking again |
 | `gaze` | `slow_deg_s` | number 1..60 | 20.0 | the head's speed for a 'slow' request (a detector that wants unblurred frames), with neck_target; a saccade goes at the board's own top speed |
-| `gaze` | `target_renew_s` | number 0.1..5 | 0.5 | how often a held neck_target is sent again: well inside the board's lease, whose lapse sends the head home |
+| `gaze` | `target_renew_s` | number 0.1..5 | 0.5 | how often a held neck_target is sent again, and never slower than half config/neck.json's motion.lease_s: the lease's lapse sends the head home |
 | `gaze` | `path_period_s` | number 0.05..2 | 0.2 | how often path gaze and reverse gaze are recomputed and renewed while a drive runs |
 | `gaze` | `path_lookahead_s` | number 0.5..5 | 2.0 | path gaze looks at the plan's point this many seconds of the current speed ahead |
 | `gaze` | `path_min_m` | number 0.2..3 | 0.6 | ...but at least this far along the plan |
