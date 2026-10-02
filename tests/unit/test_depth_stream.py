@@ -975,6 +975,30 @@ def test_a_saccade_frame_never_reaches_the_network_and_is_counted(build: Build) 
     assert "gaze gate off" in node.logger.texts("info")[-1]
 
 
+def test_the_saccades_in_the_report_line_are_the_blind_count_s_own_window(build: Build) -> None:
+    """The first live look (2026-10-02): the window holding the look said '15 blind ... 2
+    saccades', and the windows after it '0 blind ... 2 saccades' — a count per window beside a
+    total since the start, read as a gate that saw the saccades and dropped nothing. Both
+    numbers are now of the one window, the total named as such."""
+    node, _net = build()
+    node._worker.stop()
+    write = stamp_seconds(_stamp(6)) - 0.05
+    _gaze(node, "saccade", write, blind=True)
+    node._on_image(_image(_stamp(6)))
+    _gaze(node, "still", write + 0.3, blind=False)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "gaze gate: 1 blind, 0 spinning of 1 frames" in line
+    assert "1 saccades in this window (1 since the start)" in line
+    node._on_image(_image(_stamp(9)))
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "gaze gate: 0 blind, 0 spinning of 1 frames" in line
+    assert "0 saccades in this window (1 since the start)" in line, (
+        "a quiet window says so: no saccade, nothing blind"
+    )
+
+
 # ---- the stereo head as the second source ---------------------------------------------------
 BASELINE_M = 0.063  # the module's nominal; the node learns it from the right eye's P[0,3]
 

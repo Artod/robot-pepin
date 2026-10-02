@@ -177,16 +177,23 @@ class BlindLog:
         tail = self.settle_s
         return any(t1 >= start and t0 <= settled + tail for start, settled in self._closed)
 
-    def text(self, now: float) -> str:
-        """The state for a report line: the phase, since when, blind or not, intervals closed."""
+    def text(self, now: float, window: int | None = None) -> str:
+        """The state for a report line: the phase, since when, blind or not, and the intervals
+        closed — ``window`` of them in the caller's report window (the window its blind count
+        is of), :attr:`intervals` since the start."""
         last = self.last
         if last is None:
             return "no /gaze/state yet: every frame passes"
         open_ = "open" if self._open is not None else "none open"
         stale = ", STALE (the arbiter is silent: nothing is blind)" if self.stale(now) else ""
+        closed = (
+            f"{self.intervals} saccades"
+            if window is None
+            else f"{window} saccades in this window ({self.intervals} since the start)"
+        )
         return (
             f"head {last.phase or '?'} since {last.since:.2f}{' blind' if last.blind else ''}"
-            f" ({last.source or 'no source'}), {self.intervals} saccades, {open_}{stale}"
+            f" ({last.source or 'no source'}), {closed}, {open_}{stale}"
         )
 
 
@@ -238,6 +245,7 @@ class FrameGate:
         self._blind = BlindLog(settle_s)
         self._yaw = YawLog()
         self._lock = threading.Lock()
+        self._reported = 0  # saccades closed as of the last report line (text)
 
     @property
     def settle_s(self) -> float:
@@ -271,9 +279,14 @@ class FrameGate:
         return None
 
     def text(self, now: float) -> str:
-        """The gate's state for a report line."""
+        """The gate's state for a report line, ONE CALL PER REPORT WINDOW: the saccades it
+        counts are the ones closed since the previous call, the window the owning node's blind
+        and spinning counts are of — a total since the start beside a count per window read as
+        saccades the gate saw and let through (2026-10-02, the first live look)."""
         with self._lock:
-            head = self._blind.text(now)
+            closed = self._blind.intervals
+            head = self._blind.text(now, window=closed - self._reported)
+            self._reported = closed
         yaw = f"yaw gate {self.yaw_dps:g} deg/s" if self.yaw_dps > 0.0 else "yaw gate off"
         return (
             f"{head}; exposure +-{self.exposure_s * 1e3:.0f} ms, settle"
