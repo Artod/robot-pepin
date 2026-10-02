@@ -100,19 +100,67 @@ class NeckPivot:
 
 
 @dataclass(frozen=True)
+class NeckMotion:
+    """How the base server moves the head (config/neck.json's ``motion`` block).
+
+    ``max_speed_deg_s`` and ``max_acc_deg_s2`` are the profile every move runs at unless it asks
+    for less; ``lease_s`` is how long a ``neck_target`` holds the head before it goes home by
+    itself. The three are live on the base server (``neck_motion``, ros/neck.sh motion) until
+    it restarts. ``read_window_ms`` is how long past the wheels' replies the neck's are waited
+    for in the shared read; ``silent_ticks`` missed reads take the neck out of that read and
+    ``retry_s`` later it is asked again.
+    """
+
+    max_speed_deg_s: float = 120.0
+    max_acc_deg_s2: float = 1000.0
+    lease_s: float = 2.0
+    read_window_ms: float = 3.0
+    silent_ticks: int = 3
+    retry_s: float = 5.0
+
+
+# What the live setter accepts: the register's own reach (Goal_Velocity's top is ~3400 ticks/s at
+# 12 V, 299 deg/s; Acceleration's 1..254 units of 100 ticks/s^2 is 8.8..2232 deg/s^2 — 0 would be
+# the servo's own unramped maximum, which nothing has measured) and a lease a WiFi spike outlives.
+MOTION_RANGES = {
+    "max_speed_deg_s": (5.0, 299.0),
+    "max_acc_deg_s2": (9.0, 2232.0),
+    "lease_s": (0.5, 30.0),
+}
+ACC_UNIT_DEG_S2 = 100.0 * 360.0 / TICKS_PER_TURN  # one unit of the Acceleration register
+
+
+def speed_ticks(deg_s: float) -> int:
+    """A profile speed in degrees a second as the Goal_Velocity register's ticks a second."""
+    return max(1, round(deg_s * TICKS_PER_TURN / 360.0))
+
+
+def acc_units(deg_s2: float) -> int:
+    """A ramp in degrees a second squared as the Acceleration register's units, 1..254."""
+    return min(254, max(1, round(deg_s2 / ACC_UNIT_DEG_S2)))
+
+
+@dataclass(frozen=True)
 class NeckConfig:
-    """Everything config/neck.json says: the two servos, the reference pose, the lever arms."""
+    """Everything config/neck.json says: the two servos, the reference pose, the lever arms and
+    how the head is moved."""
 
     pan: NeckJoint
     tilt: NeckJoint
     reference: NeckReference
     pivot: NeckPivot
+    motion: NeckMotion = NeckMotion()
 
     @classmethod
     def from_json(cls, path: str | Path) -> NeckConfig:
         """Load config/neck.json; raises ``KeyError`` naming what is missing."""
         data = json.loads(Path(path).read_text())
         ref, pivot = data["reference"], data.get("pivot", {})
+        motion = data.get("motion", {})
+        defaults = NeckMotion()
+        for key, (low, high) in MOTION_RANGES.items():
+            if key in motion and not low <= float(motion[key]) <= high:
+                raise ValueError(f"motion.{key} {motion[key]} is outside {low}..{high}")
         return cls(
             pan=_joint(PAN, data[PAN]),
             tilt=_joint(TILT, data[TILT]),
@@ -132,6 +180,14 @@ class NeckConfig:
                 tilt_from_pan_z_m=float(pivot.get("tilt_from_pan_z_m", 0.0)),
                 camera_from_tilt_x_m=float(pivot.get("camera_from_tilt_x_m", 0.0)),
                 camera_from_tilt_z_m=float(pivot.get("camera_from_tilt_z_m", 0.0)),
+            ),
+            motion=NeckMotion(
+                max_speed_deg_s=float(motion.get("max_speed_deg_s", defaults.max_speed_deg_s)),
+                max_acc_deg_s2=float(motion.get("max_acc_deg_s2", defaults.max_acc_deg_s2)),
+                lease_s=float(motion.get("lease_s", defaults.lease_s)),
+                read_window_ms=float(motion.get("read_window_ms", defaults.read_window_ms)),
+                silent_ticks=int(motion.get("silent_ticks", defaults.silent_ticks)),
+                retry_s=float(motion.get("retry_s", defaults.retry_s)),
             ),
         )
 

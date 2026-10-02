@@ -14,28 +14,44 @@ Wire format, one JSON object per line in both directions::
                      {"cmd": "stop"}                              stop now
                      {"cmd": "ping"}                              which servos answer on the bus
                      {"cmd": "neck"}                              the neck's encoders (pan, tilt)
+                     {"cmd": "neck_target", "pan_rad": <rad>, "tilt_rad": <rad>,
+                      "speed_deg_s": <optional>, "acc_deg_s2": <optional>}
+                                                                  hold the head there (the joint
+                                                                  angles of pepin.neck: pan +
+                                                                  left, tilt = pitch below level)
+                                                                  for the lease, then it goes home
+                     {"cmd": "neck_motion", "max_speed_deg_s": 120, ...}
+                                                                  the head's top speed, ramp and
+                                                                  lease (each key: set it until a
+                                                                  restart); ros/neck.sh motion
                      {"cmd": "neck_jog", "pan": -1|0|1, "tilt": -1|0|1, "slow": false}
                                                                   walk the head (pan +1 left,
                                                                   tilt +1 down) while repeated
                                                                   within its 0.5 s deadman
                      {"cmd": "max_wheel_speed", "m_s": 0.3}        the wheel ceiling (m_s: set it
                                                                   until a restart); ros/speed.sh
-    board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, STATE_HZ
+    board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, STATE_HZ;
+                                                                  "pan_ticks"/"tilt_ticks" when the
+                                                                  neck answered that read
                      {"type": "pong", "servos": {"left": true, "servo3": false, ...}}
                      {"type": "pong", "busy": true}                   moving: servos not pinged
                      {"type": "neck", "pan_ticks": 2048, "tilt_ticks": 2360, "age_s": 0.01,
                       "read_ms": 1.4}                             see :func:`pepin.neck.parse_neck`
                      {"type": "neck", "error": "..."}             a silent servo (stale ticks, if
                                                                   any, ride along)
-                     {"type": "neck_jog", "error": "..."}         a refused jog (an accepted one
-                                                                  is silent, like a twist)
+                     {"type": "neck_target", "error": "..."}      a refused target (an accepted
+                                                                  one is silent, like a twist)
+                     {"type": "neck_jog", "error": "..."}         a refused jog (likewise)
+                     {"type": "neck_motion", "max_speed_deg_s": .., "max_acc_deg_s2": ..,
+                      "lease_s": .., "config": {..}, "was": {..}} the settings in force ("error":
+                                                                  a refused value, unchanged)
                      {"type": "max_wheel_speed", "m_s": 0.3, "config_m_s": 0.3, "was_m_s": ..}
                                                                   the ceiling in force ("error":
                                                                   a refused value, unchanged)
 
 The absolute moves (``neck_goto``, ``neck_home``) are board/README.md's; ``ros/neck.sh`` speaks
 them. Only a client that has sent ``twist`` or ``stop`` counts as a driver: the wheels are
-released when the last driver leaves, whoever is still connected only asking (the neck node).
+released when the last driver leaves, whoever is still connected only asking or aiming the head.
 """
 
 from __future__ import annotations
@@ -115,10 +131,12 @@ class BaseState:
     bus_p95_ms: float  # board-local servo round trip, 95th percentile
     stamp_s: float  # board clock (time.monotonic there): the middle of the encoder read it carries
     age_s: float  # laptop clock: seconds since this message arrived
+    neck_ticks: tuple[int, int] | None = None  # (pan, tilt) of the same read; None: not answered
 
 
 def decode_state(message: dict[str, Any], received_at: float) -> BaseState:
     """A ``state`` message from the board into a :class:`BaseState` (age 0 at ``received_at``)."""
+    pan, tilt = message.get("pan_ticks"), message.get("tilt_ticks")
     return BaseState(
         pose=Pose2D(float(message["x"]), float(message["y"]), float(message["theta"])),
         d_left_m=float(message["dl"]),
@@ -132,6 +150,7 @@ def decode_state(message: dict[str, Any], received_at: float) -> BaseState:
         bus_p95_ms=float(message.get("bus_p95_ms", 0.0)),
         stamp_s=float(message["t"]),
         age_s=0.0,
+        neck_ticks=(int(pan), int(tilt)) if pan is not None and tilt is not None else None,
     )
 
 
@@ -183,6 +202,25 @@ class BaseClient(JsonLinesClient):
         second or the head stops and lets go. Both zero stops the head where it is."""
         self.send({"cmd": "neck_jog", "pan": pan, "tilt": tilt, "slow": slow})
 
+    def neck_target(
+        self,
+        pan_rad: float,
+        tilt_rad: float,
+        *,
+        speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
+    ) -> None:
+        """Hold the head at these joint angles (pepin.neck: pan positive left, tilt the pitch
+        below level) for the board's lease (config/neck.json ``motion.lease_s``); repeat it
+        within the lease or the head goes home and is let go. The speed and ramp are ceilings
+        under the board's own; a refusal lands in :meth:`neck_error`."""
+        message: dict[str, Any] = {"cmd": "neck_target", "pan_rad": pan_rad, "tilt_rad": tilt_rad}
+        if speed_deg_s is not None:
+            message["speed_deg_s"] = speed_deg_s
+        if acc_deg_s2 is not None:
+            message["acc_deg_s2"] = acc_deg_s2
+        self.send(message)
+
     def ask_neck(self) -> None:
         """Ask for the neck's encoders; the answer lands in :meth:`neck` when it comes."""
         self.send({"cmd": "neck"})
@@ -193,7 +231,8 @@ class BaseClient(JsonLinesClient):
             return self._neck
 
     def neck_error(self, now: float | None = None) -> str | None:
-        """The text of a jog the board refused within the last ``NECK_ERROR_SHOWN_S``, else None."""
+        """The text of a jog or a target the board refused within the last
+        ``NECK_ERROR_SHOWN_S``, else None."""
         now = time.monotonic() if now is None else now
         with self._lock:
             if self._neck_error is None or now - self._neck_error[1] > NECK_ERROR_SHOWN_S:
@@ -226,6 +265,6 @@ class BaseClient(JsonLinesClient):
             reading = parse_neck(message)
             with self._lock:
                 self._neck = reading
-        elif kind == "neck_jog" and message.get("error") is not None:
+        elif kind in ("neck_jog", "neck_target") and message.get("error") is not None:
             with self._lock:
                 self._neck_error = (str(message["error"]), time.monotonic())
