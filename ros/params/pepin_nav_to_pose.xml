@@ -70,7 +70,7 @@
               </Sequence>
             </RecoveryNode>
         </RateController>
-        <RecoveryNode number_of_retries="2" name="FollowPath">
+        <RecoveryNode number_of_retries="1" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id="{selected_goal_checker}" error_code_id="{follow_path_error_code}"/>
           <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
                ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
@@ -80,6 +80,7 @@
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+            <ClearEntireCostmap name="ClearGlobalCostmap-FollowPath" service_name="global_costmap/clear_entirely_global_costmap"/>
             <!-- Wait first (a person on the path; never a retreat half-way), then plan again from
                  where the cart stands: a miss beside a mark is a manoeuvre MPPI cannot invent,
                  and Hybrid draws it. -->

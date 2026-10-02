@@ -120,7 +120,7 @@ controller_server:
       plugin: "nav2_controller::PoseProgressChecker"
       required_movement_radius: 0.10  # 0.5 aborted every goal closer than half a metre
       required_movement_angle: 0.5  # ...or 29 degrees of turning, which a pivot delivers in a second
-      movement_time_allowance: 6.0  # stuck is obvious after six seconds; ten wasted a recovery slot
+      movement_time_allowance: 3.0  # stuck is obvious after three seconds: a cart parked 20 cm short waited 42 s on 6 (run 0239)
     # Goal checker parameters
     #precise_goal_checker:
     #  plugin: "nav2_controller::SimpleGoalChecker"
