@@ -35,6 +35,15 @@ depth = [
 localization = [
     "kornia==0.8.3",
 ]
+# The LLM's tools (pepin.tools): the MCP server that Claude Code / Claude Desktop start
+# (`uv run python -m pepin.tools.mcp`) and the Anthropic SDK of the test loop. Synced by default
+# on the laptop (below); the board never installs from this file.
+llm = [
+    "anthropic>=1.9.0",
+    "google-genai>=1.0",
+    "mcp>=2.2.0",
+]
+
 
 [build-system]
 requires = ["hatchling"]
@@ -47,7 +56,7 @@ packages = ["src/pepin"]
 # menu-bar app (rumps) and the game-mode teleop (pygame) must not die on a missing import. The
 # board never installs from this file (board/README.md: src/pepin is rsynced).
 [tool.uv]
-default-groups = ["dev", "macos"]
+default-groups = ["dev", "macos", "llm"]
 
 [tool.ruff]
 line-length = 100
