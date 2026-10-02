@@ -395,6 +395,7 @@ NECK_CFG = NeckConfig.from_json(REPO / "config/neck.json")
 REF = NECK_CFG.reference
 TOP_SPEED = speed_ticks(NECK_CFG.motion.max_speed_deg_s)  # 299 deg/s: 3402 ticks/s
 TOP_ACC = acc_units(NECK_CFG.motion.max_acc_deg_s2)  # 2232 deg/s^2: 254 units
+TOP_TILT_ACC = acc_units(NECK_CFG.motion.tilt_max_acc_deg_s2)  # 600 deg/s^2: 68 units
 HOME_TILT_RAD = math.radians(REF.pitch_deg)
 
 
@@ -441,9 +442,13 @@ def energised(bus: NeckBus) -> bool:
     return False
 
 
-def block(pan: int, tilt: int, speed: int = TOP_SPEED, acc: int = TOP_ACC) -> tuple[str, Any]:
-    """The one packet that energises, ramps, aims and paces both servos."""
-    return ("block", {"neck": (1, acc, pan, 0, speed), "head": (1, acc, tilt, 0, speed)})
+def block(
+    pan: int, tilt: int, speed: int = TOP_SPEED, acc: int = TOP_ACC, tilt_acc: int | None = None
+) -> tuple[str, Any]:
+    """The one packet that energises, ramps, aims and paces both servos; the tilt's ramp is the
+    pan's under its own ceiling unless given."""
+    tilt_acc = min(acc, TOP_TILT_ACC) if tilt_acc is None else tilt_acc
+    return ("block", {"neck": (1, acc, pan, 0, speed), "head": (1, tilt_acc, tilt, 0, speed)})
 
 
 RELEASE = ("Torque_Enable", {"neck": 0, "head": 0})
@@ -717,6 +722,26 @@ def test_a_target_s_speed_and_ramp_are_ceilings_under_the_motion_settings() -> N
     ), "a new pace is a new block, the goal in it"
 
 
+def test_the_tilt_ramps_under_its_own_ceiling_the_pan_at_the_full_one() -> None:
+    """A sharp tilt rocks the mast and the picture rings for up to a second; a pan at any ramp
+    does not (2026-10-02, the camera and the IMU): one block, two ramps — the tilt's capped by
+    tilt_max_acc_deg_s2, a target's own ceiling under both."""
+    core, bus = make_neck_core()
+    assert TOP_TILT_ACC < TOP_ACC
+    target(core, 1.0)
+    core.tick(1.0)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (TOP_ACC, TOP_TILT_ACC)
+    target(core, 1.02, acc_deg_s2=1000.0)
+    core.tick(1.02)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (acc_units(1000.0), TOP_TILT_ACC)
+    target(core, 1.04, acc_deg_s2=100.0)
+    core.tick(1.04)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (acc_units(100.0), acc_units(100.0))
+
+
 @pytest.mark.parametrize(
     ("message", "words"),
     [
@@ -796,6 +821,7 @@ def test_the_motion_settings_are_answered_set_live_and_refused_outside_their_ran
     filed = {
         "max_speed_deg_s": motion.max_speed_deg_s,
         "max_acc_deg_s2": motion.max_acc_deg_s2,
+        "tilt_max_acc_deg_s2": motion.tilt_max_acc_deg_s2,
         "lease_s": motion.lease_s,
     }
     reply = core.command({"cmd": "neck_motion"}, now=1.0)
@@ -809,6 +835,11 @@ def test_the_motion_settings_are_answered_set_live_and_refused_outside_their_ran
     assert changed["config"]["max_speed_deg_s"] == motion.max_speed_deg_s
     core.tick(1.1)
     assert neck_writes(bus)[-1] == block(REF.pan_ticks, REF.tilt_ticks, speed=speed_ticks(60.0))
+    core.command({"cmd": "neck_motion", "tilt_max_acc_deg_s2": 300}, now=1.12)
+    core.tick(1.12)
+    assert neck_writes(bus)[-1] == block(
+        REF.pan_ticks, REF.tilt_ticks, speed=speed_ticks(60.0), tilt_acc=acc_units(300.0)
+    ), "the tilt's ramp alone, rewritten whole"
     for bad in (
         {"max_speed_deg_s": 900},
         {"max_acc_deg_s2": 0},
@@ -1355,7 +1386,7 @@ def test_on_the_wire_a_tick_is_one_round_trip_and_at_most_one_neck_write() -> No
             0,
         ]
         assert wire.word(9, 46) == TOP_SPEED and wire.word(10, 42) == tilt
-        assert wire.byte(10, 41) == TOP_ACC
+        assert wire.byte(10, 41) == TOP_TILT_ACC
         ceilings = [wire.byte(i, 85) for i in MOTORS.values()]
         assert ceilings == [50, 50, NECK_ACC_CEILING, NECK_ACC_CEILING]
         assert (line["pan_ticks"], line["tilt_ticks"]) == (2048, 2048)

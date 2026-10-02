@@ -30,6 +30,10 @@ Wire format, one JSON object per line in both directions::
                                                                   within its 0.5 s deadman
                      {"cmd": "max_wheel_speed", "m_s": 0.3}        the wheel ceiling (m_s: set it
                                                                   until a restart); ros/speed.sh
+                     {"cmd": "registers", "servo": "neck", "address": 85, "size": 1}
+                                                                  raw control-table bytes of one
+                                                                  roster servo; ros/neck.sh
+                                                                  registers
     board -> laptop  {"type": "state", ...}                       see :class:`BaseState`, STATE_HZ;
                                                                   "pan_ticks"/"tilt_ticks" when the
                                                                   neck answered that read
@@ -43,8 +47,13 @@ Wire format, one JSON object per line in both directions::
                                                                   one is silent, like a twist)
                      {"type": "neck_jog", "error": "..."}         a refused jog (likewise)
                      {"type": "neck_motion", "max_speed_deg_s": .., "max_acc_deg_s2": ..,
-                      "lease_s": .., "config": {..}, "was": {..}} the settings in force ("error":
+                      "tilt_max_acc_deg_s2": .., "lease_s": .., "config": {..}, "was": {..}}
+                                                                  the settings in force ("error":
                                                                   a refused value, unchanged)
+                     {"type": "registers", "servo": "neck", "address": 85, "values": [254]}
+                                                                  ("busy": true while the wheels
+                                                                  turn; "error": no such servo, a
+                                                                  silent one, a read too long)
                      {"type": "max_wheel_speed", "m_s": 0.3, "config_m_s": 0.3, "was_m_s": ..}
                                                                   the ceiling in force ("error":
                                                                   a refused value, unchanged)

@@ -104,15 +104,17 @@ class NeckMotion:
     """How the base server moves the head (config/neck.json's ``motion`` block).
 
     ``max_speed_deg_s`` and ``max_acc_deg_s2`` are the profile every move runs at unless it asks
-    for less; ``lease_s`` is how long a ``neck_target`` holds the head before it goes home by
-    itself. The three are live on the base server (``neck_motion``, ros/neck.sh motion) until
-    it restarts. ``read_window_ms`` is how long past the wheels' replies the neck's are waited
-    for in the shared read; ``silent_ticks`` missed reads take the neck out of that read and
-    ``retry_s`` later it is asked again.
+    for less, and ``tilt_max_acc_deg_s2`` the tilt's own ramp under it (a sharp tilt rocks the
+    mast, a pan does not); ``lease_s`` is how long a ``neck_target`` holds the head before it
+    goes home by itself. The four are live on the base server (``neck_motion``, ros/neck.sh
+    motion) until it restarts. ``read_window_ms`` is how long past the wheels' replies the
+    neck's are waited for in the shared read; ``silent_ticks`` missed reads take the neck out of
+    that read and ``retry_s`` later it is asked again.
     """
 
     max_speed_deg_s: float = 299.0
     max_acc_deg_s2: float = 2232.0
+    tilt_max_acc_deg_s2: float = 600.0
     lease_s: float = 2.0
     read_window_ms: float = 3.0
     silent_ticks: int = 3
@@ -125,6 +127,7 @@ class NeckMotion:
 MOTION_RANGES = {
     "max_speed_deg_s": (5.0, 299.0),
     "max_acc_deg_s2": (9.0, 2232.0),
+    "tilt_max_acc_deg_s2": (9.0, 2232.0),
     "lease_s": (0.5, 30.0),
 }
 ACC_UNIT_DEG_S2 = 100.0 * 360.0 / TICKS_PER_TURN  # one unit of the Acceleration register
@@ -184,6 +187,9 @@ class NeckConfig:
             motion=NeckMotion(
                 max_speed_deg_s=float(motion.get("max_speed_deg_s", defaults.max_speed_deg_s)),
                 max_acc_deg_s2=float(motion.get("max_acc_deg_s2", defaults.max_acc_deg_s2)),
+                tilt_max_acc_deg_s2=float(
+                    motion.get("tilt_max_acc_deg_s2", defaults.tilt_max_acc_deg_s2)
+                ),
                 lease_s=float(motion.get("lease_s", defaults.lease_s)),
                 read_window_ms=float(motion.get("read_window_ms", defaults.read_window_ms)),
                 silent_ticks=int(motion.get("silent_ticks", defaults.silent_ticks)),

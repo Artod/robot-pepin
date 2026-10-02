@@ -8,7 +8,8 @@
 #   ros/neck.sh hold PAN TILT   the same, but leave the servos energised so the head holds its pose
 #   ros/neck.sh motion [KEY VALUE ...]
 #                               the head's top speed, ramp and lease as the server holds them, and
-#                               config/neck.json's; KEY is max_speed_deg_s, max_acc_deg_s2 or
+#                               config/neck.json's; KEY is max_speed_deg_s, max_acc_deg_s2,
+#                               tilt_max_acc_deg_s2 (the tilt's ramp under the other) or
 #                               lease_s, set live until pepin-base restarts (every start reads the
 #                               file's motion block)
 #   ros/neck.sh registers SERVO ADDRESS [SIZE]
@@ -65,7 +66,7 @@ def request(argv: list[str]) -> tuple[dict[str, Any], str, float]:
 def report(cfg: NeckConfig, message: dict[str, Any]) -> None:
     """Print one reply as ticks, degrees and how the move went; exit 1 on an error in it."""
     if message.get("type") == "neck_motion":
-        keys = ("max_speed_deg_s", "max_acc_deg_s2", "lease_s")
+        keys = ("max_speed_deg_s", "max_acc_deg_s2", "tilt_max_acc_deg_s2", "lease_s")
         was = message.get("was", {})
         print("   ".join(
             f"{k} {message.get(k)}" + (f" (was {was[k]})" if k in was else "")

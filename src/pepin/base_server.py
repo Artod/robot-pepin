@@ -236,13 +236,15 @@ def target_error(text: str) -> dict[str, Any]:
 @dataclass(frozen=True)
 class ServoGoal:
     """What the two neck servos should hold: energised at these ticks with this profile
-    (Goal_Velocity in ticks/s, Acceleration in register units), or let go (``torque`` False)."""
+    (Goal_Velocity in ticks/s, Acceleration in register units, the pan's and the tilt's), or let
+    go (``torque`` False)."""
 
     torque: bool
     pan: int = 0
     tilt: int = 0
     speed: int = 0
     acc: int = 0
+    tilt_acc: int = 0
 
 
 RELEASED = ServoGoal(torque=False)
@@ -489,11 +491,13 @@ class NeckMover:
             reply["error"] = error
         elif changes:
             reply["was"] = {key: getattr(self.motion, key) for key in changes}
+            motion = self.motion
             self.motion = replace(
-                self.motion,
-                max_speed_deg_s=changes.get("max_speed_deg_s", self.motion.max_speed_deg_s),
-                max_acc_deg_s2=changes.get("max_acc_deg_s2", self.motion.max_acc_deg_s2),
-                lease_s=changes.get("lease_s", self.motion.lease_s),
+                motion,
+                max_speed_deg_s=changes.get("max_speed_deg_s", motion.max_speed_deg_s),
+                max_acc_deg_s2=changes.get("max_acc_deg_s2", motion.max_acc_deg_s2),
+                tilt_max_acc_deg_s2=changes.get("tilt_max_acc_deg_s2", motion.tilt_max_acc_deg_s2),
+                lease_s=changes.get("lease_s", motion.lease_s),
             )
             logger.info(
                 "neck motion %s, live until a restart (config/neck.json: %s)",
@@ -659,11 +663,15 @@ class NeckMover:
     def _goal(
         self, targets: tuple[int, int], speed_deg_s: float | None, acc_deg_s2: float | None
     ) -> ServoGoal:
-        """Energised at ``targets`` at the asked pace, capped by the motion settings in force."""
+        """Energised at ``targets`` at the asked pace, capped by the motion settings in force (the
+        tilt's ramp by its own ceiling too)."""
         top_speed, top_acc = self.motion.max_speed_deg_s, self.motion.max_acc_deg_s2
         speed = top_speed if speed_deg_s is None else min(speed_deg_s, top_speed)
         acc = top_acc if acc_deg_s2 is None else min(acc_deg_s2, top_acc)
-        return ServoGoal(True, targets[0], targets[1], speed_ticks(speed), acc_units(acc))
+        tilt_acc = min(acc, self.motion.tilt_max_acc_deg_s2)
+        return ServoGoal(
+            True, targets[0], targets[1], speed_ticks(speed), acc_units(acc), acc_units(tilt_acc)
+        )
 
     def _wanted(self) -> ServoGoal:
         """What the servos should hold this tick, from whoever holds the head."""
@@ -691,13 +699,14 @@ class NeckMover:
             elif (
                 sent is None
                 or not sent.torque
-                or (sent.speed, sent.acc) != (wanted.speed, wanted.acc)
+                or (sent.speed, sent.acc, sent.tilt_acc)
+                != (wanted.speed, wanted.acc, wanted.tilt_acc)
             ):
                 self._bus.sync_write_block(
                     NECK_BLOCK,
                     {
                         pan: [1, wanted.acc, wanted.pan, 0, wanted.speed],
-                        tilt: [1, wanted.acc, wanted.tilt, 0, wanted.speed],
+                        tilt: [1, wanted.tilt_acc, wanted.tilt, 0, wanted.speed],
                     },
                 )
             else:

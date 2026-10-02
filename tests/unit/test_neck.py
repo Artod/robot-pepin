@@ -143,6 +143,7 @@ def test_the_motion_block_is_read_and_held_to_the_registers_reach(tmp_path: Path
 
     motion = NeckConfig.from_json(NECK).motion
     assert (motion.max_speed_deg_s, motion.max_acc_deg_s2, motion.lease_s) == (299.0, 2232.0, 2.0)
+    assert motion.tilt_max_acc_deg_s2 == 600.0  # the mast rings above ~1000 (the camera, the IMU)
     assert (speed_ticks(299.0), acc_units(2232.0)) == (3402, 254)
     assert (motion.read_window_ms, motion.silent_ticks, motion.retry_s) == (3.0, 3, 5.0)
     assert speed_ticks(120.0) == 1365 and speed_ticks(35.0) == 398  # ~ the old 400 ticks/s
