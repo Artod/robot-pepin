@@ -59,7 +59,7 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
@@ -106,13 +106,15 @@ FLAGS = FlagSet(
     Flag(
         "controller",
         "mppi",
-        choices=("mppi", "rpp", "rpp_shim", "graceful", "dwb"),
+        choices=("mppi", "rpp", "rpp_shim", "graceful", "dwb", "shim_mppi"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
         " Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23;"
         " rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart"
         " to the mark's heading in place once it is inside the goal tolerance;"
-        " graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi"
+        " graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi;"
+        " shim_mppi drives each goal on rpp_shim and hands it to mppi for the rest of that goal"
+        " once the cart is within the knob park_distance_m of the goal (PARKERS)"
         " (ros/goto.sh controller NAME)."
         " Published latched on controller_selector and goal_checker_selector, so a change is"
         " read by the behaviour tree at its next tick",
@@ -182,7 +184,15 @@ FOLLOWERS = {
     # Both turn to the mark's heading themselves (Graceful's final rotation, DWB's RotateToGoal).
     "graceful": ("FollowPathGraceful", "general_goal_checker"),
     "dwb": ("FollowPathDWB", "general_goal_checker"),
+    # Drive on the shim, park on MPPI: the pair a goal starts on (PARKERS hands over).
+    "shim_mppi": ("FollowPathShim", "general_goal_checker"),
 }
+# DRIVE ON ONE CONTROLLER, PARK ON ANOTHER (flag values listed here): a goal starts on the pair
+# FOLLOWERS names and hands over to this one once map -> base_link is within the knob
+# park_distance_m of the goal (straight line), for the rest of that goal; the next goal starts on
+# FOLLOWERS' pair again. The tree's FollowPath passes the new controller id to the controller
+# server at its next tick, which swaps the plugin in place on the same goal.
+PARKERS = {"shim_mppi": ("FollowPathMPPI", "general_goal_checker")}
 
 
 class GoalServer(Node):
@@ -248,6 +258,7 @@ class GoalServer(Node):
         self._planner_path = self._record_dir / ".planner"
         self.planner = "navfn"  # the saved pick is published once the switches exist (below)
         self.controller = ""  # the controller id last published on controller_selector
+        self.goal_checker = ""  # ...and the goal checker id on goal_checker_selector
         self._goal_handle: Any = None
         self._driving = (
             False  # from before send_goal until the drive is finally over: cancel() clears it
@@ -288,7 +299,9 @@ class GoalServer(Node):
         self._lock = threading.Lock()
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
-        self._switches = Switches(self, FLAGS, on_change=self._on_switch)
+        self._switches = Switches(
+            self, with_knobs(FLAGS, load_knobs("goal_server")), on_change=self._on_switch
+        )
         # The saved planner (the default where none was saved), with the follower the
         # `controller` flag names for it: after the switches, because the pick reads that flag,
         # and always, because the tree's own defaults are the RPP pair's.
@@ -540,10 +553,8 @@ class GoalServer(Node):
         planner, rpp = pair
         controller, checker = FOLLOWERS.get(self._switches["controller"], (rpp, RPP_GOAL_CHECKER))
         self._planner_pick.publish(String(data=planner))
-        self._controller_pick.publish(String(data=controller))
-        self._checker_pick.publish(String(data=checker))
+        self._follow(controller, checker)
         self.planner = name.lower()
-        self.controller = controller
         with contextlib.suppress(OSError):
             self._planner_path.write_text(f"{self.planner}\n")
         self.get_logger().info(f"planner {planner} with controller {controller} ({checker})")
@@ -553,6 +564,43 @@ class GoalServer(Node):
             "controller": controller,
             "goal_checker": checker,
         }
+
+    def _follow(self, controller: str, checker: str) -> None:
+        """Hand the tree one controller and the goal checker that ends the drive with it (both
+        latched: the tree reads them at its next tick, a running goal included)."""
+        self._controller_pick.publish(String(data=controller))
+        self._checker_pick.publish(String(data=checker))
+        self.controller, self.goal_checker = controller, checker
+
+    def _hand_over(self, x: float, y: float) -> dict[str, Any] | None:
+        """Under a flag value that parks on another controller (PARKERS), once the cart is
+        within ``park_distance_m`` of the goal (x, y): the parking pair to the tree, logged, and
+        the event that says so; None otherwise, and always once handed over."""
+        parker = PARKERS.get(self._switches["controller"])
+        if parker is None or self.controller == parker[0]:
+            return None
+        pose = self._pose_now()
+        if not pose:
+            return None
+        distance = math.hypot(pose["x"] - x, pose["y"] - y)
+        if distance >= self._switches["park_distance_m"]:
+            return None
+        was = self.controller
+        self._follow(*parker)
+        self.get_logger().info(
+            f"run {self._runs.run}: {distance:.2f} m from the goal, {was} -> {parker[0]}"
+            f" ({parker[1]}) parks it"
+        )
+        return {"event": "handover", "from": was, "to": parker[0], "distance_m": round(distance, 2)}
+
+    def _hand_back(self) -> None:
+        """After a goal: the pair the ``controller`` flag names again, if a handover moved it."""
+        planner = PLANNERS[self.planner][1]
+        pair = FOLLOWERS.get(self._switches["controller"], (planner, RPP_GOAL_CHECKER))
+        if (self.controller, self.goal_checker) != pair:
+            was = self.controller
+            self._follow(*pair)
+            self.get_logger().info(f"goal over: {was} -> {pair[0]} ({pair[1]}) for the next one")
 
     def _on_switch(self, name: str, old: Any, new: Any) -> None:
         """A live flag changed: a new ``controller`` re-publishes the pick with its follower."""
@@ -644,9 +692,16 @@ class GoalServer(Node):
             self._driving = True
             cancels = self._cancels  # any cancel from here on is this drive's
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        mode = str(self._switches["controller"])
+        parks = (
+            f": {PARKERS[mode][0]} within {self._switches['park_distance_m']:.2f} m"
+            if mode in PARKERS
+            else ""
+        )
         self.get_logger().info(
             f"run {self._runs.run}: planner {PLANNERS[self.planner][0]}, controller "
-            f"{self.controller} -> {name or 'coordinates'} ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
+            f"{self.controller} ({mode}{parks}) -> {name or 'coordinates'}"
+            f" ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
         try:
             if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
@@ -654,6 +709,7 @@ class GoalServer(Node):
                     connection, {"event": "error", "detail": "cancelled before Nav2 had the goal"}
                 )
                 return
+            handover = self._hand_over(x, y)  # a goal that starts within the parking distance
             send = self._client.send_goal_async(
                 goal,
                 lambda f: feedback.update(
@@ -683,6 +739,8 @@ class GoalServer(Node):
                     "run": self._runs.run,
                     "planner": PLANNERS[self.planner][0],
                     "controller": self.controller,
+                    "mode": mode,
+                    **({"parks_within_m": self._switches["park_distance_m"]} if parks else {}),
                     "pose": "tf",
                     # early: a drive that never reaches "done" is still fetched
                     "recording": None if record is None else str(record),
@@ -693,10 +751,15 @@ class GoalServer(Node):
                     "sent_in_ms": round((time.monotonic() - started) * 1000),
                 },
             )
+            if handover is not None:
+                self._send(connection, handover)
             result_future = handle.get_result_async()
             last = 0.0
             while rclpy.ok() and not result_future.done():
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
+                handover = self._hand_over(x, y)
+                if handover is not None:
+                    self._send(connection, handover)
                 now = time.monotonic()
                 if feedback and now - last > 1.0:
                     last = now
@@ -707,7 +770,11 @@ class GoalServer(Node):
                 self._goal_handle = None
             outcome = result_future.result()
             status = getattr(outcome, "status", 0) if outcome else 0
-            if status == 4 and not self._cancelled_since(cancels):  # now the heading, taped
+            # Now the heading, taped: only after a drive that ended on position alone (the RPP
+            # pair's checker). Every other pair, a parking MPPI included, turns to the heading
+            # itself and was held to it by the yaw-checking goal checker.
+            ended_on_position = self.goal_checker == RPP_GOAL_CHECKER
+            if status == 4 and ended_on_position and not self._cancelled_since(cancels):
                 self._pivot_to(yaw_deg, connection, cancels)
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
@@ -724,6 +791,7 @@ class GoalServer(Node):
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
             self.stop_recording()
+            self._hand_back()
             with self._lock:
                 self._driving = False
 

@@ -48,6 +48,10 @@
     "scan_hz": {"default": 5.0, "range": [0.0, 30.0],
       "note": "the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all"}
   },
+  "goal_server": {
+    "park_distance_m": {"default": 1.0, "range": [0.0, 10.0],
+      "note": "under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over"}
+  },
   "marks_audit": {
     "radius_m": {"default": 2.0, "range": [0.2, 3.0],
       "note": "how far around the cart a lethal cell is judged, metres"},

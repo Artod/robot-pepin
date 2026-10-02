@@ -7,11 +7,12 @@
 #                                  (ros/stop.sh is the hard stop that also brakes)
 #   ros/goto.sh where              the pose right now (map -> base_link, from the goal server)
 #   ros/goto.sh planner NAME       the planner for the next goals (navfn|lattice|theta|smac|hybrid)
-#   ros/goto.sh controller [NAME]  the controller that follows the plan (mppi|rpp|graceful|dwb|shim;
-#                                  shim = rpp_shim), or with no NAME the one in force: the goal
-#                                  server's `controller` flag, published latched on
+#   ros/goto.sh controller [NAME]  the controller that follows the plan (mppi|rpp|graceful|dwb|shim|
+#                                  shim_mppi; shim = rpp_shim; shim_mppi drives on the shim and parks
+#                                  the last park_distance_m on MPPI), or with no NAME the one in
+#                                  force: the goal server's `controller` flag, published latched on
 #                                  controller_selector; a running goal switches at the tree's next
-#                                  tick. Back to mppi when Nav2 restarts
+#                                  tick. Back to mppi when Nav2 or the goal server restarts
 #   ros/goto.sh mark NAME          remember where the robot stands as NAME: a labelled RTAB-Map
 #                                  node plus the cart's offset from it, so the place rides the node
 #                                  when a loop closure bends the map
@@ -95,7 +96,7 @@ motion() {  # TOOL ARGS...
     MOTION=""
     exit "$rc"
 }
-USAGE="usage: ros/goto.sh NAME | X Y [YAW] | cancel | where | planner NAME | controller [mppi|rpp|graceful|dwb|shim] | mark NAME | places | seed X Y [YAW] | round [NAME] | move NAME SEG..."
+USAGE="usage: ros/goto.sh NAME | X Y [YAW] | cancel | where | planner NAME | controller [mppi|rpp|graceful|dwb|shim|shim_mppi] | mark NAME | places | seed X Y [YAW] | round [NAME] | move NAME SEG..."
 case "${1:-}" in
     "") echo "$USAGE"; exit 2 ;;
     cancel) cancel; exit ;;

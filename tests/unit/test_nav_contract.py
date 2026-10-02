@@ -473,6 +473,31 @@ def test_the_shim_wraps_the_reversing_rpp_and_turns_only_at_the_goal() -> None:
     assert followers["rpp_shim"] == ("FollowPathShim", "general_goal_checker")
 
 
+def test_shim_mppi_drives_on_the_shim_and_parks_on_mppi_both_held_to_the_heading() -> None:
+    """The flag value that hands a goal over: it starts on the shim pair, parks on the MPPI pair,
+    both controllers exist, and both end on the yaw-checking goal checker (so the goal server's
+    pivot, which follows only the position-only checker, never runs after it)."""
+    import ast
+
+    cs = _p("controller_server")
+    tree = ast.parse((REPO / "ros/pepin_bringup/pepin_bringup/goal_server.py").read_text())
+    tables = {
+        n.targets[0].id: ast.literal_eval(n.value)
+        for n in ast.walk(tree)
+        if isinstance(n, ast.Assign) and getattr(n.targets[0], "id", "") in ("FOLLOWERS", "PARKERS")
+    }
+    followers, parkers = tables["FOLLOWERS"], tables["PARKERS"]
+    assert followers["shim_mppi"] == followers["rpp_shim"]
+    assert parkers["shim_mppi"] == followers["mppi"]
+    flags = load_table(REPO / NODES / "goal_server.py")
+    assert set(followers) | set(parkers) <= set(flags.flag("controller").choices)
+    for controller, checker in (*followers.values(), *parkers.values()):
+        assert controller in cs["controller_plugins"]
+        assert checker in cs["goal_checker_plugins"]
+    for _controller, checker in parkers.values():
+        assert cs[checker]["yaw_goal_tolerance"] <= 0.20
+
+
 def test_graceful_and_dwb_stay_inside_the_base_caps_check_the_footprint_and_hold_the_heading() -> (
     None
 ):

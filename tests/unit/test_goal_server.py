@@ -359,6 +359,7 @@ def test_a_cancel_during_the_pivot_stops_the_spin(tmp_path: Path) -> None:
     """The drive ends on position (status 4) and the behaviour server's Spin turns the cart to
     the mark's heading: no navigator owns that goal, so the cancel stops it by its own handle."""
     node = ready_to_drive(tmp_path)
+    node._switches.set("controller", "rpp")  # the pair that ends on position alone
     node._client.handle = Goal(status=4)
     node._spin.server = True
     spin = Goal(status=5, on_wait=lambda: node._handle({"cmd": "cancel"}, Wire()))
@@ -369,6 +370,114 @@ def test_a_cancel_during_the_pivot_stops_the_spin(tmp_path: Path) -> None:
     assert spin.cancelled == 1, "and the cancel stopped it"
     assert node._spin_handle is None and not node.navigating()
     assert [e["event"] for e in wire.events()] == ["accepted", "pivot", "done"]
+
+
+# ---- shim_mppi: drive on the shim, park the last metre on MPPI ---------------------------------
+
+
+class Reached(Pending):
+    """Nav2's result future for a goal that drives ``ticks`` turns of the loop and SUCCEEDS."""
+
+    def result(self) -> Any:
+        return types.SimpleNamespace(status=4)
+
+
+def picks(node: Any) -> list[tuple[str, str]]:
+    """Every (controller, goal checker) the node handed the tree, in order."""
+    controllers = [m.data for m in node.pubs["controller_selector"].sent]
+    checkers = [m.data for m in node.pubs["goal_checker_selector"].sent]
+    return list(zip(controllers, checkers, strict=True))
+
+
+def parking_drive(tmp_path: Path, monkeypatch: Any, path: list[tuple[float, float]]) -> Any:
+    """A shim_mppi goal to (1.0, 0.0), heading 90 deg, with the cart (facing 0 deg) at each
+    point of ``path`` on successive turns of the drive loop, then reached."""
+    import pepin_bringup.goal_server as goal_server
+
+    monkeypatch.setattr(goal_server.time, "sleep", lambda _s: None)
+    node = ready_to_drive(tmp_path)
+    node._spin.server = True
+    node._switches.set("controller", "shim_mppi")
+    points = iter(path)
+
+    def move() -> None:
+        point = next(points, None)
+        if point is not None:
+            node._tf.buffer.transforms[("map", "base_link")] = at(*point, 0.0, age_s=0.1)
+
+    node._client.handle = Handle(len(path), move)
+    node._client.handle._result = Reached(len(path), move)
+    standing_at(node, at(*path[0], 0.0, age_s=0.1))
+    return node
+
+
+def test_shim_mppi_hands_the_last_metre_to_mppi_and_starts_the_next_goal_on_the_shim(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The goal starts on the shim; within park_distance_m (1.0) MPPI takes it, once and for
+    good (backing out does not hand it back); MPPI ends on the heading itself, so no pivot; the
+    next goal finds the shim again."""
+    node = parking_drive(tmp_path, monkeypatch, [(-1.0, 0.0), (0.5, 0.0), (-0.5, 0.0), (0.9, 0)])
+    before = len(picks(node))
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 90.0}, wire)
+    events = wire.events()
+    assert [e["event"] for e in events] == ["accepted", "handover", "done"], "and no pivot"
+    accepted, handover = events[0], events[1]
+    assert accepted["controller"] == "FollowPathShim" and accepted["mode"] == "shim_mppi"
+    assert accepted["parks_within_m"] == 1.0
+    assert handover == {
+        "event": "handover",
+        "from": "FollowPathShim",
+        "to": "FollowPathMPPI",
+        "distance_m": 0.5,
+    }
+    assert picks(node)[before:] == [
+        ("FollowPathMPPI", "general_goal_checker"),
+        ("FollowPathShim", "general_goal_checker"),
+    ], "one handover, kept when the cart backed out to 1.5 m, and the shim back after the goal"
+    assert node._spin.goals == []
+    said = node.get_logger().texts("info")
+    assert any("(shim_mppi: FollowPathMPPI within 1.00 m)" in line for line in said)
+    assert any(
+        "FollowPathShim -> FollowPathMPPI (general_goal_checker) parks it" in line for line in said
+    )
+
+
+def test_a_goal_that_starts_within_the_parking_distance_starts_on_mppi(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    node = parking_drive(tmp_path, monkeypatch, [(0.4, 0.0)])
+    before = len(picks(node))
+    sent = node._client.send_goal_async
+
+    def nav2_takes_it(request: Any, feedback: Any = None) -> Any:
+        assert node.controller == "FollowPathMPPI", "MPPI is in force before the goal goes"
+        return sent(request, feedback)
+
+    node._client.send_goal_async = nav2_takes_it
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, wire)
+    assert [e["event"] for e in wire.events()] == ["accepted", "handover", "done"]
+    assert [c for c, _ in picks(node)[before:]] == ["FollowPathMPPI", "FollowPathShim"]
+
+
+def test_no_handover_outside_shim_mppi_or_with_the_knob_at_zero(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    node = parking_drive(tmp_path, monkeypatch, [(0.0, 0.0), (0.95, 0.0)])
+    node._switches.set("park_distance_m", 0.0)
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, wire)
+    assert "handover" not in [e["event"] for e in wire.events()]
+    node._switches.set("park_distance_m", 1.0)
+    node._switches.set("controller", "mppi")
+    node._client.handle = Handle(1, None)
+    before = len(picks(node))
+    wire = Wire()
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, wire)
+    assert "handover" not in [e["event"] for e in wire.events()]
+    assert picks(node)[before:] == [], "nothing re-published around a plain mppi goal"
 
 
 def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> None:

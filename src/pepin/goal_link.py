@@ -199,9 +199,13 @@ class DriveReport:
         x, y, yaw = float(event["x"]), float(event["y"]), float(event["yaw_deg"])
         self._goal = (x, y, yaw)
         place = event.get("place")
+        follower = f", controller {event['controller']}" if event.get("controller") else ""
+        if event.get("mode"):
+            parks = event.get("parks_within_m")
+            follower += f" ({event['mode']}{'' if parks is None else f', parks within {parks} m'})"
         self._say(
-            f"goal server: run {event.get('run')}, planner {event.get('planner')}, pose from"
-            f" {event.get('pose')}, sent in {event.get('sent_in_ms')} ms"
+            f"goal server: run {event.get('run')}, planner {event.get('planner')}{follower}, pose"
+            f" from {event.get('pose')}, sent in {event.get('sent_in_ms')} ms"
         )
         recording = event.get("recording")
         if recording:
@@ -210,6 +214,12 @@ class DriveReport:
             self._say("no recorder confirmed this run: driving unrecorded")
         self._say(
             f"goal {str(place) + ' ' if place else ''}({x:.2f}, {y:.2f}) yaw {yaw:.0f} deg accepted"
+        )
+
+    def _on_handover(self, event: dict[str, Any]) -> None:
+        self._say(
+            f"handover {event.get('from')} -> {event.get('to')}"
+            f" at {event.get('distance_m')} m from the goal"
         )
 
     def _on_feedback(self, event: dict[str, Any]) -> None:
