@@ -66,7 +66,7 @@ FLAGS = FlagSet(
         on_when="always, unless the point of the run is what the stack does without a gyro",
         off_when="for one test of the heading on the wheels alone, or to see an EKF meet its"
         " sensor_timeout on a source that is simply gone; unmute and the rate is back within"
-        " one IMU period (50 Hz)",
+        " one IMU period (100 Hz)",
     ),
     Flag(
         "odom_publish",

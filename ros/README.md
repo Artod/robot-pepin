@@ -1040,7 +1040,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *What:* the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip
   - *Default:* on — on, because the gyro is the heading: the wheels over-report a turn in place by 10-25 % on carpet, and odom0's vyaw — the only other yaw-rate source, live since 2026-09-15 — carries about 4 % of the weight beside it (ros/params/ekf.yaml)
   - *On when:* always, unless the point of the run is what the stack does without a gyro
-  - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (50 Hz)
+  - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (100 Hz)
 - **`odom_publish`** — bool, default on
   - *What:* the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces
   - *Default:* on — on, because /odom is the only source of speed this filter has: odom0 fuses vx and vy at 0.001 (m/s)^2 and, since 2026-09-15, vyaw; ax and ay are off (a mount bias of -0.229 to +0.066 m/s^2 that no covariance can answer), so with /odom silent past the EKF's sensor_timeout of 0.5 s the filter has no velocity measurement left at all
@@ -1510,8 +1510,8 @@ The reasons for each default and each range are in
 `ros/pepin_base_cpp/include/pepin_base_cpp/zupt.hpp` (its contract: `test/zupt_contract.cpp`).
 Two numbers stay fixed, because they are structural: the variance on the three velocities the
 update does not claim (1e6: `odom2` fuses none of them, so the EKF never reads it), and how old
-the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 50 Hz a sample
-is that old only after ~50 failed reads in a row).
+the newest gyro sample may be (1 s, the same gap that ends the wheels' witness; at 100 Hz a sample
+is that old only after ~100 failed reads in a row).
 
 **What the bridge says.** Each change is one log line (`zupt: zupt_rate_hz 10 -> 50, in force at
 the next tick`), each refusal a warning with its reason, and each start or stop of the update a
