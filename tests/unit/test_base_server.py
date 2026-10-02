@@ -556,8 +556,9 @@ def test_the_neck_ids_come_from_the_file_and_a_missing_file_costs_only_the_neck(
 
 
 def test_a_neck_observer_leaving_does_not_release_the_wheels_but_the_driver_does() -> None:
-    """The neck node is a second client of the base server: its arrival and departure must be
-    invisible to the wheels, and the bridge's departure must still stop them at once."""
+    """A client that only asks about or aims the head (a tool, the gaze arbiter) is a second
+    client of the base server: its arrival and departure must be invisible to the wheels, and
+    the bridge's departure must still stop them at once."""
     import socket
     import threading
     import time
