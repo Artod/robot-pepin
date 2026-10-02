@@ -103,13 +103,6 @@ def test_turning_in_place_counts_as_progress() -> None:
     assert 0.0 < checker["required_movement_angle"] <= 0.6
 
 
-def test_an_auxiliary_sensor_cannot_stall_the_costmap() -> None:
-    # 2026-09-07: the range layer went stale once (clock jump) and every goal died for 13 minutes.
-    costmap = _p("local_costmap")
-    for sensor in ("front", "left", "right"):
-        assert costmap[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
-
-
 def test_the_planner_can_always_plan_out_of_where_the_cart_stands() -> None:
     """A planning disc made the START cell impassable beside the sofa and the planner failed four
     times in a row (2026-09-08). Clearance is bought with cost, never with a body the cart has not
@@ -141,18 +134,12 @@ def test_arriving_means_arriving() -> None:
 def test_a_tof_return_is_marked_across_its_whole_cone() -> None:
     """One cell is a mark the planner squeezes past; the sensor cannot say where in the cone.
 
-    Two shapes of the same promise. The kept RangeSensorLayer blocks say it with
-    ``inflate_cone: 1.0`` over the real 27 degree ``phi``; the fan that feeds the ObstacleLayers
-    says it by putting the one measured distance on EVERY beam of the cone, and by having enough
-    beams that no costmap cell inside the arc is skipped at the sensor's own ceiling.
+    The fan that feeds the ObstacleLayers says it by putting the one measured distance on EVERY
+    beam of the cone, and by having enough beams that no costmap cell inside the arc is skipped
+    at the sensor's own ceiling.
     """
     from pepin.tof_horizon import cone_beams
 
-    for costmap in ("local_costmap", "global_costmap"):
-        for sensor in ("front", "left", "right"):
-            layer = _p(costmap)[f"tof_{sensor}_layer"]
-            assert layer["inflate_cone"] == 1.0
-            assert layer["phi"] <= 0.5, "phi must model the real 27 degree cone"
     facts = sf.assignments(sf.tree(f"{NODES}/tof_bridge.py"))
     fov, cell = float(facts["_FIELD_OF_VIEW_RAD"]), float(facts["_COSTMAP_CELL_M"])
     assert cell == _p("local_costmap")["resolution"], "the fan is drawn on that costmap's cells"
@@ -177,9 +164,6 @@ def test_each_tof_owns_its_own_layer() -> None:
         assert block["plugin"].endswith("ObstacleLayer")
         assert block["observation_sources"].split() == [f"tof_{sensor}_scan"]
         assert block[f"tof_{sensor}_scan"]["topic"] == f"/tof/{sensor}/scan"
-    # ...and the blocks of the plugin they replaced are kept, unlisted, for the way back.
-    for sensor in ("front", "left", "right"):
-        assert _p("local_costmap")[f"tof_{sensor}_layer"]["topics"] == [f"/tof/{sensor}"]
 
 
 def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None:
@@ -192,8 +176,8 @@ def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None
     of the pose in ``map`` between a reading's stamp and the update — a tracker restart, a
     relocalisation, the cart lifted — which happens after the reading has left, so no publisher
     can hold it off. Reproduced with ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2
-    container: 415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, the whiskers
-    are ObstacleLayers fed by a fan, and the flag that goes back is live.
+    container: 415 s of CPU in 700 s). So: no costmap may LIST a RangeSensorLayer, and the
+    whiskers are ObstacleLayers fed by a fan.
     """
     for costmap in ("local_costmap", "global_costmap"):
         parameters = _p(costmap)
@@ -201,9 +185,6 @@ def test_the_whiskers_do_not_run_in_the_plugin_with_the_unbounded_loop() -> None
             assert not parameters[name]["plugin"].endswith("RangeSensorLayer"), (
                 f"{costmap}.{name}: the unbounded loop is one pose jump away"
             )
-    flags = load_table(REPO / NODES / "tof_bridge.py")
-    assert flags["range_as"] == "scan" and flags.flag("range_as").live
-    assert flags.flag("range_as").choices == ("scan", "range")
 
 
 def test_a_whisker_clears_its_cone_without_marking_a_ring_at_the_ceiling() -> None:
@@ -264,12 +245,9 @@ def test_the_tof_whiskers_serve_the_local_costmap_only() -> None:
     """2026-09-21: the ToF are short whiskers for the controller's map. In the global costmap
     they bought a room-scale plan nothing and were the worst amplifier of the RangeSensorLayer
     wedge (transform_tolerance 1.0 s x 15 Hz = 15x per update cycle), which hung planner_server's
-    activation on 4 of 7 board starts. Their blocks stay in the file: returning them is one
-    line of the plugin list."""
+    activation on 4 of 7 board starts."""
     plugins = _p("global_costmap")["plugins"]
     assert not [name for name in plugins if name.startswith("tof_")], plugins
-    for sensor in ("front", "left", "right"):
-        assert _p("global_costmap")[f"tof_{sensor}_layer"]["topics"] == [f"/tof/{sensor}"]
 
 
 def test_a_pivot_the_cart_cannot_make_is_preferred_less_than_an_arc() -> None:
@@ -381,14 +359,10 @@ def test_the_tof_layers_never_stall_either_costmap() -> None:
     bus, a cone can be dropped by the layer's own message filter while TF is catching up, and
     tof_bridge is restarted on its own (ros/board.sh kick). So the scan sources carry no
     expected_update_rate (a buffer given a rate calls itself stale and Nav2 answers every goal
-    with "Costmap timed out waiting for update", 2026-09-07), and the kept range layers keep
-    their no_readings_timeout."""
+    with "Costmap timed out waiting for update", 2026-09-07)."""
     for sensor in ("front", "left", "right"):
         layer = _p("local_costmap")[f"tof_{sensor}_scan_layer"]
         assert layer[f"tof_{sensor}_scan"]["expected_update_rate"] == 0.0
-    for costmap in ("local_costmap", "global_costmap"):
-        for sensor in ("front", "left", "right"):
-            assert _p(costmap)[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
 
 
 def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> None:
@@ -401,12 +375,9 @@ def test_the_whiskers_are_fed_to_a_layer_that_drops_what_it_cannot_place() -> No
     robot's own TF latency — and the answer is the CONSUMER: an ObstacleLayer's message filter
     drops what it cannot place instead of blocking on it. For one day the publisher guarded it
     too (a tf_gate and dynamic mounts); both came out on 2026-09-22 with the range layers they
-    were written for, so the bridge is one live flag wide again (rule 19)."""
+    were written for."""
     assert _p("local_costmap")["transform_tolerance"] == 0.3
     assert _p("global_costmap")["transform_tolerance"] == 1.0
-    flags = load_table(REPO / NODES / "tof_bridge.py")
-    assert flags.names == ("range_as",), "the gate's flags left with the range layers"
-    assert all(flag.live for flag in flags), "a regression is turned off in the field, not reverted"
     source = (REPO / NODES / "tof_bridge.py").read_text()
     assert "from tf2_ros import StaticTransformBroadcaster\n" in source, (
         "the mounts leave on /tf_static alone: the gate's TF listener cost 20-37 % of an A53 core,"
@@ -1023,7 +994,6 @@ def test_a_dead_sensor_cannot_stall_a_costmap_that_the_others_still_feed() -> No
             for source in sources:
                 assert layer[source]["expected_update_rate"] == 0.0, f"{costmap}.{name}.{source}"
         for sensor in ("front", "left", "right"):
-            assert params[f"tof_{sensor}_layer"]["no_readings_timeout"] == 0.0
             scan = params.get(f"tof_{sensor}_scan_layer")  # the local costmap's, since 2026-09-21
             if scan is not None:
                 assert scan[f"tof_{sensor}_scan"]["expected_update_rate"] == 0.0, sensor
@@ -1043,7 +1013,6 @@ def test_only_the_measured_layer_is_on_by_default() -> None:
             " cannot see, and a live flip was lost at every restart of 2026-09-14"
         )
         for sensor in ("front", "left", "right"):
-            assert params[f"tof_{sensor}_layer"]["enabled"] is True
             scan = params.get(f"tof_{sensor}_scan_layer")
             if scan is not None:
                 assert scan["enabled"] is True, sensor

@@ -1,54 +1,3 @@
-amcl:
-  ros__parameters:
-    alpha1: 0.6  # rotation noise from rotation: the wheels over-report turns by 10-25% on carpet
-    alpha2: 0.2
-    alpha3: 0.2
-    alpha4: 0.4  # rotation noise from translation: one wheel slipping while driving straight
-    alpha5: 0.2
-    base_frame_id: "base_link"
-    beam_skip_distance: 0.5
-    beam_skip_error_threshold: 0.9
-    beam_skip_threshold: 0.3
-    do_beamskip: false
-    global_frame_id: "map"
-    lambda_short: 0.1
-    laser_likelihood_max_dist: 2.0
-    laser_max_range: 12.0
-    laser_min_range: -1.0
-    laser_model_type: "likelihood_field"
-    max_beams: 120
-    max_particles: 1000
-    min_particles: 300
-    odom_frame_id: "odom"
-    pf_err: 0.05
-    pf_z: 0.99
-    # Kidnap recovery off: with this flat's imperfect map it kept injecting random particles
-    # and the pose wandered mid-drive. A lifted cart is re-seeded through /initialpose.
-    recovery_alpha_fast: 0.0
-    recovery_alpha_slow: 0.0
-    resample_interval: 1
-    robot_model_type: "nav2_amcl::DifferentialMotionModel"
-    save_pose_rate: 0.5
-    sigma_hit: 0.15
-    tf_broadcast: false  # RTAB-Map owns map -> odom (AMCL is not launched: ros/nav.launch.py)
-    transform_tolerance: 0.5  # scans arrive within 0.03 s now; 2.0 let a stale pose pass as current
-    update_min_a: 0.05  # correct with the laser every 3 degrees, not every 11
-    update_min_d: 0.05  # and every 5 cm, not every 25: the wheels cannot be trusted for 25 cm
-    # Sharper beam model than the defaults (z_hit 0.5 / z_rand 0.5): with half the weight on
-    # 'random' the likelihood is flat and the pose drifted 0.5 m over a 5 m round trip.
-    z_hit: 0.8
-    z_max: 0.05
-    z_rand: 0.1
-    z_short: 0.05
-    scan_topic: /scan
-    # the cart starts on the map origin (our --init 0 0 0); Foxglove can re-seed it any time
-    set_initial_pose: true
-    initial_pose:
-      x: 0.0
-      y: 0.0
-      z: 0.0
-      yaw: 0.0
-
 bt_navigator:
   ros__parameters:
     default_nav_to_pose_bt_xml: /params/pepin_nav_to_pose.xml  # back up before spinning (see the file)
@@ -452,7 +401,6 @@ controller_server:
         max_angle_to_furthest: 1.0
         mode: 2  # follow the plan's own direction, reverse segments included
 
-
 local_costmap:
   local_costmap:
     ros__parameters:
@@ -528,14 +476,11 @@ local_costmap:
       #      `ros/thin.sh kick relocalizer`: tid 191 of the Nav2 container, 415 s of CPU in 700 s.
       # An ObstacleLayer has neither: its MessageFilter drops what it cannot place instead of
       # blocking on it, its queue is bounded, and it walks the points it was given rather than a
-      # rectangle of cells. tof_bridge draws each cone as a fan for it (flag `range_as`, default
-      # `scan`) — one beam per costmap cell of arc at the sensor's own ceiling, every beam
-      # carrying the one distance the sensor measured, which is the same "the whole arc, at that
-      # range" the range layer's inflate_cone: 1.0 stood for: 11 beams front (ceiling 0.96 m), 7
-      # and 7 at the sides (0.57 and 0.59 m). THE WAY BACK (CLAUDE.md rule 19) is two moves:
-      # `ros/flags.sh set tof_bridge range_as range` and "tof_front_layer", "tof_left_layer",
-      # "tof_right_layer" in the plugins list above instead of the three *_scan_layer names —
-      # those three blocks are kept below, unlisted, exactly as they were driven.
+      # rectangle of cells. tof_bridge draws each cone as a fan for it — one beam per costmap
+      # cell of arc at the sensor's own ceiling, every beam carrying the one distance the sensor
+      # measured ("the whole arc, at that range"): 11 beams front (ceiling 0.96 m), 7 and 7 at
+      # the sides (0.57 and 0.59 m). The RangeSensorLayer blocks are in git history (before
+      # 2026-10-02) and must not come back while the two defects above are unfixed.
       #
       # combination_method 1 (Maximum) on all three, like every other layer here: a whisker's
       # clearing lives in its OWN grid and reaches the master as a maximum, so it can never erase
@@ -633,75 +578,11 @@ local_costmap:
           max_obstacle_height: 0.5
           expected_update_rate: 0.0
           observation_persistence: 0.0
-      # THE THREE RangeSensorLayer BLOCKS BELOW ARE KEPT AND UNLISTED (2026-09-21). They are the
-      # arrangement every drive until today was made on, and nothing about them was wrong except
-      # the plugin they run in; putting them back is the two moves named above. Their comments
-      # are the sensor's, not the plugin's, and still true.
-      tof_front_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/front"]
-        # The VL53L1X cone really is 0.47 rad (27 deg). At 1.2 the layer painted a 69 deg arc,
-        # so one chair leg at 0.5 m became a 0.6 m wall — the ToF layer's own version of a
-        # costmap that is too puffy. Model the sensor, then let the inflation layer do inflation.
-        phi: 0.47
-        # The whole cone: the sensor cannot say where across its 27 degrees the object was, so the
-        # honest mark is the whole arc at that range (0.19 m wide at 0.4 m, about four cells).
-        inflate_cone: 1.0
-        # 0 = never declare the costmap stale because of the ToF: the layer's 'current' flag stayed
-        # false after one timeout (the boot-time clock jump) and every goal died instantly for 13
-        # minutes with 'Costmap timed out waiting for update'. A silent auxiliary sensor must not
-        # stop the robot; the lidar layer keeps its own staleness check.
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
-      tof_left_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/left"]
-        # The VL53L1X cone really is 0.47 rad (27 deg). At 1.2 the layer painted a 69 deg arc,
-        # so one chair leg at 0.5 m became a 0.6 m wall — the ToF layer's own version of a
-        # costmap that is too puffy. Model the sensor, then let the inflation layer do inflation.
-        phi: 0.47
-        # The whole cone: the sensor cannot say where across its 27 degrees the object was, so the
-        # honest mark is the whole arc at that range (0.19 m wide at 0.4 m, about four cells).
-        inflate_cone: 1.0
-        # 0 = never declare the costmap stale because of the ToF: the layer's 'current' flag stayed
-        # false after one timeout (the boot-time clock jump) and every goal died instantly for 13
-        # minutes with 'Costmap timed out waiting for update'. A silent auxiliary sensor must not
-        # stop the robot; the lidar layer keeps its own staleness check.
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
-      tof_right_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/right"]
-        # The VL53L1X cone really is 0.47 rad (27 deg). At 1.2 the layer painted a 69 deg arc,
-        # so one chair leg at 0.5 m became a 0.6 m wall — the ToF layer's own version of a
-        # costmap that is too puffy. Model the sensor, then let the inflation layer do inflation.
-        phi: 0.47
-        # The whole cone: the sensor cannot say where across its 27 degrees the object was, so the
-        # honest mark is the whole arc at that range (0.19 m wide at 0.4 m, about four cells).
-        inflate_cone: 1.0
-        # 0 = never declare the costmap stale because of the ToF: the layer's 'current' flag stayed
-        # false after one timeout (the boot-time clock jump) and every goal died instantly for 13
-        # minutes with 'Costmap timed out waiting for update'. A silent auxiliary sensor must not
-        # stop the robot; the lidar layer keeps its own staleness check.
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
         cost_scaling_factor: 5.0  # steep: cost falls off fast beyond the hull
         inflation_radius: 0.45  # the controller slows earlier near legs; only >= 253 is a wall
-      # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
+      # ONE LAYER PER SENSOR, like the three ToF above and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
       # (`ros2 param set /local_costmap/local_costmap camera_layer.enabled true`) — which is how a
       # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
@@ -720,8 +601,8 @@ local_costmap:
       #
       # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
       # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers
-      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07,
-      # the same one their no_readings_timeout: 0.0 carries), so this costmap keeps working with
+      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07),
+      # so this costmap keeps working with
       # any subset of the sensors alive, down to none.
       lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -941,10 +822,9 @@ global_costmap:
       # second, and this costmap was the worst amplifier of the RangeSensorLayer wedge (its
       # transform_tolerance of 1.0 s x 15 Hz a sensor = 15x per update cycle; see tof_bridge's
       # tf_gate). What only a whisker saw stops the cart in the local map and is driven around
-      # there. The three layer blocks below are kept: putting them back is this one line, with
-      # "tof_front_layer", "tof_left_layer", "tof_right_layer" before "inflation_layer" — and if
-      # a whisker is ever wanted in a room-scale plan again, it comes back as the ObstacleLayers
-      # the local costmap runs now (tof_*_scan_layer there), never as a RangeSensorLayer: this
+      # there. If a whisker is ever wanted in a room-scale plan again, it comes back as the
+      # ObstacleLayers the local costmap runs now (tof_*_scan_layer there), never as a
+      # RangeSensorLayer: this
       # grid does not roll, so the unbounded loop of range_sensor_layer.cpp:362-369 fires here
       # every time the pose jumps off the edge of a map that is bigger than the window.
       plugins: ["static_layer", "lidar_layer", "camera_layer", "contact_layer", "camera_grid_layer", "inflation_layer"]
@@ -956,12 +836,12 @@ global_costmap:
       # IS c, cell for cell, and updateWithMax writes what updateWithTrueOverwrite wrote
       # (costmap_layer.cpp, layered_costmap.cpp, Jazzy). A contract test holds both premises.
       use_maximum: True
-      # ONE LAYER PER SENSOR, like the three ToF below and for the same reason: separate layers
-      # cannot erase each other's evidence, and each is switched on its own while the robot runs
-      # (`ros2 param set /global_costmap/global_costmap camera_layer.enabled true`) — which is how a
-      # camera-only or lidar-only drive is demonstrated without restarting anything. `plugins`
-      # is the order they write into the master grid, and every layer here combines by maximum,
-      # so a mark is a mark whoever wrote it.
+      # ONE LAYER PER SENSOR, like the three ToF of the local costmap and for the same reason:
+      # separate layers cannot erase each other's evidence, and each is switched on its own while
+      # the robot runs (`ros2 param set /global_costmap/global_costmap camera_layer.enabled
+      # true`) — which is how a camera-only or lidar-only drive is demonstrated without
+      # restarting anything. `plugins` is the order they write into the master grid, and every
+      # layer here combines by maximum, so a mark is a mark whoever wrote it.
       #
       # What the split changes is the point of it: while the scan and depth_scan shared one
       # grid, the LIDAR's rays cleared the CAMERA's marks — a beam passing through the lidar's
@@ -975,8 +855,8 @@ global_costmap:
       #
       # No sensor may stall the costmap by dying: expected_update_rate 0.0 on every source (a
       # buffer given a rate calls itself stale, the layer stops being current and Nav2 answers
-      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07,
-      # the same one their no_readings_timeout: 0.0 carries), so this costmap keeps working with
+      # every goal with "Costmap timed out waiting for update" — the ToF's lesson of 2026-09-07),
+      # so this costmap keeps working with
       # any subset of the sensors alive, down to none.
       lidar_layer:
         plugin: "nav2_costmap_2d::ObstacleLayer"
@@ -1096,51 +976,6 @@ global_costmap:
           # past it every mark measured false against the lidar (run 0171, 2026-09-11).
           obstacle_max_range: 2.0
           obstacle_min_range: 0.0
-      tof_front_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/front"]
-        phi: 0.47
-        # The whole cone, not a third of it: a VL53L1X reports one distance and cannot say where
-        # across its 27 degrees the object was, so the honest mark is the whole arc at that range
-        # (0.19 m wide at 0.4 m — about four cells). A one-cell mark is what the planner kept
-        # squeezing past.
-        inflate_cone: 1.0
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
-      tof_left_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/left"]
-        phi: 0.47
-        # The whole cone, not a third of it: a VL53L1X reports one distance and cannot say where
-        # across its 27 degrees the object was, so the honest mark is the whole arc at that range
-        # (0.19 m wide at 0.4 m — about four cells). A one-cell mark is what the planner kept
-        # squeezing past.
-        inflate_cone: 1.0
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
-      tof_right_layer:
-        plugin: "nav2_costmap_2d::RangeSensorLayer"
-        enabled: True
-        topics: ["/tof/right"]
-        phi: 0.47
-        # The whole cone, not a third of it: a VL53L1X reports one distance and cannot say where
-        # across its 27 degrees the object was, so the honest mark is the whole arc at that range
-        # (0.19 m wide at 0.4 m — about four cells). A one-cell mark is what the planner kept
-        # squeezing past.
-        inflate_cone: 1.0
-        no_readings_timeout: 0.0
-        clear_threshold: 0.2
-        mark_threshold: 0.5
-        clear_on_max_reading: True
-        input_sensor_type: ALL
       static_layer:
         plugin: "nav2_costmap_2d::StaticLayer"
         footprint_clearing_enabled: true  # a cell under the cart is free: the cart stands there
@@ -1191,20 +1026,6 @@ global_costmap:
       # robot published only incremental updates, the panel stayed blank, and a relay outside
       # ros/ (costmap_live) had to rebuild the grid; ros/restart.sh's planner proof reads it too.
       always_send_full_costmap: True
-
-# The yaml_filename does not need to be specified since it going to be set by defaults in launch.
-# If you'd rather set it in the yaml, remove the default "map" value in the tb3_simulation_launch.py
-# file & provide full path to map below. If CLI map configuration or launch default is provided, that will be used.
-# map_server:
-#   ros__parameters:
-#     yaml_filename: ""
-
-map_saver:
-  ros__parameters:
-    save_map_timeout: 5.0
-    free_thresh_default: 0.25
-    occupied_thresh_default: 0.65
-    map_subscribe_transient_local: True
 
 planner_server:
   ros__parameters:
@@ -1364,15 +1185,6 @@ planner_server:
         w_data: 0.2
         tolerance: 1.0e-10
 
-smoother_server:
-  ros__parameters:
-    smoother_plugins: ["simple_smoother"]
-    simple_smoother:
-      plugin: "nav2_smoother::SimpleSmoother"
-      tolerance: 1.0e-10
-      max_its: 1000
-      do_refinement: True
-
 behavior_server:
   ros__parameters:
     local_costmap_topic: local_costmap/costmap_raw
@@ -1415,40 +1227,6 @@ behavior_server:
     min_rotational_vel: 0.25
     rotational_acc_lim: 1.0  # ...1.5 overshoots its heading and the next tick corrects it
 
-waypoint_follower:
-  ros__parameters:
-    loop_rate: 20
-    stop_on_failure: false
-    action_server_result_timeout: 900.0
-    waypoint_task_executor_plugin: "wait_at_waypoint"
-    wait_at_waypoint:
-      plugin: "nav2_waypoint_follower::WaitAtWaypoint"
-      enabled: True
-      waypoint_pause_duration: 200
-
-route_server:
-  ros__parameters:
-    # The graph_filepath does not need to be specified since it going to be set by defaults in launch.
-    # If you'd rather set it in the yaml, remove the default "graph" value in the launch file(s).
-    # file & provide full path to map below. If graph config or launch default is provided, it is used
-    # graph_filepath: $(find-pkg-share nav2_route)/graphs/aws_graph.geojson
-    boundary_radius_to_achieve_node: 1.0
-    radius_to_achieve_node: 2.0
-    smooth_corners: true
-    operations: ["AdjustSpeedLimit", "ReroutingService", "CollisionMonitor"]
-    ReroutingService:
-      plugin: "nav2_route::ReroutingService"
-    AdjustSpeedLimit:
-      plugin: "nav2_route::AdjustSpeedLimit"
-    CollisionMonitor:
-      plugin: "nav2_route::CollisionMonitor"
-      max_collision_dist: 3.0
-    edge_cost_functions: ["DistanceScorer", "CostmapScorer"]
-    DistanceScorer:
-      plugin: "nav2_route::DistanceScorer"
-    CostmapScorer:
-      plugin: "nav2_route::CostmapScorer"
-
 velocity_smoother:
   ros__parameters:
     smoothing_frequency: 10.0
@@ -1465,106 +1243,3 @@ velocity_smoother:
     odom_duration: 0.1
     deadband_velocity: [0.0, 0.0, 0.0]
     velocity_timeout: 1.0
-
-collision_monitor:
-  ros__parameters:
-    base_frame_id: "base_link"
-    odom_frame_id: "odom"
-    cmd_vel_in_topic: "cmd_vel_smoothed"
-    cmd_vel_out_topic: "cmd_vel"
-    state_topic: "collision_monitor_state"
-    transform_tolerance: 0.2
-    source_timeout: 1.0
-    base_shift_correction: True
-    stop_pub_timeout: 2.0
-    # Polygons represent zone around the robot for "stop", "slowdown" and "limit" action types,
-    # and robot footprint for "approach" action type.
-    # NOT LAUNCHED, on purpose (nav.launch.py). A "stop" polygon fed by the ToF was tried on
-    # 2026-09-08 and it walls the cart in: parked 0.05 m from the printer the sensors see it, the
-    # monitor zeroes every command, and the robot cannot even begin to leave (run 0009: 75
-    # recoveries, distance stuck at 2.56 m). A short-range sensor has to be evidence the planner
-    # routes around, not a veto on the wheels — see the ToF layers in both costmaps.
-    polygons: ["FootprintApproach"]
-    FootprintApproach:
-      type: "polygon"
-      action_type: "approach"
-      footprint_topic: "/local_costmap/published_footprint"
-      time_before_collision: 1.2
-      simulation_time_step: 0.1
-      min_points: 6
-      visualize: False
-      enabled: True
-    observation_sources: ["scan"]
-    scan:
-      type: "scan"
-      topic: "/scan"
-      min_height: 0.10
-      max_height: 2.0
-      enabled: True
-
-docking_server:
-  ros__parameters:
-    controller_frequency: 50.0
-    initial_perception_timeout: 5.0
-    wait_charge_timeout: 5.0
-    dock_approach_timeout: 30.0
-    undock_linear_tolerance: 0.05
-    undock_angular_tolerance: 0.1
-    max_retries: 3
-    base_frame: "base_link"
-    fixed_frame: "odom"
-    dock_backwards: false
-    dock_prestaging_tolerance: 0.5
-
-    # Types of docks
-    dock_plugins: ['simple_charging_dock']
-    simple_charging_dock:
-      plugin: 'opennav_docking::SimpleChargingDock'
-      docking_threshold: 0.05
-      staging_x_offset: -0.7
-      use_external_detection_pose: true
-      use_battery_status: false # true
-      use_stall_detection: false # true
-
-      external_detection_timeout: 1.0
-      external_detection_translation_x: -0.18
-      external_detection_translation_y: 0.0
-      external_detection_rotation_roll: -1.57
-      external_detection_rotation_pitch: -1.57
-      external_detection_rotation_yaw: 0.0
-      filter_coef: 0.1
-
-    # Dock instances
-    # The following example illustrates configuring dock instances.
-    # docks: ['home_dock']  # Input your docks here
-    # home_dock:
-    #   type: 'simple_charging_dock'
-    #   frame: map
-    #   pose: [0.0, 0.0, 0.0]
-
-    controller:
-      k_phi: 3.0
-      k_delta: 2.0
-      v_linear_min: 0.15
-      v_linear_max: 0.15
-      use_collision_detection: true
-      costmap_topic: "local_costmap/costmap_raw"
-      footprint_topic: "local_costmap/published_footprint"
-      transform_tolerance: 0.1
-      projection_time: 5.0
-      simulation_step: 0.1
-      dock_collision_threshold: 0.3
-
-loopback_simulator:
-  ros__parameters:
-    base_frame_id: "base_link"
-    odom_frame_id: "odom"
-    map_frame_id: "map"
-    scan_frame_id: "base_scan"  # tb4_loopback_simulator.launch.py remaps to 'rplidar_link'
-    update_duration: 0.02
-    scan_range_min: 0.05
-    scan_range_max: 30.0
-    scan_angle_min: -3.1415
-    scan_angle_max: 3.1415
-    scan_angle_increment: 0.02617
-    scan_use_inf: true
