@@ -40,7 +40,9 @@ controller_server:
     min_x_velocity_threshold: 0.001
     min_y_velocity_threshold: 0.5
     min_theta_velocity_threshold: 0.001
-    failure_tolerance: 3.0  # a person in the path gets three seconds to step aside before recoveries
+    # 0: a controller that cannot move hands over to the tree at once (was 3.0, "a person gets three
+    # seconds to step aside": RPP then stood 3 s on every false collision ahead; 2026-10-02).
+    failure_tolerance: 0.0
     progress_checker_plugins: ["progress_checker"]
     # The drive ends when the position is met (xy_only, used by the tree's FollowPath); the goal
     # server then turns the cart to the mark's heading with a Spin. RPP with reversing cannot
@@ -362,7 +364,9 @@ controller_server:
       PreferForwardCritic:
         enabled: true
         cost_power: 1
-        cost_weight: 5.0
+        # 1 (was 5 since tape 0455): at 5 standing still beat the planner's reverse leg, and 42 of 43
+        # stall plans at the printer said "back up, then in" (drive 0247); variant B, 2026-10-02.
+        cost_weight: 1.0
         # 0.15 = GoalAngleCritic's: the heading hands over in ONE place. With this at 0.5 and the
         # goal heading at 0.15 nothing held the heading between them, and the cart turned round
         # 180 deg 20 cm short of the bookshelf and tried to back in (tape 0455).
@@ -389,15 +393,21 @@ controller_server:
         cost_weight: 14.0  # holds the plan's shape: at 6 MPPI cut its arcs into the printer
         max_path_occupancy_ratio: 0.05
         trajectory_point_step: 4
-        threshold_to_consider: 0.5
-        offset_from_furthest: 20
+        # Variant A, 2026-10-02 (was 0.5 / 20): at offset 20 this critic never ran — the trajectories
+        # reach 16-17 Hybrid poses (0.077 m apart), it needs index 20, so it scored on 0 of 345
+        # plans and the weights 6/12/14 above never acted (scratch/printer_corner). Drives 0270-0274:
+        # printer 23-26 s, standing 1.2-1.4 s (27.6-29.2 s, up to 5.7 s before).
+        threshold_to_consider: 0.15
+        offset_from_furthest: 3
         use_path_orientations: true  # a feasible (Hybrid) plan's headings are the cart's own
       PathFollowCritic:
         enabled: true
         cost_power: 1
         cost_weight: 10.0  # the pull along the plan, doubled: progress, not caution, sets the pace
         offset_from_furthest: 5
-        threshold_to_consider: 1.4
+        # 0.15 (was 1.4, variant B 2026-10-02): inside 1.4 m nothing but the goal pulled, so the
+        # planner's reverse leg near a mark was never driven.
+        threshold_to_consider: 0.15
       PathAngleCritic:
         enabled: true
         cost_power: 1

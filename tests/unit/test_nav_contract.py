@@ -591,7 +591,8 @@ def test_the_controller_stops_for_what_stands_in_its_path_and_never_for_what_it_
     assert tof["_MIN_RANGE_M"] == "CONTACT_BAND_M", "ToF readings inside the band must be dropped"
     box = hull_box()
     assert box["max_x"] == pytest.approx(HULL.front_m + CONTACT_BAND_M)
-    assert _p("controller_server")["failure_tolerance"] >= 3.0, "a person needs time to step aside"
+    # A controller that cannot move hands over at once; the tree replans (2026-10-02, was 3 s).
+    assert _p("controller_server")["failure_tolerance"] == 0.0
 
 
 def test_a_blocked_retreat_gives_up_within_seconds() -> None:
