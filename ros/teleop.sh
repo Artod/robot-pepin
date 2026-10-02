@@ -10,8 +10,7 @@
 # Keys: arrows drive at full speed (0.45 m/s, 1.0 rad/s), Shift+arrows slow (0.064 m/s, 0.24 rad/s);
 # a key latches until the next one; space STOPS; Ctrl-C stops the wheels and ends the run. The
 # keyboard node runs on the LAPTOP in pepin-vslam (a new process on the board stalls its link for
-# 3-4 s). PEPIN_TELEOP=twist_keyboard: the old teleop_twist_keyboard on the board (i/,/j/l, k stops).
-# The base's deadman stops the wheels within 0.5 s of the last command either way.
+# 3-4 s). The base's deadman stops the wheels within 0.5 s of the last command.
 # Game mode, without ROS: `uv run python -m pepin.teleop --game [--host 10.0.0.187]` opens a small
 # window where keys act only while HELD and the window is focused — arrows the wheels (same speeds),
 # W/S tilt and A/D pan the head, Shift slow, Space stops all, Esc quits. It talks to the base server
@@ -21,22 +20,13 @@ BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
 HERE="$(cd "$(dirname "$0")" && pwd)"
 MAPNAME="${1:-}"
-TELEOP="${PEPIN_TELEOP:-keys}"
-TWIST_KEYBOARD="docker exec -it pepin-ros /pepin_entrypoint.sh ros2 run teleop_twist_keyboard teleop_twist_keyboard --ros-args -p speed:=0.12 -p turn:=0.5 -p repeat_rate:=5.0"
 
-drive_by_keys() {
-    if [ "$TELEOP" = "twist_keyboard" ]; then
-        ssh -t "root@$BOARD" "$TWIST_KEYBOARD" || true
-    else
-        docker exec -it pepin-vslam /pepin_entrypoint.sh python3 -m pepin_bringup.teleop_keys || true
-    fi
+drive_by_keys() {  # teleop_keys sends its own zero twist on Ctrl-C
+    docker exec -it pepin-vslam /pepin_entrypoint.sh python3 -m pepin_bringup.teleop_keys || true
 }
 
 if [ -z "$MAPNAME" ]; then
     drive_by_keys
-    if [ "$TELEOP" = "twist_keyboard" ]; then  # teleop_keys sends its own zero twist on Ctrl-C
-        ssh "root@$BOARD" "docker exec pepin-ros /pepin_entrypoint.sh ros2 topic pub --once /cmd_vel geometry_msgs/msg/Twist '{}' >/dev/null 2>&1" || true
-    fi
     exit 0
 fi
 

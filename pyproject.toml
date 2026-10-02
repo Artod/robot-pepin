@@ -113,21 +113,13 @@ exclude = ["^src/pepin/vendor/", "^ros/sim/.*\\.launch\\.py$"]
 module = [
     "pepin_bringup.*",
     "bag_to_tape",
-    "base_bridge",
-    "call",
-    "draw_snapshot",
     "export_world",
     "goto_ros",
-    "load_map",
     "npz_to_map",
-    "scan_latency",
     "score",
     "session_logger",
     "sim_world",
-    "snapshot_ros",
-    "tof_bridge",
     "topic_rate",
-    "yaw_check",
 ]
 disallow_subclassing_any = false
 disallow_any_generics = false

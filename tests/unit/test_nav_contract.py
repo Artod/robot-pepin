@@ -653,30 +653,6 @@ def test_the_recorder_is_its_own_node_beside_the_goal_server() -> None:
     assert {"RUN_COMMAND_TOPIC", "RUN_STATUS_TOPIC"} <= sf.names(server)
 
 
-def test_both_doors_to_a_goal_open_the_numbered_tape() -> None:
-    """Two clients send this robot to a place: the goal server (ros/go.sh) and goto_ros.py
-    (ros/goto.sh). Only the first ever asked the recorder for a tape, so every drive started at
-    the second went unrecorded by it while its own session log kept running — the numbered tapes
-    stop at 0248 on 2026-09-13 18:00 and the goto ones continue to midnight. Both speak
-    pepin.runlink now, and goto names the tape it got in its own log."""
-    goto = sf.tree("ros/tools/goto_ros.py")
-    assert {"RUN_COMMAND_TOPIC", "RUN_STATUS_TOPIC"} <= sf.names(goto)
-    assert {"start_command", "stop_command"} <= sf.calls(goto)
-    # ...and the drive must actually use it: the protocol being imported proved nothing about
-    # the goal path calling it, which is exactly how this went unnoticed for four hours.
-    assert {"Tape", "tape.open"} <= sf.calls(goto)
-    # ``tape.close`` may be CALLED or handed to the shutdown's guard (2026-09-18: every step of an
-    # interrupt runs through `guarded` so one failure cannot swallow the next), so the contract is
-    # that the closing happens at all, not the spelling of the call.
-    assert "tape.close" in sf.calls(goto) or "tape.close" in {
-        ast.unparse(n) for n in ast.walk(goto) if isinstance(n, ast.Attribute)
-    }, "the drive must close the tape it opened"
-    assert any("taped" in text for text in sf.strings(goto)), "the log must name the tape"
-    assert "--no-tape" in sf.strings(goto), "the drive without a numbered tape stays reachable"
-    script = (REPO / "ros/goto.sh").read_text()
-    assert "taped /maps/rec/" in script and "NO TAPE" in script, "the operator is told either way"
-
-
 def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_served() -> None:
     """One map: rtabmap_frame relays RTAB-Map's grid onto /map and both costmaps' static layers
     read THAT. The topic is written as a literal in both places and held equal here; no pgm is
@@ -694,49 +670,6 @@ def test_the_static_layers_read_the_map_rtabmap_frame_relays_and_no_pgm_is_serve
     }, "rtabmap_frame must carry the same literal"
     launch = (REPO / "ros/pepin_bringup/launch/nav.launch.py").read_text()
     assert "nav2_map_server" not in launch and '"map_server"' not in launch
-
-
-def test_ctrl_c_cancels_the_goal_before_it_can_do_anything_else() -> None:
-    """The contract the two rocking-chair legs broke (2026-09-17): rclpy's own SIGINT handler had
-    torn the context down, the interrupt handler's first statement created a publisher for a note,
-    that raised, and the cancel on the next line never ran — the goal stayed alive on the board.
-    So: rclpy must not take SIGINT, and the interrupt path's first act is the cancel."""
-    goto = sf.tree("ros/tools/goto_ros.py")
-    init = sf.calls_to(goto, "rclpy.init")
-    assert init and all(
-        any(kw.arg == "signal_handler_options" for kw in call.keywords) for call in init
-    ), "rclpy must be told not to shut the context down under the handler"
-    handler = next(
-        node
-        for node in ast.walk(goto)
-        if isinstance(node, ast.FunctionDef) and node.name == "interrupted"
-    )
-    first = next(
-        sf.dotted(n.func)
-        for n in ast.walk(handler)
-        if isinstance(n, ast.Call) and sf.dotted(n.func) in {"guarded", "note", "nav.cancelTask"}
-    )
-    assert first == "guarded", "the cancel goes through the guard, first"
-    guards = [
-        n for n in ast.walk(handler) if isinstance(n, ast.Call) and sf.dotted(n.func) == "guarded"
-    ]
-    assert ast.unparse(guards[0].args[1]) == "nav.cancelTask", ast.unparse(guards[0])
-
-
-def test_goto_judges_a_goal_on_the_map_frame_and_the_placement_not_on_a_fit() -> None:
-    """goto's localisation gate once asked two services only the board tracker ran (/where_am_i,
-    /relocalize) and refused goals after ten seconds of waiting for them (2026-09-14 20:00). The
-    evidence is the map frame itself — RTAB-Map's map -> odom with the board's odometry, younger
-    than a second — and the placement word."""
-    goto = sf.tree("ros/tools/goto_ros.py")
-    defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
-    assert "map_frame_age_s" in defined and "tracker_here" not in defined
-    gate = next(
-        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
-    )
-    body = ast.unparse(gate)
-    assert "Preflight.placement" in body, "the placement word is asked"
-    assert "map_frame_age_s(nav)" in body and "MAP_FRAME_FRESH_S" in body
 
 
 def test_one_recorder_writes_a_drive_not_two() -> None:
@@ -2627,20 +2560,6 @@ def test_the_visual_memory_survives_a_kill_and_the_launches_wait_for_it_to_close
         )
         first = ast.unparse(sf.calls_to(launch, "LaunchDescription")[0].args[0].elts[0])
         assert first == "*SHUTDOWN", f"{path}: the budget must be set before anything it covers"
-
-
-def test_goto_prints_a_preflight_before_it_sends_a_goal() -> None:
-    """One line per check, and a refusal names the reading behind it. The old gate printed
-    "localized: fit 0.78" or "not localized" — a verdict with no evidence in it."""
-    goto = sf.tree("ros/tools/goto_ros.py")
-    defined = {f.name for f in ast.walk(goto) if isinstance(f, ast.FunctionDef)}
-    assert {"ensure_localized", "cancel_all"} <= defined
-    gate = next(
-        f for f in ast.walk(goto) if isinstance(f, ast.FunctionDef) and f.name == "ensure_localized"
-    )
-    body = ast.unparse(gate)
-    assert "placed.line()" in body, "the placement check prints its own line"
-    assert "preflight frame" in body, "and so does the frame's"
 
 
 def test_goto_s_cancel_cancels_a_goal_it_never_sent() -> None:

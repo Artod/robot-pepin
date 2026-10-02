@@ -17,9 +17,9 @@ recording can no longer outlive its run.
 
 A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (since 2026-09-25): both
 navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
-asks them, so a drive ``ros/goto.sh`` started through goto_ros.py is stopped from here too — by a
-socket write from the laptop (pepin.goal_link) instead of a fresh ROS process on the board, whose
-new zenoh session stalls every laptop -> board stream for about three seconds.
+asks them, so a goal any client sent is stopped from here too — by a socket write
+(pepin.goal_link) instead of a fresh ROS process, whose new zenoh session stalls every
+laptop -> board stream for about three seconds.
 
 WHERE THE POSE COMES FROM. The laptop's RTAB-Map owns ``map -> odom`` (one localiser,
 2026-09-22), so this node reads ``map -> base_link`` from TF and judges a goal by how fresh that
@@ -134,8 +134,7 @@ FLAGS = FlagSet(
         description="a goal or a mark waits for the laptop's word"
         f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
         " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
-        " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
-        " this same flag before its own preflight. Off, a fresh map -> base_link is enough, as"
+        " nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as"
         " before 2026-09-23",
         why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the"
         " pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation"

@@ -169,7 +169,7 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             *SHUTDOWN,
-            DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
+            DeclareLaunchArgument("map", default_value="/maps/flat3_straight.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
             # jsonl: the Python recorder writes the numbered tape. bag: `ros2 bag record` writes
             # an MCAP bag instead and ros/tools/bag_to_tape.py makes the tape from it

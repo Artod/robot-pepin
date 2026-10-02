@@ -320,10 +320,10 @@ FLAGS = FlagSet(
         description=f"what goes out on {PLACEMENT_TOPIC} (latched) says this start of RTAB-Map"
         " is PLACED only once an update has recognised a node of the database it loaded, or an"
         f" operator's seed ({RTABMAP_INITIAL_POSE}) has been heard since its first update — or it"
-        " loaded an empty database, whose start pose is the map's origin. The board's goal"
-        " clients (ros/tools/goto_ros.py, pepin_bringup.goal_server) refuse a goal"
-        " until then, saying to seed or to let the camera see a mapped"
-        " place. Off, every start counts as placed: RTAB-Map's pose is taken as it is",
+        " loaded an empty database, whose start pose is the map's origin. The goal server"
+        " (pepin_bringup.goal_server) refuses a goal until then, saying to seed or to let the"
+        " camera see a mapped place. Off, every start counts as placed: RTAB-Map's pose is"
+        " taken as it is",
         why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the pose"
         " it SAVED at its last shutdown, before recognising anything, and the preflight took that"
         " fresh transform for a localisation — the cart was 'at home' while standing at the"

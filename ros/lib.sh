@@ -37,7 +37,6 @@ PEPIN_STOP_TIMEOUT_S="${PEPIN_STOP_TIMEOUT_S:-30}"  # = pepin.deployment.CONTAIN
 # other through the Mac's own router — which never sends that traffic over the WiFi.
 
 PEPIN_ZROUTER_PORT="${PEPIN_ZROUTER_PORT:-7447}"
-PEPIN_ZROUTER_BOARD=pepin-zrouter          # the board's router container (host network)
 PEPIN_ZROUTER_LAPTOP=pepin-zrouter-laptop  # the laptop's router container (on pepin-net)
 # What the two routers log, as their RUST_LOG (rmw_zenohd reads it; unset, it logs at info). On
 # 2026-09-23 the router-to-router session never came back after a Mac wake and BOTH routers said

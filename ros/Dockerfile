@@ -29,7 +29,7 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # them once for every consumer.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
-        ros-jazzy-laser-filters ros-jazzy-teleop-twist-keyboard \
+        ros-jazzy-laser-filters \
     && rm -rf /var/lib/apt/lists/*
 
 # LD19 lidar driver (maintained fork; the vendor's is unmaintained), built from source: the
@@ -101,8 +101,8 @@ RUN git clone --depth 1 -b jazzy https://github.com/ros2/ros2_tracing.git src/ro
     && cp -f install/tracetools/lib/libtracetools.so /opt/ros/jazzy/lib/libtracetools.so \
     && rm -rf build log src/ros2_tracing
 
-# Our bridge packages: the Python one (base server <-> /cmd_vel, /odom, TF; ToF -> Range) and
-# the C++ base bridge, same protocol at a tenth of the RAM (robot.launch.py picks one).
+# Our bridge packages: the Python one (ToF -> Range and scan fans, the neck, the laptop's nodes)
+# and the C++ base bridge (base server <-> /cmd_vel, /odom, the IMU).
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     apt-get update && apt-get install -y --no-install-recommends \
         nlohmann-json3-dev \
@@ -115,7 +115,7 @@ RUN . /opt/ros/jazzy/setup.sh \
         --cmake-args -DCMAKE_BUILD_TYPE=Release \
     && rm -rf build log
 
-# Operator tools run inside the container (goal client, snapshots, latency probe).
+# Operator tools run inside the container (the goal client, the session logger, probes).
 COPY tools /tools
 # Our pure-numpy library; ros/build-image.sh copies src/pepin here before building.
 COPY pepin_src /ws/pepin_src

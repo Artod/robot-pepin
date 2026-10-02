@@ -2,9 +2,9 @@
 
 The overview camera rides a two-servo neck: ``neck`` (id 9) pans about the vertical, ``head``
 (id 10) tilts about the camera's own y axis. Both are 12-bit encoders, 4096 ticks per turn,
-homed so that "straight ahead, level" reads near 2048 (scripts/calibrate_neck.py). This module
-turns ticks into radians and radians into ``base_link -> camera_link`` — pure, so the board's
-node only carries messages and a test can hold every number.
+homed so that "straight ahead, level" reads near 2048. This module turns ticks into radians and
+radians into ``base_link -> camera_link`` — pure, so the board's node only carries messages and a
+test can hold every number.
 
 The angle model is anchored at a *reference pose*, the pose the camera had when its mount
 (config/camera.json: 1.23 m up, 26 degrees down) was measured against the lidar, and the ticks

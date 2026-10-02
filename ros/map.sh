@@ -13,7 +13,7 @@ case "${1:-}" in
     save) ;;
     *) echo "usage: ros/map.sh save NAME"; exit 2 ;;
 esac
-NAME="${2:?a map name, e.g. flat3_slam}"
+NAME="${2:?a map name, e.g. flat4}"
 docker ps --format '{{.Names}}' | grep -qx pepin-vslam \
     || { echo "no pepin-vslam container: ros/laptop.sh vslam first"; exit 1; }
 # save_map_timeout: the grid arrives on the next publish (map_always_update: one a second), so

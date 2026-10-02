@@ -1,7 +1,7 @@
 """Every entry point answers --help: its imports resolve and its parser builds.
 
-The servo bench tools (jog, calibrate_neck, scan_bus, setup_motor_id) import
-lerobot, which pulls torch; they are left out to keep the unit tier fast.
+The servo bench tools (jog, setup_motor_id) import lerobot, which pulls torch; they are left
+out to keep the unit tier fast.
 """
 
 import json
@@ -15,7 +15,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PAN_REFERENCE = json.loads((REPO / "config/neck.json").read_text())["reference"]["pan_ticks"]
-BENCH = {"jog.py", "calibrate_neck.py", "scan_bus.py", "setup_motor_id.py"}
+BENCH = {"jog.py", "setup_motor_id.py"}
 SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
 
@@ -1307,17 +1307,16 @@ def _sync(tmp_path: Path, *args: str) -> tuple[int, str, list[str]]:
     return run.returncode, run.stdout + run.stderr, log.read_text().splitlines()
 
 
-@pytest.mark.slow  # four runs of the script, ~0.8 s
+@pytest.mark.slow  # three runs of the script, ~0.6 s
 def test_sync_puts_the_code_on_the_board_and_restarts_only_when_asked(tmp_path: Path) -> None:
     """A restart by default restarted the board for a laptop-only change (journal 2026-09-22);
-    ros/push.sh kicks the nodes a change reaches instead. --no-restart, the old spelling of the
-    default, still works; restart.sh --deploy asks for the restart by name."""
-    for name, args in (("plain", ()), ("old", ("--no-restart",))):
-        code, out, sent = _sync(tmp_path / name, *args)
-        assert code == 0, out
-        assert sum(c.startswith("rsync -a --delete") for c in sent) == 3
-        assert not any("restart" in c for c in sent), sent
-        assert "board.sh census" in sent
+    ros/push.sh kicks the nodes a change reaches instead; restart.sh --deploy asks for the
+    restart by name."""
+    code, out, sent = _sync(tmp_path / "plain")
+    assert code == 0, out
+    assert sum(c.startswith("rsync -a --delete") for c in sent) == 3
+    assert not any("restart" in c for c in sent), sent
+    assert "board.sh census" in sent
     code, out, sent = _sync(tmp_path / "restart", "--restart")
     assert code == 0, out
     assert any("restart pepin-zrouter && systemctl start pepin-ros" in c for c in sent), sent
