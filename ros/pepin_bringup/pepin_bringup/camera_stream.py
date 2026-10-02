@@ -41,9 +41,9 @@ built for, and a resized picture would cost the baseline its meaning.
 It also broadcasts the static ``base_link -> camera_link -> camera_optical`` and
 ``base_link -> laser`` transforms from the mounts of ``config/`` (:class:`pepin.mounts.Mounts`),
 so RTAB-Map knows where the pictures were taken from — the camera's own edge only while
-``static_camera_tf`` is true: with the board's neck node publishing base_link -> camera_link
-live from the servo encoders (pepin_bringup.neck_state, ros/feature.sh neck on) this side must
-not publish the same edge, and the launch passes the switch off (``ros/laptop.sh vslam --neck``).
+``static_camera_tf`` is true (``ros/laptop.sh vslam --fixed-head``): by default the board's neck
+node publishes base_link -> camera_link live from the servo encoders (pepin_bringup.neck_state,
+ros/feature.sh neck on) and this side must not publish the same edge.
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
@@ -149,13 +149,14 @@ FLAGS = FlagSet(
     ),
     Flag(
         "static_camera_tf",
-        True,
-        description="base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh"
-        " vslam --neck) when the board's neck node publishes that edge live from the servo"
+        False,
+        description="base_link -> camera_link is broadcast from here (ros/laptop.sh vslam"
+        " --fixed-head); off, the board's neck node publishes that edge live from the servo"
         " encoders (neck_state, flag neck_tf), because two publishers of one edge fight",
-        why="default by design, unmeasured: an ownership rule rather than a tuning — one edge,"
-        " one publisher. Not live because a static transform cannot be withdrawn once it is sent,"
-        " so the choice is made at start",
+        why="off since 2026-10-02 because the neck node runs on the board by default"
+        " (PEPIN_NECK=true, every vslam start since was --neck); an ownership rule rather than a"
+        " tuning — one edge, one publisher. Not live because a static transform cannot be"
+        " withdrawn once it is sent, so the choice is made at start",
         on_when="when the neck does not publish the edge: a fixed head, or the neck node down",
         off_when="whenever neck_state runs with neck_tf on — at start, since this one cannot be"
         " taken back",

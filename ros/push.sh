@@ -8,8 +8,8 @@
 # (the launch process keeps it), an image layer. Then, in this order:
 #   1. a refusal touches nothing (exit 2); --dry-run prints the plan and what would run, and stops
 #   2. the laptop's containers must mount THIS checkout: they read the sources live, no copy
-#   3. a process of ours the launch does not respawn (the Python base bridge, the link and bridge
-#      watches, RTAB-Map's XFeat adapters) that imports a change refuses the push while it runs
+#   3. a process of ours the launch does not respawn (RTAB-Map's XFeat adapters) that imports a
+#      change refuses the push while it runs
 #   4. rsync of exactly these files to the board, never --delete: the board writes files of its
 #      own beside ours (maps/rec)
 #   5. the kicks, all at once: ros/board.sh kick on the board, ros/laptop.sh kick here, each

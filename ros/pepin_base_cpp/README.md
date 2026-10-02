@@ -1,9 +1,11 @@
 # pepin_base_cpp
 
 The base bridge in C++: `/cmd_vel` down to the board's base server, its state stream up as
-`/odom` and `odom -> base_link`. Same node name, parameters and wire protocol as the Python
-`base_bridge` in `pepin_bringup`, which stays. Why: on the board each rclpy process costs
-~190 MB RSS and this node ~10% of a core; here it is ~25 MB and ~1%, and RAM runs out first.
+`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw` and the rest `/zupt`. It is the
+board's only base bridge: the Python one it was ported from (same node name, parameters and wire
+protocol) cost ~190 MB RSS and ~10% of a core, this one ~25 MB and ~1%, and RAM runs out first;
+that node is in git history before 2026-10-02. Its live switches are described in
+`pepin_bringup/base_bridge.py` (the `FLAGS` table ros/flags.sh reads).
 
 - `include/pepin_base_cpp/protocol.hpp` — the wire format, no ROS and no sockets in it.
 - `include/pepin_base_cpp/link.hpp` — reconnecting JSON-lines TCP client, one reader thread.
@@ -16,7 +18,7 @@ The base bridge in C++: `/cmd_vel` down to the board's base server, its state st
 ## IMU
 
 `imu_enable` (false), `imu_device` (/dev/i2c-2), `imu_address` (0x68), `imu_rate_hz` (50),
-`imu_frame` (imu_link), `imu_bias_s` (2.0), `imu_bias_tracking` (true): a thread samples an
+`imu_frame` (base_link), `imu_bias_s` (2.0), `imu_bias_tracking` (true): a thread samples an
 MPU6050 and publishes `imu/data_raw` without orientation; a missing chip is one warning and the
 wheels carry on. Registers PWR_MGMT_1 0x01, SMPLRT_DIV 1000/rate-1, CONFIG 0x03 (DLPF ~44 Hz),
 GYRO_CONFIG 0x08 (+-500 dps), ACCEL_CONFIG 0x08 (+-4 g), WHO_AM_I 0x68, 14 bytes from
@@ -80,8 +82,7 @@ without moving the parameters they come from. The table, the ranges and the line
 `ros/README.md` ("The base bridge's zero-velocity update"); the reasons for every default are in
 `zupt.hpp`. The report line names `zupt_publish=on|off`, and the zupt state ends the link-up and
 minute lines with every setting in force: `zupt publishing for N s, M sent [rate 10 Hz, var 1e-06
-xy 1e-06 yaw, settle 2 s, cmd hold 0.5 s, gyro quiet 0.005 rad/s]`. The Python bridge has no gyro
-and no update.
+xy 1e-06 yaw, settle 2 s, cmd hold 0.5 s, gyro quiet 0.005 rad/s]`.
 
 Board cost: one Odometry message per tick while parked (10 Hz by default, 100 at most), a timer
 at that rate and two atomic stores per IMU sample; no new process, no new thread.
@@ -92,8 +93,7 @@ at that rate and two atomic stores per IMU sample; no new process, no new thread
 `pepin_bringup` into `/ws/install`. A change here needs an image rebuild (`ros/build-image.sh --ship`),
 not `ros/sync.sh`: only the Python package is mounted from the host.
 
-    ros2 launch pepin_bringup robot.launch.py base_bridge_cpp:=true  # this node
-    ros2 launch pepin_bringup robot.launch.py                        # the Python one (default)
+    ros2 launch pepin_bringup robot.launch.py  # composed into base_container
 
 ## test/
 

@@ -215,8 +215,9 @@ def test_the_node_broadcasts_the_camera_s_two_edges_and_the_laser_s(build: Build
     """Three edges go out at start, from config/camera.json and config/lidar.json through
     pepin.mounts — the laser as well, because a static transform does not replay to a late
     joiner over the bridge. The laser's numbers are checked against the whole-config reader
-    (Mounts.load, what the board's launch calls): the narrow readers are the same parser."""
-    node, _ = build()
+    (Mounts.load, what the board's launch calls): the narrow readers are the same parser. The
+    camera's own edge needs the fixed-head switch (``ros/laptop.sh vslam --fixed-head``)."""
+    node, _ = build(static_camera_tf=True)
     assert edges(node) == [
         ("base_link", "camera_link"),
         ("camera_link", "camera_optical"),
@@ -229,10 +230,11 @@ def test_the_node_broadcasts_the_camera_s_two_edges_and_the_laser_s(build: Build
     assert (q.x, q.y, q.z, q.w) == pytest.approx(quaternion_from_rpy(roll, pitch, yaw))
 
 
-def test_the_camera_link_edge_is_left_to_the_board_when_the_switch_is_off(build: Build) -> None:
-    """With the board's neck node publishing base_link -> camera_link from the encoders, this
-    side must not publish its static copy: two publishers of one edge fight."""
-    node, _ = build(static_camera_tf=False)
+def test_the_camera_link_edge_is_left_to_the_board_by_default(build: Build) -> None:
+    """The board's neck node publishes base_link -> camera_link from the encoders (the default
+    since 2026-10-02), so this side must not publish its static copy: two publishers of one edge
+    fight."""
+    node, _ = build()
     assert edges(node) == [("camera_link", "camera_optical"), ("base_link", "laser")]
 
 
@@ -248,7 +250,7 @@ def test_the_node_reads_only_the_two_files_whose_frames_it_publishes(
     for name in ("camera.json", "lidar.json"):
         (tmp_path / name).write_text((CONFIG_DIR / name).read_text())
     (tmp_path / "tof.json").write_text("{ this is not json")  # and no imu.json at all
-    node, _ = build(config=str(tmp_path / "camera.json"))
+    node, _ = build(config=str(tmp_path / "camera.json"), static_camera_tf=True)
     assert edges(node) == [
         ("base_link", "camera_link"),
         ("camera_link", "camera_optical"),
@@ -364,7 +366,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "flags: undistort=off fold_mask=on static_camera_tf=on scale=0.5" in line
+    assert "flags: undistort=off fold_mask=on static_camera_tf=off scale=0.5" in line
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
 
@@ -387,9 +389,9 @@ def test_the_static_transform_switch_cannot_be_flipped_while_the_node_runs(build
     """It went out at start and a static transform cannot be withdrawn: the flag is declared
     not live, so the set is refused with that reason and the value stays."""
     node, _ = build()
-    refused = node.set_parameters([Param("static_camera_tf", False)])[0]
+    refused = node.set_parameters([Param("static_camera_tf", True)])[0]
     assert not refused.successful and "not live, set at the next start" in refused.reason
-    assert node._switches.on("static_camera_tf")
+    assert not node._switches.on("static_camera_tf")
 
 
 # ---- the way out -----------------------------------------------------------------------------
@@ -629,7 +631,7 @@ def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
     assert "stages: " in line and " ms median/p95" in line
     for stage in ("decode", "split", "rectify", "publish"):
         assert f"{stage} " in line.split("stages: ")[1]
-    assert "flags: undistort=off fold_mask=on static_camera_tf=on scale=1.0" in line
+    assert "flags: undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
 
 
 def test_a_stereo_frame_of_the_wrong_size_is_counted_and_named_in_the_report(
@@ -650,7 +652,9 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
     """The same three edges, from the camera the node is actually publishing: the link is the
     neck's under either head, and a stereo head's camera_link -> camera_optical carries its left
     eye's own offset where the webcam's is the bare REP 103 turn."""
-    node, _ = build(config=stereo_config(tmp_path, ideal_stereo_calibration()))
+    node, _ = build(
+        config=stereo_config(tmp_path, ideal_stereo_calibration()), static_camera_tf=True
+    )
     assert edges(node) == [
         ("base_link", "camera_link"),
         ("camera_link", "camera_optical"),
@@ -662,7 +666,7 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
     # the eye block as measured: y half the baseline (never measured), z the lens against the
     # link's height (+0.025 under the 09-21 tape, 0.0 since the module was re-taped 2026-09-30)
     assert eye.y == pytest.approx(0.0305) and eye.z == pytest.approx(0.0, abs=1e-9)
-    mono, _ = build()
+    mono, _ = build(static_camera_tf=True)
     assert mono._static.sent[0].transform.translation.y == 0.0
     lens = mono._static.sent[1].transform.translation
     assert (lens.x, lens.y, lens.z) == (0.0, 0.0, 0.0)
@@ -681,4 +685,4 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     assert (image.width, image.height) == (640, 360) and image.encoding == "bgr8"
     node._report()
     line = node.logger.texts("info")[-1]
-    assert line.endswith("flags: undistort=off fold_mask=on static_camera_tf=on scale=0.5")
+    assert line.endswith("flags: undistort=off fold_mask=on static_camera_tf=off scale=0.5")

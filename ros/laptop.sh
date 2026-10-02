@@ -21,8 +21,10 @@
 #   ros/laptop.sh vslam --vo-depth   the visual odometry reads the picture and the depth (rgbd_odometry)
 #                            at the depth's rate; the default reads the two eyes (stereo_odometry) at
 #                            the camera's: 8 poses/s, 0.15-0.2 s behind, measured at rest 2026-10-02
-#   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
-#                            neck on): the camera node here keeps its static edge off
+#   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
+#                            config/camera.json: for a run with the board's neck node off (ros/feature.sh
+#                            neck off). By default the neck node owns that edge; --neck, the old way to
+#                            say the default, is still accepted
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
 #   ros/laptop.sh vslam      runs the camera mapping container on pepin-laptop:xfeat whenever that
 #                            image exists and was built on the laptop image below
@@ -269,18 +271,20 @@ case "${1:-}" in
         # vo_publish true).
         VO=true
         VO_INPUT=stereo
-        # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
-        # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
-        # would be two publishers of one edge; the camera node's report warns of a mismatch.
-        STATIC_CAMERA_TF=true
+        # The board's neck node publishes base_link -> camera_link live (ros/feature.sh neck on, the
+        # default), so the camera node's static edge is off; --fixed-head puts it back for a run
+        # with the neck node off. A wrong choice is two publishers of one edge, or none; the
+        # camera node's report warns of a mismatch.
+        STATIC_CAMERA_TF=false
         for arg in ${*:2}; do
             case "$arg" in
                 --camera-only) CAMERA_ONLY=true ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
+                --fixed-head) STATIC_CAMERA_TF=true ;;
                 --no-vo) VO=false ;;
                 --vo-depth) VO_INPUT=depth ;;
-                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-depth]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth]"; exit 2 ;;
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads
@@ -373,5 +377,5 @@ case "${1:-}" in
             echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
         fi
         exit 0 ;;
-    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
 esac

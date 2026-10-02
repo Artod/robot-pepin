@@ -36,7 +36,7 @@ pepin-vslam: RTAB-Map (map -> odom), the        pepin-tof.service (:3335),
 | `ros/Dockerfile` | The board's sensor image: Jazzy base + nav2-lifecycle-manager (the lidar's only), laser-filters, robot-localization, foxglove-bridge, rmw_zenoh; the LD19 driver ([Myzhar/ldrobot-lidar-ros2](https://github.com/Myzhar/ldrobot-lidar-ros2)) and rf2o built from source; our `pepin_bringup` and `pepin_base_cpp`. No Nav2: `ros/Dockerfile.laptop` adds it |
 | `ros/run.sh` | the board's `docker run`: host networking, the lidar device, `ros/maps` (recordings) and `ros/params` (`ekf.yaml`) mounted |
 | `ros/pepin_bringup/` | ament_python package: `base_bridge`, `tof_bridge`, launch files |
-| `ros/pepin_base_cpp/` | ament_cmake package: the same base bridge in C++ (`base_bridge_cpp:=true`), ~25 MB instead of ~190 MB |
+| `ros/pepin_base_cpp/` | ament_cmake package: the board's base bridge in C++ (~25 MB; the Python one it replaced cost ~190 MB) |
 | `ros/params/` | Nav2 parameters for this cart (footprint, speeds, rates for a weak CPU) |
 | `ros/maps/` | Converted maps (`<name>.pgm` + `<name>.yaml`) |
 | `ros/tools/npz_to_map.py` | Our occupancy grid -> map_server format |
@@ -962,11 +962,11 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 
 | node | flag | kind | default | live | description |
 | --- | --- | --- | --- | --- | --- |
-| `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip |
+| `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published |
 | `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
-| `camera_stream` | `static_camera_tf` | bool | on | at start | base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh vslam --neck) when the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight |
+| `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight |
 | `contact_scan` | `contact_scan` | bool | on | yes | the contact line is published; off, the node is a subscriber that costs nothing — the costmap's own contact_layer.enabled is the other end of the same demo switch, and either one alone takes the camera's floor line out |
 | `contact_scan` | `shadow` | bool | on | yes | the last floor pixel on a face stands a band's width UP that face, so its ray lands past the foot: on, that width is taken back off the range (pepin.contact.band_shadow); off is the raw boundary ray |
 | `contact_scan` | `imu_lean` | bool | on | yes | the floor plane leans with the gyro as well as the accelerometer (pepin.lean: the lean of a wheel climbing a threshold is followed within a sample instead of being gated away as a push); off, the accelerometer alone, as it always has been |
@@ -1010,7 +1010,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
 | `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
 | `marks_audit` | `phantom_cloud` | bool | on | yes | the camera-only cells are published as red points on /marks_audit/phantoms; off, only the counts go out |
-| `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge |
+| `neck_state` | `neck_tf` | bool | on | yes | base_link -> camera_link is published live from the neck's encoders; the laptop's camera node then keeps its static edge off (ros/laptop.sh vslam's default, not --fixed-head), or two nodes publish that edge |
 | `places` | `publish_places` | bool | on | yes | the resolved places are published on /places whenever the graph moves; off, the book is still kept and marked but nothing is published and every consumer falls back to the coordinates beside the map |
 | `places` | `label_nodes` | bool | on | yes | a mark also sets RTAB-Map's own label on the node (set_label), which is what makes the place a thing in its tools and in its set_goal; off, only our own book records the node id and the offset |
 | `rtabmap_frame` | `registration_follows_snapshots` | bool | on | yes | RTAB-Map's Reg/Strategy follows what the snapshots carry (/sensor_pack/state): a scan and a picture mean visual then ICP (2), a scan alone means ICP (1), no scan means visual (0), switched live through the node's own parameter path on a change that has held for the hold the state carries. Off, the strategy stays whatever the launch table set and this node only reports what it would have asked for |
@@ -1036,7 +1036,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 #### `base_bridge`
 
 - **`imu_publish`** — bool, default on
-  - *What:* the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published. THE PYTHON BRIDGE PUBLISHES NO IMU AT ALL — here the flag only exists so the node's table is the same table whichever bridge robot.launch.py started; the C++ bridge is the one that reads the chip
+  - *What:* the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published
   - *Default:* on — on, because the gyro is the heading: the wheels over-report a turn in place by 10-25 % on carpet, and odom0's vyaw — the only other yaw-rate source, live since 2026-09-15 — carries about 4 % of the weight beside it (ros/params/ekf.yaml)
   - *On when:* always, unless the point of the run is what the stack does without a gyro
   - *Off when:* for one test of the heading on the wheels alone, or to see an EKF meet its sensor_timeout on a source that is simply gone; unmute and the rate is back within one IMU period (100 Hz)
@@ -1058,9 +1058,9 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
   - *Default:* on — measured 2026-09-24 (scratch/stereo/fold_check.py): the left eye's map folds back in both bottom corners, 0.4 % of the picture, the 'crack' Artem saw, and camera phantoms lined up along it
   - *On when:* always on a stereo head calibrated without the corners
   - *Off when:* a calibration that covers the corners (fold_check.py finds no fold)
-- **`static_camera_tf`** — bool, default on, not live
-  - *What:* base_link -> camera_link is broadcast from here; it goes off (ros/laptop.sh vslam --neck) when the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight (not live: set at the next start)
-  - *Default:* on — default by design, unmeasured: an ownership rule rather than a tuning — one edge, one publisher. Not live because a static transform cannot be withdrawn once it is sent, so the choice is made at start
+- **`static_camera_tf`** — bool, default off, not live
+  - *What:* base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's neck node publishes that edge live from the servo encoders (neck_state, flag neck_tf), because two publishers of one edge fight (not live: set at the next start)
+  - *Default:* off — off since 2026-10-02 because the neck node runs on the board by default (PEPIN_NECK=true, every vslam start since was --neck); an ownership rule rather than a tuning — one edge, one publisher. Not live because a static transform cannot be withdrawn once it is sent, so the choice is made at start
   - *On when:* when the neck does not publish the edge: a fixed head, or the neck node down
   - *Off when:* whenever neck_state runs with neck_tf on — at start, since this one cannot be taken back
 
@@ -1297,7 +1297,7 @@ imu off` — restarts the board stack: a minute, and every live flag on it back 
 #### `neck_state`
 
 - **`neck_tf`** — bool, default on
-  - *What:* base_link -> camera_link is published live from the neck's encoders; the laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes publish that edge
+  - *What:* base_link -> camera_link is published live from the neck's encoders; the laptop's camera node then keeps its static edge off (ros/laptop.sh vslam's default, not --fixed-head), or two nodes publish that edge
   - *Default:* on — the encoders are honest and their signs are checked by hand: the tilt reads 26 -> 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same ticks every time, a read costs 9.7 ms, and the tick scale solved from the level frames is 1.067 true degrees per commanded degree, so 360/4096 stands (scratch/neck_tilt_scale.txt). At the reference pose the live transform equals the static one, so turning it on moves nothing until the head does
   - *On when:* whenever the head moves at all: with it off a turned head is a camera the map places where it is not
   - *Off when:* when the laptop broadcasts the static edge instead (camera_stream's static_camera_tf), or when the neck bus is suspect and a frozen edge is better than a wrong one
@@ -1470,8 +1470,8 @@ the node restarts. Where the code already names the number, a unit test holds th
 ## The base bridge's zero-velocity update
 
 The C++ base bridge's own switches, beside `imu_publish` and `odom_publish` above; they live here
-because the table above is generated from the Python nodes, and the Python bridge has no gyro and
-no update. While the cart is certainly standing still the bridge publishes `/zupt` — a twist of
+because the table above is generated from the Python nodes' tables and these are declared in
+C++ alone. While the cart is certainly standing still the bridge publishes `/zupt` — a twist of
 exactly zero, the EKF's `odom2` (vx, vy, vyaw; `ros/params/ekf.yaml`) — and nothing otherwise.
 Certainly still is three witnesses at once: the wheels at rest for `zupt_settle_s`, no non-zero
 `/cmd_vel` younger than `zupt_cmd_hold_s`, and the bias-corrected gyro under
@@ -2052,9 +2052,8 @@ routes takes `/global_costmap/costmap`, `/amcl_path`, `/tof/*` and friends out o
 puts them back under a new id a second later. No bridge parameter can hold those open.
 
 The bridge is the LAPTOP's (`ros/laptop.sh vslam`), which sees the board's topics through the
-zenoh bridge; the board's own bridge is off since 2026-09-14 (it cost a second serialisation of
-every topic on four A53 cores) and comes back with `robot.launch.py foxglove:=true`, on
-`ws://pepin.local:8765`. Layouts live in `ros/foxglove/` (`pepin_slam.json` is the driving one);
+zenoh bridge; the board runs none since 2026-09-14 (it cost a second serialisation of every
+topic on four A53 cores; the launch switch went on 2026-10-02). Layouts live in `ros/foxglove/` (`pepin_slam.json` is the driving one);
 send a goal with the "Publish" panel on `/goal_pose` (`geometry_msgs/PoseStamped`, frame `map`).
 
 ## At boot

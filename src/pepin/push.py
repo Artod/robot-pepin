@@ -70,22 +70,6 @@ class Held:
 
 HELD: tuple[Held, ...] = (
     Held(
-        "base_bridge",
-        "board",
-        "pepin-ros",
-        ("-f", "pepin_bringup[./]base_bridge"),
-        ("pepin_bringup.base_bridge",),
-        "the Python base bridge (PEPIN_CPP_BRIDGE=false), not respawned",
-    ),
-    Held(
-        "bridge_watch",
-        "laptop",
-        "pepin-vslam",
-        ("-f", "pepin_bringup[./]bridge_watch"),
-        ("pepin_bringup.bridge_watch",),
-        "the bridge watch (PEPIN_RMW=cyclone): its exit shuts the launch down",
-    ),
-    Held(
         "rtabmap",
         "laptop",
         "pepin-vslam",
@@ -94,9 +78,6 @@ HELD: tuple[Held, ...] = (
         "RTAB-Map, which loads the XFeat adapters once at start",
     ),
 )
-
-# Modules started as processes that exec into the node they wrap: fresh at every start.
-FRESH_EACH_START = ("pepin_bringup.ghost_wait",)
 
 # Our long-lived processes outside the ROS containers, which no push reaches.
 HOST_SERVICES: dict[str, str] = {

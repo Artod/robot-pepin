@@ -63,9 +63,9 @@ triple — this node does not start and RTAB-Map subscribes to the picture, the 
 itself, :data:`TRIPLE_SUBSCRIPTIONS`), ``neighbor_refining`` (whether ICP refines the neighbour
 links and stiffens them with its own covariance — false, or no closure the graph finds survives
 RGBD/OptimizeMaxError), ``vo``, ``database`` (empty: :data:`DATABASE`), ``static_camera_tf``
-(default true: the camera node broadcasts base_link -> camera_link from config/camera.json; false
-when the board's neck node publishes that edge live — ros/feature.sh neck on, ``ros/laptop.sh
-vslam --neck`` — since two publishers of one edge fight), ``camera`` (which rig of
+(default false: the board's neck node publishes base_link -> camera_link live, ros/feature.sh
+neck on; true, ``ros/laptop.sh vslam --fixed-head``, the camera node broadcasts it from
+config/camera.json — never both, since two publishers of one edge fight), ``camera`` (which rig of
 config/camera.json the head is; empty, the default, means that file's own ``"active"`` or
 ``PEPIN_CAMERA`` — :func:`camera_rig` resolves it once for the whole launch and the report line
 names it).
@@ -1121,7 +1121,7 @@ def generate_launch_description() -> LaunchDescription:
             # node's own `marks_audit` flag switches it off live without a restart.
             DeclareLaunchArgument("marks_audit", default_value="true"),
             DeclareLaunchArgument("database", default_value=""),  # empty: DATABASE
-            DeclareLaunchArgument("static_camera_tf", default_value="true"),
+            DeclareLaunchArgument("static_camera_tf", default_value="false"),
             # WHICH CAMERA the head is, by the name of a block in config/camera.json ("overview",
             # the mono webcam; "stereo", the side-by-side module). Empty — the default — leaves it
             # to PEPIN_CAMERA in the container (ros/laptop.sh forwards it) and then to that file's

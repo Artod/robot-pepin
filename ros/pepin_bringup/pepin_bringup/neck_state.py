@@ -37,9 +37,10 @@ commands a move can close that (scratch/neck_aware/DESIGN.md).
 in config/neck.json were read at the measured mount pose and both servo signs were verified by
 moving the head by hand while watching /neck/state (config/neck.json says how, and how to redo
 it after the neck is re-assembled). With the reference null again the transform is the static
-mount at any head pose. The laptop's camera node must run with ``ros/laptop.sh vslam --neck``
-whenever this is on, or two nodes publish base_link -> camera_link; ``ros/flags.sh set
-neck_state neck_tf false`` hands the edge back to the laptop's static one.
+mount at any head pose. The laptop's camera node keeps its static edge off whenever this is on
+(``ros/laptop.sh vslam``'s default), or two nodes publish base_link -> camera_link; with
+``ros/flags.sh set neck_state neck_tf false`` the edge comes back only from a camera node
+started with ``ros/laptop.sh vslam --fixed-head``.
 """
 
 from __future__ import annotations
@@ -77,8 +78,8 @@ FLAGS = FlagSet(
         "neck_tf",
         True,
         description="base_link -> camera_link is published live from the neck's encoders; the"
-        " laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes"
-        " publish that edge",
+        " laptop's camera node then keeps its static edge off (ros/laptop.sh vslam's default,"
+        " not --fixed-head), or two nodes publish that edge",
         why="the encoders are honest and their signs are checked by hand: the tilt reads 26 ->"
         " 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left"
         " (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same"

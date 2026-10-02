@@ -2,8 +2,7 @@
 
 The board is a sensor box; navigation runs on the laptop. This file includes robot.launch.py
 under the container's stop window and passes on the switches of the board's unit
-(board/pepin-ros.service): ``base_bridge_cpp``, ``imu``, ``ekf``, ``laser_odom``, ``tof``,
-``neck``, ``board_bag``.
+(board/pepin-ros.service): ``imu``, ``ekf``, ``laser_odom``, ``tof``, ``neck``, ``board_bag``.
 """
 
 import os
@@ -37,7 +36,6 @@ def generate_launch_description() -> LaunchDescription:
     robot = IncludeLaunchDescription(
         PythonLaunchDescriptionSource(os.path.join(launch_dir, "robot.launch.py")),
         launch_arguments={
-            "base_bridge_cpp": LaunchConfiguration("base_bridge_cpp"),
             "imu": LaunchConfiguration("imu"),
             "ekf": LaunchConfiguration("ekf"),
             "laser_odom": LaunchConfiguration("laser_odom"),
@@ -49,12 +47,11 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             *SHUTDOWN,  # before the include: a scoped include inherits what is set above it
-            DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
-            DeclareLaunchArgument("imu", default_value="false"),
+            DeclareLaunchArgument("imu", default_value="true"),
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
-            DeclareLaunchArgument("tof", default_value="false"),
-            DeclareLaunchArgument("neck", default_value="false"),
+            DeclareLaunchArgument("tof", default_value="true"),
+            DeclareLaunchArgument("neck", default_value="true"),
             DeclareLaunchArgument("board_bag", default_value="false"),
             robot,
         ]

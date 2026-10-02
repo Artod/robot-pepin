@@ -213,7 +213,7 @@ switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
             # REFUSED since 2026-09-24: deactivating the LD19 driver ABORTS its process ("*** bit
             # out of range 0 - FD_SETSIZE on fd_set ***", exit -6, a select() on the descriptor its
             # own close invalidated). In the shared sensors_container of before that took the wheels
-            # and the IMU down for hours; in the split one (sensor_split) the lidar process simply
+            # and the IMU down for hours; in its own lidar_container the lidar process simply
             # respawns 2 s later and the driver is active again, so a hard off can hold neither way.
             # A camera-only cart is 'lidar off' (the layers) plus sensor_pack sources=camera; a dead
             # lidar is simulated by killing the lidar_container process (it respawns).

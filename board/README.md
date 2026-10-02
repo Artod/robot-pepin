@@ -17,15 +17,16 @@ switches the ToF bridge and the neck's encoders. Its router is
 
 | Switch (`/etc/default/pepin-ros`) | `ros/feature.sh` | Default |
 | --- | --- | --- |
-| `PEPIN_CPP_BRIDGE` | `cpp on\|off` | false |
-| `PEPIN_IMU` | `imu on\|off` | false |
+| `PEPIN_IMU` | `imu on\|off` | true |
 | `PEPIN_EKF` | `ekf on\|off` | true |
 | `PEPIN_LASER_ODOM` | `laser_odom on\|off` | true |
-| `PEPIN_TOF` | `tof on\|off` | false |
-| `PEPIN_NECK` | `neck on\|off` | false |
+| `PEPIN_TOF` | `tof on\|off` | true |
+| `PEPIN_NECK` | `neck on\|off` | true |
+| `PEPIN_BOARD_BAG` | `board_bag on\|off` | false |
 
-Lines a board still carries from before 2026-10-01 (`PEPIN_NAV`, `PEPIN_SLAM_TOOLBOX`,
-`PEPIN_MAP`, `PEPIN_SIDE`, `PEPIN_RECORDER`) are read by nothing on the board.
+Lines a board still carries from before 2026-10-02 (`PEPIN_CPP_BRIDGE`, `PEPIN_NAV`,
+`PEPIN_SLAM_TOOLBOX`, `PEPIN_MAP`, `PEPIN_SIDE`, `PEPIN_RECORDER`) are read by nothing on the
+board: the base bridge is always the C++ one.
 
 The image is built on the Mac (same arm64 architecture, minutes instead of the
 board's half hour) and loaded here over ssh: `ros/build-image.sh --ship` with the

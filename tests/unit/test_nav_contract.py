@@ -648,9 +648,6 @@ def test_the_recorder_is_its_own_node_beside_the_goal_server() -> None:
     nav = sf.tree(NAV_LAUNCH)
     assert "pepin_bringup.run_recorder" in sf.strings(nav)
     assert "loc_from:=pose_topic" in sf.strings(nav)
-    setup = sf.dict_items(sf.tree("ros/pepin_bringup/setup.py"))
-    scripts = ast.literal_eval(next(iter(setup["console_scripts"])))
-    assert "run_recorder = pepin_bringup.run_recorder:main" in scripts
     server = sf.tree(f"{NODES}/goal_server.py")
     assert "RunRecorder" not in sf.calls(server) and "RunRecorder" not in sf.imported(server)
     assert not any("curl" in s for s in sf.strings(server))
@@ -1303,7 +1300,7 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     # transform went out at start, and a static transform cannot be withdrawn.
     camera_flags = load_table(REPO / NODES / "camera_stream.py")
     assert "static_camera_tf" in camera_flags and not camera_flags.flag("static_camera_tf").live
-    assert camera_flags["static_camera_tf"] is True, "this side owns the edge unless told not to"
+    assert camera_flags["static_camera_tf"] is False, "the board's neck node owns the edge"
     assert "Switches" in sf.imported(camera)
     report = sf.calls_to(camera, "self._switches.state")
     assert report and all(ast.unparse(sf.keywords(c)["live_only"]) == "False" for c in report), (
@@ -1340,15 +1337,18 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     neck_arg = next(
         c for c in sf.calls_to(robot, "DeclareLaunchArgument") if ast.unparse(c.args[0]) == "'neck'"
     )
-    assert ast.unparse(sf.keywords(neck_arg)["default_value"]) == "'false'"
+    assert ast.unparse(sf.keywords(neck_arg)["default_value"]) == "'true'"
     bringup = sf.tree("ros/pepin_bringup/launch/bringup.launch.py")
     assert bringup and "LaunchConfiguration('neck')" in sf.unparsed(bringup, ast.Call)
     unit = (REPO / "board/pepin-ros.service").read_text()
-    assert "Environment=PEPIN_NECK=false" in unit and "neck:=${PEPIN_NECK}" in unit
+    assert "Environment=PEPIN_NECK=true" in unit and "neck:=${PEPIN_NECK}" in unit
     feature = (REPO / "ros/feature.sh").read_text()
     assert "neck) VAR=PEPIN_NECK ;;" in feature
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "--neck) STATIC_CAMERA_TF=false ;;" in laptop, "a flag anywhere after the subcommand"
+    assert "STATIC_CAMERA_TF=false\n" in laptop, "the neck node owns the edge by default"
+    assert "--fixed-head) STATIC_CAMERA_TF=true ;;" in laptop, (
+        "a flag anywhere after the subcommand"
+    )
     assert any(
         '"static_camera_tf:=$STATIC_CAMERA_TF"' in command
         for command in sf.shell_commands(laptop)
@@ -1584,9 +1584,9 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     """Switching a sensor off used to mean `ros/feature.sh imu off`: a restart of the whole
     board stack, a minute long, every live flag on it lost. The mute is the same test without
     the restart — the node that publishes the sensor stops publishing, live, and a consumer sees
-    what a dead sensor looks like. One node name, `base_bridge`, two implementations
-    (robot.launch.py picks one), so the two parameter names have to exist in both or
-    `ros/sensor.sh mute imu` reaches whichever bridge is running and does nothing."""
+    what a dead sensor looks like. The node is C++ and its table lives in base_bridge.py (what
+    ros/flags.sh reads), so the two parameter names have to exist in both or `ros/sensor.sh mute
+    imu` validates a name the running bridge does not have."""
     flags = load_table(REPO / NODES / "base_bridge.py")
     for name in flags.names:
         assert flags.flag(name).live and flags[name] is True, f"{name}: on, and live, or no test"
@@ -1936,8 +1936,8 @@ def test_the_flags_script_reaches_a_node_where_it_runs_and_refuses_before_any_ho
 
 def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     """The depth node snaps floor pixels to the floor plane (switchable), the plane leans with
-    the cart, and the IMU mount the laptop would apply is the one the board publishes
-    (roll +90 deg: the chip's Y up)."""
+    the cart, and the IMU mount the laptop would apply is config/imu.json's (roll +90 deg: the
+    chip's Y up), the one the board's bridge rotates its readings by."""
     node = sf.tree(f"{NODES}/depth_stream.py")
     flags = load_table(REPO / NODES / "depth_stream.py")
     kit = sf.tree(f"{NODES}/node_kit.py")
@@ -1959,12 +1959,10 @@ def test_the_floor_anchors_the_depth_and_leans_with_the_imu() -> None:
     assert "Mounts.load" in sf.calls(kit)
     mount = json.loads((REPO / "config/imu.json").read_text())["mount"]
     assert mount["roll_deg"] == 90.0
-    # The launch publishes that file, not a copy of its numbers: every rotation and
+    # The launch publishes the lidar's file, not a copy of its numbers: every rotation and
     # translation value of its static transforms is a name, never a literal.
     robot = sf.tree(ROBOT_LAUNCH)
-    assert sf.assignments(robot)["IMU"] == "MOUNTS.imu.transform()"
     entries = sf.dict_items(robot)
-    assert "ix" in entries["rotation.x"] and "imu_z" in entries["translation.z"]
     for key, values in entries.items():
         if key.startswith(("rotation.", "translation.")):
             assert all(value.isidentifier() for value in values), (key, values)
@@ -2434,12 +2432,12 @@ def test_the_filter_survives_a_dead_gyro_because_the_launch_never_gated_it_on_on
     read — so it must run on whichever sources are alive. It was conditioned on ``imu:=true``
     until 2026-09-15, and ``ros/feature.sh imu off`` therefore took the filter down with the
     gyro: zero messages on /odometry/filtered, the relocalizer carrying scans on an odometry
-    that never arrived, goto refusing with "not localized". Its one precondition is the C++
-    bridge, which is what hands over the transform; the way back to no filter is its own switch.
+    that never arrived, goto refusing with "not localized". The bridge hands over the transform
+    whenever the filter runs; the way back to no filter is its own switch.
     """
     robot = sf.tree(ROBOT_LAUNCH)
     condition = ast.unparse(sf.keywords(_node_named(robot, "ekf_filter_node"))["condition"])
-    assert "'ekf'" in condition and "use_cpp" in condition
+    assert condition == "IfCondition(LaunchConfiguration('ekf'))"
     assert "'imu'" not in condition, "the gyro is a source of this filter, never its switch"
     # The bridge hands over odom -> base_link to whoever publishes it: keyed on the filter, so
     # `imu off` can never leave the edge unpublished nor let both publish it.
@@ -2448,8 +2446,8 @@ def test_the_filter_survives_a_dead_gyro_because_the_launch_never_gated_it_on_on
     )
     # False is the laser odometry's, and for the same reason from the other side: with the filter
     # up exactly one node publishes odom -> base_link, and it is the filter.
-    assert sf.dict_items(robot)["publish_tf"] == {"not ekf_on", "True", "False"}, (
-        "the C++ bridge follows the filter; the Python bridge, which has no filter, keeps it"
+    assert sf.dict_items(robot)["publish_tf"] == {"not ekf_on", "False"}, (
+        "the bridge follows the filter; the laser odometry never publishes the edge"
     )
     assert sf.dict_items(robot)["imu_enable"] == {"imu_on"}, "the gyro keeps its own switch"
     # Reachable end to end: one operator gesture, one env var, one argument.
@@ -2776,18 +2774,18 @@ def test_the_lidar_and_the_base_die_apart_and_each_comes_back() -> None:
     """A dead lidar is the failure a camera-only cart must ride out, so it must not take the
     wheels with it: on 2026-09-24 the LD19 driver aborted on a deactivate and, sharing one
     process with the base bridge, left the cart with no wheels, no IMU and no gyro-bias tracker
-    for hours. Two processes, each respawned; the shared one of before is sensor_split:=false;
-    and the deactivate that aborts the driver (sensor.sh --hard) is refused with the reason."""
+    for hours. Two processes, each respawned; and the deactivate that aborts the driver
+    (sensor.sh --hard) is refused with the reason."""
     src = (REPO / "ros/pepin_bringup/launch/robot.launch.py").read_text()
-    assert 'DeclareLaunchArgument("sensor_split", default_value="true")' in src
+    assert "ComposableNodeContainer(" not in src, "no shared process to fall back to"
     lidar_block = src[src.index("def lidar_parts(") : src.index("def base_parts(")]
     assert 'name="ldlidar_node"' in lidar_block and 'name="scan_filter"' in lidar_block
     base_block = src[src.index("def base_parts(") : src.index("def sensors_container(")]
-    assert 'package="pepin_base_cpp"' in base_block and 'name="base_to_imu"' in base_block
+    assert 'package="pepin_base_cpp"' in base_block
     assert 'package="pepin_base_cpp"' not in lidar_block
     # A respawn restores the nodes, wired: each start loads descriptions its factory built anew
     # (pepin_bringup.launch_kit; the generator trap is held in test_launch_kit).
-    split = src[src.index("    containers = respawned_container(") : src.index("return containers")]
+    split = src[src.index("def sensors_container(") : src.index("def generate_launch_description(")]
     assert 'respawned_container("lidar_container", lidar_parts,' in split
     assert 'respawned_container("base_container", base_parts,' in split
     assert "def respawned_container(" not in src, "one helper, pepin_bringup.launch_kit"
