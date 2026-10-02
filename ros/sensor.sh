@@ -312,7 +312,7 @@ flag_value() {  # NODE FLAG -> the value the running node holds; exit 1 when it 
 consequence() {  # SENSOR mute|unmute: what a consumer should now see, in one or two lines
     if [ "$2" = unmute ]; then
         case "$1" in
-            imu) echo "  /imu/data_raw is back within one IMU period (50 Hz)" ;;
+            imu) echo "  /imu/data_raw is back within one IMU period (100 Hz)" ;;
             odom) echo "  /odom is back on the next state line (50 Hz), and the transform with it" ;;
             vo) echo "  /vo is back at about 9.4 poses/s and the EKF fuses it again" ;;
             lidar) echo "  lidar_layer feeds both costmaps again" ;;

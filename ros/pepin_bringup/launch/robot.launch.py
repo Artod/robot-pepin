@@ -58,6 +58,7 @@ from pepin_bringup.launch_kit import respawned_container
 from pepin.deployment import (
     BASE_MAX_ANGULAR_RAD_S,
     BASE_MAX_LINEAR_M_S,
+    IMU_RATE_HZ,
     LASER_ODOM_HZ,
     LASER_ODOM_TOPIC,
     LASER_ODOM_TWIST_VARIANCE,
@@ -236,6 +237,7 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                 parameters=[
                     {
                         "imu_enable": imu_on,
+                        "imu_rate_hz": IMU_RATE_HZ,
                         "publish_tf": not ekf_on,
                         "max_linear_m_s": BASE_MAX_LINEAR_M_S,
                         "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,

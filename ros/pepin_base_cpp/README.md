@@ -23,6 +23,13 @@ GYRO_CONFIG 0x08 (+-500 dps), ACCEL_CONFIG 0x08 (+-4 g), WHO_AM_I 0x68, 14 bytes
 ACCEL_XOUT_H 0x3B. The EKF that fuses the yaw rate with /odom is robot_localization, configured
 outside this package.
 
+robot.launch.py passes `imu_rate_hz` 100 (`pepin.deployment.IMU_RATE_HZ`, since 2026-10-01): the
+DLPF's ~44 Hz is under that rate's Nyquist limit, so the samples are the same noise as at 50 Hz,
+twice as many and unaliased. 200 Hz would want DLPF_CFG 2 (~94 Hz, 1.5x the per-sample noise, and
+the zero-velocity update's gyro threshold re-measured), which `configure()` does not write yet. A
+read is one 14-byte burst, ~1.6 ms on the 100 kHz bus (no `clock-frequency` in the board's device
+tree for i2c@5002c00, the mv64xxx default), which the three VL53L1X share.
+
 ### The gyro's zero is re-measured, not taken once
 
 The chip's bias moves with temperature, so the boot calibration this node shipped with was wrong

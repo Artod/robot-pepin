@@ -13,6 +13,9 @@ from typing import Any
 import pytest
 import yaml
 
+from pepin.base_link import STATE_HZ
+from pepin.deployment import IMU_RATE_HZ
+
 EKF = Path(__file__).resolve().parents[2] / "ros" / "params" / "ekf.yaml"
 # The 15 states robot_localization fuses, in message order.
 STATES = (
@@ -84,3 +87,14 @@ def test_every_heading_source_is_named_in_the_file(params: dict[str, Any]) -> No
     wheels' path back in is written down rather than forgotten."""
     assert fused(params, "imu0_config") & {"vyaw"}
     assert fused(params, "odom1_config") & {"yaw"}
+
+
+def test_the_filter_runs_at_the_wheels_rate_and_queues_a_fifth_of_a_second(
+    params: dict[str, Any],
+) -> None:
+    """One wheel line per filter cycle (a slower filter publishes odom -> base_link staler than
+    the wheels measured it), and the input queues of the fast sources hold 0.2 s of them, so a
+    cycle the board delays drops nothing."""
+    assert params["frequency"] == STATE_HZ
+    assert params["odom0_queue_size"] / STATE_HZ >= 0.2
+    assert params["imu0_queue_size"] / IMU_RATE_HZ >= 0.2
