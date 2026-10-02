@@ -1,9 +1,8 @@
 <!--
-  Pepin's navigate-to-pose tree: the stock Nav2 "replanning and recovery" tree with the
-  recovery round-robin reordered. A cart wedged between the sofa and the table (its 0.41 m
-  swing circle full of returns) cannot spin: on 2026-09-06 the stock order spent 24 s on a
-  refused Spin and a 5 s Wait before the BackUp that actually freed it, and the spin attempt
-  is exactly the move that slips the wheels on carpet. Back up first, then clear, spin, wait.
+  Pepin's navigate-to-pose tree: the stock Nav2 "replanning and recovery" tree, waiting before it
+  retreats. A plan every second from where the cart stands; a controller that stops making
+  progress waits a second and plans again from there (a person on the path, a miss beside a
+  mark); a planner refusal waits, turns, then backs up; the round robin below is the last resort.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
@@ -34,40 +33,42 @@
         <RateController hz="0.1">
           <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
         </RateController>
+        <!-- A fresh plan every second, from where the cart stands: MPPI may leave the line to pass
+             a person, and the next plan starts under its wheels. -->
         <RateController hz="1.0">
           <RecoveryNode number_of_retries="5" name="ComputePathToPose">
-            <!-- The chosen planner is the only planner. The NavFn fallback that used to sit here
-                 took over whenever Hybrid-A* refused — and Hybrid refuses exactly when the cart
-                 does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
-                 over the toes (run 0113, five times in one leg). A refusal is a recovery below,
-                 a wait for the person to move, never a smaller robot. -->
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-            <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
-                 for START_OCCUPIED, which is precisely the code a footprint-checking planner
-                 returns when the cart is parked close to something — so the whole branch was
-                 skipped and the goal died in four seconds without a wheel turning (runs 0023 and
-                 0025, "Goal failed" 65 ms after "Start occupied"). A planner failure gets the
-                 same three answers a person would try: forget what may be stale, retreat, or
-                 turn so the hull sits differently. Any one of them is enough, so they are a
-                 fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
-            <Sequence>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-              <!-- RoundRobin, not Fallback: a Fallback always stops at the first child that
-                   succeeds, so a retreat that worked was repeated on every retry and walked the
-                   cart backwards across the room (run 0027, four reverses and a lost tracker).
-                   Each retry gets a DIFFERENT answer instead. Waiting is second, not first: the
-                   tracker searches the whole map by itself when the fit drops, so a pose being
-                   fixed needs no help from here, while a cart parked on the furniture does. -->
-              <RoundRobin name="PlannerRecoveryActions">
-                <!-- Retreat first: a start the planner refuses is a cart parked on the map's own
-                     furniture (the front edge inside one cell of it), and two seconds of waiting
-                     do not move it. -->
-                <BackUp backup_dist="0.15" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
-                <Wait wait_duration="3"/>
-                <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_error_code}"/>
-              </RoundRobin>
-            </Sequence>
-          </RecoveryNode>
+              <!-- The chosen planner is the only planner. The NavFn fallback that used to sit here
+                   took over whenever Hybrid-A* refused — and Hybrid refuses exactly when the cart
+                   does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
+                   over the toes (run 0113, five times in one leg). A refusal is a recovery below,
+                   a wait for the person to move, never a smaller robot. -->
+              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
+                   for START_OCCUPIED, which is precisely the code a footprint-checking planner
+                   returns when the cart is parked close to something — so the whole branch was
+                   skipped and the goal died in four seconds without a wheel turning (runs 0023 and
+                   0025, "Goal failed" 65 ms after "Start occupied"). A planner failure gets the
+                   same three answers a person would try: forget what may be stale, retreat, or
+                   turn so the hull sits differently. Any one of them is enough, so they are a
+                   fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
+              <Sequence>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                <!-- RoundRobin, not Fallback: a Fallback always stops at the first child that
+                     succeeds, so a retreat that worked was repeated on every retry and walked the
+                     cart backwards across the room (run 0027, four reverses and a lost tracker).
+                     Each retry gets a DIFFERENT answer instead. Waiting is second, not first: the
+                     tracker searches the whole map by itself when the fit drops, so a pose being
+                     fixed needs no help from here, while a cart parked on the furniture does. -->
+                <RoundRobin name="PlannerRecoveryActions">
+                  <!-- Retreat first: a start the planner refuses is a cart parked on the map's own
+                       furniture (the front edge inside one cell of it), and two seconds of waiting
+                       do not move it. -->
+                  <Wait wait_duration="2"/>
+                  <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_error_code}"/>
+                  <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
+                </RoundRobin>
+              </Sequence>
+            </RecoveryNode>
         </RateController>
         <RecoveryNode number_of_retries="2" name="FollowPath">
           <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id="{selected_goal_checker}" error_code_id="{follow_path_error_code}"/>
@@ -79,7 +80,11 @@
           <Sequence>
             <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
             <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <BackUp backup_dist="0.25" backup_speed="0.08" time_allowance="5" error_code_id="{backup_code_id}"/>
+            <!-- Wait first (a person on the path; never a retreat half-way), then plan again from
+                 where the cart stands: a miss beside a mark is a manoeuvre MPPI cannot invent,
+                 and Hybrid draws it. -->
+            <Wait wait_duration="1"/>
+            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
           </Sequence>
         </RecoveryNode>
       </PipelineSequence>
@@ -100,9 +105,9 @@
                  spin and a shrug. Every move is short and collision-checked against the costmap. -->
             <!-- time_allowance on every move: the rear is unsensed, and a retreat that has not covered its
                  distance in twice its nominal time is pushing something (a box, run 0087: 10-20 s per push). -->
-            <BackUp backup_dist="0.30" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
+            <BackUp backup_dist="0.20" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
             <Sequence name="Rock">
-              <BackUp backup_dist="0.15" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
+              <BackUp backup_dist="0.10" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
               <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="4"/>
             </Sequence>
             <Spin spin_dist="1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
@@ -115,7 +120,7 @@
               <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
             </Sequence>
             <Sequence name="LongRetreat">
-              <BackUp backup_dist="0.50" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
+              <BackUp backup_dist="0.35" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
               <Wait wait_duration="1.0"/>
             </Sequence>
             <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="4"/>
