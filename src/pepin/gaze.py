@@ -337,6 +337,21 @@ class Arbiter:
         self._deliver()
         return len(gone)
 
+    def adopt(self, now: float, tol_rad: float) -> bool:
+        """Take the head as the encoders say it is when that is more than ``tol_rad`` off what
+        the arbiter last wrote (a jog, a hand, ``ros/neck.sh``): with nothing holding it, the
+        next step then brings it home. Whether it was adopted."""
+        with self._lock:
+            if not self._readings:
+                return False
+            reading = self._readings[-1]
+            believed = self._head.aim if self._head is not None else self.home
+            if reading.aim.off(believed) <= tol_rad:
+                return False
+            self._head = _Write(reading.aim, False, now, "", settled=reading)
+            self.counts["adopted"] += 1
+            return True
+
     def renew(self, source: str, now: float) -> int:
         """Restart the TTL of ``source``'s requests, and the dwell of one already answered
         (``see`` keeps a look; path gaze keeps its aim); how many."""

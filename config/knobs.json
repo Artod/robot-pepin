@@ -69,6 +69,8 @@
       "note": "the life of path gaze and reverse gaze (band 4), renewed every path_period_s while they apply"},
     "ttl_idle_s": {"default": 20.0, "range": [1.0, 300.0],
       "note": "the default life of an idle request (band 5)"},
+    "drive_home_tol_deg": {"default": 5.0, "range": [0.5, 45.0],
+      "note": "at a drive's start a head the encoders read further than this from where the arbiter last put it (a jog, a hand, ros/neck.sh) is sent home: no drive starts with a crooked head"},
     "stall_ahead_m": {"default": 1.0, "range": [0.2, 3.0],
       "note": "how far along the plan the hull is swept for blockers at a stall"},
     "stall_margin_m": {"default": 0.05, "range": [0.0, 0.3],

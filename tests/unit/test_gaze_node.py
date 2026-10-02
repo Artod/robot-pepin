@@ -323,6 +323,20 @@ def test_a_drive_start_lets_every_look_go_and_its_end_the_navigation_ones(node: 
     assert not node._driving and out[1].status == "preempted"
 
 
+def test_a_head_left_turned_by_hand_goes_home_when_a_drive_starts(node: Gaze) -> None:
+    """What the tools' face_forward did for their own drives, the arbiter does for every one."""
+    state_line(node)
+    joints = gaze_node.JointState()
+    joints.header.stamp = _stamp(time.time())
+    joints.name = ["neck_pan", "head_tilt"]
+    joints.position = [math.radians(40.0), math.radians(23.8)]
+    node._on_neck(joints)
+    node._on_nav_status("navigate_to_pose", goals(3))
+    node._step()
+    assert link(node).sent == [{"cmd": "neck_home", "hold": False}]
+    assert "the head found off home is sent there" in node.logger.texts("info")[-1]
+
+
 def test_a_persons_look_is_refused_during_a_drive_by_todays_base_server(node: Gaze) -> None:
     node._on_nav_status("navigate_to_pose", goals(1))
     answer = node._door_look(

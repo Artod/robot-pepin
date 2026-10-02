@@ -316,6 +316,18 @@ def test_renewing_an_answered_request_keeps_holding_the_head() -> None:
     assert head.writes[-1][0] is None  # the renewals stopped: home
 
 
+def test_a_head_moved_by_someone_else_is_adopted_and_brought_home() -> None:
+    """A jog or a hand moved the head: at a drive's start the arbiter takes it as its own."""
+    arb, head, _out = arbiter()
+    assert not arb.adopt(0.0, math.radians(5))  # no reading: nothing to adopt
+    arb.observe(HeadReading(HOME.pan_rad + 0.05, HOME.tilt_rad, 0.0))
+    assert not arb.adopt(0.1, math.radians(5))  # within the tolerance of home
+    arb.observe(HeadReading(math.radians(40), HOME.tilt_rad, 0.2))
+    assert arb.adopt(0.3, math.radians(5))
+    arb.step(0.3)
+    assert head.writes == [(None, False, 0.3)]
+
+
 def test_a_home_request_is_answered_at_home() -> None:
     arb, head, out = arbiter()
     arb.submit(look(frames=0), 0.0)

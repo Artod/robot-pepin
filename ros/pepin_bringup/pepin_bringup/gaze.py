@@ -402,8 +402,11 @@ class Gaze(Node):
             gone = self._arbiter.release(
                 now, "the drive's start", keep=lambda r: r.band == OPERATOR
             )
+            # A head someone else moved (a jog, a hand) is taken home too: no drive starts crooked.
+            adopted = self._arbiter.adopt(now, math.radians(self._knob("drive_home_tol_deg")))
             self.get_logger().info(
-                f"gaze: a drive starts; {gone} requests let go, the head goes home"
+                f"gaze: a drive starts; {gone} requests let go"
+                + (", the head found off home is sent there" if adopted else "")
             )
         elif before and not after:
             self._driving = False

@@ -573,6 +573,7 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `ttl_sensor_s` | number 0.5..30 | 2.0 | the default life of a sensor-triggered check (band 3) |
 | `gaze` | `ttl_driving_s` | number 0.2..5 | 0.5 | the life of path gaze and reverse gaze (band 4), renewed every path_period_s while they apply |
 | `gaze` | `ttl_idle_s` | number 1..300 | 20.0 | the default life of an idle request (band 5) |
+| `gaze` | `drive_home_tol_deg` | number 0.5..45 | 5.0 | at a drive's start a head the encoders read further than this from where the arbiter last put it (a jog, a hand, ros/neck.sh) is sent home: no drive starts with a crooked head |
 | `gaze` | `stall_ahead_m` | number 0.2..3 | 1.0 | how far along the plan the hull is swept for blockers at a stall |
 | `gaze` | `stall_margin_m` | number 0..0.3 | 0.05 | the hull grown by this much on every side for the sweep (one costmap cell) |
 | `gaze` | `stall_cluster_m` | number 0.05..1 | 0.25 | candidates first reached within this much of the nearest one are one blocker: the look aims at their centroid |
