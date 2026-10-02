@@ -44,7 +44,7 @@ case "${{FAKE_KICK:-ok}}" in
 esac
 """
 TREE = {
-    "ros/thin.sh": FAKE_KICK.format(nodes="rec goal"),
+    "ros/board.sh": FAKE_KICK.format(nodes="rec goal"),
     "ros/laptop.sh": FAKE_KICK.format(nodes="fusion goal"),
     "ros/pepin_bringup/pepin_bringup/__init__.py": "",
     "ros/pepin_bringup/pepin_bringup/kit.py": "from pepin.a import (\n    x,\n    y,  # two\n)\n",
@@ -77,7 +77,7 @@ def _repo(root: Path) -> Path:
     for rel, text in TREE.items():
         (root / rel).parent.mkdir(parents=True, exist_ok=True)
         (root / rel).write_text(text)
-    for script in ("ros/thin.sh", "ros/laptop.sh"):
+    for script in ("ros/board.sh", "ros/laptop.sh"):
         (root / script).chmod(0o755)
     return root
 
@@ -279,10 +279,7 @@ def test_the_real_tree_kicks_what_imports_the_change(graph: ImportGraph) -> None
 
     assert kicks("ros/pepin_bringup/pepin_bringup/depth_fusion.py") == [("laptop", "depth_fusion")]
     assert kicks("ros/pepin_bringup/pepin_bringup/tof_bridge.py") == [("board", "tof_bridge")]
-    assert kicks("ros/pepin_bringup/pepin_bringup/goal_server.py") == [
-        ("board", "goal_server"),
-        ("laptop", "goal_server"),
-    ]
+    assert kicks("ros/pepin_bringup/pepin_bringup/goal_server.py") == [("laptop", "goal_server")]
     refused = make_plan(REPO, ["src/pepin/deployment.py"], graph).refusals
     assert [r.fix for r in refused] == ["ros/restart.sh both --deploy"]
 
@@ -374,12 +371,12 @@ def test_a_dry_run_prints_the_plan_and_what_would_run_and_touches_nothing(tmp_pa
         " ros/restart.sh board --deploy)\n"
         "would run: (cd src && rsync -a --relative pepin/b.py"
         " root@10.0.0.187:/root/pepin-ros/pepin_src/)\n"
-        "would run: ros/thin.sh kick rec\n"
-        "would run: ros/thin.sh kick goal\n"
+        "would run: ros/board.sh kick rec\n"
+        "would run: ros/board.sh kick goal\n"
         "would run: ros/laptop.sh kick goal\n"
         "dry run: nothing was touched\n"
     )
-    assert "would check: pepin-vslam and pepin-laptop mount" in out
+    assert "would check: pepin-vslam and pepin-macnav mount" in out
     same = _push(tmp_path / "env", "src/pepin/b.py", PEPIN_PUSH_DRY="1")
     assert same[0] == 0 and same[2] == "" and same[1].endswith("dry run: nothing was touched\n")
 
@@ -402,7 +399,7 @@ def test_a_push_rsyncs_exactly_its_files_and_kicks_exactly_its_nodes(tmp_path: P
     ]
     assert "--delete" not in calls, "the board writes files of its own beside ours"
     kicks = sorted(c for c in calls.splitlines() if " kick " in c)
-    assert kicks == ["laptop.sh kick goal", "thin.sh kick goal", "thin.sh kick rec"]
+    assert kicks == ["board.sh kick goal", "board.sh kick rec", "laptop.sh kick goal"]
     assert (
         "board  rec kicked at 10:00:05.1, ready at 10:00:07.3 UTC, 2.2 s, pid 47 -> 836: rec up"
         in out

@@ -67,19 +67,15 @@ def test_a_docker_daemon_that_is_off_is_a_red_line_not_an_exception() -> None:
     assert not probe_laptop_containers(run=missing).ok
 
 
-def test_the_goal_server_probe_names_the_side_nav2_runs_on() -> None:
+def test_the_goal_server_probe_asks_this_mac_only() -> None:
     from unittest import mock
 
     from pepin import goal_link, health
 
-    with mock.patch.object(goal_link, "find_server", lambda board, port: "127.0.0.1"):
-        local = health.probe_goal_server("10.0.0.187")
-    assert local.ok and local.detail == "127.0.0.1:3337 (Nav2 on this Mac)"
-    with mock.patch.object(goal_link, "find_server", lambda board, port: board):
-        board = health.probe_goal_server("10.0.0.187")
-    assert board.ok and board.detail == "10.0.0.187:3337 (Nav2 on the board)"
-    with mock.patch.object(goal_link, "find_server", lambda board, port: None):
-        nobody = health.probe_goal_server("10.0.0.187")
-        alone = health.probe_goal_server(None)
-    assert not nobody.ok and nobody.detail == "nobody listens on 127.0.0.1:3337 or 10.0.0.187:3337"
-    assert alone.detail == "nobody listens on 127.0.0.1:3337"
+    with mock.patch.object(goal_link, "find_server", lambda port: "127.0.0.1"):
+        local = health.probe_goal_server()
+    assert local.ok and local.detail == "127.0.0.1:3337"
+    with mock.patch.object(goal_link, "find_server", lambda port: None):
+        nobody = health.probe_goal_server()
+    assert not nobody.ok
+    assert nobody.detail == "nobody listens on 127.0.0.1:3337 (ros/laptop.sh nav)"

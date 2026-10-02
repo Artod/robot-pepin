@@ -1,4 +1,4 @@
-"""The kick's wait (ros/kick_ready.awk, ros/thin.sh kick, ros/laptop.sh kick): the ready line it
+"""The kick's wait (ros/kick_ready.awk, ros/board.sh kick, ros/laptop.sh kick): the ready line it
 reports is the NEW process's — after the launch's exit line of the signalled pid and the start of
 its successor under the same tag — never an older line that happens to match."""
 # ruff: noqa: E501 — the log below is written as the launch writes it, one line per record.
@@ -167,11 +167,11 @@ def _kick(
 def test_the_board_kick_reaches_the_board_with_its_whole_ready_line(tmp_path: Path) -> None:
     """ssh joins its arguments into one command line: unquoted, "run recorder ready" arrived as
     "run" and the first line holding that word — the old process's own — passed for the new."""
-    code, out, sent = _kick(tmp_path, "thin.sh", "run_recorder")
+    code, out, sent = _kick(tmp_path, "board.sh", "tof_bridge", line="tof ceilings: ")
     assert code == 0, out
     assert out.splitlines()[0] == (
-        "run_recorder kicked at 10:00:05.1, ready at 10:00:11.3 UTC, 6.2 s,"
-        " pid 47 -> 836: run recorder ready: tapes in /maps/rec"
+        "tof_bridge kicked at 10:00:05.1, ready at 10:00:11.3 UTC, 6.2 s,"
+        " pid 47 -> 836: tof ceilings: tapes in /maps/rec"
     )
     assert 'sh -c kill -INT "$@" sh 47' in sent
     assert f"logs -t --since {KICKED} pepin-ros" in sent
@@ -179,8 +179,8 @@ def test_the_board_kick_reaches_the_board_with_its_whole_ready_line(tmp_path: Pa
 
 @pytest.mark.slow  # ~0.3-0.45 s: two dozen processes of bash, fakes and awk
 def test_a_board_node_that_is_not_running_is_said_and_nothing_is_signalled(tmp_path: Path) -> None:
-    code, out, sent = _kick(tmp_path, "thin.sh", "run_recorder", pids="")
-    assert code == 3 and "no run_recorder process in pepin-ros" in out
+    code, out, sent = _kick(tmp_path, "board.sh", "tof_bridge", line="tof ceilings: ", pids="")
+    assert code == 3 and "no tof_bridge process in pepin-ros" in out
     assert "kill" not in sent
 
 
@@ -196,8 +196,15 @@ def test_the_laptop_kick_waits_for_the_new_pid_the_same_way(tmp_path: Path) -> N
     assert "ssh" not in sent
 
 
+@pytest.mark.slow  # ~0.3-0.45 s: two dozen processes of bash, fakes and awk
+def test_the_recorder_is_kicked_in_the_mac_s_nav2_container(tmp_path: Path) -> None:
+    code, out, sent = _kick(tmp_path, "laptop.sh", "run_recorder")
+    assert code == 0, out
+    assert "docker exec pepin-macnav sh -c kill -INT" in sent and "ssh" not in sent
+
+
 def test_both_kicks_read_the_one_matcher() -> None:
-    for script in ("ros/thin.sh", "ros/laptop.sh"):
+    for script in ("ros/board.sh", "ros/laptop.sh"):
         text = (REPO / script).read_text()
         assert "kick_ready.awk" in text, script
         assert 'grep -F "$LINE"' not in text, f"{script}: the bare --since grep is back"

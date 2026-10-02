@@ -74,21 +74,9 @@ on_board() { ros2_in board pepin-ros "$@"; }
 
 flags() { "$HERE/flags.sh" "$@"; }  # the one place a feature flag is read or written
 
-board_side() {  # the board's PEPIN_SIDE ("board" when the stack is split, empty when it is whole)
-    ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros 2>/dev/null | cut -d= -f2" \
-        2>/dev/null || true
-}
-
-costmap_in() {  # COSTMAP ros2 ...: the local costmap is the controller's and always on the board;
-    # the global one follows the planner, which side=board puts in the laptop's container
-    # (pepin.deployment.nav_nodes). SIDE is read once per run, by the caller.
-    local costmap="$1"
+costmap_in() {  # COSTMAP ros2 ...: both costmaps live in the Mac's Nav2 container (ros/laptop.sh nav)
     shift
-    if [ "$costmap" = "$GLOBAL_COSTMAP" ] && [ "${SIDE:-}" = board ]; then
-        ros2_in laptop pepin-laptop "$@"
-    else
-        ros2_in board pepin-ros "$@"
-    fi
+    ros2_in laptop pepin-macnav "$@"
 }
 
 param_dump() {  # COSTMAP -> its whole parameter dump as YAML, empty when it did not answer
@@ -156,7 +144,7 @@ refuse_if_navigating() {  # the lifecycle half never runs under a goal, nor unde
         verdict="$(goal_running "$line" "$action")"
         case "$verdict" in
             no) ;;
-            yes) echo "  refused: a navigation goal is running ($action); ros/go.sh cancel first"
+            yes) echo "  refused: a navigation goal is running ($action); ros/goto.sh cancel first"
                  exit 1 ;;
             *) echo "  refused: the guard could not read /$action/_action/status, so it cannot"
                echo "  see whether the robot is driving; ros/watch.sh, or leave --hard off"
@@ -242,7 +230,6 @@ switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
         *) usage ;;
     esac
     echo "$sensor $state${hard:+ (hard)}:"
-    SIDE="$(board_side)"
     want="$(driver_wanted "$sensor" "$state" "$hard")"
     was=""
     if [ -n "$want" ]; then
@@ -252,7 +239,7 @@ switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
             *:'?')
                 [ "$hard" != --hard ] || {
                     echo "  refused: $LIDAR_DRIVER did not answer a lifecycle get, so --hard"
-                    echo "  cannot know what it is turning off; is the stack up? ros/thin.sh"
+                    echo "  cannot know what it is turning off; is the stack up? ros/board.sh census"
                     exit 1
                 }
                 echo "  $LIDAR_DRIVER did not answer a lifecycle get: the driver is left alone"
@@ -405,7 +392,6 @@ mute_status() {  # every sensor's mute state, read from the live flags one by on
 
 status() {  # what the costmaps take, and what each node last said
     local costmap dump layer line value vslam depth contact sensor
-    SIDE="$(board_side)"
     for costmap in $COSTMAPS; do
         dump="$(param_dump "$costmap")"
         line=""

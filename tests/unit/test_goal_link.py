@@ -1,7 +1,7 @@
-"""pepin.goal_link and ros/goto.sh's PEPIN_GOAL_TCP: cancel, where and a goal over the goal
-server's socket instead of a fresh ROS process on the board (whose new zenoh session stalled all
+"""pepin.goal_link and ros/goto.sh: cancel, where, planner and a goal over the goal server's
+socket on this Mac instead of a fresh ROS process (a new zenoh session on the board stalled all
 laptop -> board delivery for ~3 s, journal 2026-09-25). A fake goal server on a local port
-answers; the old path is a fake ``ssh`` on PATH that only writes down what it was asked."""
+answers; ``docker`` and ``ssh`` are fakes on PATH that only write down what they were asked."""
 
 from __future__ import annotations
 
@@ -252,7 +252,7 @@ def test_a_link_lost_mid_drive_says_the_drive_goes_on() -> None:
     finally:
         server.close()
     assert verdict == goal_link.EXIT_FAILED
-    assert "the drive may go on on the board" in out.getvalue()
+    assert "the drive may go on; ros/goto.sh cancel stops it" in out.getvalue()
 
 
 def test_a_cancelled_drive_is_not_a_success() -> None:
@@ -264,22 +264,31 @@ def test_a_cancelled_drive_is_not_a_success() -> None:
     assert report.verdict == goal_link.EXIT_FAILED, "a drive cut by the watch was not reached"
 
 
-# ---- ros/goto.sh: the switch and the fallback ---------------------------------------------------
+# ---- ros/goto.sh: the one client, against fakes --------------------------------------------------
 
-FAKE_SSH = """#!/bin/bash
-printf 'ssh %s\\n' "$*" >> "$FAKE_LOG"
+FAKE = """#!/bin/bash
+printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
+case "$(basename "$0") $*" in
+    "docker logs"*) printf '%s\\n' "$FAKE_NAV2_LINE"; sleep 30 ;;
+    "docker inspect"*) printf '%s\\n' ros2 launch nav.launch.py map:=/maps/flat3.yaml ;;
+esac
 exit 0
 """
+NAV2_LINE = (
+    "[component_container_isolated-1] [WARN] [1790000000.123] [controller_server]:"
+    " Failed to make progress"
+)
 
 
-def goto(tmp_path: Path, port: int, *args: str, **env: str) -> tuple[str, list[str]]:
-    """Run ros/goto.sh against a goal server on ``port``, with ``ssh`` faked; its output and
-    the ssh commands it ran (each one a way onto the board)."""
+def goto(tmp_path: Path, port: int, *args: str, **env: str) -> tuple[int, str, list[str]]:
+    """Run ros/goto.sh against a goal server on ``port`` with ``docker`` and ``ssh`` faked, its
+    records in ``tmp_path``; its exit status, its output and the commands the fakes were given."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
-    (bin_dir / "ssh").write_text(FAKE_SSH)
-    (bin_dir / "ssh").chmod(0o755)
-    log = tmp_path / "ssh.log"
+    for name in ("docker", "ssh"):
+        (bin_dir / name).write_text(FAKE)
+        (bin_dir / name).chmod(0o755)
+    log = tmp_path / "fakes.log"
     log.write_text("")
     run = subprocess.run(
         ["bash", str(REPO / "ros/goto.sh"), *args],
@@ -289,39 +298,79 @@ def goto(tmp_path: Path, port: int, *args: str, **env: str) -> tuple[str, list[s
         env=os.environ
         | {
             "PATH": f"{bin_dir}:{os.environ['PATH']}",
-            "PEPIN_HOST": "127.0.0.1",
             "PEPIN_GOAL_PORT": str(port),
+            "PEPIN_REC_DIR": str(tmp_path / "rec"),
+            "PEPIN_BT_LOG": str(tmp_path / "rec/bt_live.log"),
+            "PEPIN_CAMERA_STREAM": f"http://127.0.0.1:{closed_port()}/stream",
+            "PEPIN_CLIP_CHECK_S": "0.2",
             "FAKE_LOG": str(log),
+            "FAKE_NAV2_LINE": NAV2_LINE,
         }
         | env,
     )
-    return run.stdout + run.stderr, log.read_text().splitlines()
+    return run.returncode, run.stdout + run.stderr, log.read_text().splitlines()
 
 
-def test_goto_s_cancel_goes_over_the_socket_by_default(
-    tmp_path: Path, served: FakeGoalServer
-) -> None:
-    output, ssh = goto(tmp_path, served.port, "cancel")
-    assert CANCEL_LINE in output
-    assert ssh == [], "no ssh, so no ROS process started on the board"
+def test_goto_s_cancel_goes_over_the_socket(tmp_path: Path, served: FakeGoalServer) -> None:
+    code, output, sent = goto(tmp_path, served.port, "cancel")
+    assert code == 0 and CANCEL_LINE in output
+    assert sent == [], "no ROS process started anywhere"
     assert served.asked == [{"cmd": "cancel"}]
 
 
 def test_goto_s_cancel_falls_back_to_goto_ros_when_no_server_answers(tmp_path: Path) -> None:
-    output, ssh = goto(tmp_path, closed_port(), "cancel")
-    assert "no goal server" in output and "the old path" in output
-    assert any("goto_ros.py cancel" in line for line in ssh), ssh
+    _, output, sent = goto(tmp_path, closed_port(), "cancel")
+    assert "no goal server" in output and "goto_ros.py cancel in pepin-macnav" in output
+    assert any(
+        line.startswith("docker exec pepin-macnav") and "goto_ros.py cancel" in line
+        for line in sent
+    ), sent
 
 
-def test_goto_s_switch_off_is_the_old_path(tmp_path: Path, served: FakeGoalServer) -> None:
-    _, ssh = goto(tmp_path, served.port, "cancel", PEPIN_GOAL_TCP="0")
-    assert any("goto_ros.py cancel" in line for line in ssh), ssh
-    assert served.asked == [], "the socket is not touched with the switch off"
+def test_goto_s_where_and_planner_go_over_the_socket(tmp_path: Path) -> None:
+    server = FakeGoalServer(
+        {
+            "where": [{"event": "where", "pose": "tf", "x": 1.0, "y": 2.0, "yaw_deg": 90.0}],
+            "planner": [{"event": "planner", "planner": "ThetaStar"}],
+        }
+    )
+    try:
+        code, output, sent = goto(tmp_path, server.port, "where")
+        assert code == 0 and '"event": "where"' in output and sent == []
+        code, output, _ = goto(tmp_path, server.port, "planner", "theta")
+        assert code == 0 and '"planner": "ThetaStar"' in output
+    finally:
+        server.close()
+    assert server.asked[-1] == {"cmd": "planner", "name": "theta"}
 
 
-def test_goto_s_where_goes_over_the_socket(tmp_path: Path, served: FakeGoalServer) -> None:
-    output, ssh = goto(tmp_path, served.port, "where")
-    assert '"event": "where"' in output and ssh == []
+def test_a_mark_is_goto_ros_s_in_the_nav2_container_with_the_map_s_book(tmp_path: Path) -> None:
+    _, _, sent = goto(tmp_path, closed_port(), "mark", "sofa")
+    assert (
+        "docker exec pepin-macnav /pepin_entrypoint.sh python3 /tools/goto_ros.py"
+        " --places /maps/flat3.places.yaml mark sofa"
+    ) in sent, sent
+
+
+@pytest.mark.slow  # a drive with its film and its streams: ~2 s
+def test_a_drive_writes_its_reasons_names_its_tape_and_says_it_has_no_picture(
+    tmp_path: Path,
+) -> None:
+    server = FakeGoalServer({"go": [DRIVE[0], DRIVE[-1]]})
+    try:
+        code, output, sent = goto(tmp_path, server.port, "printer")
+    finally:
+        server.close()
+    assert code == 0, output
+    assert server.asked == [{"cmd": "go", "place": "printer"}]
+    logs = sorted((tmp_path / "rec").glob("*_goto.log"))
+    assert len(logs) == 1 and "taped /maps/rec/0481_" in logs[0].read_text()
+    reasons = logs[0].with_name(logs[0].name.replace(".log", ".nav2.log")).read_text()
+    assert "nav2| [controller_server]: Failed to make progress" in reasons
+    assert "numbered tape: ros/maps/rec/0481_20260925T080000Z_printer.jsonl" in output
+    assert "!! the camera clip is NOT recording" in output, "a dead camera is said aloud"
+    assert "!! no camera clip for this drive" in output
+    assert any("logs -f --since 1s pepin-macnav" in line for line in sent), sent
 
 
 def test_a_cancel_is_confirmed_by_any_navigator_that_answered_even_with_nothing_to_cancel() -> None:
@@ -336,14 +385,11 @@ def test_a_cancel_is_confirmed_by_any_navigator_that_answered_even_with_nothing_
     assert not goal_link.cancel_confirmed({"event": "where"})
 
 
-def test_the_goal_server_is_looked_for_on_this_machine_first_then_the_board() -> None:
-    """ros/go.sh's transport decision, in Python: Nav2 on the Mac answers on 127.0.0.1, else the
-    board's; the port decides, never a configuration file."""
+def test_the_goal_server_is_looked_for_on_this_mac_only() -> None:
+    """Nav2 and its goal server live on this Mac (ros/laptop.sh nav): 127.0.0.1 or nobody."""
     with socket.socket() as listener:  # a bare port: the probe connects and says nothing
         listener.bind(("127.0.0.1", 0))
         listener.listen(2)
         port = int(listener.getsockname()[1])
-        assert goal_link.find_server("10.0.0.187", port, timeout_s=0.5) == "127.0.0.1"
-        assert goal_link.find_server(None, port, timeout_s=0.5) == "127.0.0.1"
-    assert goal_link.find_server(None, closed_port(), timeout_s=0.5) is None
-    assert goal_link.find_server("127.0.0.1", closed_port(), timeout_s=0.5) is None
+        assert goal_link.find_server(port, timeout_s=0.5) == "127.0.0.1"
+    assert goal_link.find_server(closed_port(), timeout_s=0.5) is None

@@ -1,35 +1,31 @@
-"""Which part of the stack runs where: the board keeps the reflexes, the laptop takes the rest.
+"""Which part of the stack runs where: the board is a sensor box, the Mac runs the rest.
 
-The board is four Cortex-A53 cores. Whatever closes a control loop or owns a frame stays on
-it: the sensors, the EKF, the controller with its local costmap, the behaviours and the tree
-that orders them. Whatever answers once a second and tolerates a
-wireless hop moves to the laptop: the planner with the global costmap, the goal server with its
-recorder. The split is data, so a test can hold it and the launch file merely reads it.
+The board is four Cortex-A53 cores and carries what is wired to its pins and what must survive a
+WiFi loss: the sensors, the base bridge and the EKF. Nav2 (planner, controller, costmaps,
+behaviour tree), the goal server and the run recorder run on the Mac in one container
+(``ros/laptop.sh nav``), the camera's mapping beside them (``ros/laptop.sh vslam``). Where a node
+lives is data here, so a test can hold it and the scripts merely read it.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 from pathlib import Path
-
-SIDES = ("all", "board", "laptop")
 
 # WHO OWNS map -> odom: RTAB-Map on the laptop publishes it (vslam.launch.py's publish_tf) and
 # every consumer composes it with the board's own odom -> base_link; the board keeps odometry
 # only (one localiser, 2026-09-22). The board's scan-matching tracker that owned the edge before
 # is on the tag alt/tracker-2026-09-22.
 
-# Nav2 lifecycle nodes by side. "all" is the union: one machine, as before the split.
-# In bring-up order: the tree last, because loading it needs the planner side's costmap service.
-BOARD_NAV_NODES = ("controller_server", "behavior_server", "velocity_smoother", "bt_navigator")
-LAPTOP_NAV_NODES = ("planner_server",)
-# The pgm server, on the board and off by default: under World R the one map is RTAB-Map's live
-# grid and the board's own cache of it (pepin.mapcache), so a file is only ever the seed of a room
-# nobody has mapped yet (ros/nav.launch.py's map_server argument).
-MAP_NODES = ("map_server",)
-
-HEARTBEAT_TOPIC = "laptop/heartbeat"
-HEARTBEAT_HZ = 2.0
+# The Nav2 lifecycle nodes, all in the Mac's one navigation container, in bring-up order.
+NAV_NODES = (
+    "controller_server",
+    "behavior_server",
+    "velocity_smoother",
+    "bt_navigator",
+    "planner_server",
+)
+# The container ros/laptop.sh nav runs them in, with the goal server and the run recorder.
+NAV_CONTAINER = "pepin-macnav"
 
 # How long a container of this robot is given to stop before it is killed, everywhere: ros/lib.sh
 # (pepin_stop_container, which every ros/*.sh goes through), board/pepin-ros.service's ExecStop,
@@ -99,110 +95,6 @@ def config_file(name: str) -> Path:
     raise FileNotFoundError(f"config/{name} is in none of {[str(h) for h in homes]}")
 
 
-def nav_nodes(side: str) -> tuple[str, ...]:
-    """The Nav2 lifecycle nodes the navigation manager on ``side`` must bring up."""
-    if side == "all":
-        return BOARD_NAV_NODES + LAPTOP_NAV_NODES
-    if side == "board":
-        return BOARD_NAV_NODES
-    if side == "laptop":
-        return LAPTOP_NAV_NODES
-    raise ValueError(f"side must be one of {SIDES}, not {side!r}")
-
-
-def runs_here(side: str, node: str) -> bool:
-    """Whether a named piece runs on ``side``: Nav2 nodes, the map, the goal server, the watches."""
-    if node in MAP_NODES:
-        return side in ("all", "board")
-    if node == "goal_server":  # it carries the laptop's heartbeat too
-        return side in ("all", "laptop")
-    if node == "run_recorder":  # the tape is written where the sensors are
-        return side in ("all", "board")
-    if node == "link_watch":
-        return side == "board"  # only a split stack has a link to watch
-    return node in nav_nodes(side)
-
-
-@dataclass
-class LinkWatch:
-    """Cuts a drive when the laptop's heartbeat stops: a plan may never arrive, so stop now.
-
-    With the planner on the laptop, a lost link means the tree on the board keeps following
-    its last path with no one to replan around whatever appears. The controller and the local
-    costmap still avoid what the lidar sees, so the cart is not blind — but it is deaf, and a
-    deaf cart stops. ``patience_s`` covers a wireless hiccup; a link that stays silent longer
-    is gone. The verdict is armed only while a goal is running, and fires once per outage.
-    """
-
-    patience_s: float = 2.5
-    _last_beat: float | None = field(default=None, init=False)
-    _cut: bool = field(default=False, init=False)
-
-    def beat(self, now: float) -> None:
-        """A heartbeat arrived."""
-        self._last_beat = now
-        self._cut = False
-
-    def should_cut(self, navigating: bool, now: float) -> bool:
-        """True while a running drive has had no heartbeat for the patience and the cut has not
-        been sent yet. It does not consume itself: a node that could not reach the cancel
-        service must be told again on the next tick, so ``cut_sent`` latches, not this."""
-        if not navigating or self._cut:
-            return False
-        if self._last_beat is None:
-            return False  # never heard the laptop: the stack is not split, nothing to watch
-        return now - self._last_beat > self.patience_s
-
-    def cut_sent(self) -> None:
-        """The cancel went out: this outage is handled until the next heartbeat."""
-        self._cut = True
-
-    @property
-    def alive(self) -> bool:
-        return self._last_beat is not None and not self._cut
-
-
-# Lifecycle transitions and states (lifecycle_msgs), by name so a test needs no ROS.
-TRANSITION_CONFIGURE = 1
-TRANSITION_ACTIVATE = 3
-
-
-def autostart_for(side: str) -> bool:
-    """Whether the navigation lifecycle manager on ``side`` activates its nodes by itself.
-
-    A whole stack does. The board half does not: its tree cannot load until the planner side's
-    global costmap answers, and a bring-up that fails once is aborted for good by the manager
-    (2026-09-09, "Action server is inactive"). The laptop brings the board up instead, node by
-    node, when it is there to answer — see :func:`next_transition`.
-    """
-    return side != "board"
-
-
-def next_transition(states: dict[str, str]) -> tuple[str, int] | None:
-    """The one lifecycle transition to send next so the board's Nav2 comes up, or ``None``.
-
-    ``states`` maps each board node to its lifecycle state label. Nodes are walked in
-    :data:`BOARD_NAV_NODES` order and the first that is not active gets its next step:
-    unconfigured -> configure, inactive -> activate. A node in transit (activating, ...) or
-    missing answers ``None``: wait and ask again. Sending one step at a time and re-reading the
-    states makes the bring-up idempotent — a half-failed earlier attempt is simply continued.
-    """
-    for node in BOARD_NAV_NODES:
-        state = states.get(node)
-        if state == "active":
-            continue
-        if state == "unconfigured":
-            return node, TRANSITION_CONFIGURE
-        if state == "inactive":
-            return node, TRANSITION_ACTIVATE
-        return None
-    return None
-
-
-# Both navigators' actions on the board: what the link watch reads the goal status of.
-BOARD_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
-
-
 # The QoS every endpoint of these cross-machine topics uses, on BOTH sides. A reader and a writer
 # that disagree on reliability do not match at all, and the loser receives nothing, in silence.
 # Pinned under CycloneDDS, where the bridge fixed a route's QoS from whichever side declared first
@@ -242,49 +134,32 @@ LAPTOP_SLAM_NODES = (
 )
 
 
-def nav_container_nodes(side: str) -> tuple[str, ...]:
-    """Fully qualified names of the ROS nodes the Nav2 container on ``side`` creates: the
-    container itself, its lifecycle nodes, the costmap each planner/controller creates inside,
-    the map server with its manager where the map lives, and the navigation manager."""
-    names = [f"/nav2_container_{side}" if side != "all" else "/nav2_container"]
-    names += [f"/{node}" for node in nav_nodes(side)]
-    if "controller_server" in nav_nodes(side):
-        names.append("/local_costmap/local_costmap")
-    if "planner_server" in nav_nodes(side):
-        names.append("/global_costmap/global_costmap")
-    if runs_here(side, "map_server"):
-        names += ["/map_server", "/lifecycle_manager_localization"]
-    names.append(f"/lifecycle_manager_navigation_{side}")
-    return tuple(names)
+# Fully qualified names of the ROS nodes of the Mac's navigation container
+# (ros/pepin_bringup/launch/nav.launch.py): the composed container, its lifecycle nodes and the
+# costmaps they create, the map server with its manager when asked for, the navigation manager,
+# and the processes beside them.
+LAPTOP_NAV_NODES = (
+    "/nav2_container",
+    *(f"/{node}" for node in NAV_NODES),
+    "/local_costmap/local_costmap",
+    "/global_costmap/global_costmap",
+    "/map_server",
+    "/lifecycle_manager_localization",
+    "/lifecycle_manager_navigation",
+    "/goal_server",
+    "/run_recorder",
+    "/bag_recorder",
+)
 
 
-def laptop_launch_nodes(launch: str) -> tuple[str, ...]:
-    """Fully qualified names of the ROS nodes the laptop's ``launch`` ("nav" or "slam") creates.
-
-    The navigation half is the planner side's container (:func:`nav_container_nodes`) and the
-    goal server.
-    """
-    if launch == "slam":
-        return LAPTOP_SLAM_NODES
-    if launch == "nav":
-        return (*nav_container_nodes("laptop"), "/goal_server")
-    raise ValueError(f"launch must be 'nav' or 'slam', not {launch!r}")
-
-
-def node_host(node: str, split: bool = False) -> tuple[str, str]:
+def node_host(node: str) -> tuple[str, str]:
     """Where a node's process lives, as ``(side, container)``: what ros/flags.sh execs into to
-    reach the node's parameters.
-
-    The camera nodes are always in the laptop's SLAM container (``pepin-vslam``). The planner and
-    the goal server follow the board's ``PEPIN_SIDE``: ``split`` (``PEPIN_SIDE=board``) puts them
-    in the laptop's navigation container (``pepin-laptop``), which ros/laptop.sh starts in that
-    mode ONLY; a whole board (no ``PEPIN_SIDE`` line, ros/thin.sh vision) runs them itself, and
-    there is no ``pepin-laptop`` to exec into (2026-09-23: ``ros/flags.sh set goal_server ...``
-    failed on "No such container"). Everything else — the sensors and the reflexes — is the
-    board's ``pepin-ros``."""
+    reach the node's parameters. The camera nodes are in the Mac's SLAM container
+    (``pepin-vslam``), Nav2 with the goal server and the recorder in its navigation container
+    (:data:`NAV_CONTAINER`); everything else — the sensors — is the board's ``pepin-ros``."""
     name = f"/{node.lstrip('/')}"
-    if name in laptop_launch_nodes("slam"):
+    if name in LAPTOP_SLAM_NODES:
         return "laptop", "pepin-vslam"
-    if split and name in laptop_launch_nodes("nav"):
-        return "laptop", "pepin-laptop"
+    if name in LAPTOP_NAV_NODES:
+        return "laptop", NAV_CONTAINER
     return "board", "pepin-ros"

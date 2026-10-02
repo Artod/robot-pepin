@@ -10,7 +10,7 @@ marked into the local costmap, and the pose the scan matcher is holding.*
 
 ## What it is
 
-Say `ros/go.sh printer` and the cart goes to the printer. It knows where it is because it
+Say `ros/goto.sh printer` and the cart goes to the printer. It knows where it is because it
 matches every lidar revolution against a map of the flat; it knows what is in front of it
 because the lidar and three time-of-flight sensors write into the costmaps ten times a second;
 it stops with its bumper against the furniture, because that is where a manipulator has to
@@ -130,7 +130,7 @@ lidar is not supported yet.
 ```
  LAPTOP                                  │ BOARD — Orange Pi Zero 3 (4x Cortex-A53, 1.5 GB)
                                          │ one Docker container: ROS 2 Jazzy + Nav2 1.3.12
- ros/go.sh printer ─── TCP 3337 ─────────┼─► goal_server ──► bt_navigator ──► planner_server
+ ros/goto.sh printer ─ TCP 3337 ─────────┼─► goal_server ──► bt_navigator ──► planner_server
         (JSON lines: run number,         │        │              │            global costmap 2 Hz
          events, tape path)              │        │              │ /plan
                                          │        │              ▼
@@ -187,8 +187,8 @@ that could be a separate node and is not saves about 140 MB on a 1.5 GB board.
 
 One command, end to end:
 
-1. **`ros/go.sh printer`** opens a socket to the goal server on the board and writes one JSON
-   line. No client boots, no ROS process starts: a goal costs a socket write, not the 8–15 s
+1. **`ros/goto.sh printer`** opens a socket to the goal server beside Nav2 on the Mac and writes
+   one JSON line. No client boots, no ROS process starts: a goal costs a socket write, not the 8–15 s
    an ssh-and-import client used to cost.
 2. **The goal server** looks the name up in the map's own places book (`<map>.places.yaml`),
    takes the next run number, opens the tape — which already holds the last 15 s of every topic,
@@ -356,7 +356,7 @@ controller, `FollowPathRS`, the same RPP with `allow_reversing` on, since plain 
 a cusp. A 3.9 m leg to the printer took 34 s with 1% of the time spent turning in place, against
 35% under the point planners.
 
-**The rest stay selectable per run** — `ros/go.sh planner navfn|theta|smac|lattice|hybrid` picks
+**The rest stay selectable per run** — `ros/goto.sh planner navfn|theta|smac|lattice|hybrid` picks
 the planner and the controller that can follow it, and the board remembers the choice across a
 restart, so no drive is credited to a planner that never ran:
 
@@ -417,14 +417,12 @@ odometry, gyro, the tracker's pose and fit, the plan, the local costmap, the thr
 the commanded twist. The costmap matters: it is the proof of what the robot itself believed —
 which cells it held for occupied when it refused to move.
 
-`ros/go.sh` brings the run home: the tape, a slice of the board's container log, and the camera
-clip. The clip is captured **on the board**, by the goal server that opened the tape — `curl`
-copying ustreamer's MJPEG stream to a file beside it, a few percent of a core and no re-encoding;
-the laptop only wraps that local file into mkv afterwards. Pulling the stream from the laptop was
-the old way, and one macOS network policy turned it into "No route to host" in one terminal and
-not another: a recording must not depend on which window started the drive. The script ends with
-a verdict line naming the run number, whether the goal was reached, and which planner planned it —
-a good drive credited to the wrong planner is worse than no measurement.
+`ros/goto.sh` leaves every drive on the Mac: the numbered tape the recorder beside Nav2 wrote,
+the goal's own log, Nav2's reasons and the behaviour tree's transitions as they happened, and the
+camera clip (`ros/clip.sh`: ffmpeg copying ustreamer's MJPEG stream into mkv, no re-encoding). A
+clip that does not start is said aloud and started once more, and the drive ends with the clip's
+size or with a loud line saying there is none. The exit status is the verdict: 0 only for a goal
+reached.
 
 ## Hardware
 
@@ -451,8 +449,8 @@ bridge's ~190) packages. Host systemd units outside the container: `pepin-base` 
 `pepin-tof` (:3335), `pepin-camera` (ustreamer, :8080), `pepin-ros` (the container itself),
 `ser2net` (:3333, the servo bus) and `tof-init`.
 
-**On the laptop**: Foxglove Studio on `ws://<board>:8765`, and `ros/go.sh` and its siblings —
-short shell scripts, one job each, no client to boot.
+**On the laptop**: Nav2 with the goal server (`ros/laptop.sh nav`), Foxglove Studio, and
+`ros/goto.sh` and its siblings — short shell scripts, one job each, no client to boot.
 
 **The Python library** (`src/pepin`, Python 3.12, numpy) is imported by the ROS package and never
 imports it back. It holds the board servers, the algorithms (scan matching, occupancy mapping,
@@ -475,17 +473,19 @@ uv run pytest && uv run mypy && uv run ruff check .
 ros/build-image.sh --ship               # build the board's sensor image on this Mac, load it on the board
 ros/push.sh src/pepin/x.py              # a change to the running robot: rsync it, kick the nodes that import it (--dry-run: the plan)
 ros/sync.sh                             # the whole code tree to the board, nothing restarted (--restart: the stack too)
-ros/thin.sh kick goal_server            # one board node from the synced sources (~10 s), the stack untouched
+ros/board.sh kick tof_bridge           # one board node from the synced sources (~10 s), the stack untouched
 ros/laptop.sh kick depth_fusion         # one laptop node from the mounted sources (~4 s), no container restart
 ros/laptop.sh vslam                     # camera SLAM on the laptop, the RTAB-Map database kept; --fresh starts an empty map
 
 # driving
-ros/go.sh printer                       # go to a named place; Ctrl-C cancels
-ros/go.sh -1.0 0.3 90                   # ...or to map coordinates, with a heading
-ros/go.sh mark sofa                     # name the spot the robot is standing on
-ros/go.sh where | places | cancel
-ros/go.sh planner hybrid                # swap the planner (and its controller) for the next run
-ros/go.sh trip                          # printer, then home
+ros/laptop.sh nav                       # Nav2 on this Mac, the goal server on 127.0.0.1:3337
+ros/preflight.sh                        # ready for a goal? pose, lidar, planner, snapshots, one plan
+ros/goto.sh printer                     # go to a named place; Ctrl-C cancels
+ros/goto.sh -1.0 0.3 90                 # ...or to map coordinates, with a heading
+ros/goto.sh mark sofa                   # name the spot the robot is standing on
+ros/goto.sh where | places | cancel
+ros/goto.sh planner hybrid              # swap the planner (and its controller) for the next run
+ros/goto.sh printer && ros/goto.sh home # printer, then home
 ros/stop.sh                             # the red button: wheels stopped within a second
 
 # a new map
@@ -503,7 +503,7 @@ src/pepin/     the Python library: board servers (base, ToF), drivers and links,
                algorithms — mapping, scanmatch, posegraph, slam, timeline,
                watch, tof_horizon, dynamic, footprint, places, tape, deployment
 ros/           the ROS 2 side: pepin_bringup (base/ToF bridges, goal server,
-               run recorder, link watch, launch files), pepin_base_cpp, params/, maps/,
+               run recorder, launch files), pepin_base_cpp, params/, maps/,
                tools/, Dockerfile, and the shell scripts that drive the robot
 board/         Orange Pi: systemd units, ser2net, udev rules, ToF init
 config/        base geometry and speed caps, lidar and ToF mounts (JSON)
@@ -523,13 +523,11 @@ controller within 0.3 s and the cart stopped 0.14 m short; the budget is now a 5
 costmap, a 1.5 s collision look-ahead (0.45 m) and 1.5 m/s² braking, so the refusal comes at
 the first sight of the obstacle.
 
-**Thin client**: `ros/thin.sh vision` keeps the whole drive on the board and opens the bridge
-for the laptop; `ros/thin.sh on` moves the planner and the goal server to the laptop, which then
-brings the board's Nav2 up node by node once its own costmap answers, while the board's link
-watch stops a drive 2.5 s after the laptop's heartbeat goes silent. The bridge is a systemd unit
-that follows the board's stack; the laptop's containers restart when that bridge is a new one,
-and each waits until the bridge has forgotten its previous incarnation before it starts its
-nodes — the bridge keys routes by node name, and a killed node lingers for its DDS lease.
+**Nav2 on the Mac** (2026-10-01): the planner, the controller, the costmaps, the behaviour tree
+and the goal server run in one container on the laptop (`ros/laptop.sh nav`); the board is a
+sensor box whose scans, ToF and odometry cross the WiFi to them, and the velocity comes back on
+`/cmd_vel`. The thin-client split before it (the board's reflexes, the laptop's planner, a link
+watch between them) is in the git history.
 
 **The board's memory**: ROS 2 Jazzy's binaries load `liblttng-ust` into every node through
 `tracetools`, and it takes 128 MB per process before a single tracepoint fires; nine processes on

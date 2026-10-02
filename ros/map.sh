@@ -6,7 +6,7 @@
 # that and writes the pair map_server reads later, so a SLAM session ends with a map the robot
 # can be sent back into. The container mounts ros/maps, so the
 # files land in the checkout with no copying; the places book of the new map starts empty
-# (ros/go.sh mark NAME while standing somewhere).
+# (ros/goto.sh mark NAME while standing somewhere).
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 case "${1:-}" in
@@ -16,9 +16,6 @@ esac
 NAME="${2:?a map name, e.g. flat3_slam}"
 docker ps --format '{{.Names}}' | grep -qx pepin-vslam \
     || { echo "no pepin-vslam container: ros/laptop.sh vslam first"; exit 1; }
-MODE="$(cat "$HERE/.mode" 2>/dev/null || echo unknown)"
-[ "$MODE" = slam ] \
-    || echo "note: the laptop last read the board in mode '$MODE', not slam — /map is then the board's own saved map, and this would only copy it back"
 # save_map_timeout: the grid arrives on the next publish (map_always_update: one a second), so
 # ten seconds is a dead publisher, not a slow one. The thresholds are map_saver's defaults, the
 # ones every saved map here was written with: a cell is free below 0.25 and occupied above 0.65.

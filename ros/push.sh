@@ -12,7 +12,7 @@
 #      watches, RTAB-Map's XFeat adapters) that imports a change refuses the push while it runs
 #   4. rsync of exactly these files to the board, never --delete: the board writes files of its
 #      own beside ours (maps/rec)
-#   5. the kicks, all at once: ros/thin.sh kick on the board, ros/laptop.sh kick here, each
+#   5. the kicks, all at once: ros/board.sh kick on the board, ros/laptop.sh kick here, each
 #      waiting for its node's NEW pid and that pid's own ready line (ros/kick_ready.awk); a
 #      node that is not running on its half (the other recorder, the goal server's other side,
 #      the tracker under RTAB-Map) is skipped
@@ -59,7 +59,7 @@ done
 
 say() { printf 'would run: %s\n' "$*"; }
 if [ "$DRY" = 1 ]; then
-    [ "$LAPTOP" = 0 ] || echo "would check: pepin-vslam and pepin-laptop mount $ROOT/src/pepin"
+    [ "$LAPTOP" = 0 ] || echo "would check: pepin-vslam and pepin-macnav mount $ROOT/src/pepin"
     for h in ${HELD[@]+"${HELD[@]}"}; do
         IFS="$TAB" read -r half c flag pattern name fix <<<"$h"
         echo "would check: $name in $c on the $half (runs -> refused, $fix)"
@@ -67,7 +67,7 @@ if [ "$DRY" = 1 ]; then
     [ ${#ROS_FILES[@]} -eq 0 ] || say "(cd ros && rsync -a --relative ${ROS_FILES[*]} root@$BOARD:/root/pepin-ros/)"
     [ ${#LIB_FILES[@]} -eq 0 ] || say "(cd src && rsync -a --relative ${LIB_FILES[*]} root@$BOARD:/root/pepin-ros/pepin_src/)"
     for k in ${KICKS[@]+"${KICKS[@]}"}; do
-        case "$k" in board\ *) say "ros/thin.sh kick ${k#* }" ;; *) say "ros/laptop.sh kick ${k#* }" ;; esac
+        case "$k" in board\ *) say "ros/board.sh kick ${k#* }" ;; *) say "ros/laptop.sh kick ${k#* }" ;; esac
     done
     echo "dry run: nothing was touched"
     exit 0
@@ -76,7 +76,7 @@ fi
 # ---- 2. the laptop reads this checkout ------------------------------------------------------
 same_dir() { [ "$(cd "$1" 2>/dev/null && pwd -P)" = "$(cd "$2" && pwd -P)" ]; }
 if [ "$LAPTOP" = 1 ]; then
-    for c in pepin-vslam pepin-laptop; do
+    for c in pepin-vslam pepin-macnav; do
         SRC="$(docker inspect -f '{{range .Mounts}}{{if eq .Destination "/ws/pepin_src/pepin"}}{{.Source}}{{end}}{{end}}' "$c" 2>/dev/null)" || continue
         [ -n "$SRC" ] || continue
         if ! same_dir "${SRC#/host_mnt}" "$ROOT/src/pepin"; then
@@ -119,7 +119,7 @@ trap 'rm -rf "$OUTS"' EXIT
 i=0
 for k in "${KICKS[@]}"; do
     i=$((i + 1)); script=laptop.sh
-    case "$k" in board\ *) script=thin.sh ;; esac
+    case "$k" in board\ *) script=board.sh ;; esac
     (RC=0; "$HERE/$script" kick "${k#* }" >"$OUTS/$i" 2>&1 || RC=$?; echo "$RC" >"$OUTS/$i.rc") &
 done
 wait

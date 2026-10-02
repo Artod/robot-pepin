@@ -1,22 +1,21 @@
-"""The laptop's line to the goal server: cancel, where and a goal over its TCP socket.
+"""The Mac's line to the goal server: cancel, where, planner and a goal over its TCP socket.
 
-Every ROS process started on the board opens a zenoh session, and a new session stalls all
-laptop -> board delivery for 2.6-3.1 s about 1.5 s after it starts; an exited one stalls it again
-until the router closes it. ``ros/goto.sh cancel`` started exactly such a process
-(``goto_ros.py cancel``) in the middle of the drive it was stopping. The goal server
-(pepin_bringup.goal_server) runs for the stack's lifetime and speaks JSON lines on port 3337, so
-the same command costs one TCP connection and no session at all.
+The goal server (pepin_bringup.goal_server) runs with Nav2 on this Mac (``ros/laptop.sh nav``,
+port 3337 published on 127.0.0.1) for the stack's lifetime and speaks JSON lines, so a command
+costs one TCP connection, not a ROS process with a zenoh session of its own (a new session on the
+board stalled all laptop -> board delivery for 2.6-3.1 s, journal 2026-09-25).
 
 Standard library only: ``ros/goto.sh`` runs it with the laptop's own interpreter
 (``PYTHONPATH=src python3 -m pepin.goal_link``), so a cancel never waits for an environment.
 
-    python3 -m pepin.goal_link [--host H] [--port P] cancel
+    python3 -m pepin.goal_link [--host H] [--port P] [--timeout S] cancel
     python3 -m pepin.goal_link [--host H] [--port P] where
+    python3 -m pepin.goal_link [--host H] [--port P] planner NAME
     python3 -m pepin.goal_link [--host H] [--port P] [--log FILE] go NAME | X Y [YAW_DEG]
 
 Exit codes: 0 answered (a goal: reached), 1 refused or not reached, 3 no goal server answered,
 4 the goal server cannot do what was asked (a build whose cancel reaches only its own goal), 5 a
-cancel no navigator confirmed — on 3, 4 and 5 ros/goto.sh takes the old path.
+cancel no navigator confirmed — on 3, 4 and 5 ros/goto.sh cancels through goto_ros.py instead.
 """
 
 from __future__ import annotations
@@ -32,7 +31,8 @@ from pathlib import Path
 from typing import Any, TextIO
 
 PORT = 3337
-# Both navigators the board's Nav2 runs; a cancel means every goal on either (goto_ros.py's
+HOST = "127.0.0.1"  # Nav2 and its goal server run on this Mac (ros/laptop.sh nav)
+# Both navigators Nav2 runs; a cancel means every goal on either (goto_ros.py's
 # cancel_all asks the same two, with the same zero goal id).
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
 # One deadline for the whole cancel, shared between the navigators: the operator is watching.
@@ -89,18 +89,14 @@ def cancel_confirmed(answer: dict[str, Any]) -> bool:
     return any(isinstance(said, dict) and "cancelling" in said for said in navigators.values())
 
 
-def find_server(board_host: str | None, port: int = PORT, timeout_s: float = 1.0) -> str | None:
-    """The host whose goal server listens on ``port``: this machine first (Nav2 on the laptop,
-    ``ros/laptop.sh`` or the macnav container), then the board; ``None`` when neither answers.
-    The same decision ``ros/go.sh`` makes before every command."""
-    hosts = ["127.0.0.1"] + ([board_host] if board_host and board_host != "127.0.0.1" else [])
-    for host in hosts:
-        try:
-            with socket.create_connection((host, port), timeout=timeout_s):
-                return host
-        except OSError:
-            continue
-    return None
+def find_server(port: int = PORT, timeout_s: float = 1.0) -> str | None:
+    """:data:`HOST` when a goal server listens there on ``port``, else ``None``: Nav2 lives on
+    this Mac only."""
+    try:
+        with socket.create_connection((HOST, port), timeout=timeout_s):
+            return HOST
+    except OSError:
+        return None
 
 
 def events(
@@ -183,7 +179,7 @@ class DriveReport:
 
     @property
     def accepted(self) -> bool:
-        """Whether Nav2 took the goal: from then on it drives on the board whatever happens here."""
+        """Whether Nav2 took the goal: from then on it drives whatever happens to this client."""
         return self._goal is not None
 
     def event(self, event: dict[str, Any]) -> None:
@@ -281,10 +277,11 @@ class DriveReport:
         )
 
 
-def run_cancel(host: str, port: int, out: TextIO) -> int:
-    """Cancel every goal through the goal server and print goto_ros.py's line for it."""
-    # The server confirms within CANCEL_CONFIRM_S: the answer is waited for a little longer.
-    answer = ask({"cmd": "cancel"}, host, port, timeout_s=CANCEL_CONFIRM_S + 3.0)
+def run_cancel(host: str, port: int, out: TextIO, timeout_s: float = CANCEL_CONFIRM_S + 3.0) -> int:
+    """Cancel every goal through the goal server and print goto_ros.py's line for it. The
+    server confirms within CANCEL_CONFIRM_S, so the answer is waited for a little longer by
+    default; the red button (ros/stop.sh) waits 3 s and then stops the wheels itself."""
+    answer = ask({"cmd": "cancel"}, host, port, timeout_s=timeout_s)
     line = cancel_line(answer)
     if line is None:
         print(
@@ -296,7 +293,7 @@ def run_cancel(host: str, port: int, out: TextIO) -> int:
         return EXIT_UNSUPPORTED
     print(line, file=out, flush=True)
     if not cancel_confirmed(answer):
-        # Not one navigator answered the server: a second opinion from the board is worth a
+        # Not one navigator answered the server: a second opinion through goto_ros.py is worth a
         # stall here, and the old path gives it.
         print("!! no navigator confirmed the cancel through the goal server", file=out, flush=True)
         return EXIT_UNCONFIRMED
@@ -304,10 +301,17 @@ def run_cancel(host: str, port: int, out: TextIO) -> int:
 
 
 def run_where(host: str, port: int, out: TextIO) -> int:
-    """Print the goal server's ``where`` answer verbatim, as ``ros/go.sh where`` does."""
+    """Print the goal server's ``where`` answer verbatim."""
     answer = ask({"cmd": "where"}, host, port)
     print(json.dumps(answer), file=out, flush=True)
     return EXIT_OK if answer.get("event") == "where" else EXIT_FAILED
+
+
+def run_planner(name: str, host: str, port: int, out: TextIO) -> int:
+    """Select the planner for the next goals and print the goal server's answer verbatim."""
+    answer = ask({"cmd": "planner", "name": name}, host, port)
+    print(json.dumps(answer), file=out, flush=True)
+    return EXIT_OK if answer.get("event") == "planner" else EXIT_FAILED
 
 
 def run_goal(
@@ -315,7 +319,7 @@ def run_goal(
 ) -> int:
     """Drive through the goal server and print the drive as goto_ros.py does; Ctrl-C cancels.
 
-    The goal lives on the board: a connection lost mid-drive leaves it running there, said so.
+    The goal lives in Nav2: a connection lost mid-drive leaves it running, said so.
     """
 
     def say(line: str) -> None:
@@ -339,26 +343,34 @@ def run_goal(
     except OSError as error:
         say(f"!! the link to the goal server dropped ({error})")
     if report.accepted and not report.done:
-        say("!! no result: the drive may go on on the board; ros/goto.sh cancel stops it")
+        say("!! no result: the drive may go on; ros/goto.sh cancel stops it")
     return report.verdict
 
 
 def main(argv: list[str] | None = None) -> int:
     """Parse the command line, run one command, return its exit code."""
     parser = argparse.ArgumentParser(
-        prog="goal_link", description="cancel, where or a goal through the goal server's socket"
+        prog="goal_link",
+        description="cancel, where, planner or a goal through the goal server's socket",
     )
-    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--host", default=HOST)
     parser.add_argument("--port", type=int, default=PORT)
     parser.add_argument("--log", type=Path, help="a goal's lines are also written here")
-    parser.add_argument("command", choices=("cancel", "where", "go"))
-    parser.add_argument("goal", nargs="*", help="go: NAME or X Y [YAW_DEG]")
+    parser.add_argument(
+        "--timeout", type=float, default=CANCEL_CONFIRM_S + 3.0, help="cancel: seconds to wait"
+    )
+    parser.add_argument("command", choices=("cancel", "where", "planner", "go"))
+    parser.add_argument("goal", nargs="*", help="go: NAME or X Y [YAW_DEG]; planner: NAME")
     args = parser.parse_args(argv)
     try:
         if args.command == "cancel":
-            return run_cancel(args.host, args.port, sys.stdout)
+            return run_cancel(args.host, args.port, sys.stdout, args.timeout)
         if args.command == "where":
             return run_where(args.host, args.port, sys.stdout)
+        if args.command == "planner":
+            if len(args.goal) != 1:
+                parser.error("planner takes one NAME")
+            return run_planner(args.goal[0], args.host, args.port, sys.stdout)
         try:
             request = goal_request(args.goal)
         except ValueError as error:

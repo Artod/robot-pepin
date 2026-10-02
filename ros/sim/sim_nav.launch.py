@@ -1,6 +1,6 @@
 """Nav2 for the simulator: the stack's own navigation launch, included whole, not copied.
 
-pepin_bringup's nav.launch.py with ``side:=all`` is what the board runs when it drives by itself:
+pepin_bringup's nav.launch.py is what the Mac runs for the robot (ros/laptop.sh nav):
 the five Nav2 servers composed in one container on ros/params/nav2_params.yaml (with the
 ``PEPIN_LOCALIZER=rtabmap`` overlay that points both static layers at ``/map``), the lifecycle
 manager, the goal server on its socket and the run recorder. The sim changes one thing, and only
@@ -42,7 +42,6 @@ def generate_launch_description() -> LaunchDescription:
                     )
                 ),
                 launch_arguments={
-                    "side": "all",
                     "map": LaunchConfiguration("map"),
                     "params_file": "/params/nav2_params.yaml",
                     "recorder": "jsonl",

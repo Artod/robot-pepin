@@ -2,7 +2,7 @@
 RATE rad/s on /cmd_vel at 20 Hz until the odometry's yaw has swept TARGET_DEG (a little past
 360, so the cart returns to its heading or overshoots slightly — a timed 19 s at 0.35 rad/s
 came up short on the carpet), then stop. Recorded as a tape by the run recorder under the
-given name. Run through ros/go.sh round from the laptop; on the board itself:
+given name. Run through ros/goto.sh round from the laptop; on the board itself:
   docker exec -i pepin-ros /pepin_entrypoint.sh python3 - NAME < /tools/turn_full.py
 
 Guards, because this writes /cmd_vel past every one of Nav2's: it refuses to turn while a
@@ -90,7 +90,7 @@ while time.time() - t0 < ODOM_WAIT_S:  # the status and the first odometry arriv
     rclpy.spin_once(node, timeout_sec=0.05)
 if any(navigating.values()):
     running = ", ".join(a for a, on in navigating.items() if on)
-    print(f"refused: a navigation goal is running ({running}); ros/go.sh cancel first")
+    print(f"refused: a navigation goal is running ({running}); ros/goto.sh cancel first")
     node.destroy_node()
     rclpy.shutdown()
     sys.exit(2)

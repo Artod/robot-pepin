@@ -147,22 +147,14 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
 
 
 @pytest.mark.slow
-def test_the_goal_server_is_reached_where_the_board_s_side_puts_it(
-    capsys: Any, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """ros/flags.sh hands the board's PEPIN_SIDE over as PEPIN_BOARD_SIDE: the split puts the
-    goal server in the laptop's pepin-laptop, a whole board (no side, or empty) keeps it in
-    pepin-ros — where it runs tonight, and where `set goal_server` used to miss it."""
-    monkeypatch.delenv("PEPIN_BOARD_SIDE", raising=False)
-    assert _main(["where", "goal_server"], capsys)[1].strip() == "board pepin-ros"
-    assert "goal_server" in _main(["nodes", "board"], capsys)[1].split()
-    assert "goal_server" not in _main(["nodes", "laptop"], capsys)[1].split()
-    monkeypatch.setenv("PEPIN_BOARD_SIDE", "")
-    assert _main(["where", "goal_server"], capsys)[1].strip() == "board pepin-ros"
-    monkeypatch.setenv("PEPIN_BOARD_SIDE", "board")
-    assert _main(["where", "goal_server"], capsys)[1].strip() == "laptop pepin-laptop"
+def test_the_goal_server_is_reached_in_the_mac_s_nav2_container(capsys: Any) -> None:
+    """Nav2 and its goal server run in pepin-macnav (ros/laptop.sh nav), the camera nodes in
+    pepin-vslam, the sensors on the board."""
+    assert _main(["where", "goal_server"], capsys)[1].strip() == "laptop pepin-macnav"
     assert "goal_server" in _main(["nodes", "laptop"], capsys)[1].split()
+    assert "goal_server" not in _main(["nodes", "board"], capsys)[1].split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
+    assert _main(["where", "neck_state"], capsys)[1].strip() == "board pepin-ros"
 
 
 @pytest.mark.slow

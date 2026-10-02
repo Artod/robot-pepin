@@ -10,8 +10,8 @@ A drive leaves two recordings, written by two processes with two clocks:
 
 | File | Written by | Clock |
 | --- | --- | --- |
-| `<stamp>_goto.jsonl`, `_goto.log`, `_goto_cam.mkv`, `_goto_board.log` | `ros/goto.sh`, on the laptop | the laptop's local time |
-| `0249_<stamp>Z_<place>.jsonl`, `_cam.mjpeg` | `pepin_bringup.run_recorder`, in the board's container | **UTC**, marked by the `Z` |
+| `<stamp>_goto.log`, `_goto.nav2.log`, `_goto_cam.mkv` | `ros/goto.sh`, on the laptop | the laptop's local time |
+| `0249_<stamp>Z_<place>.jsonl` | `pepin_bringup.run_recorder`, in the laptop's Nav2 container (`pepin-macnav`) | **UTC**, marked by the `Z` |
 | `0249_<stamp>Z_<place>/` (an MCAP bag) and the `.jsonl` made from it | `ros2 bag record` under `pepin_bringup.bag_recorder` with `PEPIN_RECORDER=bag`, converted on the laptop by `ros/tools/bag_to_tape.py` | **UTC** too: the same stem, from the same container clock |
 
 The board's own shell is on local time; only the container it runs ROS in is on `Etc/UTC`, so
@@ -26,8 +26,8 @@ Two ways out of the two clocks, both open:
   every name is local;
 * or read the numbered tape's name out of the drive's own log instead of off the clock:
   `ros/goto.sh` prints `run 0249: taped /maps/rec/0249_…` into `<stamp>_goto.log` beside the
-  goal, and `ros/go.sh` prints `=== run #0249 ===` with the fetched paths under it. Neither
-  line needs a timezone.
+  goal, and `numbered tape: ros/maps/rec/0249_…` when the drive ends. Neither line needs a
+  timezone.
 
 ## Which tape answers which question
 
@@ -35,4 +35,4 @@ The numbered tape is the one the replays and the reports are named by: it carrie
 the EKF and the IMU records a stall has to be judged from, and the camera clip beside it. The
 `_goto` session log carries the scans, the odometry, the tracked pose, the commands, the camera's
 measurements and the tracker's account of each update, and it exists whether or not the recorder
-answered. Both are opened on every drive through `ros/goto.sh` and `ros/go.sh`.
+answered. The numbered tape is opened on every drive through `ros/goto.sh`.

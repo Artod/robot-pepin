@@ -3,7 +3,7 @@
 # config/ to the board. Usage:
 #   ros/sync.sh            the files only: the running stack keeps running, and each node picks
 #                          the new code up at its next start (ros/push.sh FILE... kicks exactly
-#                          the nodes a change reaches; ros/thin.sh kick NODE one of them)
+#                          the nodes a change reaches; ros/board.sh kick NODE one of them)
 #   ros/sync.sh --restart  the files, then the board's stack (systemd unit pepin-ros): what a
 #                          launch, params or config change needs; ros/restart.sh board --deploy
 # A restart by default was a surprise more than once (journal 2026-09-22): a laptop-only change

@@ -66,7 +66,7 @@ from pepin.footprint import hull_box
 from pepin.mounts import Mounts
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
-# process: ros/thin.sh kick <node>).
+# process: ros/board.sh kick <node>).
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 
 

@@ -288,18 +288,15 @@ def test_a_jump_of_map_to_odom_clears_nav2_s_local_costmap(tmp_path: Path) -> No
 
 
 def test_the_jump_watch_reads_nothing_at_all_while_its_flag_is_off(tmp_path: Path) -> None:
-    """Default off, and off means nothing runs: no TF listener is started for it (a listener is a
-    subscription to /tf, sixty messages a second on the board) and no service call is made,
-    however far the edge steps. Held on the laptop's half of a split stack, the one place where
-    no pose topic starts that listener first."""
+    """Default off, and off means nothing runs: no service call is made, however far the edge
+    steps, and the first reading after the flag goes on is a baseline, not a jump."""
     with ros_stubs.parameters(
-        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path), side="laptop"
+        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path)
     ):
         node = GoalServer()
     node.clock.seconds = NOW
     for _ in range(5):
         jump_tick(node)
-    assert node._tf is None, "no listener while nobody reads the edge"
     assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [] and node._clears == 0
 
     node._switches.set("jump_clear", True)

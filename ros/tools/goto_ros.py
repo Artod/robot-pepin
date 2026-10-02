@@ -529,10 +529,10 @@ def describe(x: float, y: float, yaw_deg: float, home: dict[str, float] | None =
 
 
 def arrival(nav: BasicNavigator) -> str:
-    """How fresh the pose is at the end of the drive; ros/go.sh where prints the pose itself."""
+    """How fresh the pose is at the end of the drive; ros/goto.sh where prints the pose itself."""
     age = map_frame_age_s(nav, wait_s=2.0)
     return "arrival: " + (
-        f"map -> base_link {age * 1e3:.0f} ms old (the pose: ros/go.sh where)"
+        f"map -> base_link {age * 1e3:.0f} ms old (the pose: ros/goto.sh where)"
         if age is not None
         else "no map frame"
     )
@@ -597,7 +597,7 @@ def main() -> None:
             if not graph:
                 print(
                     f"nothing on {PLACES_TOPIC}: the laptop's places node is not up, or this room"
-                    " has no graph book yet (ros/go.sh mark NAME makes one)"
+                    " has no graph book yet (ros/goto.sh mark NAME makes one)"
                 )
             return
         if args[0] == "seed":
@@ -646,7 +646,7 @@ def main() -> None:
                 print(
                     f"no place 'home' in {PLACES_TOPIC} or {places_path}: it was never marked on"
                     f" this map (known here: {vocabulary.known()}). Stand the cart where home is"
-                    " and run ros/go.sh mark home."
+                    " and run ros/goto.sh mark home."
                 )
                 sys.exit(2)
             x, y, yaw = home_at

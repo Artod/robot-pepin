@@ -128,8 +128,8 @@ def test_the_terminal_items_run_their_exact_commands_from_the_repo_root() -> Non
         == "cd /Users/artem/robots/pepin && uv run python -m pepin.teleop --game"
     )
     assert tm.terminal_script(Path(repo), tm.TELEOP_TERMINAL) == f"cd {repo} && ros/teleop.sh"
-    assert tm.terminal_script(repo, tm.TURN_ONCE) == f"cd {repo} && ros/go.sh round tray"
-    assert (REPO / "ros/teleop.sh").exists() and (REPO / "ros/go.sh").exists()
+    assert tm.terminal_script(repo, tm.TURN_ONCE) == f"cd {repo} && ros/goto.sh round tray"
+    assert (REPO / "ros/teleop.sh").exists() and (REPO / "ros/goto.sh").exists()
 
 
 def test_where_is_one_line_with_the_pose_the_planner_and_the_lidar() -> None:

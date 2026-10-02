@@ -40,9 +40,7 @@ subscription to the whole stream — RTAB-Map's ``map -> odom`` at 20 Hz, the bo
 wanted out of it, and two of them ran on a 4-core A53: this one and the tape recorder's. So this
 node republishes the pose it reads as ``/pose`` (PoseStamped in ``map``, 5 Hz, stamped with the
 transform's own stamp) under the ``pose_topic`` flag, and pepin_bringup.run_recorder subscribes to
-that instead of running a listener of its own (its ``loc_from`` flag). The topic is not published
-on a split stack, where this node is the laptop's and the recorder is the board's: a pose that
-crossed the WiFi to be written to a tape is what putting that recorder on the board prevents.
+that instead of running a listener of its own (its ``loc_from`` flag).
 """
 
 from __future__ import annotations
@@ -62,22 +60,14 @@ import rclpy
 from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
-from lifecycle_msgs.srv import ChangeState, GetState
 from nav2_msgs.action import NavigateToPose, Spin
 from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
-from std_msgs.msg import Header, String
+from std_msgs.msg import String
 
-from pepin.deployment import (
-    BOARD_NAV_NODES,
-    HEARTBEAT_HZ,
-    HEARTBEAT_TOPIC,
-    next_transition,
-    runs_here,
-)
 from pepin.flags import Flag, FlagSet
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
 from pepin.lidar_watch import LidarWatch
@@ -110,7 +100,6 @@ PIVOT_ALLOWANCE_S = 15.0
 RECORDER_PATIENCE_S = (
     8.0  # the recorder answers over the bridge; 3 s once named a drive after the previous tape
 )
-BRINGUP_ROUND_S = 10.0  # a lifecycle query or transition that has not answered by then is abandoned
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
@@ -182,10 +171,9 @@ FLAGS = FlagSet(
         True,
         description=f"the pose this node reads out of TF is republished as {POSE_TOPIC}"
         f" (geometry_msgs/PoseStamped in {MAP_FRAME}, {POSE_HZ:.0f} Hz, stamped with the"
-        " transform's own stamp), so the other nodes on this board can have the pose without a"
-        " TF listener of their own. Inert on a split stack, where the reader is on the other"
-        " machine and reads the edge itself. Off, nothing is published and this node's"
-        " listener goes back to being started on the first ask",
+        " transform's own stamp), so the other nodes beside it can have the pose without a TF"
+        " listener of their own. Off, nothing is published and this node's listener goes back"
+        " to being started on the first ask",
         why="a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at"
         " 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in"
         " Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read"
@@ -201,7 +189,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "controller",
-        "rpp_shim",
+        "mppi",
         choices=("mppi", "rpp", "rpp_shim"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
@@ -216,12 +204,13 @@ FLAGS = FlagSet(
         " _pivot_to, which drives sent through goto_ros.py never reach. Each leg also ran 5-9"
         " recoveries, which is what an RPP answers a refused arc with; MPPI samples another"
         " trajectory instead",
-        on_when="rpp_shim by default since the evening of 2026-09-23 (six legs: 21-33 s, 6-11"
-        " recoveries, 4-10 cm and 2-5 deg at the mark; MPPI on the same board crawled at a median"
-        " 0.06 m/s); mppi where its sampling is wanted, rpp for the position-only drives of before",
-        off_when="rpp for an A/B against the RPP drives of before, or if MPPI's cycle does not"
-        " fit the board's control period (the controller server's 'Control loop missed its"
-        " desired rate')",
+        on_when="mppi by default since Nav2 moved to the Mac (2026-10-01): the board's MPPI"
+        " crawled at a median 0.06 m/s, which is why rpp_shim was the default from the evening of"
+        " 2026-09-23 (six legs: 21-33 s, 6-11 recoveries, 4-10 cm and 2-5 deg at the mark), and"
+        " the Mac's MPPI is what every drive since 2026-09-30 was set to by hand after each start",
+        off_when="rpp_shim for an A/B against the board's RPP drives, rpp for the position-only"
+        " drives of before, or if MPPI's cycle does not fit the control period (the controller"
+        " server's 'Control loop missed its desired rate')",
     ),
     Flag(
         "start_needs_placement",
@@ -370,10 +359,6 @@ class GoalServer(Node):
         self._driving = (
             False  # from before send_goal until the drive is finally over: cancel() clears it
         )
-        # The laptop's pulse: on a split stack the board's link watch cancels a drive when this
-        # stops. Harmless on one machine, where nothing listens.
-        self._beat = self.create_publisher(Header, HEARTBEAT_TOPIC, 10)
-        self.create_timer(1.0 / HEARTBEAT_HZ, self._heartbeat)
         # The lidar's driver, brought back when its port is there and it says nothing. The scan
         # is taken raw: only its arrival matters here, and a parsed one costs a core's percent.
         self._lidar = LidarWatch(started_at=time.monotonic())
@@ -381,27 +366,8 @@ class GoalServer(Node):
             LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
         )
         self.create_timer(1.0, self._watch_lidar)
-        # The laptop half brings the board's Nav2 up (pepin.deployment.next_transition): the
-        # board's tree cannot load before this side's costmap service exists, and the board's
-        # own manager gives up after one failure. Every few seconds: read the four states, send
-        # the one transition that is due, read again. Idempotent, so a restart on either side
-        # simply continues.
-        self._side = str(self.declare_parameter("side", "all").value)
-        self._board_state: dict[str, str] = {}
-        self._board_up_logged = False
-        if self._side == "laptop":
-            self._state_clients = {
-                node: self.create_client(GetState, f"/{node}/get_state") for node in BOARD_NAV_NODES
-            }
-            self._change_clients = {
-                node: self.create_client(ChangeState, f"/{node}/change_state")
-                for node in BOARD_NAV_NODES
-            }
-            self._bringup_busy = False
-            self._bringup_since = 0.0
-            self.create_timer(3.0, self._bring_board_up)
-        # The recorder is a node where the sensors are (run_recorder, on the board): one command
-        # opens a tape, the latched status names it (pepin.runlink).
+        # The recorder is a node of its own (run_recorder, beside this one): one command opens a
+        # tape, the latched status names it (pepin.runlink).
         self._runs = RunLink()
         self._run_word = threading.Event()  # set on every status heard
         self._run_pub = self.create_publisher(String, RUN_COMMAND_TOPIC, 10)
@@ -423,7 +389,7 @@ class GoalServer(Node):
             saved = self._planner_path.read_text().strip()
         self.pick_planner(saved or self.planner)
         self._start_jump_watch()  # the map -> odom jump watch (flag jump_clear, default off)
-        self._start_pose_topic()  # /pose, the board's one pose topic (flag pose_topic)
+        self._start_pose_topic()  # /pose, the one pose topic (flag pose_topic)
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(
             f"goal server ready on port {self._port} (pose: map -> base_link from TF);"
@@ -453,69 +419,6 @@ class GoalServer(Node):
                 f" kick {self._lidar.kicks}, rule {rule}"
             )
             subprocess.run(["pkill", "-INT", "-f", LIDAR_PROCESS], check=False, timeout=5)
-
-    def _heartbeat(self) -> None:
-        self._beat.publish(Header(stamp=self.get_clock().now().to_msg(), frame_id="laptop"))
-
-    def _bring_board_up(self) -> None:
-        """Every 3 s on the laptop: read the board's lifecycle states and send the due step."""
-        now = time.monotonic()
-        if self._bringup_busy:
-            # A call whose answer never comes (the board restarted under it, the bridge re-routing)
-            # must not hold the bring-up for good: after BRINGUP_ROUND_S the round is abandoned.
-            if now - self._bringup_since < BRINGUP_ROUND_S:
-                return
-            self.get_logger().warning("board bring-up: a round got no answer; asking afresh")
-            self._board_state.clear()
-        self._bringup_busy = True
-        self._bringup_since = now
-        pending = set(BOARD_NAV_NODES)
-        for node, client in self._state_clients.items():
-            if not client.service_is_ready():
-                self._board_state.pop(node, None)
-                pending.discard(node)
-                continue
-            future = client.call_async(GetState.Request())
-            future.add_done_callback(lambda f, n=node: self._board_state_read(n, f, pending))
-        if not pending:
-            self._bringup_busy = False
-
-    def _board_state_read(self, node: str, future: Any, pending: set[str]) -> None:
-        try:
-            self._board_state[node] = str(future.result().current_state.label)
-        except Exception:  # a dropped call: the next round asks again
-            self._board_state.pop(node, None)
-        pending.discard(node)
-        if pending:
-            return
-        step = next_transition(self._board_state)
-        if step is None:
-            self._bringup_busy = False
-            if all(self._board_state.get(n) == "active" for n in BOARD_NAV_NODES):
-                if not self._board_up_logged:
-                    self.get_logger().info("board Nav2 is up")
-                    self._board_up_logged = True
-            else:
-                self._board_up_logged = False
-            return
-        node, transition = step
-        self._board_up_logged = False
-        request = ChangeState.Request()
-        request.transition.id = transition
-        self.get_logger().info(f"board bring-up: {node} <- transition {transition}")
-        future = self._change_clients[node].call_async(request)
-        future.add_done_callback(lambda f: self._board_transition_done(node, transition, f))
-
-    def _board_transition_done(self, node: str, transition: int, future: Any) -> None:
-        try:
-            ok = bool(future.result().success)
-        except Exception:
-            ok = False
-        if not ok:
-            self.get_logger().warning(
-                f"board bring-up: {node} refused transition {transition}; asking again in 3 s"
-            )
-        self._bringup_busy = False
 
     def _clock_s(self) -> float:
         """The node's clock in seconds."""
@@ -971,38 +874,25 @@ class GoalServer(Node):
             )
         return None
 
-    # ---- the board's one pose topic (flag pose_topic) -----------------------------------------
+    # ---- the one pose topic (flag pose_topic) -------------------------------------------------
     def _start_pose_topic(self) -> None:
         """Wire ``/pose``: the cart's pose in ``map``, five times a second, out of the TF
         listener this node already owns.
 
-        Only where the reader is on this machine. On a SPLIT stack this node is the laptop's
-        while the tape recorder is the board's, and a pose that crossed the WiFi to be written to
-        the tape is exactly what putting that recorder on the board is meant to prevent — so there
-        it reads the edge itself (its ``loc_from`` tf) and nothing is published here: the timer
-        is not created and the flag is inert; the start line says so.
-
         The listener is built HERE, in the constructor, rather than on the first ask: this timer
-        wants it from the first tick, and it is the one listener the board keeps (the flag's
+        wants it from the first tick, and it is the one listener the stack keeps (the flag's
         ``why``). It starts a spin thread for this node, which is why ``_up`` guards the tick.
         """
-        if not runs_here(self._side, "run_recorder"):
-            return
         self._pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 5)
         if self._tf is None:
             self._tf = TfLookup(self)
         self.create_timer(1.0 / POSE_HZ, self._publish_pose)
 
     def _pose_topic_note(self) -> str:
-        """Where the rest of the board gets the pose from, in one phrase for the start line."""
-        if not runs_here(self._side, "run_recorder"):
-            return (
-                f"{POSE_TOPIC} not published: its reader is on the other machine (side"
-                f" {self._side}) and reads the edge there"
-            )
+        """Where the other nodes get the pose from, in one phrase for the start line."""
         if not self._switches.on("pose_topic"):
             return f"{POSE_TOPIC} off: every reader of the pose parses /tf for itself"
-        return f"{POSE_TOPIC} at {POSE_HZ:.0f} Hz from map -> base_link, for the board's readers"
+        return f"{POSE_TOPIC} at {POSE_HZ:.0f} Hz from map -> base_link, for the other readers"
 
     def _publish_pose(self) -> None:
         """One pose onto ``/pose``, or nothing at all: this is a relay of an edge, never a
