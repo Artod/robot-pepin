@@ -1756,8 +1756,11 @@ script's header carries the one line that puts it back.
 
 The image travels uncompressed: Docker Desktop's containerd image store already saves compressed
 layers (`PEPIN_SHIP_COMPRESS=zstd` turns a compressor on for a daemon whose store writes plain
-tars). Neither step restarts the robot: `docker load` under a running stack is refused unless
-`--force`, and the restart is printed at the end. Code, `params/ekf.yaml` and `config/` are
+tars). Neither step restarts the robot. A ship is refused under a running stack (unless
+`--force`), on a board whose `/etc/default/pepin-ros` still says `PEPIN_NAV=true` or
+`PEPIN_SLAM_TOOLBOX=true`, and under 2 GB free on docker's root; it sets the rollback tag before
+it loads anything, installs `board/pepin-ros.service` (daemon-reload, no restart), and prints the
+restart. Code, `params/ekf.yaml` and `config/` are
 mounted from `/root/pepin-ros` and travel with `ros/sync.sh` as before.
 
 The rf2o layer's compiler count is the `RF2O_JOBS` build argument (Eigen-heavy units; a `-j4`

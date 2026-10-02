@@ -29,7 +29,7 @@ Lines a board still carries from before 2026-10-01 (`PEPIN_NAV`, `PEPIN_SLAM_TOO
 
 The image is built on the Mac (same arm64 architecture, minutes instead of the
 board's half hour) and loaded here over ssh: `ros/build-image.sh --ship` with the
-stack stopped. The board's image from before the sensors-only stack is kept as
+stack stopped, which also installs `board/pepin-ros.service`. The board's image from before the sensors-only stack is kept as
 `pepin-ros:pre-sensors-2026-10-01`; the script's header has the one-line rollback.
 Code, `params/ekf.yaml` and `config/` travel with `ros/sync.sh`; no map goes to the
 board.
