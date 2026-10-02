@@ -368,7 +368,7 @@ def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
 def test_the_tof_layers_never_stall_either_costmap() -> None:
     """A whisker that goes quiet must never be able to stop the robot: a sensor can leave the
     bus, a cone can be dropped by the layer's own message filter while TF is catching up, and
-    tof_bridge is restarted on its own (ros/thin.sh kick). So the scan sources carry no
+    tof_bridge is restarted on its own (ros/board.sh kick). So the scan sources carry no
     expected_update_rate (a buffer given a rate calls itself stale and Nav2 answers every goal
     with "Costmap timed out waiting for update", 2026-09-07), and the kept range layers keep
     their no_readings_timeout."""

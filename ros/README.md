@@ -816,7 +816,7 @@ ros/laptop.sh vslam --seed-map=/maps/flat3_straight.yaml  # the volume starts as
 ```
 
 Offline, `WorldMap.export_pgm_yaml` writes the map_server pair every existing tool already reads
-(`ros/mode.sh nav /maps/NAME.yaml`, `pepin.mapping.grid_from_pgm`), so a volume can be frozen into
+(`PEPIN_MAP=/maps/NAME.yaml ros/laptop.sh nav`, `pepin.mapping.grid_from_pgm`), so a volume can be frozen into
 a file exactly like `ros/map.sh save`.
 
 **The next step, not built:** re-fusing after a loop closure. A TSDF cannot be un-integrated, so a
@@ -1620,7 +1620,7 @@ a pipeline that failed with nothing running to cancel leaves no trace.
 ## Simulation
 
 A kinematic simulator for Nav2's behaviour, on the Mac: `ros/sim.sh`. It runs **our** Nav2 —
-`nav.launch.py side:=all` included whole (`ros/sim/sim_nav.launch.py`), `ros/params/nav2_params.yaml`
+`nav.launch.py` included whole (`ros/sim/sim_nav.launch.py`), `ros/params/nav2_params.yaml`
 with the `PEPIN_LOCALIZER=rtabmap` overlay, the goal server with its saved planner pick, the run
 recorder — in the board's own image, against a simulated cart in the room RTAB-Map saved. Goals go
 through the goal server's socket with the client `ros/goto.sh` uses (`pepin.goal_link`), and every

@@ -1,4 +1,4 @@
-"""The kick's wait (ros/kick_ready.awk, ros/thin.sh kick, ros/laptop.sh kick): the ready line it
+"""The kick's wait (ros/kick_ready.awk, ros/board.sh kick, ros/laptop.sh kick): the ready line it
 reports is the NEW process's — after the launch's exit line of the signalled pid and the start of
 its successor under the same tag — never an older line that happens to match."""
 # ruff: noqa: E501 — the log below is written as the launch writes it, one line per record.

@@ -153,7 +153,7 @@ Check from the laptop: `uv run python scripts/health_check.py --quick`.
 
 The CycloneDDS transport ran two zenoh-bridge-ros2dds sidecars (`pepin-bridge`, and the
 laptop's kick to it, `pepin-bridge-kick.path`). They are on the tag
-`alt/cyclone-bridges-2026-09-20`; `ros/thin.sh` disables them on a board that still has them.
+`alt/cyclone-bridges-2026-09-20`; a board that still has them gets `systemctl disable --now pepin-bridge pepin-bridge-kick.path`.
 
 ## Stray ros2 CLI tools
 
