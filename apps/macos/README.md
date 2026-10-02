@@ -45,12 +45,12 @@ and **this Mac** (`pepin.health.probe_laptop`, no ssh): whether the goal server 
 `pepin-macnav` are up (`docker ps`; red without the mapper). ALL GO means both halves.
 
 The first item, **■ STOP THE ROBOT**, is the red button, run in the background and reported
-as a notification. It cancels every goal through the goal server's socket on this Mac,
-where Nav2 runs (`pepin.goal_link`, the same cancel as `ros/goto.sh cancel`), giving it 3 s to
-confirm; a confirmed cancel is the whole stop and the board is untouched. If no goal server
-answers or no navigator confirms, `ros/stop.sh` takes over: the base server's own stop on the
-board, Nav2's container stopped on this Mac, and the base's stop once more (`ros/laptop.sh nav`
-brings Nav2 back; the board is never restarted, so the odometry and the map stay).
+as a notification: it is `ros/stop.sh`, and the notification is its last line. The base's own
+stop, every goal cancelled through the goal server on this Mac (3 s to confirm), and the base's
+stop again, believed only when its state stream says the wheels are still; when either is not
+confirmed, Nav2's container and a measured motion on the board are killed before that stop, and
+Nav2 is stopped (`ros/laptop.sh nav` brings it back; the board is never restarted, so the
+odometry and the map stay). See ros/README.md, "Driving".
 
 Read-only asks, each answered as a notification: **Where** (the goal server's `where`: the
 cart's pose from `map -> base_link`, the planner, the lidar rate) and **Neck home**

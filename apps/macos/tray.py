@@ -34,7 +34,6 @@ from AppKit import (
     NSMutableAttributedString,
 )
 from tray_menu import (
-    STOP_CONFIRM_S,
     TELEOP_GAME,
     TELEOP_TERMINAL,
     TURN_ONCE,
@@ -254,54 +253,30 @@ class TrayApp(rumps.App):
         rumps.quit_application()
 
     def on_stop(self, _sender: Any) -> None:
-        """The red button, in the background (no Terminal window to wait for).
-
-        First the goal server's cancel over its socket — this Mac's 3337, where Nav2 runs
-        (ros/laptop.sh nav) — given STOP_CONFIRM_S to confirm; a cancel the navigators confirmed
-        is the whole stop, the board untouched.
-        Unreachable or unconfirmed, ros/stop.sh takes over: the base server's own stop,
-        Nav2's container stopped on this Mac, the base's stop again; the board is never
-        restarted. The outcome comes back as a notification.
-        """
+        """The red button, in the background (no Terminal window to wait for): ros/stop.sh,
+        whose last line comes back as a notification. It cancels through the goal server,
+        stops the base and believes only the wheels, and kills what drives them when either
+        is not confirmed; one script, so the tray never waits for a cancel twice."""
         log.info("STOP requested from the tray")
 
         def run() -> None:
-            body = self._cancel_through_goal_server()
-            if body is None:
-                body = self._hard_stop()
+            body = self._stop_sh()
             log.info("STOP: %s", body)
             self._notes.put(("STOP", body))
 
         threading.Thread(target=run, name="stop-robot", daemon=True).start()
 
-    def _cancel_through_goal_server(self) -> str | None:
-        """The cancel line when a navigator confirmed the goal server's cancel; None otherwise."""
-        host = goal_link.find_server()
-        if host is None:
-            log.info("STOP: no goal server on %s:%d", goal_link.HOST, goal_link.PORT)
-            return None
-        try:
-            answer = goal_link.ask({"cmd": "cancel"}, host, timeout_s=STOP_CONFIRM_S)
-        except goal_link.GoalServerUnreachableError as exc:
-            log.warning("STOP: the goal server at %s did not confirm: %s", host, exc)
-            return None
-        line = goal_link.cancel_line(answer)
-        if not goal_link.cancel_confirmed(answer) or line is None:
-            log.warning("STOP: no navigator confirmed the cancel: %s", answer)
-            return None
-        return f"{line} (goal server {host})"
-
     @staticmethod
-    def _hard_stop() -> str:
+    def _stop_sh() -> str:
         """ros/stop.sh: its last line."""
         try:
             done = subprocess.run(
                 ["bash", "ros/stop.sh"], cwd=REPO_ROOT, capture_output=True, text=True, timeout=90
             )
             lines = (done.stdout + done.stderr).strip().splitlines()
-            return "hard stop: " + (lines[-1] if lines else f"stop.sh exited {done.returncode}")
+            return lines[-1] if lines else f"stop.sh exited {done.returncode}"
         except (OSError, subprocess.TimeoutExpired) as exc:
-            return f"hard stop: stop.sh failed: {exc}"
+            return f"stop.sh failed: {exc}"
 
     def on_where(self, _sender: Any) -> None:
         """The cart's pose from the goal server (``where``), notified."""
