@@ -224,19 +224,15 @@ def test_a_stream_that_ends_before_the_drive_was_taken_still_halts() -> None:
     assert goals(robot).cancelled == 1
 
 
-def test_the_head_is_turned_to_its_working_pose_before_a_drive() -> None:
+def test_a_drive_leaves_the_head_to_the_gaze_arbiter() -> None:
+    """The arbiter lets every look go when a drive starts and points the head for it: the drive
+    tool never touches the head, and a head nobody can reach does not stop a drive."""
     robot = fake_robot()
     neck(robot).pose_now = HeadPose(60.0, 10.0)
-    result = call(robot, "go_to", place="home")
-    assert neck(robot).pose_now == REST
-    assert result["head"] == "head turned to its working pose for the drive"
-
-
-def test_a_head_that_does_not_answer_does_not_stop_the_drive() -> None:
-    robot = fake_robot()
     neck(robot).down = True
     result = call(robot, "go_to", place="home")
-    assert result["arrived"] and result["head"].startswith("head not checked before the drive")
+    assert result["arrived"] and "head" not in result
+    assert neck(robot).moves == []
 
 
 def test_cancel_stops_the_drive() -> None:
@@ -288,17 +284,18 @@ def test_look_past_the_reach_is_refused_before_anything_moves() -> None:
     assert neck(robot).moves == []
 
 
-def test_look_while_the_wheels_turn_says_to_wait() -> None:
+def test_look_during_a_drive_says_to_wait_in_the_arbiters_words() -> None:
     robot = fake_robot()
     neck(robot).wheels_moving = True
     why = call(robot, "look", pan_deg=30)["why"]
     assert why == (
-        "the head did not get there: it does not move while the wheels turn: wait for the drive"
-        " to end, or cancel it"
+        "the head did not get there: the head does not move during a drive (the base server"
+        " moves the neck only at rest): wait for the drive to end, or cancel it"
     )
 
 
-def test_look_around_reports_each_direction_and_turns_the_head_back() -> None:
+def test_look_around_reports_each_direction_and_leaves_the_head_to_go_home() -> None:
+    """No tool turns the head back: the last view's TTL ends and the arbiter takes it home."""
     robot = fake_robot()
     neck(robot).pose_now = HeadPose(10.0, 20.0)
     world(robot).things = [
@@ -311,7 +308,7 @@ def test_look_around_reports_each_direction_and_turns_the_head_back() -> None:
     assert seen == {120.0: [], 60.0: ["chair"], 0.0: [], -60.0: [], -120.0: ["cup"]}
     chair = result["views"][1]["seen"][0]
     assert chair["count"] == 2 and chair["range_m"] == 2.0 and chair["bearing_deg"] == 58
-    assert neck(robot).pose_now == HeadPose(10.0, 20.0)
+    assert "head" not in result and neck(robot).moves[-1] == (-120.0, None)
 
 
 def test_look_around_without_the_memory_does_not_move_the_head() -> None:
@@ -321,16 +318,18 @@ def test_look_around_without_the_memory_does_not_move_the_head() -> None:
     assert "world" in result["why"] and neck(robot).moves == []
 
 
-def test_see_returns_the_picture_and_where_the_head_points() -> None:
-    result = call(fake_robot(), "see")
+def test_see_returns_the_picture_and_where_the_head_points_and_keeps_it_there() -> None:
+    robot = fake_robot()
+    result = call(robot, "see")
     assert result["image"].mime == "image/jpeg" and result["pan_deg"] == 0.0
+    assert neck(robot).kept == 1
 
 
 def test_see_without_the_head_still_returns_the_picture() -> None:
     robot = fake_robot()
     neck(robot).down = True
     result = call(robot, "see")
-    assert result["ok"] and result["head"].startswith("unknown: the base server")
+    assert result["ok"] and result["head"].startswith("unknown: the gaze arbiter")
 
 
 def test_see_without_the_camera_says_what_to_check() -> None:
@@ -386,18 +385,18 @@ def test_find_with_look_around_stays_pointed_at_the_thing() -> None:
     assert neck(robot).pose_now.pan_deg == -60.0
 
 
-def test_find_with_look_around_turns_back_when_nothing_is_found() -> None:
+def test_find_with_look_around_leaves_the_head_to_go_home_when_nothing_is_found() -> None:
     robot = fake_robot()
     result = call(robot, "find", thing="umbrella", look_around=True)
     assert result["why"].startswith("no umbrella anywhere around here: the head looked in 5")
-    assert neck(robot).pose_now == REST
+    assert neck(robot).moves[-1] == (-120.0, None) and neck(robot).pose_now != REST
 
 
-def test_find_cannot_sweep_while_the_wheels_turn() -> None:
+def test_find_cannot_sweep_during_a_drive() -> None:
     robot = fake_robot()
     neck(robot).wheels_moving = True
     why = call(robot, "find", thing="cup", look_around=True)["why"]
-    assert why.startswith("the head could not sweep: it does not move while the wheels turn")
+    assert why.startswith("the head could not sweep: the head does not move during a drive")
 
 
 def test_recall_gives_the_memory_with_distances_from_here() -> None:

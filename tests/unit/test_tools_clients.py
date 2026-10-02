@@ -1,6 +1,6 @@
 """pepin.tools.clients against fake owners on local sockets: the goal server's JSON lines, the
-base server's neck commands among its broadcast state lines, world's and the camera's HTTP, and
-the audio link through an injected connection. Real sockets, hence ``slow``."""
+gaze arbiter's door, world's and the camera's HTTP, and the audio link through an injected
+connection. Real sockets, hence ``slow``."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import math
 import shutil
 import socket
 import threading
-import time
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,11 +20,12 @@ import cv2
 import numpy as np
 import pytest
 
+from pepin.gaze_link import JsonDoor
 from pepin.neck import NeckConfig
 from pepin.tools import clients
 from pepin.tools.clients import (
-    BaseServerNeck,
     BoardSpeech,
+    GazeNeck,
     GoalServerLink,
     MacSay,
     ServiceDownError,
@@ -123,98 +123,93 @@ def test_a_goal_server_nobody_runs_is_named() -> None:
         list(link.go({"cmd": "go", "place": "home"}))
 
 
-class BaseServerFake(LineServer):
-    """The base server's port: state lines ten times a second to everyone, and the neck's three
-    commands answered among them, as pepin.base_server does."""
+class GazeDoorFake:
+    """The gaze arbiter's door (pepin.gaze_link): /state with the head at home, /look answered
+    as arrived where it was asked (or denied, when ``deny`` says why), /renew counted."""
 
-    ticks = (2029, 2311)
+    def __init__(self) -> None:
+        self.asked: list[dict[str, Any]] = []
+        self.deny = ""
+        self.head = (0.0, math.radians(23.8))
+        self._door = JsonDoor(
+            "127.0.0.1",
+            0,
+            {
+                ("GET", "/state"): self._state,
+                ("POST", "/look"): self._look,
+                ("POST", "/renew"): self._renew,
+            },
+        ).start()
+        self.url = f"http://127.0.0.1:{self._door.port}"
 
-    def serve(self, lines: Any, send: Any) -> None:
-        stop = threading.Event()
+    def close(self) -> None:
+        self._door.close()
 
-        def broadcast() -> None:
-            while not stop.is_set():
-                try:
-                    send({"type": "state", "armed": False})
-                except OSError:
-                    return
-                time.sleep(0.01)
+    def _state(self, _body: dict[str, Any]) -> dict[str, Any]:
+        return {"phase": "home", "pan_rad": self.head[0], "tilt_rad": self.head[1]}
 
-        threading.Thread(target=broadcast, daemon=True).start()
-        try:
-            for line in lines:
-                message = json.loads(line)
-                self.asked.append(message)
-                if message["cmd"] == "neck":
-                    send({"type": "neck", "pan_ticks": self.ticks[0], "tilt_ticks": self.ticks[1]})
-                elif message["cmd"] == "neck_home":
-                    self.ticks = (NECK.reference.pan_ticks or 0, NECK.reference.tilt_ticks or 0)
-                    send(
-                        {
-                            "type": "neck_goto",
-                            "pan_ticks": self.ticks[0],
-                            "tilt_ticks": self.ticks[1],
-                            "reached": True,
-                            "ms": 800.0,
-                        }
-                    )
-                elif message["cmd"] == "neck_goto":
-                    pan = (
-                        message["pan_ticks"] if message["pan_ticks"] is not None else self.ticks[0]
-                    )
-                    tilt = (
-                        message["tilt_ticks"]
-                        if message["tilt_ticks"] is not None
-                        else self.ticks[1]
-                    )
-                    if not 257 <= pan <= 3812:
-                        send({"type": "neck_goto", "reached": False, "error": "outside its limits"})
-                        continue
-                    self.ticks = (pan, tilt)
-                    send(
-                        {
-                            "type": "neck_goto",
-                            "pan_ticks": pan,
-                            "tilt_ticks": tilt,
-                            "reached": True,
-                            "ms": 900.0,
-                        }
-                    )
-        finally:
-            stop.set()
+    def _look(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.asked.append(body)
+        if self.deny:
+            return {"status": "denied", "reason": self.deny, "reached": False}
+        target = body["target"]
+        self.head = (target["pan_rad"], target["tilt_rad"])
+        return {
+            "status": "done",
+            "reached": True,
+            "pan_rad": self.head[0],
+            "tilt_rad": self.head[1],
+            "took_ms": 900.0,
+        }
+
+    def _renew(self, body: dict[str, Any]) -> dict[str, Any]:
+        self.asked.append(body)
+        return {"renewed": 1}
 
 
 @pytest.fixture
-def base_server() -> Iterator[BaseServerFake]:
-    server = BaseServerFake()
-    yield server
-    server.close()
+def gaze() -> Iterator[GazeDoorFake]:
+    door = GazeDoorFake()
+    yield door
+    door.close()
 
 
-def test_the_neck_speaks_degrees_and_sends_only_neck_commands(base_server: BaseServerFake) -> None:
-    head = BaseServerNeck("127.0.0.1", base_server.port, NECK)
+def test_the_neck_asks_the_arbiter_in_radians_and_reads_its_answers(gaze: GazeDoorFake) -> None:
+    head = GazeNeck(gaze.url, NECK)
     rest = head.pose()
     assert rest.pan_deg == pytest.approx(0.0) and rest.tilt_deg == pytest.approx(23.8)
-    move = head.turn(45.0, None)  # 45 deg left: pan_sign -1, 360/4096 deg a tick -> 512 below
-    assert move.reached and move.pose is not None
-    assert move.pose.pan_deg == pytest.approx(45.0, abs=0.1)
-    assert base_server.asked[-1] == {"cmd": "neck_goto", "pan_ticks": 1517, "tilt_ticks": None}
-    assert head.home().reached
-    assert {m["cmd"] for m in base_server.asked} == {"neck", "neck_goto", "neck_home"}
+    move = head.turn(45.0, None)  # the tilt stays where the encoders say
+    assert move.reached and move.pose is not None and move.ms == 900.0
+    assert move.pose.pan_deg == pytest.approx(45.0)
+    look = gaze.asked[-1]
+    assert look == {
+        "source": "llm.look",
+        "kind": "angles",
+        "band": 2,
+        "target": {
+            "pan_rad": pytest.approx(math.radians(45.0)),
+            "tilt_rad": pytest.approx(rest.tilt_deg * math.pi / 180),
+        },
+        "frames": 0,
+        "hold": True,
+    }
+    head.keep()
+    assert gaze.asked[-1] == {"source": "llm.look"}
 
 
-def test_the_neck_reports_a_refusal_in_the_server_s_words(base_server: BaseServerFake) -> None:
-    refused = BaseServerNeck("127.0.0.1", base_server.port, NECK).turn(170.0, None)
-    assert not refused.reached and refused.why == "outside its limits"
+def test_the_neck_reports_a_denial_in_the_arbiter_s_words(gaze: GazeDoorFake) -> None:
+    gaze.deny = "the head does not move during a drive"
+    refused = GazeNeck(gaze.url, NECK).turn(30.0, 30.0)
+    assert not refused.reached and refused.why == "the head does not move during a drive"
 
 
 def test_the_neck_s_reach_and_rest_come_from_its_config() -> None:
-    head = BaseServerNeck("127.0.0.1", closed_port(), NECK)
+    head = GazeNeck(f"http://127.0.0.1:{closed_port()}", NECK)
     reach = head.reach()
     assert reach.pan_left_deg == pytest.approx(155.7, abs=0.5)
     assert reach.refusal(0.0, 70.0) is not None and reach.refusal(-150.0, 60.0) is None
     assert head.rest().tilt_deg == 23.8
-    with pytest.raises(ServiceDownError, match="base server"):
+    with pytest.raises(ServiceDownError, match="gaze arbiter"):
         head.pose()
 
 

@@ -64,6 +64,11 @@ BANDS = {
 }
 STILL_RAD = 2 * RAD_PER_TICK  # two encoder readings this close are one pose (the encoder's jitter)
 RETRY_S = 0.2  # a write the base server refused for now is tried again after this
+# What a person's look is told during a drive by a base server that moves the neck only at rest.
+DRIVE_REFUSAL = (
+    "the head does not move during a drive (the base server moves the neck only at rest):"
+    " wait for the drive to end, or cancel it"
+)
 
 
 @dataclass(frozen=True)
@@ -704,7 +709,9 @@ def look_from_json(
 
     ``kind`` point (``target`` {frame, x, y, z}), direction ({bearing_rad, pitch_rad} in
     base_link), angles ({pan_rad, tilt_rad}), scan ({views: [{pan_rad, tilt_rad}, ...]}) or
-    home; ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why not).
+    home; ``hold`` true keeps the head on the last view for the rest of the TTL (``dwell_s`` =
+    ``ttl_s``); ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why
+    not).
     """
     kind = str(data.get("kind", "angles"))
     if kind not in KINDS:
@@ -715,8 +722,8 @@ def look_from_json(
     try:
         band = int(data.get("band", PERSON))
         frames = int(data.get("frames", settings.frames))
-        dwell_s = float(data.get("dwell_s", 0.0))
         ttl_s = float(data.get("ttl_s", settings.ttl_for(band)))
+        dwell_s = ttl_s if data.get("hold") else float(data.get("dwell_s", 0.0))
     except (TypeError, ValueError) as exc:
         return f"bad number: {exc}"
     speed = str(data.get("speed", "saccade"))

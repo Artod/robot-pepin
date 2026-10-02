@@ -6,8 +6,8 @@ the robot, whoever sent it. These tools only ask it; they never command the whee
 
 The reflexes live here, not in the model: a drive waits for its own end and says how it ended;
 one that has not ended within :data:`pepin.tools.robot.DRIVE_TIMEOUT_S`, or whose report stream
-is lost, is cancelled, so no motion outlives the call that started it; and the head is turned to
-its working pose first, the pose the costmap's camera scans are measured in.
+is lost, is cancelled, so no motion outlives the call that started it. The head is not theirs:
+the gaze arbiter lets every look go when a drive starts and points the head for the drive.
 """
 
 from __future__ import annotations
@@ -21,7 +21,6 @@ from pepin.tools.robot import Robot
 
 AT_PLACE_M = 0.35  # "at" a place: within this distance of it
 STALE_POSE_S = 2.0  # a pose older than this is reported as such
-HEAD_FORWARD_DEG = 5.0  # a head further than this from its working pose is turned back to it
 AFTER_CANCEL_S = 35.0  # after a cancel of our own, the drive's end is waited for this long
 NAV2_ABORTED = 6
 
@@ -160,7 +159,6 @@ def cancel(robot: Robot) -> Result:
 def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
     """One drive through the goal server, reported when it has ended: the body of go_to and
     go_to_pose, and of any later tool that drives (approach, explore)."""
-    head = face_forward(robot)
     deadline = robot.clock() + robot.drive_timeout_s
     accepted: dict[str, Any] | None = None
     feedback: dict[str, Any] = {}
@@ -173,7 +171,7 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
         for event in events:
             kind = event.get("event")
             if kind == "error":
-                return refused(robot, str(event.get("detail", "")), head)
+                return refused(robot, str(event.get("detail", "")))
             if kind == "accepted":
                 accepted = event
             elif kind == "feedback":
@@ -208,7 +206,7 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
             f"{what} ({link_error or 'no word'}); {robot.halt()}",
             **_progress(feedback),
         )
-    return outcome(accepted, done, feedback, lost, gave_up, target, head)
+    return outcome(accepted, done, feedback, lost, gave_up, target)
 
 
 def outcome(
@@ -218,7 +216,6 @@ def outcome(
     lost: dict[str, Any] | None,
     gave_up: str | None,
     target: str,
-    head: str | None,
 ) -> Result:
     """How a drive ended, in the words and numbers the model needs to re-plan."""
     status = int(done.get("status", 0))
@@ -239,8 +236,6 @@ def outcome(
                 float(arrival["x"]) - accepted["x"], float(arrival["y"]) - accepted["y"]
             )
             payload["off_by_m"] = round(off, 2)
-    if head:
-        payload["head"] = head
     if status == NAV2_SUCCEEDED and not done.get("detail"):
         return ok(arrived=True, **payload)
     payload.update(arrived=False, **_progress(feedback))
@@ -265,7 +260,7 @@ def outcome(
     return fail(why, **payload)
 
 
-def refused(robot: Robot, detail: str, head: str | None) -> Result:
+def refused(robot: Robot, detail: str) -> Result:
     """A goal the goal server would not take, with what the model needs to try again."""
     why = f"not driving: {detail}"
     if "no such place" in detail or "no place" in detail:
@@ -276,26 +271,7 @@ def refused(robot: Robot, detail: str, head: str | None) -> Result:
         why += f". Known places: {', '.join(names)}" if names else ". No places are known yet"
     elif "already driving" in detail:
         why += " (another drive is under way: wait for it to end, or cancel it)"
-    return fail(why, **({"head": head} if head else {}))
-
-
-def face_forward(robot: Robot) -> str | None:
-    """Turn the head to its working pose before a drive; what was done, in words (None when
-    it was there already). A head that cannot be checked does not stop the drive."""
-    try:
-        pose, rest = robot.neck.pose(), robot.neck.rest()
-    except ToolError as error:
-        return f"head not checked before the drive: {error.why}"
-    off = max(abs(pose.pan_deg - rest.pan_deg), abs(pose.tilt_deg - rest.tilt_deg))
-    if off <= HEAD_FORWARD_DEG:
-        return None
-    try:
-        move = robot.neck.home()
-    except ToolError as error:
-        return f"head left {off:.0f} deg off its working pose: {error.why}"
-    if move.reached:
-        return "head turned to its working pose for the drive"
-    return f"head left {off:.0f} deg off its working pose: {move.why or 'it did not arrive'}"
+    return fail(why)
 
 
 def _progress(feedback: dict[str, Any]) -> dict[str, Any]:

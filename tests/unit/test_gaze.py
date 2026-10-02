@@ -408,7 +408,14 @@ def test_requests_from_json() -> None:
         to_base,
     )
     assert isinstance(angles, Look) and angles.views == (Aim(0.5, 0.4),)
-    assert (angles.band, angles.frames, angles.ttl_s) == (PERSON, 3, 10.0)
+    assert (angles.band, angles.frames, angles.ttl_s, angles.dwell_s) == (PERSON, 3, 10.0, 0.0)
+    held = look_from_json(
+        {"source": "llm.look", "target": {"pan_rad": 0.5, "tilt_rad": 0.4}, "hold": True},
+        SETTINGS,
+        CFG,
+        to_base,
+    )
+    assert isinstance(held, Look) and held.dwell_s == held.ttl_s == 10.0
     point = look_from_json(
         {"source": "nav.stall", "kind": "point", "band": 1, "target": {"x": 1, "y": 0, "z": 0}},
         SETTINGS,

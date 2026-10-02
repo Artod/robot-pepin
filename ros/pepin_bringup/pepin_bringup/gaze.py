@@ -68,6 +68,7 @@ from pepin.base_link import BASE_PORT
 from pepin.deployment import config_file
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze import (
+    DRIVE_REFUSAL,
     DRIVING,
     NAVIGATION,
     OPERATOR,
@@ -520,10 +521,7 @@ class Gaze(Node):
         if self._head.moves_while_driving or look.band < PERSON:
             return None
         if self._driving or self._head.wheels_moving:
-            return (
-                "the head does not move during a drive (the base server moves the neck only at"
-                " rest): wait for the drive to end, or cancel it"
-            )
+            return DRIVE_REFUSAL
         return None
 
     # ---- the stall look ------------------------------------------------------------------------
