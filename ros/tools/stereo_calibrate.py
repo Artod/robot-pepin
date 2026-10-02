@@ -11,6 +11,8 @@ enough — writes config/stereo_calibration.json.
     ros/calibrate.sh stereo                  calibrate, with a window showing both eyes
     ros/calibrate.sh stereo --no-window      the same over ssh: a text coverage report
     ros/calibrate.sh stereo --images DIR     re-fit from a session a previous run saved
+    ros/calibrate.sh stereo --images DIR --refit-rotation
+                                             only the rotation between the eyes, after a remount
     ros/calibrate.sh stereo --square 0.0245  the square really on the paper, metres
 
 Every accepted pair is saved under data/stereo_calib/<session>/ before anything is solved, so a
@@ -29,6 +31,7 @@ import time
 import urllib.error
 import urllib.request
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -38,7 +41,7 @@ import numpy as np
 
 from pepin.calibration import Board
 from pepin.log import setup_logging
-from pepin.stereo import CALIBRATION_FILE, SideBySide
+from pepin.stereo import CALIBRATION_FILE, SideBySide, StereoCalibration
 from pepin.stereo_calibration import (
     EPIPOLAR_GOOD_PX,
     SHARP_MIN,
@@ -47,9 +50,13 @@ from pepin.stereo_calibration import (
     EyeFit,
     PairCollector,
     StereoFit,
+    board_depth_check,
     board_sharpness,
     calibrate_pairs,
     find_pair,
+    rectified_rows,
+    refit_rotation,
+    rotation_deg,
 )
 
 logger = logging.getLogger(__name__)
@@ -224,6 +231,47 @@ def report_models(fit: StereoFit, left: dict[str, EyeFit], right: dict[str, EyeF
         )
 
 
+def refit(board: Board, args: argparse.Namespace) -> None:
+    """--refit-rotation: the file's lenses and baseline kept, only the rotation between the eyes
+    refitted on every pair of a saved session; written only when the board's depth agrees."""
+    calibration = StereoCalibration.load(args.config)
+    found = (find_pair(left, right, board) for left, right in session_eyes(args.images))
+    pairs = [pair for pair in found if pair is not None]
+    if len(pairs) < 6:
+        raise SystemExit(f"{len(pairs)} pairs is not a refit: nothing written")
+    before = board_depth_check(calibration, pairs, board)
+    logger.info("%s as it is (%s), on %d pairs:\n%s", args.config, calibration.date, len(pairs),
+                before.report())  # fmt: skip
+    refitted, yaw_deg = refit_rotation(calibration, pairs, board)
+    after = board_depth_check(refitted, pairs, board)
+    epipolar = rectified_rows(refitted, pairs)
+    logger.info("refitted:\n%s", after.report())
+    logger.info(
+        "rotation (pitch, yaw, roll) %s deg -> %s deg: the PnP median, then %+.3f deg of yaw from"
+        " the board's depth; epipolar error after rectification %.3f px",
+        np.array2string(rotation_deg(calibration.rotation), precision=3),
+        np.array2string(rotation_deg(refitted.rotation), precision=3),
+        yaw_deg,
+        epipolar,
+    )
+    refusal = after.refusal()
+    if refusal is not None:
+        logger.error("NOT WRITTEN: %s", refusal)
+        raise SystemExit(1)
+    if args.dry_run:
+        logger.info("--dry-run: %s untouched", args.config)
+        return
+    note = (
+        f"{board} | rotation refitted on {len(pairs)} pairs (per-pair PnP median, then"
+        f" {yaw_deg:+.3f} deg of yaw from the board's depth) with the {calibration.date} lenses"
+        f" and the {calibration.baseline_m * 1000.0:.1f} mm baseline kept | board depth"
+        f" {after.ratio:.4f}, epipolar {epipolar:.3f} px"
+    )
+    today = datetime.now(UTC).strftime("%Y-%m-%d")
+    replace(refitted, date=today, views=len(pairs), board=note).write(args.config)
+    logger.info("wrote %s: only the rotation changed", args.config)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Calibrate the stereo head with a checkerboard; writes"
@@ -238,6 +286,10 @@ def main() -> None:
     parser.add_argument(
         "--images", type=Path, default=None, help="re-fit from a session directory of saved pairs"
     )
+    parser.add_argument(
+        "--refit-rotation", action="store_true",
+        help="with --images: keep the file's lenses and baseline, refit only the eyes' rotation",
+    )  # fmt: skip
     parser.add_argument("--config", type=Path, default=CONFIG, help="the file to write")
     parser.add_argument("--views", type=int, default=TARGET_VIEWS, help="how many pairs to collect")
     parser.add_argument(
@@ -255,6 +307,8 @@ def main() -> None:
     parser.add_argument("--no-save", action="store_true", help="do not keep the accepted pairs")
     parser.add_argument("--dry-run", action="store_true", help="fit and report, write nothing")
     args = parser.parse_args()
+    if args.refit_rotation and args.images is None:
+        parser.error("--refit-rotation refits from saved pairs: pass --images DIR")
     setup_logging("stereo_calibrate")
 
     board = Board.parse(args.board, args.square)
@@ -264,6 +318,9 @@ def main() -> None:
         " %.1f mm, pass what it really is with --square",
         board.square_m * 1000.0,
     )
+    if args.refit_rotation:
+        refit(board, args)
+        return
     session = None
     if not args.no_save and args.images is None:
         session = SESSIONS / datetime.now(UTC).strftime("%Y%m%d-%H%M%S")
