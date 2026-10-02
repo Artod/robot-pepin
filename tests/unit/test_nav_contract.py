@@ -344,7 +344,7 @@ def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
     assert _p("planner_server")["Smac2D"]["cost_travel_multiplier"] >= 5.0
     assert "cost_factor" not in _p("planner_server")["GridBased"], "nav2's NavFn has no such knob"
     inflation = _p("global_costmap")["inflation_layer"]
-    assert (inflation["inflation_radius"], inflation["cost_scaling_factor"]) == (0.55, 10.0)
+    assert (inflation["inflation_radius"], inflation["cost_scaling_factor"]) == (0.55, 5.0)
     assert _p("global_costmap")["update_frequency"] >= 2.0
     follow = _p("controller_server")["FollowPath"]
     assert follow["max_allowed_time_to_collision_up_to_carrot"] >= 0.7

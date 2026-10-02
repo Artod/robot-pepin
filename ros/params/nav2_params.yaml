@@ -129,7 +129,7 @@ controller_server:
       # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
-      inflation_cost_scaling_factor: 5.0
+      inflation_cost_scaling_factor: 10.0  # = the local costmap's (2026-10-02)
       cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
@@ -189,7 +189,7 @@ controller_server:
       # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
-      inflation_cost_scaling_factor: 5.0
+      inflation_cost_scaling_factor: 10.0  # = the local costmap's (2026-10-02)
       cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
@@ -265,7 +265,7 @@ controller_server:
       # RPP recomputes the distance to an obstacle from the cost it reads, so the scaling factor
       # must equal the local inflation layer's and the distance must not exceed its radius; on the defaults (3.0 / 0.6) it was
       # mis-reading its own clearance and crawling near walls for no reason.
-      inflation_cost_scaling_factor: 5.0
+      inflation_cost_scaling_factor: 10.0  # = the local costmap's (2026-10-02)
       cost_scaling_dist: 0.20  # 0.40 halved the speed 20 cm from furniture; the collision check is separate (2026-09-23)
       regulated_linear_scaling_min_radius: 0.6
       regulated_linear_scaling_min_speed: 0.06
@@ -689,7 +689,9 @@ local_costmap:
           observation_persistence: 0.0
       inflation_layer:
         plugin: "nav2_costmap_2d::InflationLayer"
-        cost_scaling_factor: 5.0  # steep: cost falls off fast beyond the hull
+        # 10.0 (was 5.0, 2026-10-02): the controller's map is the bolder one, the planner's (5) the
+        # careful one, so a plan keeps a berth and the controller may still pass close to it.
+        cost_scaling_factor: 10.0
         inflation_radius: 0.45  # the controller slows earlier near legs; only >= 253 is a wall
       # ONE LAYER PER SENSOR, like the three ToF above and for the same reason: separate layers
       # cannot erase each other's evidence, and each is switched on its own while the robot runs
@@ -1126,7 +1128,10 @@ global_costmap:
         # 10.0 (2026-09-23, Artem's A/B after 5.0): at 2.0 the cost stayed high half a metre from
         # any furniture and the planner hunted troughs across the flat; at 10 it is 64 at 20 cm and
         # 3 at 50 cm, so plans run along the furniture and the footprint check alone keeps them off it.
-        cost_scaling_factor: 10.0
+        # 5.0 (2026-10-02): at 10 the planner was bolder than the controllers' local map (5): a hand
+        # 20 cm off the path cost 71 here and 134 there, so plans hugged it, MPPI crept and RPP called
+        # "collision ahead"; at 5 the planner leaves the berth the controller will drive (134 at 20 cm).
+        cost_scaling_factor: 5.0
         inflation_radius: 0.55
       # True (2026-09-28): the planner's live map in Foxglove (/global_costmap/costmap), the whole
       # grid each publish — ~141x216 cells, ~30 kB at publish_frequency 1 Hz. On False a still

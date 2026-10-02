@@ -105,7 +105,7 @@ TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to
 FLAGS = FlagSet(
     Flag(
         "controller",
-        "mppi",
+        "shim_mppi",  # 2026-10-02: the shim drives, MPPI parks (was mppi; drives from 0295)
         choices=("mppi", "rpp", "rpp_shim", "graceful", "dwb", "shim_mppi"),
         description="what follows the plan: mppi is Nav2's MPPI controller for every planner,"
         " held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own"
