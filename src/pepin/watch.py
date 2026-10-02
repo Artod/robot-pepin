@@ -178,8 +178,8 @@ TF_FRESH_S = 1.0
 # How long the SLAM correction may be silent before the half of the stack that owns the pose
 # counts as gone. pepin_bringup.rtabmap_frame publishes it at 10 Hz whether or not the graph
 # moved, so it is a pulse and not an event stream — but it crosses the bridge over WiFi, where
-# the laptop's own heartbeat is given 2.5 s (pepin.deployment.LinkWatch). Twenty missed messages
-# is not a hiccup.
+# the split stack's heartbeat was given 2.5 s (its link watch, removed 2026-10-01). Twenty missed
+# messages is not a hiccup.
 CORRECTION_FRESH_S = 2.0
 
 # How long every scan source and every remote measurement may be silent at once before the fit

@@ -167,7 +167,7 @@ class TrayApp(rumps.App):
             except ConnectionError as exc:
                 self._host = None  # re-resolve on the next poll
                 report = HealthReport(probes=[Probe("board", False, str(exc)[:80])])
-            report.probes.extend(probe_laptop(self._host))
+            report.probes.extend(probe_laptop())
             log.info(
                 "poll %s: %s (%.1fs)%s",
                 self._host,
@@ -256,9 +256,9 @@ class TrayApp(rumps.App):
     def on_stop(self, _sender: Any) -> None:
         """The red button, in the background (no Terminal window to wait for).
 
-        First the goal server's cancel over its socket, wherever Nav2 runs — this Mac's
-        3337 (the macnav container, ros/laptop.sh) or the board's — given STOP_CONFIRM_S to
-        confirm; a cancel the navigators confirmed is the whole stop, the board untouched.
+        First the goal server's cancel over its socket — this Mac's 3337, where Nav2 runs
+        (ros/laptop.sh nav) — given STOP_CONFIRM_S to confirm; a cancel the navigators confirmed
+        is the whole stop, the board untouched.
         Unreachable or unconfirmed, ros/stop.sh takes over: it kills the board's ROS
         processes so the base's deadman cuts the wheels, then restarts that stack (~45 s, the
         odometry starts from zero). The outcome comes back as a notification.
@@ -276,9 +276,9 @@ class TrayApp(rumps.App):
 
     def _cancel_through_goal_server(self) -> str | None:
         """The cancel line when a navigator confirmed the goal server's cancel; None otherwise."""
-        host = goal_link.find_server(self._host)
+        host = goal_link.find_server()
         if host is None:
-            log.info("STOP: no goal server on 127.0.0.1 or %s", self._host)
+            log.info("STOP: no goal server on %s:%d", goal_link.HOST, goal_link.PORT)
             return None
         try:
             answer = goal_link.ask({"cmd": "cancel"}, host, timeout_s=STOP_CONFIRM_S)
@@ -304,14 +304,12 @@ class TrayApp(rumps.App):
             return f"hard stop: stop.sh failed: {exc}"
 
     def on_where(self, _sender: Any) -> None:
-        """The cart's pose from the goal server (``where``), wherever Nav2 runs, notified."""
+        """The cart's pose from the goal server (``where``), notified."""
 
         def run() -> None:
-            host = goal_link.find_server(self._host)
+            host = goal_link.find_server()
             if host is None:
-                body = f"no goal server on 127.0.0.1:{goal_link.PORT}" + (
-                    f" or {self._host}:{goal_link.PORT}" if self._host else ""
-                )
+                body = f"no goal server on {goal_link.HOST}:{goal_link.PORT}"
             else:
                 try:
                     body = where_line(goal_link.ask({"cmd": "where"}, host))
@@ -339,7 +337,7 @@ class TrayApp(rumps.App):
         threading.Thread(target=run, name="neck-home", daemon=True).start()
 
     def on_turn(self, _sender: Any) -> None:
-        """One full turn in place (ros/go.sh round: 372 deg by the gyro, recorded), in a
+        """One full turn in place (ros/goto.sh round: 372 deg by the gyro, recorded), in a
         Terminal window so the sweep and the verdict are visible; the cart moves."""
         self._in_terminal(TURN_ONCE)
 

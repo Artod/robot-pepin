@@ -1,6 +1,6 @@
 #!/bin/bash
 # The kinematic simulator for Nav2, on this Mac (ros/sim/, ros/README.md "Simulation"): the
-# stack's own Nav2 launch (nav.launch.py side:=all, ros/params/nav2_params.yaml, the goal server,
+# stack's own Nav2 launch (nav.launch.py, ros/params/nav2_params.yaml, the goal server,
 # the run recorder) driving a simulated cart in the room RTAB-Map saved. Usage:
 #   ros/sim.sh up [--rate N] [--world NAME] [--start PLACE] [--nav-first S]   router, world and
 #                                Nav2 in throwaway containers; --rate N runs the world's clock at N x

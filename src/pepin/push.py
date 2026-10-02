@@ -3,7 +3,7 @@
 ``ros/push.sh FILE...`` asks this module for a plan and then carries it out: the files go to the
 board by rsync (the laptop's containers mount the checkout), and every running node whose Python
 imports a changed module — directly or through any chain of imports — is kicked by
-``ros/thin.sh kick`` (board) or ``ros/laptop.sh kick`` (laptop): SIGINT, the launch respawns it
+``ros/board.sh kick`` (board) or ``ros/laptop.sh kick`` (laptop): SIGINT, the launch respawns it
 from the new sources, and the kick waits for the NEW pid's own ready line.
 
 What a kick cannot reach is refused before anything is touched: a launch file, a params file or a
@@ -36,7 +36,7 @@ BOARD_LIB_DIR = f"{BOARD_ROS_DIR}/pepin_src"
 
 # The scripts that own the kick of each half: their KICKABLE line is the list of nodes a kick
 # reaches there, and the ready line each node prints lives beside it in the same script.
-KICK_SCRIPTS = {"board": "ros/thin.sh", "laptop": "ros/laptop.sh"}
+KICK_SCRIPTS = {"board": "ros/board.sh", "laptop": "ros/laptop.sh"}
 
 # Each launch file and the halves that run it (the board runs sensors only: navigation is the
 # laptop's).
@@ -76,22 +76,6 @@ HELD: tuple[Held, ...] = (
         ("-f", "pepin_bringup[./]base_bridge"),
         ("pepin_bringup.base_bridge",),
         "the Python base bridge (PEPIN_CPP_BRIDGE=false), not respawned",
-    ),
-    Held(
-        "link_watch",
-        "board",
-        "pepin-ros",
-        ("-f", "pepin_bringup[./]link_watch"),
-        ("pepin_bringup.link_watch",),
-        "the link watch of a split stack, not respawned",
-    ),
-    Held(
-        "bridge_watch",
-        "laptop",
-        "pepin-laptop",
-        ("-f", "pepin_bringup[./]bridge_watch"),
-        ("pepin_bringup.bridge_watch",),
-        "the bridge watch (PEPIN_RMW=cyclone): its exit shuts the launch down",
     ),
     Held(
         "bridge_watch",

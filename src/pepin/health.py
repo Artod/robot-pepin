@@ -434,23 +434,19 @@ def run_health(
 
 # -- the laptop's half --------------------------------------------------------------------------
 
-# The containers the laptop may run (ros/laptop.sh vslam, ros/laptop.sh start, the macnav
-# container): the one that must be up for a drive is the mapper; the other two are where Nav2
-# lives when it does not live on the board.
-LAPTOP_CONTAINERS = ("pepin-vslam", "pepin-macnav", "pepin-laptop")
+# The containers the laptop runs (ros/laptop.sh vslam, ros/laptop.sh nav): the mapper must be up
+# for anything at all, Nav2 for a drive.
+LAPTOP_CONTAINERS = ("pepin-vslam", "pepin-macnav")
 DOCKER_PS = ["docker", "ps", "--format", "{{.Names}} {{.Status}}"]
 
 
-def probe_goal_server(board_host: str | None) -> Probe:
-    """Where the goal server answers (port 3337): this Mac — Nav2 runs here — or the board."""
-    from pepin.goal_link import PORT, find_server
+def probe_goal_server() -> Probe:
+    """Whether the goal server answers on this Mac's port 3337, where Nav2 runs."""
+    from pepin.goal_link import HOST, PORT, find_server
 
-    host = find_server(board_host, PORT)
-    if host is None:
-        where = f"127.0.0.1:{PORT}" + (f" or {board_host}:{PORT}" if board_host else "")
-        return Probe("goal server", False, f"nobody listens on {where}")
-    side = "Nav2 on this Mac" if host == "127.0.0.1" else "Nav2 on the board"
-    return Probe("goal server", True, f"{host}:{PORT} ({side})")
+    if find_server(PORT) is None:
+        return Probe("goal server", False, f"nobody listens on {HOST}:{PORT} (ros/laptop.sh nav)")
+    return Probe("goal server", True, f"{HOST}:{PORT}")
 
 
 def probe_laptop_containers(
@@ -487,9 +483,9 @@ def _running_containers(ps_output: str) -> dict[str, str]:
     return up
 
 
-def probe_laptop(board_host: str | None) -> list[Probe]:
+def probe_laptop() -> list[Probe]:
     """The laptop's half of the stack, no ssh: the goal server and the containers."""
-    return [probe_goal_server(board_host), probe_laptop_containers()]
+    return [probe_goal_server(), probe_laptop_containers()]
 
 
 # -- polling cadence for the menu-bar app -------------------------------------------------------

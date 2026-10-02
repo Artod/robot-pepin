@@ -42,20 +42,9 @@ ros2_in() {  # SIDE CONTAINER ros2 ...: the ros2 CLI inside the container the no
     fi
 }
 
-board_side() {  # the board's PEPIN_SIDE ("board" when the stack is split, empty when it is whole)
-    ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=[a-z]*' /etc/default/pepin-ros 2>/dev/null | cut -d= -f2" \
-        2>/dev/null || true
-}
-
-costmap_in() {  # COSTMAP ros2 ...: the local costmap is always the board's; the global one follows
-    # the planner, which the split (PEPIN_SIDE=board) puts in the laptop's container
-    local costmap="$1"
+costmap_in() {  # COSTMAP ros2 ...: both costmaps live in the Mac's Nav2 container (ros/laptop.sh nav)
     shift
-    if [ "$costmap" = "$GLOBAL_COSTMAP" ] && [ "${SIDE:-}" = board ]; then
-        ros2_in laptop pepin-laptop "$@"
-    else
-        ros2_in board pepin-ros "$@"
-    fi
+    ros2_in laptop pepin-macnav "$@"
 }
 
 layer_in_dump() {  # DUMP LAYER -> the layer's enabled value (true/false), empty when not in it
@@ -117,7 +106,6 @@ apply_layer() {  # COSTMAP LAYER DUMP WANT -> 1 when the costmap has no such lay
 }
 
 on() {
-    SIDE="$(board_side)"
     flags set "$NODE" grid_out true >/dev/null
     echo "  $NODE grid_out -> true"
     for costmap in "$LOCAL_COSTMAP" "$GLOBAL_COSTMAP"; do
@@ -133,7 +121,6 @@ on() {
 }
 
 off() {
-    SIDE="$(board_side)"
     for costmap in "$LOCAL_COSTMAP" "$GLOBAL_COSTMAP"; do
         set_layers "$costmap" off
     done
@@ -143,7 +130,6 @@ off() {
 
 status() {
     local costmap dump line layer value report
-    SIDE="$(board_side)"
     value="$(flags get "$NODE" grid_out 2>/dev/null | sed -n 's/^.*value is: *//p' || true)"
     echo "$NODE grid_out: ${value:-? (the node did not answer)}"
     for costmap in "$LOCAL_COSTMAP" "$GLOBAL_COSTMAP"; do

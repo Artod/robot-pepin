@@ -1,9 +1,12 @@
 #!/bin/bash
-# The laptop half of the thin-client split: the planner (with the global costmap) and the goal
-# server run here, the board keeps the reflexes. Usage:
-#   ros/laptop.sh            start (or restart) the router and the laptop-side Nav2 launch
-#   ros/laptop.sh stop       stop both
-#   ros/laptop.sh logs       follow the launch's output
+# The robot's brain on this Mac; the board is a sensor box. Usage:
+#   ros/laptop.sh nav        start (or restart) Nav2 in pepin-macnav: planner, controller, costmaps,
+#                            behaviour tree, the goal server on 127.0.0.1:3337 (controller mppi),
+#                            the run recorder. PEPIN_MAP names the map whose places book the goal
+#                            server reads (map_server stays off: both costmaps read RTAB-Map's /map)
+#   ros/laptop.sh nav down   stop it; ros/laptop.sh nav logs follows its output
+#   ros/laptop.sh stop       stop every container here, the router with them
+#   ros/laptop.sh logs [vslam|macnav]   follow a container's output (macnav by default)
 #   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them: RTAB-Map
 #                            on its one database (ros/maps/rtabmap.db), whose loop-closed grid is
 #                            THE map — published on /map for the board's tracker. The database is
@@ -40,15 +43,16 @@
 #                            the xfeat image's (PEPIN_ADAPTERS_MOUNT=0: the image's) and passes
 #                            PEPIN_GLOBAL_DESCRIPTOR / PEPIN_REGISTRATION_BACKEND through when set;
 #                            stop stops the models again
-# Only `start` talks to the board (its side and its map); stop, logs, vslam and kick never do.
-# Prerequisites: the image built here (ros/laptop-build.sh) and the board on side=board
-# (ros/thin.sh on). A Docker container on macOS lives behind the VM's NAT; this machine's zenoh
-# router holds the one TCP link to the board's router, and the graph appears here whole.
+# Nothing here talks to the board. Prerequisites: the image built here (ros/laptop-build.sh) and
+# the board's sensors up with no Nav2 of its own (two Nav2 in one graph share every node name).
+# A Docker container on macOS lives behind the VM's NAT; this machine's zenoh router holds the one
+# TCP link to the board's router, and the graph appears here whole.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$HERE/lib.sh"  # one multiplexed ssh with a connect timeout: a frozen board fails fast, not silently
 NET=pepin-net
+NAV=pepin-macnav  # = pepin.deployment.NAV_CONTAINER
 # The library is mounted live, like the ROS package: a copy went stale whenever a container was
 # restarted by anything but this script (the depth node died on an import of a function that
 # existed in src/ but not in the copy, 2026-09-11).
@@ -105,7 +109,7 @@ xfeat_built_on() {  # BASE: whether pepin-laptop:xfeat's layers begin with BASE'
 # The session's tx queues raised to 16 batches each (rmw_zenoh's default is smaller): with the
 # default the Foxglove bridge in pepin-vslam hit "Unable to push non droppable network message"
 # within minutes of every start and hung silently (2026-09-30, 2026-10-01), as Nav2 did before
-# scratch/macnav/up.sh got the same override. 32 panics zenoh (`*num <= RBLEN`): 16 is the ceiling.
+# the Mac's Nav2 got the same override. 32 panics zenoh (`*num <= RBLEN`): 16 is the ceiling.
 ZENOH_QUEUE="${PEPIN_ZENOH_QUEUE:-16}"
 ZENOH_QUEUES=""
 for prio in control real_time interactive_high interactive_low data_high data data_low background; do
@@ -119,7 +123,7 @@ start_check() { pepin_time_source_check || exit 1; }
 # One zenoh router per machine, and this is the laptop's. It is started before any node here and
 # left alone afterwards: a node's connect retry is infinite, so containers may come and go under
 # it, and it is the only process on this side that talks to the board. Started idempotently —
-# `ros/laptop.sh start` and `ros/laptop.sh vslam` both need it and either may come first.
+# `ros/laptop.sh nav` and `ros/laptop.sh vslam` both need it and either may come first.
 zrouter_up() {
     docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
     if docker ps --format '{{.Names}}' | grep -qx "$PEPIN_ZROUTER_LAPTOP"; then
@@ -149,9 +153,10 @@ zrouter_up() {
     echo "laptop zenoh router up: $PEPIN_ZROUTER_LAPTOP, dialling tcp/$BOARD:$PEPIN_ZROUTER_PORT"
 }
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
-# (the kick waits for that line): the Python modules of vslam.launch.py, and the goal server of
-# the navigation half (it runs here on side=board only; on side=all: ros/thin.sh kick goal_server).
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server"
+# (the kick waits for that line): the Python modules of vslam.launch.py and of nav.launch.py. Only
+# one of the two recorders runs (nav.launch.py's recorder argument); a kick of the other one finds
+# nothing and says so.
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -163,7 +168,9 @@ kick_target() {  # node name -> "container|start-up line"
         places) echo "pepin-vslam|places up: " ;;
         marks_audit) echo "pepin-vslam|marks audit up: " ;;
         visual_odometry) echo "pepin-vslam|visual odometry up: " ;;
-        goal_server) echo "pepin-laptop|goal server ready on port" ;;
+        goal_server) echo "$NAV|goal server ready on port" ;;
+        run_recorder) echo "$NAV|run recorder ready" ;;
+        bag_recorder) echo "$NAV|bag recorder ready" ;;
         *) return 1 ;;
     esac
 }
@@ -179,19 +186,43 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/pyth
         -v "$HERE/tools:/tools:ro" -v "$HERE/entrypoint.sh:/pepin_entrypoint.sh:ro"
         -v "$HERE/../src/pepin:/ws/pepin_src/pepin:ro" -v "$HERE/params:/params:ro" -v "$HERE/maps:/maps"
         -v "$HERE/../config:/ws/config:ro")
-case "${1:-start}" in
+case "${1:-}" in
+    nav)
+        # NAV2 ON THIS MAC (decision of 2026-10-01): the launch the board ran, whole, beside this
+        # machine's router; scans, ToF and odometry come from the board over WiFi and the velocity
+        # goes back on /cmd_vel. The goal server's port is published here: ros/goto.sh,
+        # ros/preflight.sh and the tray speak to 127.0.0.1:3337.
+        case "${2:-up}" in
+            down) pepin_remove_container "$NAV"; echo "$NAV stopped"; exit 0 ;;
+            logs) exec docker logs -f "$NAV" ;;
+            up) ;;
+            *) echo "usage: ros/laptop.sh nav [up|down|logs]"; exit 2 ;;
+        esac
+        start_check
+        MAP="${PEPIN_MAP:-/maps/flat3_straight.yaml}"
+        pepin_remove_container "$NAV"
+        zrouter_up
+        pepin_timeserver_up  # the clock the board follows (ros/lib.sh)
+        docker run -d --name "$NAV" --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
+            "$(image)" ros2 launch pepin_bringup nav.launch.py "map:=$MAP" "recorder:=$PEPIN_RECORDER" >/dev/null
+        # The tree's transitions, one watcher per container, read by ros/goto.sh (which starts
+        # it itself when it is missing).
+        pepin_bt_watch || echo "bt watcher not started: ros/goto.sh starts it with the first goal"
+        echo "nav up: Nav2 in $NAV, map $MAP, goal server on 127.0.0.1:3337; ros/laptop.sh nav logs"
+        exit 0 ;;
     stop)
         # The router is this side's own, so a stop takes it too. The time server (pepin-chrony) is left running: it is the board's clock, not a part of this
         # half, and a board that lost it would change source at every stop (ros/time.sh server
         # stop takes it down on purpose).
-        pepin_remove_container pepin-laptop pepin-vslam "$PEPIN_ZROUTER_LAPTOP"
+        pepin_remove_container "$NAV" pepin-vslam "$PEPIN_ZROUTER_LAPTOP"
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         # The localisation models leave with the session, as the depth host does: ~1 GB of this
         # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
         if "$HERE/models.sh" installed localization; then "$HERE/models.sh" stop localization; fi
         echo "laptop side stopped"; exit 0 ;;
     logs)
-        exec docker logs -f "pepin-${2:-laptop}" ;;
+        exec docker logs -f "pepin-${2:-macnav}" ;;
     kick)
         # One node, not its container. SIGINT is what the launch itself sends at shutdown: the
         # node's main destroys the node and the context; the launch respawns the module from the
@@ -336,40 +367,5 @@ case "${1:-start}" in
             echo "foxglove: reopen off (PEPIN_FOXGLOVE_REOPEN=0); reconnect with: open '$("$HERE/foxglove.sh" url)'"
         fi
         exit 0 ;;
-    start) start_check ;;
-    *) echo "usage: ros/laptop.sh [start | stop | logs [vslam] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] | kick NODE]"; exit 2 ;;
 esac
-# Which half the board expects: on side=all (ros/thin.sh vision) the board drives by itself and
-# this side starts only the router — RTAB-Map and the camera come with "ros/laptop.sh vslam".
-# A board that does not answer is fatal here, loudly: with pipefail a failed ssh in a command
-# substitution once ended this script silently (2026-09-10 20:02).
-# No PEPIN_SIDE line in the board's file is side=all (ros/thin.sh vision and off delete it).
-SIDE="$(ssh "root@$BOARD" "grep -oE '^PEPIN_SIDE=.*' /etc/default/pepin-ros || echo PEPIN_SIDE=all" 2>/dev/null | cut -d= -f2 || true)"
-[ -n "$SIDE" ] || { echo "cannot read the board's side over ssh (root@$BOARD, /etc/default/pepin-ros): is it up?"; exit 1; }
-# Where Nav2's planner lives: on side=board (the split) this side plans and takes goals; on
-# side=all the board drives by itself and this side only maps. The map always comes FROM here
-# (RTAB-Map's grid on /map).
-if [ "$SIDE" = board ]; then
-    # The map here chooses the places book, so it must be the board's map, not merely a valid one.
-    MAP="${PEPIN_MAP:-$(ssh "root@$BOARD" "grep -oE '^PEPIN_MAP=.*' /etc/default/pepin-ros" 2>/dev/null | cut -d= -f2 || true)}"
-    [ -n "$MAP" ] || { echo "the board does not say which map it runs (ros/mode.sh nav MAP first)"; exit 1; }
-    MODE=split
-else
-    MODE=vision
-fi
-# The mode the board is in, recorded for anyone who needs it without an ssh of its own.
-printf '%s\n' "$MODE" > "$HERE/.mode"
-docker network inspect "$NET" >/dev/null 2>&1 || docker network create "$NET" >/dev/null
-pepin_remove_container pepin-laptop
-pepin_timeserver_up  # the clock the board follows (ros/lib.sh)
-# This half's nodes are peers of this machine's router, and that router holds the one link to
-# the board's. A restart of either router is recovered from by the nodes' own infinite connect
-# retry, so no start order is enforced here.
-zrouter_up
-if [ "$SIDE" != board ]; then
-    echo "board on side=$SIDE, mode $MODE: it drives by itself; router up for the laptop's mapping (ros/laptop.sh vslam)"; exit 0
-fi
-docker run -d --name pepin-laptop --network "$NET" -p 3337:3337 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-    -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
-    "$(image)" ros2 launch pepin_bringup nav.launch.py side:=laptop "map:=$MAP" >/dev/null
-echo "laptop side up: planner + goal server (port 3337 here), linked to $BOARD; ros/laptop.sh logs"

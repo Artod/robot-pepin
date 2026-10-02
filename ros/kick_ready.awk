@@ -1,5 +1,5 @@
 # The kicked node's successor and its own ready line, read from its container's log (the tail
-# `docker logs -t --since <the kick>` prints). ros/thin.sh kick and ros/laptop.sh kick feed it
+# `docker logs -t --since <the kick>` prints). ros/board.sh kick and ros/laptop.sh kick feed it
 # on every poll; POSIX awk (mawk on the board, BWK awk on the Mac).
 #
 # The launch writes three lines per restart under the process's own tag ([python3-7]):
