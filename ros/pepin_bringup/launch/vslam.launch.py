@@ -1113,7 +1113,7 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("vo", default_value="true"),
             # What that odometry reads: depth (rgbd_odometry, at the depth's rate) or stereo
             # (stereo_odometry on the two eyes, at the camera's). See the node's comment above.
-            DeclareLaunchArgument("vo_input", default_value="depth"),
+            DeclareLaunchArgument("vo_input", default_value="stereo"),
             # The live phantom count (pepin_bringup.marks_audit): who painted each lethal cell of
             # the local costmap, once a second. On by default — it only reads, it costs this
             # laptop a few milliseconds a second, and the drive it is needed on is the drive

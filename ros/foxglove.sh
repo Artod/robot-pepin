@@ -124,6 +124,16 @@ reopen() {
         echo "  or: open '$link'"
         return 0
     fi
+    # The app reconnects its own open connections; a deep link fired anyway opens ANOTHER one, and
+    # each costs ~26 MB/s through Docker's proxy (five of them halved the depth rate, 2026-10-01).
+    local i
+    for i in 1 2 3 4 5 6; do
+        if lsof -nP -iTCP:"$PORT" -sTCP:ESTABLISHED 2>/dev/null | grep -q "^$APP_PROCESS"; then
+            echo "foxglove: the app reconnected to $(ws_url) by itself; no new connection opened"
+            return 0
+        fi
+        sleep 1
+    done
     # -g: the app reconnects without stealing the screen from whatever is being read right now.
     if open -g "$link" 2>/dev/null; then
         echo "foxglove: the app was told to reconnect to $(ws_url) (its old socket died with the bridge)"

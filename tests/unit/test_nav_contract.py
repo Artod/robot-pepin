@@ -2678,7 +2678,7 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
     declared = {
         ast.unparse(c.args[0]): sf.keywords(c) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
     }
-    assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'depth'", "today's input"
+    assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'stereo'", "today's input"
     assert ast.literal_eval(sf.assignments(vslam)["VO_INPUTS"]) == ("depth", "stereo")
     stereo = sf.keywords(_node_named(vslam, "stereo_odometry"))
     assert ast.unparse(stereo["executable"]) == "'stereo_odometry'"
@@ -2694,7 +2694,7 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
     ):
         assert pair in remapped, remapped
     laptop = (REPO / "ros/laptop.sh").read_text()
-    assert "--vo-stereo) VO_INPUT=stereo ;;" in laptop and '"vo_input:=$VO_INPUT"' in laptop
+    assert "--vo-depth) VO_INPUT=depth ;;" in laptop and '"vo_input:=$VO_INPUT"' in laptop
     gate = next(
         c
         for c in sf.calls_to(vslam, "ExecuteProcess")
