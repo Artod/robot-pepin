@@ -42,6 +42,15 @@ def camera(pan_deg: float, pitch_deg: float) -> RigidPose:
     return RigidPose(rotation, np.array([x, y, z]))
 
 
+def inside(model: BodyModel, points: np.ndarray) -> np.ndarray:
+    """Which (n, 3) base_link points lie in one of the model's grown boxes, faces included."""
+    p = np.asarray(points, dtype=float).reshape(-1, 3)
+    hit = np.zeros(p.shape[0], dtype=bool)
+    for box in model.grown:
+        hit |= np.all((p >= np.array(box.lo)) & (p <= np.array(box.hi)), axis=1)
+    return hit
+
+
 def march(intr: Intrinsics, pose: RigidPose, boxes: tuple[BodyBox, ...]) -> np.ndarray:
     """The optical depth each pixel sees in a room of ``boxes`` on a floor at z = 0, by marching
     the ray in 5 mm steps (NaN where nothing within 3 m)."""
@@ -55,7 +64,7 @@ def march(intr: Intrinsics, pose: RigidPose, boxes: tuple[BodyBox, ...]) -> np.n
         if not open_.any():
             break
         points = pose.translation + z * direction[open_]
-        hit = solid.contains(points) | (points[:, 2] <= 0.0)
+        hit = inside(solid, points) | (points[:, 2] <= 0.0)
         depth[np.flatnonzero(open_)[hit]] = z
     return depth.reshape(intr.height, intr.width).astype(np.float32)
 
@@ -81,7 +90,7 @@ def test_the_shipped_body_loads_and_the_camera_never_stands_inside_it() -> None:
     for pan in np.linspace(pan_lo, pan_hi, 37):
         for tilt in np.linspace(tilt_lo, tilt_hi, 11):
             pose = camera(math.degrees(pan), math.degrees(tilt))
-            assert not SHIPPED.contains(pose.translation[None, :]).any(), (pan, tilt)
+            assert not inside(SHIPPED, pose.translation[None, :]).any(), (pan, tilt)
 
 
 def test_a_config_that_is_not_a_body_is_refused_with_the_reason() -> None:
@@ -130,12 +139,11 @@ def test_a_frame_looking_down_at_the_own_shelf_paints_nothing_inside_the_body() 
     cut.integrate(depth, None, INTR, pose, clip=clip)
 
     true_body = BodyModel(SHIPPED.boxes, margin_m=0.0)
-    centres = voxel_centres(room())
-    inside = true_body.contains(centres).reshape(raw.weight.shape)
-    assert np.count_nonzero(raw.weight[inside]) > 20, "unfiltered, the frame paints the cart"
-    assert np.count_nonzero(cut.weight[inside]) == 0, "filtered, nothing inside the body"
+    within = inside(true_body, voxel_centres(room())).reshape(raw.weight.shape)
+    assert np.count_nonzero(raw.weight[within]) > 20, "unfiltered, the frame paints the cart"
+    assert np.count_nonzero(cut.weight[within]) == 0, "filtered, nothing inside the body"
     points, _colours = cut.surface(min_weight=0.1)
-    assert len(points) and not SHIPPED.contains(points).any(), "no surface on the grown body"
+    assert len(points) and not inside(SHIPPED, points).any(), "no surface on the grown body"
     floor = points[points[:, 2] < 0.1]
     assert len(floor) > 20, "the floor the frame sees around the cart is still there"
 
@@ -164,8 +172,8 @@ def test_a_ray_that_enters_the_body_carves_nothing_behind_it() -> None:
     true_body = BodyModel(SHIPPED.boxes, margin_m=0.0)
     hidden = np.zeros(len(centres), dtype=bool)
     for t in np.linspace(0.0, 1.0, 120)[1:-1]:
-        hidden |= true_body.contains(pose.translation + t * (centres - pose.translation))
-    hidden &= ~SHIPPED.contains(centres)
+        hidden |= inside(true_body, pose.translation + t * (centres - pose.translation))
+    hidden &= ~inside(SHIPPED, centres)
     hidden = hidden.reshape(painted().weight.shape)
 
     raw, cut = painted(), painted()

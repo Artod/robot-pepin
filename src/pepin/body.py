@@ -128,14 +128,6 @@ class BodyModel:
         """The boxes as the filter uses them: each grown by :attr:`margin_m`."""
         return tuple(box.grown(self.margin_m) for box in self.boxes)
 
-    def contains(self, points: npt.ArrayLike) -> npt.NDArray[np.bool_]:
-        """Which of the (n, 3) base_link ``points`` are inside the grown body."""
-        p = np.asarray(points, dtype=float).reshape(-1, 3)
-        inside = np.zeros(p.shape[0], dtype=bool)
-        for box in self.grown:
-            inside |= np.all((p >= np.array(box.lo)) & (p <= np.array(box.hi)), axis=1)
-        return inside
-
     def ray_depth(self, intr: Intrinsics, camera: RigidPose) -> RayDepth:
         """Where each ray of the picture enters the body, ``camera`` being ``base_link <-
         camera_optical``; the rays of a :attr:`stride_px` grid, each through its cell's centre

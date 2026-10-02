@@ -339,9 +339,9 @@ FLAGS = FlagSet(
         " does not see the body is written bit for bit as without the filter) and its cost"
         " (scratch/gaze_vision/cost.py, the live 280x250x34 grid, the 800x600 eye): nothing at"
         " the working tilt for any pan within +-95 deg (no ray meets the body; the cached mask"
-        " says so in 5 us), +3.0 ms of integration (23.8 -> 26.8 ms) on a reverse-gaze frame"
-        " whose rays meet the body for 24 %, and 6 ms to rebuild the ray grid once the head has"
-        " moved",
+        " says so in 3-5 us), +1.6-3.0 ms of integration (on 19-24 ms, two runs) on a"
+        " reverse-gaze frame whose rays meet the body for 24 %, and 4.5-6 ms to rebuild the ray"
+        " grid once the head has moved",
         on_when="before the head looks back or down to a side (reverse-gaze, side looks at tilt"
         " 45-63 deg), after the boxes are taped; the check: the head at the tilt limit at pan 0,"
         " +-90 and 180, 20 frames each, no voxel born inside the boxes",
