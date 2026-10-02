@@ -25,10 +25,12 @@ I2C=""
 # three variables:
 #   RMW_IMPLEMENTATION    the middleware itself
 #   PEPIN_RMW             kept for the tools that print it
-#   ZENOH_ROUTER_CHECK_ATTEMPTS=0  do not block on the router at start-up. The session's own
-#       connect retry is infinite for a peer (connect/timeout_ms -1, exit_on_failure false in
-#       the shipped session config), so a node started before pepin-zrouter comes up stays
-#       alive and joins when the router appears, instead of dying on a start-order race.
+#   ZENOH_ROUTER_CHECK_ATTEMPTS=0  rmw_zenoh's meaning: wait for the router at start-up for as
+#       long as it takes, one check a second (-1 would skip the check). A node started before
+#       pepin-zrouter comes up therefore blocks in its first rmw call and comes alive when the
+#       router appears, instead of dying on a start-order race (seen in a container with no
+#       router, 2026-10-01: "Unable to connect to a Zenoh router" once a second, and the nodes
+#       came up the moment a router started).
 # No session config is passed: the shipped default (peer, connect tcp/localhost:7447, listen
 # tcp/localhost:0) is already the shape the board wants — nodes talk to each other directly
 # over the host loopback, and only what leaves the board goes through the router.
