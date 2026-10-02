@@ -27,7 +27,7 @@ from nav_msgs.msg import Path as PathMsg  # noqa: E402
 from pepin_bringup.bag_recorder import BAG_TOPICS, record_command  # noqa: E402
 from pepin_bringup.run_recorder import RunRecorder  # noqa: E402
 from sensor_msgs.msg import Imu, LaserScan, Range  # noqa: E402
-from std_msgs.msg import Header  # noqa: E402
+from std_msgs.msg import Header, String  # noqa: E402
 from tf2_msgs.msg import TFMessage  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[2]
@@ -123,6 +123,29 @@ def statuses() -> GoalStatusArray:
     return GoalStatusArray(status_list=[GoalStatus(status=2), GoalStatus(status=6)])
 
 
+def gaze_state() -> String:
+    """The gaze arbiter's state line in a saccade."""
+    return String(
+        data=json.dumps(
+            {
+                "phase": "saccade",
+                "pan_rad": 0.1,
+                "tilt_rad": 0.9,
+                "source": "nav.stall",
+                "band": 1,
+                "blind": True,
+                "blind_from": 1000.85,
+                "blind_until": None,
+            }
+        )
+    )
+
+
+def stall_look() -> String:
+    """One stall look's record, dated by the arbiter."""
+    return String(data=json.dumps({"t": 1000.95, "verdict": "carved", "success": True}))
+
+
 # One message per record a drive writes, in the order a drive produces them (the plan before the
 # global costmap: the grid's throttle is the plan counter in both recorders).
 MESSAGES: list[tuple[str, Any, str]] = [
@@ -136,11 +159,13 @@ MESSAGES: list[tuple[str, Any, str]] = [
     ("/global_costmap/costmap", grid(1000.7, [0, 0, 50, 99, -1, -1, 100, 0]), "_on_global_costmap"),
     ("/tof/front", tof(1000.8), "tof:front"),
     ("/navigate_to_pose/_action/status", statuses(), "status:navigate_to_pose"),
+    ("/gaze/state", gaze_state(), "_on_gaze"),
+    ("/gaze/stall", stall_look(), "_on_stall"),
 ]
 # The rows dated on arrival rather than by a stamp of their own: the two recorders cannot agree
 # on that number (one is the moment the message reached the node, the other the moment the bag
 # wrote it), and everything else in them must still be equal.
-ARRIVAL_DATED = {"cmd", "nav"}
+ARRIVAL_DATED = {"cmd", "nav", "gaze"}
 
 
 def live_rows(tmp_path: Path) -> list[dict[str, Any]]:
@@ -204,6 +229,8 @@ def test_every_record_a_drive_writes_is_covered(
         "gcostmap",
         "tof",
         "nav",
+        "gaze",
+        "stall",
     }
 
 

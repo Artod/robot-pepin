@@ -51,8 +51,8 @@ def test_a_node_s_flags_are_reached_where_its_process_lives() -> None:
     assert node_host("/depth_fusion") == ("laptop", "pepin-vslam")
     assert node_host("goal_server") == ("laptop", "pepin-macnav")
     assert node_host("/planner_server") == ("laptop", "pepin-macnav")
-    assert node_host("neck_state") == ("board", "pepin-ros")
     assert node_host("base_bridge") == ("board", "pepin-ros")
+    assert node_host("tof_bridge") == ("board", "pepin-ros")
 
 
 def test_a_cross_machine_topic_carries_one_qos_on_both_sides() -> None:

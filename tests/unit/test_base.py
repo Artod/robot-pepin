@@ -1,7 +1,9 @@
 """The base driver against a fake bus: sign handling, clamping, encoder wrap."""
 
 import math
+from collections.abc import Sequence
 from dataclasses import replace
+from typing import Any
 
 import pytest
 
@@ -22,7 +24,7 @@ class FakeBus:
     """Records writes and serves scripted encoder positions."""
 
     def __init__(self) -> None:
-        self.writes: list[tuple[str, dict[str, int]]] = []
+        self.writes: list[tuple[str, dict[str, Any]]] = []
         self.torque: list[tuple[str, list[str] | None]] = []
         self.positions = {LEFT: 0, RIGHT: 0}
 
@@ -30,11 +32,23 @@ class FakeBus:
         assert not normalize, "drivers must write raw units"
         self.writes.append((data_name, dict(values)))
 
+    def sync_write_block(self, data_names: Sequence[str], values: dict[str, Sequence[int]]) -> None:
+        """Recorded as ("block", {motor: (one value per register, ...)})."""
+        self.writes.append(("block", {name: tuple(row) for name, row in values.items()}))
+
     def sync_read(
-        self, data_name: str, motors: list[str], *, normalize: bool = True
+        self,
+        data_name: str,
+        motors: list[str],
+        *,
+        normalize: bool = True,
+        optional: Sequence[str] = (),
+        optional_window_s: float = 0.0,
     ) -> dict[str, int]:
         assert data_name == "Present_Position" and not normalize
-        return {m: self.positions[m] for m in motors}
+        read = {m: self.positions[m] for m in motors}
+        read.update({m: self.positions[m] for m in optional if m in self.positions})
+        return read
 
     def enable_torque(self, motors: list[str] | None = None) -> None:
         self.torque.append(("on", motors))
@@ -73,21 +87,19 @@ def test_stop_writes_zero_to_both_wheels(bus: FakeBus) -> None:
 
 def test_wheel_travel_first_read_is_zero_then_signed_meters(bus: FakeBus) -> None:
     base = DiffDriveBase(bus, CFG)
-    bus.positions = {LEFT: 4000, RIGHT: 100}
-    assert base.read_wheel_travel() == (0.0, 0.0)
-    # Left is mirrored: its encoder DEcreasing means the robot moved forward.
-    bus.positions = {LEFT: 3900, RIGHT: 200}
-    left, right = base.read_wheel_travel()
+    assert base.wheel_travel({LEFT: 4000, RIGHT: 100}) == (0.0, 0.0)
+    # Left is mirrored: its encoder DEcreasing means the robot moved forward. A servo riding in
+    # the same read (the neck) is none of the wheels' business.
+    left, right = base.wheel_travel({LEFT: 3900, RIGHT: 200, "neck": 2048})
     assert left == pytest.approx(100 * CFG.geometry.m_per_tick)
     assert right == pytest.approx(100 * CFG.geometry.m_per_tick)
 
 
 def test_wheel_travel_resolves_encoder_wrap(bus: FakeBus) -> None:
     base = DiffDriveBase(bus, CFG)
-    bus.positions = {LEFT: 10, RIGHT: 4090}
-    base.read_wheel_travel()
-    bus.positions = {LEFT: 4086, RIGHT: 6}  # left went back by 20 ticks, right forward by 12
-    left, right = base.read_wheel_travel()
+    base.wheel_travel({LEFT: 10, RIGHT: 4090})
+    # left went back by 20 ticks, right forward by 12
+    left, right = base.wheel_travel({LEFT: 4086, RIGHT: 6})
     assert left == pytest.approx(20 * CFG.geometry.m_per_tick)  # mirrored sign flips it
     assert right == pytest.approx(12 * CFG.geometry.m_per_tick)
 

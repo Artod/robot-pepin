@@ -22,6 +22,7 @@ import ros_stubs
 ros_stubs.install()
 
 from pepin_bringup.depth_fusion import DepthFusion  # noqa: E402
+from pepin_bringup.msgs import fields_from_cloud  # noqa: E402
 from ros_stubs import Header, LaserScan, TransformStamped  # noqa: E402
 from ros_stubs import Time as TimeMsg  # noqa: E402
 
@@ -160,6 +161,7 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
     # ...and, behind marks_clear (off as shipped), the clearing half of the same fan: how far
     # each bearing is KNOWN OPEN. Still an answer about obstacles, still nothing to seat a pose on.
     # ...and, behind grid_out (off as shipped), the same columns as grids the costmaps only draw.
+    # /fusion/frame carries stamps only: which camera frames went in (the gaze arbiter's count).
     assert set(node.pubs) == {
         "/fusion/surface",
         "/depth_marks",
@@ -167,6 +169,7 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
         "/camera_grid",
         "/camera_grid_map",
         "/camera_grid_map_updates",
+        "/fusion/frame",
     }
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
@@ -209,6 +212,37 @@ def test_what_the_volume_agrees_on_marks_at_its_own_range(node: DepthFusion) -> 
     assert np.isfinite(ranges).any()
     assert float(np.nanmin(ranges)) == pytest.approx(2.0, abs=0.1), "the wall of the box"
     assert float(np.nanmax(ranges)) <= 3.0, "and nothing past the fan's own reach"
+
+
+def column(node: DepthFusion, **box: float) -> dict[str, Any]:
+    """Ask /fusion/column for a box and read the answer back as columns."""
+    srv_type, callback = node.services["/fusion/column"]
+    answer = callback(srv_type.Request(**box), srv_type.Response())
+    fields = fields_from_cloud(answer.sub_map)
+    fields["frame"] = answer.sub_map.header.frame_id
+    return fields
+
+
+def test_the_column_service_answers_the_surface_in_a_box_with_its_weights(
+    node: DepthFusion,
+) -> None:
+    """The gaze arbiter's stall look asks for the columns over the blocking cells before and
+    after the look: here a stretch of the box's north wall, which the lidar painted, and
+    nothing in a box of open floor."""
+    node._switches.set("min_weight", 0.5)
+    node._on_scan_work(scan_msg())
+    at_odom(node, 0.4)
+    node._on_scan_work(scan_msg(SCAN_S + 0.2))
+    wall = column(node, x=-1.5, y=2.0, z=0.4, l_x=0.4, l_y=0.4, l_z=0.6)
+    assert wall["frame"] == "odom" and set(wall) >= {"x", "y", "z", "weight", "lidar"}
+    assert len(wall["x"]) > 0
+    assert np.all(np.abs(wall["x"] + 1.5) <= 0.2) and np.all(np.abs(wall["y"] - 2.0) <= 0.2)
+    assert np.all(wall["weight"] >= 0.5) and np.any(wall["lidar"] > 0)
+    floor = column(node, x=0.5, y=0.5, z=0.4, l_x=0.4, l_y=0.4, l_z=0.6)
+    assert len(floor["x"]) == 0
+    outside = column(node, x=50.0, y=0.0, z=0.4, r=0.2)
+    assert len(outside["x"]) == 0
+    assert node._tally.take().counts["columns"] == 3
 
 
 def test_the_marks_hz_cap_thins_the_topic_and_not_the_volume(node: DepthFusion) -> None:

@@ -9,9 +9,10 @@ everything that consumes the camera run on the laptop.
 
 One container, `pepin-ros` (`pepin-ros.service`, `ros/run.sh`), runs `bringup.launch.py`, which
 is `robot.launch.py` alone: the LD19 driver and its hull filter (`/scan`), the C++ base bridge
-(`/odom`, `/imu/data_raw`, `/zupt`, `/cmd_vel` to the base server), the EKF (`odom -> base_link`),
-the lidar's scan-to-scan odometry, and behind their switches the ToF bridge, the neck's encoders
-and the raw-sensor recorder. Its router is `pepin-zrouter.service` (rmw_zenoh), on the same image.
+(`/odom`, `/imu/data_raw`, `/zupt`, `/cmd_vel` to the base server, and the neck's encoders as
+`/neck/state` and `base_link -> camera_link`), the EKF (`odom -> base_link`), the lidar's
+scan-to-scan odometry, and behind their switches the ToF bridge and the raw-sensor recorder. Its
+router is `pepin-zrouter.service` (rmw_zenoh), on the same image.
 
 | Switch (`/etc/default/pepin-ros`) | `ros/feature.sh` | Default |
 | --- | --- | --- |
@@ -19,7 +20,6 @@ and the raw-sensor recorder. Its router is `pepin-zrouter.service` (rmw_zenoh), 
 | `PEPIN_EKF` | `ekf on\|off` | true |
 | `PEPIN_LASER_ODOM` | `laser_odom on\|off` | true |
 | `PEPIN_TOF` | `tof on\|off` | true |
-| `PEPIN_NECK` | `neck on\|off` | true |
 | `PEPIN_BOARD_BAG` | `board_bag on\|off` | false |
 
 Older lines in that file (`PEPIN_CPP_BRIDGE`, `PEPIN_NAV`, `PEPIN_SLAM_TOOLBOX`, `PEPIN_MAP`,
@@ -39,7 +39,7 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads the encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, a state line every tick; the neck commands (below) |
 | 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status` |
-| 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera` |
+| 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera`, its exposure the active rig's `exposure` block of `config/camera.json`, set before ustreamer starts (`pepin.camera_controls`; `ros/exposure.sh` shows and tries the modes live) |
 
 The lidar belongs to the ROS container; its ser2net port (3334) stays commented out in
 `ser2net.yaml`, for bench work with the container stopped. The base server is the only client of
@@ -64,14 +64,14 @@ and `systemctl start pepin-base` after.
 | `board/wifi_primary.sh` | run by hand, as root: `dongle\|onboard\|status\|confirm` picks which radio carries the board's DHCP identity, with a timed rollback (see its header) |
 | `board/xvf_host_install.sh` | run once: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
-| `config/base.json`, `config/neck.json` | `/opt/pepin/config/` (`neck.json`: the ids and limits the neck commands obey; absent, those commands answer an error and the wheels do not care) |
+| `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure, read by pepin-camera at its start) |
 | `ros/` | `/root/pepin-ros/` (`ros/sync.sh`) |
 
 Deploy the host package and its configuration from the laptop:
 
 ```bash
 rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin/pepin/
-scp config/base.json config/neck.json root@pepin.local:/opt/pepin/config/
+scp config/base.json config/neck.json config/camera.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof pepin-audio'
 ```
 
@@ -100,32 +100,38 @@ numbers go to the journal once a minute.
 ## The neck on the base server's port (:3336)
 
 The two neck servos hang on the same bus as the wheels, so the base server is the only thing that
-may talk to them. Five JSON lines, from anywhere that can reach the port — `ros/neck.sh` is the
-shell around the first three, the game-mode teleop (`pepin.teleop --game`) around the jog:
+may talk to them, and they ride the wheels' tick. Their encoders are read in the SAME sync_read as
+the wheels, after them and waited for only `motion.read_window_ms` (3 ms) past the wheels'
+replies: a dead head costs the odometry that window, never a retry, and three silent reads take
+it out of the read until it is asked again `motion.retry_s` (5 s) later. Both ticks go out in
+every state line (`"pan_ticks"`, `"tilt_ticks"`) under the odometry's own stamp, and the base
+bridge turns them into `/neck/state` and `base_link -> camera_link`. Every neck write is one
+unacknowledged sync_write, at most one a tick — the Torque_Enable..Goal_Velocity block (torque,
+ramp, goal, speed in one packet) when the head is energised or changes pace, else a Goal_Position
+— so nothing a servo can fail to answer runs on the wheels' thread, and the head moves while the
+cart drives. The operating mode is read once each time the pair (re)appears; a servo that is not
+in position mode (`scripts/jog.py wheel` writes velocity mode into its EEPROM, and the head would
+turn forever) is never given a goal.
 
 | Line | What happens |
 | --- | --- |
-| `{"cmd":"neck"}` | answers `{"type":"neck","pan_ticks":..,"tilt_ticks":..,"age_s":..,"read_ms":..}`: the encoders, cached, at most twenty bus reads a second however many clients ask |
-| `{"cmd":"neck_goto","pan_ticks":N,"tilt_ticks":N,"hold":false}` | moves the head there and answers `{"type":"neck_goto","pan_ticks":..,"tilt_ticks":..,"reached":bool,"ms":..,"hold":bool}` when it arrives or after 3 s. Either target may be `null` to leave that servo alone |
+| `{"cmd":"neck"}` | answers `{"type":"neck","pan_ticks":..,"tilt_ticks":..,"age_s":..,"read_ms":..}` from the tick's own read: no bus traffic of its own |
+| `{"cmd":"neck_target","pan_rad":..,"tilt_rad":..,"speed_deg_s":..,"acc_deg_s2":..}` | the gaze arbiter's stream: hold the head at these joint angles (`pepin.neck`: pan positive left, tilt the pitch below level, 23.8 deg at home) for the lease, `motion.lease_s` (2 s); speed and ramp are optional ceilings under the motion's. No target for the lease: the head goes home at the full pace and is let go on arrival. Accepted silently, like a twist; refused as `{"type":"neck_target","error":".."}` (outside the reach, never clamped; a jog holds the head; the servos silent or not in position mode) |
+| `{"cmd":"neck_goto","pan_ticks":N,"tilt_ticks":N,"hold":false}` | moves the head there at the motion's pace and answers `{"type":"neck_goto","pan_ticks":..,"tilt_ticks":..,"reached":bool,"ms":..,"hold":bool}` when it arrives or gives up (half again its travel time plus a second, 3 s at least). Either target may be `null` to hold that servo where it is |
 | `{"cmd":"neck_home"}` | the same move to the reference pose of `config/neck.json` (`reference.pan_ticks` / `tilt_ticks`), the pose the camera mount was measured in |
-| `{"cmd":"neck_jog","pan":-1\|0\|1,"tilt":-1\|0\|1,"slow":false}` | walks the head at a rate (52 deg/s, `slow` 8 deg/s) in those directions — pan +1 left, tilt +1 down, the signs of `pepin.neck.NeckAngles` — for as long as the lines keep coming: each one re-arms the jog's own 0.5 s deadman, after which the head stops where it is and the servos are released. Both zero: stop where it is, still held until the deadman. Accepted silently, like a twist; refused as `{"type":"neck_jog","error":".."}` |
-| `{"cmd":"ping"}` | the servo roster, ids 1–10 |
+| `{"cmd":"neck_jog","pan":-1\|0\|1,"tilt":-1\|0\|1,"slow":false}` | walks the head at a rate (52 deg/s, `slow` 8 deg/s) in those directions — pan +1 left, tilt +1 down, the signs of `pepin.neck.NeckAngles` — for as long as the lines keep coming: each one re-arms the jog's own 0.5 s deadman, after which the head stops where it is and the servos are released. Both zero: stop where it is, still held until the deadman. Accepted silently; refused as `{"type":"neck_jog","error":".."}` |
+| `{"cmd":"neck_motion","max_speed_deg_s":..,"max_acc_deg_s2":..,"lease_s":..}` | the motion in force beside `config/neck.json`'s; each key given is set until the server restarts (`ros/neck.sh motion`), a value outside its range refuses the whole line |
+| `{"cmd":"ping"}` | the servo roster, ids 1–10 (refused while the wheels turn: a ping waits for its answer) |
 
-A move is refused rather than made smaller: a target outside the limits in `config/neck.json`
-(pan 257–3812, tilt 1814–2760 ticks — never clamped, a wrong number is a mistake); a move while the
-wheels turn (a write to a silent servo costs the wheel loop 0.4 s, and the deadman lives on that
-thread); a second move while one is under way; a servo that is not in position mode, which
-`scripts/jog.py wheel` writes into a servo's EEPROM and which would turn the head forever. The move
-runs one short bus transaction per 20 ms tick, so it never delays the wheels; the servos are
-released when the head arrives unless `"hold":true` asked them to keep the pose. Its answer is
-broadcast to every client of the port, because it may come seconds after the request.
-
-The jog obeys the same rules and differs where a rate differs from a target: its goal is clamped to
-the limits (it is walking, not aiming), it ends the tick the wheels start, a jog and a move refuse
-each other, the servo is never wound up (a goal more than ~10 deg ahead of the encoder waits for
-the head), and encoders that fail mid-jog end it with torque off and an error line. Per 20 ms
-tick it costs ONE `Goal_Position` write for both axes plus the cached encoder read at most every
-50 ms; nothing when idle. WiFi lost mid-jog: the head stops within 0.5 s and lets go.
+Who holds the head, one at a time: a jog is the operator's and takes it from a lease; a lease takes
+it from a move, which answers `"error":"preempted by neck_target"`; a move is refused while a lease
+or a jog holds it; a move and a jog refuse each other. None of them looks at the wheels. A target
+or a move is never made smaller: outside the limits in `config/neck.json` (pan 257–3812, tilt
+1814–2760 ticks) it is refused, a wrong number being a mistake. The jog's goal is clamped to the
+limits instead (it is walking, not aiming), and it never winds the servo up: a goal more than
+~10 deg ahead of the encoder waits for the head. A move's answer is broadcast to every client of
+the port, because it may come seconds after the request. WiFi lost: a jog stops within 0.5 s and
+lets go, a lease goes home within its 2 s.
 
 ## Setting up a fresh board
 

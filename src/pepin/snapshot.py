@@ -405,6 +405,13 @@ class SnapshotPacker[T]:
         self._cadence[name].observe(stamp)
         self._rings[name].offer(stamp, item)
 
+    def heard(self, name: str, stamp: float) -> None:
+        """A message of ``name`` arrived that must not be a member (a frame taken while the head
+        turned): its stamp keeps the source's cadence, so the source stays alive and the state
+        keeps saying it is carried, and nothing joins its ring, so no moment is built on it —
+        the next snapshot waits for the source's next usable message."""
+        self._cadence[name].observe(stamp)
+
     def now_s(self) -> float | None:
         """The newest stamp any ENABLED source has delivered — the only "now" there is here —
         or ``None`` before the first message."""

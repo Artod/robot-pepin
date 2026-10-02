@@ -204,7 +204,9 @@ Bool = _msg("Bool", data=False)
 Float32 = _msg("Float32", data=0.0)
 String = _msg("String", data="")
 TFMessage = _msg("TFMessage", transforms=list)
-GoalStatus = _msg("GoalStatus", status=0)
+UUID = _msg("UUID", uuid=lambda: [0] * 16)
+GoalInfo = _msg("GoalInfo", goal_id=UUID, stamp=Time)
+GoalStatus = _msg("GoalStatus", goal_info=GoalInfo, status=0)
 for _name, _value in (("STATUS_ACCEPTED", 1), ("STATUS_EXECUTING", 2), ("STATUS_SUCCEEDED", 4)):
     setattr(GoalStatus, _name, _value)
 GoalStatusArray = _msg("GoalStatusArray", status_list=list)
@@ -309,6 +311,14 @@ class GetState:
     Response = _msg("GetState_Response", current_state=State)
 
 
+class GetPointMapROI:
+    """map_msgs/GetPointMapROI: a box (centre and sides) or a sphere (``r``) in, the points of
+    the map inside it back (depth_fusion's ``/fusion/column``)."""
+
+    Request = _msg("GetPointMapROI_Request", x=0.0, y=0.0, z=0.0, r=0.0, l_x=0.0, l_y=0.0, l_z=0.0)
+    Response = _msg("GetPointMapROI_Response", sub_map=PointCloud2)
+
+
 class ClearEntireCostmap:
     """nav2_msgs/ClearEntireCostmap: empty a costmap; nothing goes in and nothing comes back."""
 
@@ -363,6 +373,17 @@ class Parameter:
 
 class ExternalShutdownException(Exception):  # noqa: N818 — rclpy's own name
     """rclpy's: the context was shut down under the spin."""
+
+
+class MultiThreadedExecutor:
+    """rclpy's executor of several threads, as a node's main asks for it."""
+
+    def __init__(self, num_threads: int | None = None) -> None:
+        self.num_threads = num_threads
+
+
+class MutuallyExclusiveCallbackGroup:
+    """rclpy's callback group whose callbacks never run at the same time as each other."""
 
 
 class RclpyTime:
@@ -694,6 +715,7 @@ class Node:
         self.pubs: dict[str, Publisher] = {}
         self.subs: dict[str, tuple[Any, Any]] = {}  # topic -> (message type, callback)
         self.services: dict[str, tuple[Any, Any]] = {}  # name -> (service type, callback)
+        self.service_groups: dict[str, Any] = {}  # name -> the callback group it was given
         self.service_clients: dict[str, Client] = {}  # name -> the client this node created
         self.destroyed_clients: list[str] = []  # the names of the clients it destroyed
         self.publisher_counts: dict[str, int] = {}  # topic -> publishers, where not one
@@ -730,14 +752,24 @@ class Node:
         return self.pubs[topic]
 
     def create_subscription(
-        self, msg_type: Any, topic: str, callback: Any, qos: Any, raw: bool = False
+        self,
+        msg_type: Any,
+        topic: str,
+        callback: Any,
+        qos: Any,
+        raw: bool = False,
+        callback_group: Any = None,
     ) -> None:
         self.subs[topic] = (msg_type, callback)
 
-    def create_service(self, srv_type: Any, name: str, callback: Any) -> None:
+    def create_service(
+        self, srv_type: Any, name: str, callback: Any, callback_group: Any = None
+    ) -> None:
         self.services[name] = (srv_type, callback)
+        if callback_group is not None:
+            self.service_groups[name] = callback_group
 
-    def create_client(self, srv_type: Any, name: str) -> Client:
+    def create_client(self, srv_type: Any, name: str, callback_group: Any = None) -> Client:
         """A client of someone else's service; not ready until a test says the service is there."""
         self.service_clients[name] = Client(srv_type, name)
         return self.service_clients[name]
@@ -791,8 +823,8 @@ class Rclpy(types.ModuleType):
     def init(self, args: Any = None) -> None:
         self.log.append("init")
 
-    def spin(self, node: Any) -> None:
-        self.log.append("spin")
+    def spin(self, node: Any, executor: Any = None) -> None:
+        self.log.append("spin" if executor is None else f"spin on {type(executor).__name__}")
         if self.on_spin is not None:
             self.on_spin()
 
@@ -840,7 +872,12 @@ def install() -> Any:
         ),
         "rclpy.duration": _module("rclpy.duration", Duration=Duration),
         "rclpy.executors": _module(
-            "rclpy.executors", ExternalShutdownException=ExternalShutdownException
+            "rclpy.executors",
+            ExternalShutdownException=ExternalShutdownException,
+            MultiThreadedExecutor=MultiThreadedExecutor,
+        ),
+        "rclpy.callback_groups": _module(
+            "rclpy.callback_groups", MutuallyExclusiveCallbackGroup=MutuallyExclusiveCallbackGroup
         ),
         "rclpy.parameter": _module("rclpy.parameter", Parameter=Parameter),
         "rclpy.parameter_client": _module(
@@ -894,6 +931,7 @@ def install() -> Any:
         ),
         "map_msgs": _module("map_msgs"),
         "map_msgs.msg": _module("map_msgs.msg", OccupancyGridUpdate=OccupancyGridUpdate),
+        "map_msgs.srv": _module("map_msgs.srv", GetPointMapROI=GetPointMapROI),
         "nav_msgs": _module("nav_msgs"),
         "nav_msgs.msg": _module(
             "nav_msgs.msg", OccupancyGrid=OccupancyGrid, Odometry=Odometry, Path=Path_

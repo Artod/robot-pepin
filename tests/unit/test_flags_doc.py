@@ -33,7 +33,7 @@ def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/depth_fusion.py")
     assert not DOC.has_table(REPO / "ros/pepin_bringup/pepin_bringup/launch_kit.py")
     tables = DOC.tables()
-    assert set(tables) >= {"depth_stream", "depth_fusion", "goal_server", "neck_state"}
+    assert set(tables) >= {"depth_stream", "depth_fusion", "goal_server", "base_bridge"}
     assert all(isinstance(t, FlagSet) and len(t) for t in tables.values())
     assert list(tables) == sorted(tables), "file order: the README reads the same every time"
 
@@ -120,11 +120,11 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
     code, out, _ = _main(["nodes"], capsys)
     assert code == 0 and "depth_stream" in out.split() and "launch_kit" not in out.split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
-    assert _main(["where", "/neck_state"], capsys)[1].strip() == "board pepin-ros"
+    assert _main(["where", "/base_bridge"], capsys)[1].strip() == "board pepin-ros"
     code, out, err = _main(["where", "nope"], capsys)
     assert code == 2 and out == "" and err.startswith("nope: no node with a flags table")
-    code, out, _ = _main(["flag", "neck_state", "neck_tf"], capsys)
-    assert code == 0 and out.startswith("neck_state/neck_tf: bool, default ")
+    code, out, _ = _main(["flag", "base_bridge", "imu_publish"], capsys)
+    assert code == 0 and out.startswith("base_bridge/imu_publish: bool, default ")
     assert [line.split(":")[0] for line in out.splitlines() if line[:1].isupper()] == [
         "What",
         "Default",
@@ -132,8 +132,8 @@ def test_the_verbs_flags_sh_asks_for(capsys: Any) -> None:
         "Off when",
     ], "the whole entry, not just the kind"
     assert max(len(line) for line in out.splitlines()) <= 100, "it is read in a terminal"
-    code, _, err = _main(["flag", "neck_state", "gpu"], capsys)
-    assert code == 2 and err.startswith("neck_state: no flag gpu; the flags are neck_tf")
+    code, _, err = _main(["flag", "base_bridge", "gpu"], capsys)
+    assert code == 2 and err.startswith("base_bridge: no flag gpu; the flags are imu_publish")
     assert _main(["value", "depth_fusion", "min_weight", "3"], capsys)[1] == "3.0\n"
     assert _main(["value", "depth_stream", "depth_backend", "auto"], capsys)[1] == "auto\n"
     code, _, err = _main(["value", "depth_stream", "depth_backend", "gpu"], capsys)
@@ -154,7 +154,7 @@ def test_the_goal_server_is_reached_in_the_mac_s_nav2_container(capsys: Any) -> 
     assert "goal_server" in _main(["nodes", "laptop"], capsys)[1].split()
     assert "goal_server" not in _main(["nodes", "board"], capsys)[1].split()
     assert _main(["where", "depth_fusion"], capsys)[1].strip() == "laptop pepin-vslam"
-    assert _main(["where", "neck_state"], capsys)[1].strip() == "board pepin-ros"
+    assert _main(["where", "base_bridge"], capsys)[1].strip() == "board pepin-ros"
 
 
 @pytest.mark.slow
@@ -166,8 +166,8 @@ def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: 
         _main(["nodes", "board"], capsys)[1].split(),
         _main(["nodes", "laptop"], capsys)[1].split(),
     )
-    assert "neck_state" in board and "depth_fusion" not in board
-    assert "depth_fusion" in laptop and "neck_state" not in laptop
+    assert "base_bridge" in board and "depth_fusion" not in board
+    assert "depth_fusion" in laptop and "base_bridge" not in laptop
     assert sorted(board + laptop) == sorted(_main(["nodes"], capsys)[1].split())
     code, _, err = _main(["nodes", "orbit"], capsys)
     assert code == 2 and err.startswith("orbit: no such side")

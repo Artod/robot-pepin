@@ -2,7 +2,7 @@
 
 The board is a sensor box; navigation runs on the laptop. This file includes robot.launch.py
 under the container's stop window and passes on the switches of the board's unit
-(board/pepin-ros.service): ``imu``, ``ekf``, ``laser_odom``, ``tof``, ``neck``, ``board_bag``.
+(board/pepin-ros.service): ``imu``, ``ekf``, ``laser_odom``, ``tof``, ``board_bag``.
 """
 
 import os
@@ -40,7 +40,6 @@ def generate_launch_description() -> LaunchDescription:
             "ekf": LaunchConfiguration("ekf"),
             "laser_odom": LaunchConfiguration("laser_odom"),
             "tof": LaunchConfiguration("tof"),
-            "neck": LaunchConfiguration("neck"),
             "board_bag": LaunchConfiguration("board_bag"),
         }.items(),
     )
@@ -51,7 +50,6 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("tof", default_value="true"),
-            DeclareLaunchArgument("neck", default_value="true"),
             DeclareLaunchArgument("board_bag", default_value="false"),
             robot,
         ]

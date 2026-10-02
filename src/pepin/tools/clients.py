@@ -1,9 +1,10 @@
 """The owners' sockets as the tools see them: one small client per service, each behind a Protocol.
 
 The tools hold no truth of their own (``.claude/research/brain/CONTRACTS.md``): where the robot
-is and the places are the goal server's (TCP 3337, :mod:`pepin.goal_link`), the head is the base
-server's (TCP 3336, its ``neck`` commands), what is where is ``world``'s (HTTP 8798), the voice
-is ``pepin.audio_server``'s (TCP 3338) and the picture is the camera's (ustreamer, HTTP 8080).
+is and the places are the goal server's (TCP 3337, :mod:`pepin.goal_link`), the head is the gaze
+arbiter's (HTTP 3339 on this Mac, :mod:`pepin.gaze_link`), what is where is ``world``'s (HTTP
+8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the camera's
+(ustreamer, HTTP 8080).
 Each client here speaks one of them and nothing else; none of them can send the wheels a twist.
 
 Every Protocol is what a tool relies on, so a fake stands in for a service in the tests
@@ -14,17 +15,14 @@ that cannot reach its service raises :class:`ServiceDownError`, whose words reac
 
 from __future__ import annotations
 
-import contextlib
 import importlib
 import json
 import logging
 import math
 import re
 import shutil
-import socket
 import subprocess
 import tempfile
-import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -35,8 +33,8 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pepin import goal_link
-from pepin.base_link import BASE_PORT
-from pepin.neck import NeckAngles, NeckConfig, angle_limits, joint_angles, parse_neck, ticks_for
+from pepin.gaze_link import GAZE_PORT, ask
+from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
 
 logger = logging.getLogger(__name__)
@@ -44,7 +42,10 @@ logger = logging.getLogger(__name__)
 AUDIO_PORT = 3338  # pepin.audio_link.AUDIO_PORT (branch mic-array)
 CAMERA_PORT = 8080  # ustreamer on the board: config/robot.json ports.camera_http
 WORLD_URL = "http://127.0.0.1:8798"  # CONTRACTS.md: world, a host process on the Mac
-NECK_ANSWER_S = 8.0  # a head move gives up after 3 s on the board; its answer is waited longer
+GAZE_URL = f"http://127.0.0.1:{GAZE_PORT}"  # the gaze arbiter's door, beside Nav2 on this Mac
+# A look is answered when the head has settled, or denied, within the person band's TTL (10 s);
+# the answer is waited a little longer than that.
+LOOK_ANSWER_S = 15.0
 HTTP_TIMEOUT_S = 3.0
 
 
@@ -168,8 +169,8 @@ class HeadReach:
 
 @dataclass(frozen=True)
 class HeadMove:
-    """How a head move ended: whether it arrived, where the head is, and the refusal or error
-    the base server gave (empty when there was none)."""
+    """How a head move ended: whether it arrived, where the head is, and why not in the gaze
+    arbiter's words (empty when it arrived)."""
 
     reached: bool
     pose: HeadPose | None
@@ -178,7 +179,8 @@ class HeadMove:
 
 
 class Neck(Protocol):
-    """The head's two servos, in degrees (the base server's neck commands)."""
+    """The head, in degrees, as the gaze arbiter lends it: a turn holds the head for a while
+    (:meth:`keep` extends it), then the arbiter brings it home by itself."""
 
     def reach(self) -> HeadReach:
         """How far the head turns."""
@@ -193,24 +195,29 @@ class Neck(Protocol):
         ...
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
-        """Point the head (None leaves that axis alone) and wait until it arrives or gives up."""
+        """Point the head (None leaves that axis where it is) and wait until it arrives or the
+        arbiter says why not."""
         ...
 
-    def home(self) -> HeadMove:
-        """Back to :meth:`rest`, waiting as :meth:`turn` does."""
+    def keep(self) -> None:
+        """Keep the head where the last turn put it a while longer (``see``)."""
         ...
 
 
-class BaseServerNeck:
-    """:class:`Neck` through the base server's JSON-lines port (``ros/neck.sh`` in Python): a
-    connection per command, the answer picked out of the state lines the port broadcasts. It
-    sends ``neck``, ``neck_goto`` and ``neck_home``, nothing else — never a twist."""
+class GazeNeck:
+    """:class:`Neck` through the gaze arbiter's door (:mod:`pepin.gaze_link`): every turn is a
+    request of the person's band (``llm.look``) that the arbiter grants, holds behind a more
+    urgent one (a stall look), or denies in words — during a drive, past the reach. A turn holds
+    the head for the band's TTL (10 s) and :meth:`keep` restarts it; then the head goes home by
+    itself, so no tool turns it back. It sends requests, nothing else: never a neck command and
+    never a twist."""
 
-    HINT = "Is the board up and pepin-base running on it?"
+    SOURCE = "llm.look"  # one source for every tool: a new turn replaces the last one
+    HINT = "Is Nav2 up on this Mac (ros/laptop.sh nav)? The gaze arbiter runs beside it."
 
-    def __init__(self, host: str, port: int = BASE_PORT, config: NeckConfig | None = None) -> None:
-        """The base server at ``host:port``; ``config`` is config/neck.json (read when None)."""
-        self.host, self.port = host, port
+    def __init__(self, url: str = GAZE_URL, config: NeckConfig | None = None) -> None:
+        """The arbiter's door at ``url``; ``config`` is config/neck.json (read when None)."""
+        self.url = url
         self._cfg = config
 
     @property
@@ -235,73 +242,48 @@ class BaseServerNeck:
         return HeadPose(0.0, self.cfg.reference.pitch_deg)
 
     def pose(self) -> HeadPose:
-        """The encoders' reading in degrees."""
-        reading = parse_neck(self._ask({"cmd": "neck"}, "neck"))
-        if reading is None or reading.ticks is None:
-            why = reading.error if reading is not None else "no reading"
-            raise ToolError(f"the neck's encoders did not answer: {why}")
-        return self._pose(*reading.ticks)
+        """The encoders' newest reading, as the arbiter heard it, in degrees."""
+        state = self._ask("/state", None, HTTP_TIMEOUT_S)
+        pan, tilt = state.get("pan_rad"), state.get("tilt_rad")
+        if pan is None or tilt is None:
+            raise ToolError("the neck's encoders have not been heard (is the board's neck up?)")
+        return HeadPose(_deg(float(pan)), _deg(float(tilt)))
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
-        """A ``neck_goto`` to those angles, converted to ticks by :func:`pepin.neck.ticks_for`."""
-        rest = self.rest()
-        wanted = NeckAngles(
-            _rad(pan_deg if pan_deg is not None else rest.pan_deg),
-            _rad(tilt_deg if tilt_deg is not None else rest.tilt_deg),
-        )
-        try:
-            pan_ticks, tilt_ticks = ticks_for(self.cfg, wanted)
-        except ValueError as error:
-            raise ToolError(f"the head cannot be pointed: {error}") from error
+        """A look at those angles, held for the person band's TTL; an axis left None stays
+        where the encoders say it is."""
+        if pan_deg is None or tilt_deg is None:
+            here = self.pose()
+            pan_deg = here.pan_deg if pan_deg is None else pan_deg
+            tilt_deg = here.tilt_deg if tilt_deg is None else tilt_deg
         request = {
-            "cmd": "neck_goto",
-            "pan_ticks": pan_ticks if pan_deg is not None else None,
-            "tilt_ticks": tilt_ticks if tilt_deg is not None else None,
+            "source": self.SOURCE,
+            "kind": "angles",
+            "band": 2,  # the person's word (pepin.gaze.PERSON)
+            "target": {"pan_rad": _rad(pan_deg), "tilt_rad": _rad(tilt_deg)},
+            "frames": 0,  # a picture is ustreamer's, not the volume's: settled is enough
+            "hold": True,
         }
-        return self._move(self._ask(request, "neck_goto", NECK_ANSWER_S))
-
-    def home(self) -> HeadMove:
-        """A ``neck_home``."""
-        return self._move(self._ask({"cmd": "neck_home"}, "neck_goto", NECK_ANSWER_S))
-
-    def _pose(self, pan_ticks: int, tilt_ticks: int) -> HeadPose:
-        angles = joint_angles(self.cfg, pan_ticks, tilt_ticks)
-        return HeadPose(_deg(angles.pan_rad), _deg(angles.pitch_rad))
-
-    def _move(self, reply: dict[str, Any]) -> HeadMove:
-        pan, tilt = reply.get("pan_ticks"), reply.get("tilt_ticks")
-        pose = self._pose(int(pan), int(tilt)) if pan is not None and tilt is not None else None
-        why = str(reply.get("error") or "")
-        return HeadMove(bool(reply.get("reached")), pose, why, float(reply.get("ms", 0.0)))
-
-    def _ask(self, message: dict[str, Any], want: str, wait_s: float = 3.0) -> dict[str, Any]:
-        """Send one command, read lines until the answer of type ``want`` (the port also
-        broadcasts state lines 20 times a second)."""
-        where = f"{self.host}:{self.port}"
-        try:
-            connection = socket.create_connection((self.host, self.port), timeout=2.0)
-        except OSError as error:
-            raise ServiceDownError("base server", where, error, self.HINT) from error
-        deadline = time.monotonic() + wait_s
-        with connection, connection.makefile("rb") as lines:
-            connection.sendall((json.dumps(message) + "\n").encode())
-            while (left := deadline - time.monotonic()) > 0:
-                connection.settimeout(left)
-                try:
-                    line = lines.readline()
-                except TimeoutError:
-                    break
-                except OSError as error:
-                    raise ServiceDownError("base server", where, error, self.HINT) from error
-                if not line:
-                    raise ServiceDownError("base server", where, "closed the connection", self.HINT)
-                with contextlib.suppress(ValueError):
-                    reply = json.loads(line)
-                    if isinstance(reply, dict) and reply.get("type") == want:
-                        return reply
-        raise ServiceDownError(
-            "base server", where, f"no {want} answer in {wait_s:.0f} s", self.HINT
+        answer = self._ask("/look", request, LOOK_ANSWER_S)
+        pan, tilt = answer.get("pan_rad"), answer.get("tilt_rad")
+        pose = (
+            HeadPose(_deg(float(pan)), _deg(float(tilt)))
+            if pan is not None and tilt is not None
+            else None
         )
+        reached = answer.get("status") == "done" and bool(answer.get("reached"))
+        why = "" if reached else str(answer.get("reason") or answer.get("status", ""))
+        return HeadMove(reached, pose, why, float(answer.get("took_ms", 0.0)))
+
+    def keep(self) -> None:
+        """Restart the last turn's TTL (``/renew``)."""
+        self._ask("/renew", {"source": self.SOURCE}, HTTP_TIMEOUT_S)
+
+    def _ask(self, path: str, body: dict[str, Any] | None, wait_s: float) -> dict[str, Any]:
+        try:
+            return ask(self.url, path, body, wait_s)
+        except (OSError, ValueError) as error:
+            raise ServiceDownError("gaze arbiter", self.url, error, self.HINT) from error
 
 
 _deg, _rad = math.degrees, math.radians

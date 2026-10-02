@@ -61,12 +61,14 @@ from pepin.tape_rows import (
     costmap_row,
     ekf_row,
     feasibility_classes,
+    gaze_row,
     gcostmap_row,
     laser_odom_row,
     loc_row_from_pose,
     nav_row,
     plan_row,
     pose_row,
+    stall_row,
     stamp,
     tof_row,
 )
@@ -224,6 +226,11 @@ class RunRecorder:
                     )
                     for action in ("navigate_to_pose", "compute_path_to_pose", "follow_path")
                 ),
+                # ...and the head: where it looked and who held it (the gaze arbiter's state, 10 Hz)
+                # and every stall look's verdict, so a drive's frames can be told still from blind
+                # and a stall's look read back beside the recovery it replaced.
+                self._node.create_subscription(String, "/gaze/state", self._on_gaze, 10),
+                self._node.create_subscription(String, "/gaze/stall", self._on_stall, 10),
             ]
         elif want == "deafen" and self._during_run:
             for subscription in self._during_run:
@@ -350,6 +357,16 @@ class RunRecorder:
     def _on_cmd(self, msg: Twist) -> None:
         """What the controller asked the wheels for: the only record of the command side."""
         self._tape.add(cmd_row(msg, time.time()))
+
+    def _on_gaze(self, msg: String) -> None:
+        """The gaze arbiter's state: the head's phase, angles, holder and blind interval."""
+        if self._keep("gaze"):
+            self._tape.add(gaze_row(msg, time.time()))
+
+    def _on_stall(self, msg: String) -> None:
+        """One stall look and its verdict."""
+        if self._keep("stall"):
+            self._tape.add(stall_row(msg, time.time()))
 
     def _on_pose(self, msg: PoseStamped) -> None:
         """The goal server's republished ``map -> base_link`` (``/pose``, 5 Hz): the tape's

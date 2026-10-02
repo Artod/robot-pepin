@@ -1,8 +1,11 @@
 """The head and what it sees: point it, sweep it, take a picture.
 
-The head is the base server's (its neck commands); it refuses to move while the wheels turn,
-and a move gives up after three seconds. What was seen is ``world``'s: a sweep only reports the
-sightings the memory filed while the head dwelt at each direction, so no picture is judged here.
+The head is the gaze arbiter's: a look is a request it grants, holds behind a more urgent one,
+or refuses in words (past the reach; during a drive only on a base server that moves the neck
+at rest alone). A look holds the head for ten seconds, ``see`` keeps it there, and then the head
+goes home by itself, so no tool turns it back. What was seen is ``world``'s: a sweep only
+reports the sightings the memory filed while the head dwelt at each direction, so no picture is
+judged here.
 """
 
 from __future__ import annotations
@@ -12,7 +15,7 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
-from pepin.tools.clients import HeadMove, HeadPose
+from pepin.tools.clients import HeadMove
 from pepin.tools.registry import Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Robot
 
@@ -24,7 +27,8 @@ MAX_SEEN = 8  # labels reported per direction
 @tool
 def look(robot: Robot, pan_deg: float, tilt_deg: float | None = None) -> Result:
     """Turn the head (the camera) and wait until it gets there; see() then gives the picture.
-    Angles are relative to the robot's body. The head does not move while the wheels turn.
+    Angles are relative to the robot's body. The head stays there about ten seconds (each see()
+    restarts that) and then turns home by itself; a drive may take it for the road.
 
     Args:
         pan_deg: degrees left of straight ahead (+) or right of it (-); the neck reaches about
@@ -40,34 +44,33 @@ def look(robot: Robot, pan_deg: float, tilt_deg: float | None = None) -> Result:
 
 @tool
 def look_around(robot: Robot) -> Result:
-    """Sweep the head across its reach (five directions, about 15 s), report what the robot saw
-    in each direction (labels with range and bearing), then turn the head back where it was.
+    """Sweep the head across its reach (five directions, about 15 s) and report what the robot
+    saw in each direction (labels with range and bearing); the head then turns home by itself.
     Needs the memory service (world) to say what was seen."""
     robot.world.latest(None, 0.1)  # the memory must answer before the head is sent anywhere
-    start = robot.neck.pose()
     views: list[dict[str, Any]] = []
-    try:
-        for pan in sweep(robot):
-            move = robot.neck.turn(pan, None)
-            if not move.reached:
-                return fail(f"the head stopped sweeping: {why_not(move)}", views=views)
-            robot.sleep(DWELL_S)
-            seen = robot.world.latest(None, DWELL_S)
-            views.append({"pan_deg": pan, "seen": summarise(seen)})
-    finally:
-        restore(robot, start)
-    return ok(views=views, head=start.as_dict())
+    for pan in sweep(robot):
+        move = robot.neck.turn(pan, None)
+        if not move.reached:
+            return fail(f"the head stopped sweeping: {why_not(move)}", views=views)
+        robot.sleep(DWELL_S)
+        seen = robot.world.latest(None, DWELL_S)
+        views.append({"pan_deg": pan, "seen": summarise(seen)})
+    return ok(views=views)
 
 
 @tool
 def see(robot: Robot) -> Result:
     """One picture from the head camera, as the robot sees it now, with where the head points
-    (pan_deg left +, tilt_deg down +). Point the head with look first to see elsewhere."""
+    (pan_deg left +, tilt_deg down +). Point the head with look first to see elsewhere; seeing
+    keeps the head where look put it a while longer."""
     picture = robot.camera.snapshot()
     try:
         head: dict[str, Any] = robot.neck.pose().as_dict()
     except ToolError as error:
         head = {"head": f"unknown: {error.why}"}
+    with contextlib.suppress(ToolError):
+        robot.neck.keep()
     return ok(image=picture, **head)
 
 
@@ -82,12 +85,6 @@ def sweep(robot: Robot, skip: float | None = None) -> list[float]:
     ]
 
 
-def restore(robot: Robot, pose: HeadPose) -> None:
-    """Turn the head back to ``pose`` after a sweep; a failure here does not hide the sweep's."""
-    with contextlib.suppress(ToolError):
-        robot.neck.turn(pose.pan_deg, pose.tilt_deg)
-
-
 def moved(move: HeadMove) -> Result:
     """A head move as a result: the pose it reached, or why it did not."""
     pose = move.pose.as_dict() if move.pose else {}
@@ -97,9 +94,7 @@ def moved(move: HeadMove) -> Result:
 
 
 def why_not(move: HeadMove) -> str:
-    """Why a head move did not arrive, in words the model can act on."""
-    if "wheels are moving" in move.why:
-        return "it does not move while the wheels turn: wait for the drive to end, or cancel it"
+    """Why a head move did not arrive, in the arbiter's words (written for the model)."""
     return move.why or "it stopped short (something in the way?)"
 
 

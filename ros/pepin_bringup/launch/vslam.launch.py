@@ -59,7 +59,7 @@ owns heading). Nothing reaches the filter until that node's ``vo_publish`` flag 
 
 Arguments: ``board`` (the robot's address for the camera stream), ``camera_only``
 (sensor_pack's ``sources``), ``vo``, ``vo_input``, ``static_camera_tf`` (default false: the
-board's neck node publishes base_link -> camera_link live, ros/feature.sh neck on; true,
+board's base bridge publishes base_link -> camera_link live from the neck's encoders; true,
 ``ros/laptop.sh vslam --fixed-head``, the camera node broadcasts it from config/camera.json —
 never both, since two publishers of one edge fight). The database is always :data:`DATABASE`,
 and the camera rig is config/camera.json's own ``"active"`` or ``PEPIN_CAMERA``

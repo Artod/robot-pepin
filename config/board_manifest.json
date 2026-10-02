@@ -57,7 +57,7 @@
     {
       "name": "base_container",
       "match": "component_container_isolated .*__node:=base_container",
-      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest, a zero-velocity update for the EKF while the cart is certainly still).",
+      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest, a zero-velocity update for the EKF while the cart is certainly still, the neck's encoders as /neck/state and base_link -> camera_link).",
       "on_board_because": [
         "real-time",
         "hardware-attached"
@@ -66,14 +66,14 @@
       "components": [
         {
           "name": "base_bridge",
-          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness, and /zupt (the EKF's odom2, a zero twist at 10 Hz) while that rest, no fresh cmd_vel and a quiet gyro agree (ros/pepin_base_cpp)"
+          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness, and /zupt (the EKF's odom2, a zero twist at 10 Hz) while that rest, no fresh cmd_vel and a quiet gyro agree; the neck's ticks riding every state line as /neck/state and base_link -> camera_link at that line's stamp, 50 Hz (ros/pepin_base_cpp, neck.hpp)"
         }
       ],
       "budget": {
         "cpu_percent": 15.0,
         "rss_mb": 60.0
       },
-      "note": "Measured 5-6 % / 43-54 MB on 2026-09-24, 5.4 % on 2026-10-01 (state lines at 16.7 Hz, gyro at 50); split from sensors_container. Each process carries its own zenoh session (~40 MB). With 50 state lines and 100 gyro reads a second, AN ESTIMATE until a census: ~11 % (the lines +0.76 % of a laptop core in a replica, x4.4; the gyro loop doubled)."
+      "note": "Measured 5-6 % / 43-54 MB on 2026-09-24, 5.4 % on 2026-10-01 (state lines at 16.7 Hz, gyro at 50); split from sensors_container. Each process carries its own zenoh session (~40 MB). With 50 state lines and 100 gyro reads a second, AN ESTIMATE until a census: ~11 % (the lines +0.76 % of a laptop core in a replica, x4.4; the gyro loop doubled). Since 2026-10-02 it also publishes the neck (a JointState and a transform per state line, 50 Hz), which retired pepin_bringup.neck_state (measured 10 % / 66 MB in a process of its own): AN ESTIMATE until a census, +2-3 % here, about the cost of the /odom it publishes beside them; the budget stays."
     },
     {
       "name": "bag_record",
@@ -134,20 +134,6 @@
         "rss_mb": 105.0
       },
       "note": "TO MEASURE: every number here is an estimate and the first census after this feature lands replaces it. Where it comes from: RF2O's paper reports 0.9 ms per scan on one desktop core at 1080 beams; ours are 455, and an A53 at 1.5 GHz with no tuned SIMD is taken at 10x a desktop core, so 4-8 ms of the 100 ms between scans -> 4-8 %, +50 % -> 12, rounded to 20 because nothing is measured. The memory is a C++ ROS node's measured 28 MB (ekf_node) plus the ~40 MB of zenoh session every process on this board carries, and the same headroom. If the census says OVER, the honest lever is the node's freq, not this number."
-    },
-    {
-      "name": "neck_state",
-      "match": "pepin_bringup\\.neck_state",
-      "role": "Reads the neck's encoders and publishes /neck/state and, behind its neck_tf flag, the live base_link -> camera_link.",
-      "on_board_because": [
-        "hardware-attached"
-      ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (neck:=true, respawn)",
-      "budget": {
-        "cpu_percent": 16.0,
-        "rss_mb": 99.0
-      },
-      "note": "Measured 10 % / 66 MB."
     },
     {
       "name": "ekf_node",
@@ -223,7 +209,7 @@
         "cpu_percent": 16.0,
         "rss_mb": 27.0
       },
-      "note": "Measured 10 % / 18 MB; 8.5 % on 2026-10-01 at 16.7 state lines a second. 50 a second (every tick) adds an estimated 2-3 %: +0.56 % of a laptop core for the lines and two readers over a fake bus (scratch bench, x4.4 the EKF's board/laptop ratio). Outside Docker on purpose: it must survive a container restart."
+      "note": "Measured 10 % / 18 MB; 8.5 % on 2026-10-01 at 16.7 state lines a second. 50 a second (every tick) adds an estimated 2-3 %: +0.56 % of a laptop core for the lines and two readers over a fake bus (scratch bench, x4.4 the EKF's board/laptop ratio). Since 2026-10-02 the neck rides the tick: two more ids in the one encoder read (+0.18 ms of wire), at most one unacknowledged neck write a tick, two ints in the state line; the neck node's 2-20 Hz `neck` polls are gone. Outside Docker on purpose: it must survive a container restart."
     },
     {
       "name": "tof_server",

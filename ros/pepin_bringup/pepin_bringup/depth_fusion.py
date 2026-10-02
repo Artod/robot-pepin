@@ -73,8 +73,18 @@ The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set dep
 <value>``): ``enabled``, ``tof_rays``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``,
 ``min_weight``, ``marks_min_z``, ``marks_hz``, ``marks_clear``, ``grid_out``, ``grid_hz``,
 ``grid_size_m``, ``grid_resolution_m``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
-``no_depth_weight``, ``no_depth_reach_m``; their state is printed in every report line.
+``no_depth_weight``, ``no_depth_reach_m``, ``self_filter``; their state is printed in every report
+line.
+
+THE CART'S OWN BODY (``self_filter``, :mod:`pepin.body`, config/body.json): a head that looks back
+or down to a side sees the cart's top shelf, wheels and mast, and would paint them into the volume
+— a wall where the robot stands. Under the flag every camera frame is clipped per ray at its entry
+into the body's boxes: what lies on or past it is not written, measured or carved. The frames of a
+head in motion never arrive here at all: depth_stream's gaze gate keeps them from the network.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
+For the gaze arbiter: ``/fusion/frame`` (std_msgs/Header) is every fused camera frame at its own
+stamp, and ``/fusion/column`` (map_msgs/GetPointMapROI) the surface points of a box of the
+volume with their weights.
 
 THE CAMERA GRIDS (``grid_out``, off as shipped, 2026-09-24). ``/depth_marks`` is accumulated by
 each costmap's camera_layer into a grid of its own — two more copies of this memory, the global
@@ -95,13 +105,16 @@ from typing import Any
 
 import numpy as np
 from map_msgs.msg import OccupancyGridUpdate
+from map_msgs.srv import GetPointMapROI
 from message_filters import Subscriber, TimeSynchronizer
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
+from std_msgs.msg import Header
 from std_srvs.srv import Trigger
 
+from pepin.body import BODY_FILE, BodyMask, BodyModel, RayDepth
 from pepin.camera_grid import (
     OCCUPIED,
     GridWindow,
@@ -114,6 +127,7 @@ from pepin.depth import Intrinsics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.lean import LeanGate
+from pepin.live_settings import LiveFile
 from pepin.mounts import LASER_FRAME, load_lidar_mount
 from pepin.tof_rays import TOF_RATE_HZ, TOF_WEIGHT, fan_image, fans_to_clear, optical_pose, tof_law
 from pepin.tsdf import (
@@ -129,8 +143,11 @@ from pepin.volume_scan import (
     MARKS_MIN_RANGE_M,
     MARKS_RANGE_M,
     MARKS_STEP,
+    Column,
     MarksLaw,
     band_surface,
+    column_points,
+    column_window,
     empty_marks,
     fan_counts,
     free_ranges,
@@ -146,6 +163,7 @@ from pepin.worldmap import (
 )
 from pepin_bringup.msgs import (
     array_from_image,
+    cloud_from_fields,
     cloud_from_points,
     grid_update,
     map_geometry,
@@ -153,6 +171,7 @@ from pepin_bringup.msgs import (
     rpy_from_transform,
     scan_arrays,
     scan_from_ranges,
+    stamp_from_seconds,
     stamp_seconds,
 )
 from pepin_bringup.node_kit import (
@@ -181,6 +200,13 @@ MARKS_TOPIC = "/depth_marks"
 # ObstacleLayer marks at the end of every finite range it is given, so one source that cleared a
 # ray at 1.2 m would plant a lethal cell at 1.2 m — at the frontier of knowledge.
 FREE_TOPIC = "/depth_free"
+# THE GAZE ARBITER'S TWO QUESTIONS (pepin_bringup.gaze). Which camera frames went into the volume,
+# each as a header at its own stamp, published as it is fused: a look waits for still frames
+# stamped after the head settled, and only the fused ones carve or confirm anything. And what the
+# volume holds in a box (map_msgs/GetPointMapROI, the box in the volume's frame): the surface
+# points with their voxel weights, asked before and after a stall look over the blocking cells.
+FRAME_TOPIC = "/fusion/frame"
+COLUMN_SERVICE = "/fusion/column"
 # THE CAMERA GRIDS (``grid_out``, 2026-09-24): the same surface as grids that the costmaps'
 # camera_grid_layer (a StaticLayer, ros/params/nav2_params.yaml) only DRAWS, so Nav2 keeps no copy
 # of the memory of its own (pepin.camera_grid). /camera_grid is a square about the cart in the
@@ -196,7 +222,7 @@ GEOMETRY_SETTLE_S = 1.0  # a new full grid reaches the layer before any update i
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
-STAGES = ("integrate", "scan", "tof", "marks", "grid", "grid_map")
+STAGES = ("integrate", "body", "scan", "tof", "marks", "grid", "grid_map")
 # The three ToF fans, in their own frames (pepin_bringup.tof_bridge publishes both; the frame
 # names are pepin.mounts.TOF_FRAME, the topic its _SCAN_TOPIC under the root namespace).
 TOF_NAMES = ("front", "left", "right")
@@ -315,6 +341,30 @@ FLAGS = FlagSet(
         " beams are the only metric truth in the volume",
         off_when="to measure the camera alone — what the depth adds, and where it lies",
     ),
+    Flag(
+        "self_filter",
+        False,
+        description="the cart's own body (config/body.json: boxes in base_link grown by margin_m)"
+        " is cut out of every camera frame: a pixel whose depth lies on or past its ray's entry"
+        " into the body measures no room, and no voxel on or past that entry is written, measured"
+        " or carved (pepin.body, pepin.tsdf.Tsdf.integrate's clip); off, every ray is written"
+        " whole, as before",
+        why="OFF until the body is taped: the boxes are config/base.json's measured footprint"
+        " and the IKEA RASKOG catalogue (top 0.78 m), the mast's section and top are guesses."
+        " What is measured is the mechanism (tests/unit/test_body.py: a frame looking down at the"
+        " own shelf paints 0 voxels inside the body and carves nothing behind it, a frame that"
+        " does not see the body is written bit for bit as without the filter) and its cost"
+        " (scratch/gaze_vision/cost.py, the live 280x250x34 grid, the 800x600 eye): nothing at"
+        " the working tilt for any pan within +-95 deg (no ray meets the body; the cached mask"
+        " says so in 3-5 us), +1.6-3.0 ms of integration (on 19-24 ms, two runs) on a"
+        " reverse-gaze frame whose rays meet the body for 24 %, and 4.5-6 ms to rebuild the ray"
+        " grid once the head has moved",
+        on_when="before the head looks back or down to a side (reverse-gaze, side looks at tilt"
+        " 45-63 deg), after the boxes are taped; the check: the head at the tilt limit at pan 0,"
+        " +-90 and 180, 20 frames each, no voxel born inside the boxes",
+        off_when="if the report line shows rays meeting the body at the working pose (a box too"
+        " large), or an obstacle beside the cart disappears from the volume",
+    ),
 )
 
 
@@ -400,6 +450,8 @@ class DepthFusion(Node):
         self._canvas_at = -math.inf  # when its full grid went out (GEOMETRY_SETTLE_S)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_service(Trigger, "/fusion/reset", self._on_reset)
+        self._frame_pub = self.create_publisher(Header, FRAME_TOPIC, reliable)
+        self.create_service(GetPointMapROI, COLUMN_SERVICE, self._on_column)
         # the depth copies the image's header, so the pair has one exact stamp; the synchronizer
         # keeps PAIR_QUEUE of each and calls back under its own lock, on the executor thread
         depth_sub = Subscriber(self, Image, "/camera/depth", qos_profile=reliable)
@@ -426,6 +478,12 @@ class DepthFusion(Node):
         # How far the cart may leave the window's centre before the box slides onto it, from the
         # node's own config (pepin.tsdf.window_recentre_m).
         self._window_recentre_m = window_recentre_m(config)
+        # The cart's own body (self_filter): config/body.json beside this node's config, read
+        # again whenever the file changes, so a taped correction reaches the next frame.
+        self._body_file = LiveFile(config.parent / BODY_FILE)
+        self._body_data: dict[str, Any] = {}
+        self._body_note = ""  # what the body is, for the log and the report line
+        self._body = BodyMask(BodyModel(()))
         self._recentre_ms = 0.0  # the last slide's cost, a level the report line reads
         self._read_plane(BAND_TF_WAIT_S)
         # The scan's own answer to the lean: a frame can be placed leaning, a revolution taken
@@ -640,6 +698,37 @@ class DepthFusion(Node):
         self.get_logger().info(
             "fusion: model, pairing queues and tallies reset; the volume is empty"
         )
+        return response
+
+    def _on_column(self, request: Any, response: Any) -> Any:
+        """``/fusion/column``: the surface points in an axis-aligned box of the volume (centre
+        ``x, y, z`` and sides ``l_x, l_y, l_z`` in the volume's frame; ``r`` > 0 a cube of half
+        side ``r``), read by the rule of the marks (``min_weight``), each with its voxel's weight
+        and the lidar's weight there, stamped with the last fused frame. The box is copied under
+        the model's lock and read outside it, as the marks are."""
+        centre = np.array([request.x, request.y, request.z], dtype=float)
+        sides = [request.l_x, request.l_y, request.l_z] if request.r <= 0.0 else [2 * request.r] * 3
+        half = np.array(sides, dtype=float) / 2.0
+        lo, hi = centre - half, centre + half
+        with self._lock:
+            window = column_window(self._world.volume, self._world.lidar_weight, lo, hi)
+            stamp = self._last_stamp
+        column = Column.empty()
+        if window is not None:
+            column = column_points(*window, lo, hi, float(self._switches["min_weight"]))
+        points = column.points
+        response.sub_map = cloud_from_fields(
+            {
+                "x": points[:, 0],
+                "y": points[:, 1],
+                "z": points[:, 2],
+                "weight": column.weight,
+                "lidar": column.lidar,
+            },
+            stamp if stamp is not None else stamp_from_seconds(0.0),
+            ODOM_FRAME,
+        )
+        self._tally.count("columns")
         return response
 
     # ---- inputs --------------------------------------------------------------------------
@@ -872,15 +961,51 @@ class DepthFusion(Node):
             rgb = None
         self._roll_window(base)
         self._reach.saw(depth)  # the source's own reach, measured off the frames themselves
+        clip = self._body_clip(intr, camera, base) if self._switches.on("self_filter") else None
         with self._tally.measure("integrate"), self._lock:
             touched = self._world.integrate_depth(
-                depth, rgb, intr, camera, stamp=at, law=self._depth_law()
+                depth, rgb, intr, camera, stamp=at, law=self._depth_law(), clip=clip
             )
             self._last_stamp = stamp
+        self._frame_pub.publish(Header(stamp=stamp, frame_id=ODOM_FRAME))
         self._tally.count("frames")
         self._tally.count("voxels", touched)
         self._publish_marks(base, stamp)  # the camera's own turn to move the marks
         self._publish_grid(base, stamp)
+
+    def _body_clip(self, intr: Intrinsics, camera: RigidPose, base: RigidPose) -> RayDepth | None:
+        """Where each ray of this frame enters the cart's own body (``self_filter``), or ``None``
+        when no ray does: config/body.json as it stands now, the camera's pose on the cart at the
+        frame's stamp (``base_link <- camera_optical``, the two halves of the frame's own chain),
+        the ray grid rebuilt only when the head, the optics or the file moved."""
+        self._read_body()
+        with self._tally.measure("body"):
+            rb = base.rotation.T
+            on_cart = RigidPose(rb @ camera.rotation, rb @ (camera.translation - base.translation))
+            clip = self._body.for_frame(intr, on_cart)
+        if clip is not None:
+            self._tally.count("body_frames")
+            self._tally.sample("body_share", clip.share)
+        return clip
+
+    def _read_body(self) -> None:
+        """config/body.json into the mask whenever the file changed (one ``stat`` a frame); a
+        file that is missing or broken cuts nothing and says so in the log and the report."""
+        data = self._body_file.read()
+        if data == self._body_data and self._body_note:
+            return
+        self._body_data = data
+        try:
+            model = BodyModel.from_dict(data)
+        except ValueError as exc:
+            self._body.model = BodyModel(())
+            self._body_note = f"{self._body_file.path} unreadable ({exc}): nothing is cut"
+            self.get_logger().error(f"self filter: {self._body_note}")
+            return
+        self._body.model = model
+        names = ", ".join(box.name for box in model.boxes)
+        self._body_note = f"{names} grown {model.margin_m * 100:.0f} cm"
+        self.get_logger().info(f"self filter: the body is {self._body_note}")
 
     # ---- outputs -------------------------------------------------------------------------
     def _marks_due(self) -> bool:
@@ -1115,10 +1240,32 @@ class DepthFusion(Node):
             f" skipped: {skipped};"
             f" no image {c['no_image']}; surface {self._surface_points} points;"
             f" {self._marks_line(w)}; {self._grid_line(w)}; {self._frame_line(w)};"
-            f" {self._band_text()}; {self._carve_line()}; {self._tof_line(w)};"
+            f" {self._band_text()}; {self._carve_line()}; {self._body_line(w)};"
+            f" {self._tof_line(w)};"
             f" {self._world_line(w)};"
             f" {self._lean.report()};"
             f" flags: {self._switches.state()}" + (f"; tf: {tf_text}" if tf_text else "")
+        )
+
+    def _body_line(self, w: Window) -> str:
+        """The self filter's half of the report: on how many frames the body was in view and on
+        what share of their rays, what finding that out cost, and what the body is."""
+        if not self._switches.on("self_filter"):
+            return "self filter off"
+        c = w.counts
+        shares = w.samples.get("body_share", [])
+        seen = f" ({float(np.median(shares)) * 100:.1f} % of their rays)" if shares else ""
+        last = self._body.last
+        inside = (
+            f"; the camera stands in {', '.join(last.skipped)}: skipped"
+            if last is not None and last.skipped
+            else ""
+        )
+        return (
+            f"self filter: the body met {int(c['body_frames'])} of {int(c['frames'])}"
+            f" frames{seen}, {w.ms_per('body', 'frames'):.2f} ms a frame,"
+            f" {self._body.rebuilds} ray grids ({self._body.last_ms:.1f} ms the last);"
+            f" {self._body_note or 'config/body.json not read yet'}{inside}"
         )
 
     def _tof_line(self, w: Window) -> str:

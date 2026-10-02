@@ -1,0 +1,26 @@
+{
+  "frame": "base_link: origin on the floor midway between the drive wheels' contact points, x forward, y left, z up (config/base.json's footprint frame)",
+  "margin_m": 0.05,
+  "ray_stride_px": 4,
+  "boxes": [
+    {
+      "name": "cart",
+      "min_m": [-0.300, -0.225, 0.0],
+      "max_m": [0.027, 0.225, 0.78],
+      "source": "x: config/base.json's footprint as measured on 2026-09-04 (rear edge 0.30 m behind the axle, front plane x=0.027); y and z: the IKEA RASKOG catalogue (35 W x 45 D x 78 H cm, the 45 cm across the cart since the 35 cm matches the measured 0.327 m along x). The top at 0.78 m is NOT taped on Pepin: tape the top shelf and anything standing on it"
+    },
+    {
+      "name": "wheels",
+      "min_m": [-0.0625, -0.275, 0.0],
+      "max_m": [0.0625, 0.275, 0.125],
+      "source": "config/base.json: 0.125 m wheels on the front axle (x=0), 0.55 m over the wheels; one box spanning both, the cart between them is inside the cart box anyway"
+    },
+    {
+      "name": "mast",
+      "min_m": [-0.078, -0.02, 0.78],
+      "max_m": [-0.038, 0.02, 1.0],
+      "source": "the neck column from the top shelf to under the pan servo, centred on the pan axis where the neck model puts it: x -0.058, y 0, the tilt axis at 1.134 m (pepin.neck.pan_pivot of config/neck.json: the lens at x 0 at the reference pose, less its 0.025/0.086 m lever pitched 23.8 deg). The 4 x 4 cm section and the 1.0 m top are NOT measured; the top stays under the pan servo and, grown, under every ray of the working pose (the frame's bottom edge, 55 deg down, passes its grown top 10 cm ahead of it)"
+    }
+  ],
+  "note": "The cart's own body for the camera's self-filter (pepin.body; depth_fusion's self_filter flag): every box is grown by margin_m (one 5 cm voxel) and a depth pixel whose ray enters a grown box writes nothing on or past that point into the volume. The ToF shelf lips (x 0.027-0.06, 0.16-0.27 m up) are inside the cart box's margin. Read live: an edit of this file reaches the next frame. Check after a tape: head at the tilt limit at pan 0, +-90 and 180 with the cart at rest, 20 frames each, and no voxel may be born inside the boxes (marks_audit's count within the hull)."
+}

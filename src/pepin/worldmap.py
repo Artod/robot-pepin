@@ -47,6 +47,7 @@ from pepin.tsdf import (
     DepthLaw,
     Float32,
     GridSpec,
+    RayClip,
     RigidPose,
     Tsdf,
     Uint8,
@@ -419,6 +420,7 @@ class WorldMap:
         stamp: float | None = None,
         law: DepthLaw | None = None,
         sensor: str = CAMERA,
+        clip: RayClip | None = None,
     ) -> int:
         """Fuse one depth frame the way :meth:`pepin.tsdf.Tsdf.integrate` does, then hand the
         lidar's layer back to the lidar: inside that layer the voxels the lidar has spoken for
@@ -437,17 +439,19 @@ class WorldMap:
         ray may not touch the layer the beams own.
 
         ``sensor`` names the source in the frame list (:data:`CAMERA`; :data:`TOF` for a ToF fan
-        drawn as a tiny depth image, :mod:`pepin.tof_rays`)."""
+        drawn as a tiny depth image, :mod:`pepin.tof_rays`). ``clip`` is the self-filter
+        (:class:`pepin.tsdf.RayClip`, :mod:`pepin.body`): nothing on or past a ray's entry into
+        the cart's own body is written."""
         law = law if law is not None else self.depth_law
         rows = self._rows if self.protect_lidar_layer else None
         if rows is None:
-            touched = self.volume.integrate(depth, rgb, intr, pose, law)
+            touched = self.volume.integrate(depth, rgb, intr, pose, law, clip)
             self._note(stamp, sensor, pose)
             return touched
         lo, hi = rows
         keep_sdf = self.volume.sdf[:, :, lo:hi].copy()
         keep_weight = self.volume.weight[:, :, lo:hi].copy()
-        touched = self.volume.integrate(depth, rgb, intr, pose, law)
+        touched = self.volume.integrate(depth, rgb, intr, pose, law, clip)
         owned = self.lidar_weight[:, :, lo:hi] > 0.0
         np.copyto(self.volume.sdf[:, :, lo:hi], keep_sdf, where=owned)
         np.copyto(self.volume.weight[:, :, lo:hi], keep_weight, where=owned)

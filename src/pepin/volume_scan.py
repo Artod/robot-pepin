@@ -321,3 +321,52 @@ def fan_counts(marks: Array, free: Array) -> tuple[int, int, int]:
     nothing at all — for a node's report line."""
     marked, cleared = np.isfinite(marks), np.isfinite(free)
     return int(marked.sum()), int(cleared.sum()), int((~marked & ~cleared).sum())
+
+
+# ---- a box of the volume, for the gaze arbiter's stall look -----------------------------------
+@dataclass(frozen=True)
+class Column:
+    """The surface points standing in a box of the volume: (n, 3) metres in the volume's frame,
+    the weight of the voxel each lies in, and the lidar's own weight there."""
+
+    points: Array
+    weight: Array
+    lidar: Array
+
+    @classmethod
+    def empty(cls) -> Column:
+        """No point at all."""
+        return cls(np.zeros((0, 3)), np.zeros(0), np.zeros(0))
+
+
+def column_window(
+    volume: Tsdf, lidar_weight: npt.NDArray[np.float32], lo: Array, hi: Array
+) -> tuple[Tsdf, npt.NDArray[np.float32]] | None:
+    """The box ``lo``..``hi`` (metres) of the volume and of its lidar weights, copied out — the
+    part that belongs under the model's lock; ``None`` when the box misses the volume."""
+    box = volume.index_box(np.asarray(lo, dtype=float), np.asarray(hi, dtype=float))
+    if box is None:
+        return None
+    return volume.window(box), lidar_weight[box].copy()
+
+
+def column_points(
+    twin: Tsdf, lidar_weight: npt.NDArray[np.float32], lo: Array, hi: Array, min_weight: float
+) -> Column:
+    """The surface crossings of a window (:func:`column_window`) that lie inside ``lo``..``hi``,
+    by the rule of ``/fusion/surface`` and the marks (``min_weight``), each with its voxel's weight
+    and lidar weight."""
+    points, _colours = twin.surface(min_weight)
+    if points.shape[0] == 0:
+        return Column.empty()
+    lo_m, hi_m = np.asarray(lo, dtype=float), np.asarray(hi, dtype=float)
+    keep = np.all((points >= lo_m) & (points <= hi_m), axis=1)
+    points = points[keep]
+    idx, inside = twin.voxel_of(points)
+    points, idx = points[inside], idx[inside]
+    i, j, k = idx[:, 0], idx[:, 1], idx[:, 2]
+    return Column(
+        points.astype(float),
+        twin.weight[i, j, k].astype(float),
+        lidar_weight[i, j, k].astype(float),
+    )

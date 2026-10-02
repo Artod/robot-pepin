@@ -24,7 +24,7 @@ import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
@@ -35,6 +35,15 @@ Array = npt.NDArray[np.float64]
 Float32 = npt.NDArray[np.float32]
 Floats = npt.NDArray[np.floating[Any]]
 Uint8 = npt.NDArray[np.uint8]
+
+
+class RayClip(Protocol):
+    """How far along each pixel's ray a frame may write: the optical depth past which the ray is
+    inside something that is not the room (the cart's own body, :class:`pepin.body.RayDepth`)."""
+
+    def at(self, v: npt.NDArray[np.intp], u: npt.NDArray[np.intp]) -> Float32:
+        """The limit of the pixels at rows ``v``, columns ``u``; ``inf`` for no limit."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -479,7 +488,7 @@ class Tsdf:
         return move
 
     # ---- geometry helpers ----------------------------------------------------------------
-    def _index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
+    def index_box(self, lo_m: Array, hi_m: Array) -> tuple[slice, slice, slice] | None:
         """Voxel index ranges of the box ``lo_m``..``hi_m`` (map metres), clipped to the grid;
         ``None`` when the box misses the grid."""
         s = self.spec
@@ -512,7 +521,7 @@ class Tsdf:
             ]
         )
         pts = np.vstack([pose.translation, corners @ pose.rotation.T + pose.translation])
-        return self._index_box(pts.min(axis=0), pts.max(axis=0))
+        return self.index_box(pts.min(axis=0), pts.max(axis=0))
 
     def _centres(self, box: tuple[slice, slice, slice]) -> Float32:
         s = self.spec
@@ -537,6 +546,7 @@ class Tsdf:
         intr: Intrinsics,
         pose: RigidPose,
         law: DepthLaw | None = None,
+        clip: RayClip | None = None,
     ) -> int:
         """Fuse one depth frame (metres, optical frame) taken from ``pose`` (map <- optical);
         returns how many voxels were updated. Colour goes only into voxels within the
@@ -548,6 +558,12 @@ class Tsdf:
         its own ray out to ``law.carve_to_m``, at ``law.no_depth_weight`` of what a measurement
         at that range weighs: the fix for a phantom standing in front of something the rig
         cannot reach, which no ray could ever carve.
+
+        ``clip`` is the self-filter (:mod:`pepin.body`): per pixel, the depth at which its ray
+        enters the cart's own body. A pixel whose depth lies there or beyond measured the body
+        (or something behind it) and measures no room — it is read as a pixel with no depth —
+        and no voxel on or past that depth along the ray is written, measured or carved. ``None``
+        writes every ray whole, as before.
         """
         s = self.spec
         depth_law = law if law is not None else DepthLaw()
@@ -577,6 +593,12 @@ class Tsdf:
             return 0
         d = np.full(centres.shape[0], np.nan, dtype=np.float32)
         d[seen] = d_all[vi[seen], ui[seen]]
+        inside: npt.NDArray[np.bool_] | None = None  # voxels on or past their ray's body entry
+        if clip is not None:
+            limit = np.full(centres.shape[0], np.inf, dtype=np.float32)
+            limit[seen] = clip.at(vi[seen], ui[seen])
+            d[d >= limit] = np.nan  # the body's own pixel, or one behind it: no room measured
+            inside = z >= limit
         finite = np.isfinite(d)
         measured = finite & (d > depth_law.near_m) & (d <= s.range_max_m)
         sdf = d - z  # positive: the voxel is between the camera and the surface
@@ -590,6 +612,9 @@ class Tsdf:
             if carving
             else np.zeros(centres.shape[0], dtype=bool)
         )
+        if inside is not None:  # a ray that enters the body writes nothing from there on
+            touch &= ~inside
+            carve &= ~inside
         written = touch | carve
         if not np.any(written):
             return 0

@@ -34,5 +34,14 @@
     "tilt_from_pan_z_m": 0.0,
     "camera_from_tilt_x_m": 0.025,
     "camera_from_tilt_z_m": 0.086
+  },
+  "motion": {
+    "max_speed_deg_s": 120.0,
+    "max_acc_deg_s2": 1000.0,
+    "lease_s": 2.0,
+    "read_window_ms": 3.0,
+    "silent_ticks": 3,
+    "retry_s": 5.0,
+    "note": "How the base server moves the head (pepin.neck.NeckMotion). max_speed_deg_s and max_acc_deg_s2 are the profile every move runs at unless it asks for less (the Goal_Velocity and Acceleration registers, written with the goal in one packet); SEEDS, not measurements: 120 deg/s is Artem's starting point (2026-10-02), 1000 deg/s^2 reaches it in 0.12 s; the bench tunes both. lease_s: a neck_target holds the head this long, then it goes home and lets go. The three are live until pepin-base restarts: ros/neck.sh motion [KEY VALUE ...]. read_window_ms: how long past the wheels' replies the neck's are waited for in the one encoder read of a tick; silent_ticks missed reads take the neck out of that read, and it is asked again every retry_s."
   }
 }
