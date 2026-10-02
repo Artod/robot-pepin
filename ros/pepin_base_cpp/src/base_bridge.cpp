@@ -1,9 +1,9 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
 // ROS 2 node: the board's base server as /odom, odom->base_link, and a /cmd_vel sink.
-// A C++ port of pepin_bringup/base_bridge.py, same parameters, same wire protocol:
-// on the board's four A53 cores an rclpy process costs ~190 MB and a tenth of a core,
-// this one ~25 MB and ~1%. The Python node stays; robot.launch.py picks one.
+// Ported from the Python bridge (git history before 2026-10-02), same parameters, same wire
+// protocol: on the board's four A53 cores an rclpy process costs ~190 MB and a tenth of a
+// core, this one ~25 MB and ~1%. Its live switches are described in pepin_bringup/base_bridge.py.
 //
 // The board owns the wheels in real time behind a 0.5 s deadman: it stops them the
 // moment commands stop arriving. Nav2 publishes a twist only when it feels like it and

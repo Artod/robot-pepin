@@ -12,15 +12,14 @@ carried over the bridge), and the laptop's wall clock is not comparable with it 
 this module ever asks what time it is. The only "now" is the newest stamp any enabled source has
 delivered, which is the one moment the data itself names, and every judgement is made against it.
 
-ALIVE, BY THE SOURCE'S OWN PERIOD. Each source measures its own period from the stamps it
-delivers (:class:`Cadence`, the running mean of :class:`pepin.sources.SourceHealth` under another
-name) and is alive while its newest stamp is within :data:`LIVE_PERIODS` of that period of the
-newest stamp anybody has. Nothing is a chosen timeout: the multiple is the worst arrival lag this
-stack was measured to have against the period of the source that showed it — the depth's 497 ms
-worst against its 118 ms period, 4.2 periods, so five missed messages is a source that has
-stopped rather than one that stumbled (scratch/vo_stamp_pairs.py, 2026-09-14). A source that has
-delivered one message has no period yet and is therefore neither alive nor pairable: it takes two
-messages to have one interval.
+ALIVE, BY THE SOURCE'S OWN PERIOD. Each source measures its own period from the stamps it delivers
+(:class:`Cadence`, a running mean with :data:`pepin.sources.RATE_TAU_S`) and is alive while its
+newest stamp is within :data:`LIVE_PERIODS` of that period of the newest stamp anybody has. Nothing
+is a chosen timeout: the multiple is the worst arrival lag this stack was measured to have against
+the period of the source that showed it — the depth's 497 ms worst against its 118 ms period, 4.2
+periods, so five missed messages is a source that has stopped rather than one that stumbled
+(scratch/vo_stamp_pairs.py, 2026-09-14). A source that has delivered one message has no period yet
+and is therefore neither alive nor pairable: it takes two messages to have one interval.
 
 THE PAIRING RULE. The DRIVER is the alive enabled source whose newest stamp is the OLDEST — the
 latest moment EVERY alive source has already spoken for. Not the newest stamp, because the
@@ -95,9 +94,9 @@ class Cadence:
     (:attr:`liveness_s`), and how far from a moment its nearest message may sit and still be
     paired with it (:attr:`patience_s`).
 
-    The period is a running mean over the last seconds — the recipe and the time constant of
-    :class:`pepin.sources.SourceHealth`, which measures the same thing as a rate — so a source
-    that slows down is believed within a couple of seconds instead of after a whole window.
+    The period is a running mean over the last seconds (time constant
+    :data:`pepin.sources.RATE_TAU_S`), so a source that slows down is believed within a couple of
+    seconds instead of after a whole window.
     """
 
     def __init__(

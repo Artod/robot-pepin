@@ -263,21 +263,6 @@ def test_the_band_floor_rises_with_the_floor_s_own_noise() -> None:
     assert math.isnan(band[3])
 
 
-def test_a_mark_the_floor_was_watched_past_is_gated_and_a_real_one_is_not() -> None:
-    """The contact gate: the floor verified out to 2.0 m forbids a mark at 1.0 m, leaves the
-    wall's own mark at 1.95 m alone (the margin), and never touches a bearing it cannot judge."""
-    from pepin.contact import gate_by_contact
-
-    ranges = np.array([1.0, 1.95, 0.8, np.inf])
-    contact = np.array([2.0, 2.0, np.nan, 2.0])
-    out, gated = gate_by_contact(ranges, contact)
-    assert gated == 1
-    assert out[0] == math.inf  # seen, and clear that far: what the camera actually saw
-    assert out[1] == pytest.approx(1.95)  # within the margin of the floor's end: the wall
-    assert out[2] == pytest.approx(0.8)  # no verdict at that bearing: left exactly as it was
-    assert out[3] == math.inf
-
-
 def test_an_array_band_floor_reaches_depth_to_scan_pixel_by_pixel() -> None:
     """A per-pixel band floor is what depth_to_scan marks against: a floor 0.2 m "above" the
     plane marks with the flat 0.15 m edge and does not with the noise band's."""

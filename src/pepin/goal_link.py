@@ -222,23 +222,6 @@ class DriveReport:
             f" recoveries {int(event.get('recoveries', 0))}"
         )
 
-    def _on_lost(self, event: dict[str, Any]) -> None:
-        reading = event.get("reading") or (
-            f"no SLAM correction for {event['correction_s']:.1f} s"
-            if isinstance(event.get("correction_s"), (int, float))
-            else "the pose is lost"
-        )
-        self._say(f"!! lost mid-drive at t+{event.get('t')} s: {reading}; the goal server stops")
-
-    def _on_searching(self, event: dict[str, Any]) -> None:
-        self._say(f"searching the whole map first (fit {event.get('fit')})")
-
-    def _on_searched(self, event: dict[str, Any]) -> None:
-        self._say(f"searched: {event.get('detail')} (fit {event.get('fit')})")
-
-    def _on_resuming(self, event: dict[str, Any]) -> None:
-        self._say(f"resuming the same goal (fit {event.get('fit')})")
-
     def _on_pivot(self, event: dict[str, Any]) -> None:
         self._say(
             f"pivot {event.get('residual_deg', '?')} deg: status {event.get('status')}"

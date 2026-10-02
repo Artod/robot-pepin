@@ -38,16 +38,16 @@ def test_every_node_with_a_table_is_found_and_only_those() -> None:
     assert list(tables) == sorted(tables), "file order: the README reads the same every time"
 
 
-def test_the_table_is_the_one_liner_and_the_paragraphs_come_under_it_by_node() -> None:
-    """The short answer for scanning, the long one for deciding: one row per flag in a table
-    over every node, then every flag whole, grouped by the node that owns it."""
+def test_the_section_is_one_row_per_flag_then_the_knobs() -> None:
+    """The short answer for scanning, one row per flag in a table over every node; the long one
+    for deciding is ``ros/flags.sh flag NODE FLAG``, read from the table, not repeated here."""
     body = DOC.section()
-    table, details = body.index("| node | flag |"), body.index(DOC.DETAILS)
-    assert body.index(DOC.HOW_TO_READ.splitlines()[0]) < table < details
+    table, knobs = body.index("| node | flag |"), body.index(DOC.KNOBS_HEADING)
+    assert body.index(DOC.HOW_TO_READ.splitlines()[0]) < table < knobs
     for node, flags in DOC.tables().items():
-        assert body.index(f"#### `{node}`") > table, node
         for flag in flags:
-            assert f"  - *Default:* {flag.render(flag.default)} — " in body, (node, flag.name)
+            assert f"| `{node}` | `{flag.name}` |" in body[table:knobs], (node, flag.name)
+            assert "*Default:*" not in body, "the four texts are the flag verb's"
     assert body.endswith("\n") and "\n\n\n" not in body
 
 
@@ -172,9 +172,9 @@ def test_the_nodes_of_one_side_and_the_flags_that_are_not_their_default(capsys: 
     code, _, err = _main(["nodes", "orbit"], capsys)
     assert code == 2 and err.startswith("orbit: no such side")
 
-    dump = "/depth_fusion:\n  ros__parameters:\n    align: false\n    min_weight: 4.0\n"
+    dump = "/depth_fusion:\n  ros__parameters:\n    lidar_layer: false\n    min_weight: 4.0\n"
     code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin=dump)
-    assert code == 0 and out == "depth_fusion/align off (default on)\n"
+    assert code == 0 and out == "depth_fusion/lidar_layer off (default on)\n"
     code, out, _ = _main(["drift", "depth_fusion"], capsys, stdin="")
     assert code == 1 and out.strip() == "depth_fusion: no answer to a parameter dump (is it up?)"
 

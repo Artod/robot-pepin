@@ -12,13 +12,12 @@ was one.
 
 What differs from a live tape, and cannot be otherwise:
 
-- the records with no stamp of their own (``cmd``, ``nav``, ``meas``, ``srcs``) are dated by the
-  bag's receive time instead of the recorder's ``time.time()`` — the same clock, one hop later;
+- the records with no stamp of their own (``cmd``, ``nav``) are dated by the bag's receive time
+  instead of the recorder's ``time.time()`` — the same clock, one hop later;
 - there is no prelude: a bag starts when the goal's word does, a tape starts 15 seconds earlier
   (``pepin.tape.RunTape``);
-- the ``loc`` rows are the tracker's where the bag holds ``/tracker_pose``, and otherwise are
-  composed from ``/tf`` (``map -> odom``, ``odom -> base_link``) at 5 Hz, the rate and the
-  composition the live recorder uses where no tracker publishes a pose.
+- the ``loc`` rows are composed from ``/tf`` (``map -> odom``, ``odom -> base_link``) at 5 Hz,
+  the rate of the live recorder's ``/pose`` rows and the same composition.
 
 Runs in the laptop's ROS container, where rosbag2_py and rclpy's serialization live:
 
@@ -48,13 +47,10 @@ from pepin.tape_rows import (
     ekf_row,
     gcostmap_row,
     laser_odom_row,
-    loc_row,
     loc_row_from_transform,
-    meas_row,
     nav_row,
     plan_row,
     pose_row,
-    srcs_row,
     stamp,
     tof_row,
 )
@@ -116,11 +112,10 @@ class TapeBuilder:
     from TF.
     """
 
-    def __init__(self, *, loc_from_tf: bool = False) -> None:
+    def __init__(self) -> None:
         lidar = Mounts.load().lidar
         self._mount_yaw_rad = -math.radians(lidar.yaw_deg)
         self._mount_x_m = lidar.x_m
-        self._loc_from_tf = loc_from_tf
         self._plan_seq = 0
         self._gcostmap_seq = -1
         self._map_odom: tuple[float, float, float] | None = None
@@ -159,8 +154,6 @@ class TapeBuilder:
             return [imu_record(t, (w.x, w.y, w.z), (a.x, a.y, a.z))]
         if record == "cmd":
             return [cmd_row(msg, received_s)]
-        if record == "loc":
-            return [loc_row(msg, received_s)]
         if record == "plan":
             self._plan_seq += 1
             return [plan_row(msg, received_s)]
@@ -173,10 +166,6 @@ class TapeBuilder:
             return [gcostmap_row(msg, received_s, self._plan_seq)]
         if record == "tof":
             return [tof_row(topic.rsplit("/", 1)[-1], msg, received_s)]
-        if record == "meas":
-            return [meas_row(msg.data, received_s)]
-        if record == "srcs":
-            return [srcs_row(msg.data, received_s)]
         if record == "nav":
             return [nav_row(topic.split("/")[1], msg, received_s)]
         return []
@@ -198,7 +187,7 @@ class TapeBuilder:
             else:
                 continue
             newest = max(newest, stamp(transform.header, received_s))
-        if not self._loc_from_tf or self._map_odom is None or self._odom_base is None:
+        if self._map_odom is None or self._odom_base is None:
             return []
         when = newest or received_s
         if when - self._last_loc < LOC_PERIOD_S:
@@ -238,20 +227,9 @@ def read_bag(bag: Path) -> Iterator[tuple[str, Any, float]]:
         yield topic, deserialize_message(payload, get_message(kind)), nanoseconds * 1e-9
 
 
-def has_tracker_pose(bag: Path) -> bool:
-    """Whether the bag holds a tracker pose, which decides where the ``loc`` rows come from."""
-    import rosbag2_py
-
-    info = rosbag2_py.Info().read_metadata(str(bag), "")
-    return any(
-        t.topic_metadata.name == "/tracker_pose" and t.message_count > 0
-        for t in info.topics_with_message_count
-    )
-
-
-def convert(bag: Path, tape: Path, *, loc_from_tf: bool) -> int:
+def convert(bag: Path, tape: Path) -> int:
     """Write ``bag`` out as a tape; returns how many rows it holds."""
-    builder = TapeBuilder(loc_from_tf=loc_from_tf)
+    builder = TapeBuilder()
     written = 0
     with tape.open("w") as out:
         for topic, msg, received_s in read_bag(bag):
@@ -281,7 +259,7 @@ def main(argv: list[str] | None = None) -> int:
     if tape.exists() and not args.force:
         print(f"{tape} is already there (--force overwrites)", file=sys.stderr)
         return 2
-    rows = convert(bag, tape, loc_from_tf=not has_tracker_pose(bag))
+    rows = convert(bag, tape)
     print(f"{tape}: {rows} records from {bag}")
     return 0
 

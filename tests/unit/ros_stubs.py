@@ -145,8 +145,7 @@ SensorData = _msg(
 # rtabmap_msgs/MapGraph as the laptop's nodes read it, field for field as
 # /opt/ros/jazzy/share/rtabmap_msgs/msg/MapGraph.msg lists them: the map -> odom transform, the node
 # ids and their OPTIMISED poses as two parallel arrays, and the links with their information
-# matrices. pepin_bringup.depth_fusion reads poses_id + poses (the room's own movement,
-# pepin.graphbend) and pepin_bringup.rtabmap_frame reads map_to_odom in SLAM.
+# matrices. pepin_bringup.places reads poses_id + poses.
 Link_ = _msg(
     "Link", from_id=0, to_id=0, type=0, transform=Transform, information=lambda: [0.0] * 36
 )

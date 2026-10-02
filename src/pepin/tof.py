@@ -30,10 +30,6 @@ class TofRanges:
     right: float | None
     age_s: float
 
-    def by_name(self) -> dict[str, float | None]:
-        """The three ranges keyed by sensor name, for code that iterates over sensors."""
-        return {"front": self.front, "left": self.left, "right": self.right}
-
 
 @dataclass(frozen=True)
 class TofMount:
@@ -62,7 +58,7 @@ def load_mounts(path: str | Path) -> dict[str, TofMount]:
 
 
 class TofClient(JsonLinesClient):
-    """The board's range stream (:mod:`pepin.tof_server`) as a :class:`pepin.feeds.Feed`.
+    """The board's range stream (:mod:`pepin.tof_server`), read in the background.
 
     ``ranges()`` never blocks; its ``age_s`` is infinite until the first record,
     so a dead stream is visible instead of silently reading "nothing close".

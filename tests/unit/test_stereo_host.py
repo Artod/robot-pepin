@@ -19,14 +19,12 @@ import pytest
 
 from pepin.depth_service import DepthServer
 from pepin.stereo_depth import (
-    MATCHERS,
     Baseline,
     MatcherSettings,
     RaftMatcher,
     StereoDepth,
     StereoMatcher,
     StereoUnavailableError,
-    build_matcher,
 )
 from pepin.stereo_host import (
     CONTENT_DISPARITY,
@@ -347,19 +345,6 @@ def test_a_host_that_does_not_answer_falls_to_sgbm_counted_and_is_given_up_on() 
     clock[0] = 31.0
     assert matcher.on_host, "probed again after retry_s"
     assert "4 fell to sgbm" in matcher.describe() and "down 31 s" in matcher.describe()
-
-
-def test_the_flag_names_the_engine_and_an_unknown_name_is_refused() -> None:
-    """A costmap marked from a matcher nobody chose is the bug build_matcher prevents."""
-    assert MATCHERS == ("sgbm", "raft")
-    sgbm = build_matcher("sgbm", MatcherSettings(num_disparities=16))
-    assert isinstance(sgbm, StereoMatcher) and sgbm.search_px == 16
-    raft = build_matcher("raft", url="http://127.0.0.1:1")
-    assert isinstance(raft, RaftMatcher) and isinstance(raft.fallback, StereoMatcher)
-    with pytest.raises(ValueError, match="must be one of"):
-        build_matcher("elas")
-    with pytest.raises(ValueError, match="needs the stereo host's URL"):
-        build_matcher("raft")
 
 
 @pytest.mark.slow

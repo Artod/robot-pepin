@@ -99,21 +99,6 @@ def test_a_head_taped_onto_the_neck_s_camera_says_its_own_eye_and_the_link_stays
     assert Mount().then(OPTICAL_MOUNT).transform() == pytest.approx(OPTICAL_MOUNT.transform())
 
 
-def test_every_static_frame_of_the_cart_is_listed_once_under_its_name() -> None:
-    frames = Mounts.load(CONFIG).static_frames()
-    names = [(parent, child) for parent, child, _mount in frames]
-    assert names == [
-        ("base_link", "laser"),
-        ("base_link", "imu_link"),
-        ("base_link", "camera_link"),
-        ("camera_link", "camera_optical"),
-        ("base_link", "tof_front"),
-        ("base_link", "tof_left"),
-        ("base_link", "tof_right"),
-    ]
-    assert len(set(names)) == len(names)
-
-
 def test_a_sensor_without_a_measured_mount_is_left_out(tmp_path: Path) -> None:
     """tof.json says null for a sensor nobody measured: it feeds the reflex, not a frame."""
     for name in ("lidar.json", "imu.json", "camera.json"):

@@ -1,6 +1,6 @@
 """Export the room the stack drives on into a world for the simulator.
 
-The map is RTAB-Map's grid, the one ``/map`` carries under ``PEPIN_LOCALIZER=rtabmap``: the grid
+The map is RTAB-Map's grid, the one ``/map`` carries: the grid
 the database saved at its last shutdown (Admin.opt_map), which is what RTAB-Map publishes the
 moment it loads that database to localise. The places are ``rtabmap.places.json`` resolved
 against the same saved graph (pepin.places), written as the ``/places`` payload the laptop's

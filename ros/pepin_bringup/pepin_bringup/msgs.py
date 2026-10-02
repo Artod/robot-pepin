@@ -16,13 +16,13 @@ from typing import TYPE_CHECKING, Any
 import numpy as np
 import numpy.typing as npt
 from builtin_interfaces.msg import Time as TimeMsg
-from geometry_msgs.msg import PoseWithCovarianceStamped, TransformStamped
+from geometry_msgs.msg import TransformStamped
 from nav_msgs.msg import OccupancyGrid as OccupancyGridMsg
 from sensor_msgs.msg import Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import Header
 
 from pepin.camera import quaternion_from_rpy
-from pepin.depth import decode_rgb, quaternion_from_matrix, rotation_matrix
+from pepin.depth import decode_rgb, rotation_matrix
 from pepin.mapping import GridSpec, OccupancyGrid
 from pepin.mounts import Mount
 from pepin.tsdf import RigidPose
@@ -109,16 +109,6 @@ def transform_from_mount(parent: str, child: str, mount: Mount, stamp: Any) -> A
     return transform_from_rpy(parent, child, (x, y, z), (roll, pitch, yaw), stamp)
 
 
-def transform_from_pose(parent: str, child: str, pose: RigidPose, stamp: Any) -> Any:
-    """``parent -> child`` from a rotation matrix and a translation (``parent <- child``)."""
-    t = TransformStamped()
-    t.header.stamp = stamp
-    t.header.frame_id, t.child_frame_id = parent, child
-    _set_vector(t.transform.translation, pose.translation)
-    _set_quaternion(t.transform.rotation, quaternion_from_matrix(pose.rotation))
-    return t
-
-
 def pose_from_transform(msg: Any) -> RigidPose:
     """A ``TransformStamped`` (or a bare ``Transform``) as rotation matrix and translation."""
     transform = getattr(msg, "transform", msg)
@@ -138,29 +128,6 @@ def planar_mount(msg: Any) -> tuple[float, float, float, bool]:
     upside_down)``, upside down when the roll is within :data:`UPSIDE_DOWN_TOLERANCE` of pi."""
     x, y, _z, roll, _pitch, yaw = rpy_from_transform(msg)
     return x, y, yaw, abs(abs(roll) - math.pi) < UPSIDE_DOWN_TOLERANCE
-
-
-# ---- poses ---------------------------------------------------------------------------------
-def pose_with_covariance(
-    x: float,
-    y: float,
-    yaw: float,
-    sigma_xy_m: float,
-    sigma_yaw_rad: float,
-    stamp: Any,
-    frame_id: str,
-) -> Any:
-    """A planar pose as ``geometry_msgs/PoseWithCovarianceStamped``: isotropic position
-    sigma, a yaw sigma, everything else zero."""
-    msg = PoseWithCovarianceStamped()
-    msg.header.stamp, msg.header.frame_id = stamp, frame_id
-    msg.pose.pose.position.x, msg.pose.pose.position.y = float(x), float(y)
-    _set_quaternion(msg.pose.pose.orientation, (0.0, 0.0, math.sin(yaw / 2.0), math.cos(yaw / 2.0)))
-    cov = [0.0] * 36
-    cov[0] = cov[7] = sigma_xy_m**2
-    cov[35] = sigma_yaw_rad**2
-    msg.pose.covariance = cov
-    return msg
 
 
 # ---- maps ------------------------------------------------------------------------------------
@@ -265,8 +232,8 @@ def scan_arrays(msg: Any) -> tuple[Array, Array]:
 # ---- maps ----------------------------------------------------------------------------------
 def occupancy_grid(fields: OccupancyGridFields, stamp: Any, frame_id: str) -> Any:
     """A grid of 0 free / 100 occupied / -1 unknown as a ``nav_msgs/OccupancyGrid``: the cells
-    row-major from the origin corner, which is where the map's own (0, 0) cell sits. What
-    :meth:`pepin.worldmap.WorldMap.to_occupancy_grid_message_fields` hands over, packed."""
+    row-major from the origin corner, which is where the map's own (0, 0) cell sits: the fields
+    :class:`pepin.worldmap.OccupancyGridFields` (or :mod:`pepin.camera_grid`) hands over, packed."""
     msg = OccupancyGridMsg()
     msg.header = header(stamp, frame_id)
     msg.info.resolution = float(fields.resolution)

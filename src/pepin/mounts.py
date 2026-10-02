@@ -37,7 +37,6 @@ Transform = tuple[float, float, float, float, float, float]
 
 # The frames the cart's static transforms are published under.
 LASER_FRAME = "laser"
-IMU_FRAME = "imu_link"
 TOF_FRAME = "tof_{name}"
 
 
@@ -241,17 +240,3 @@ class Mounts:
             if entry.get("mount") is not None
         }
         return cls(lidar_mount(sensor), sensor, imu, cam, tof)
-
-    def static_frames(self) -> list[tuple[str, str, Mount]]:
-        """Every static transform the cart has, as ``(parent, child, mount)``: the laser, the
-        IMU, the camera's link and optical frames, the ToF sensors."""
-        frames = [
-            ("base_link", LASER_FRAME, self.lidar),
-            ("base_link", IMU_FRAME, self.imu),
-            ("base_link", self.camera.link_frame, self.camera.link),
-            (self.camera.link_frame, self.camera.optical_frame, self.camera.optical),
-        ]
-        frames += [
-            ("base_link", TOF_FRAME.format(name=name), mount) for name, mount in self.tof.items()
-        ]
-        return frames

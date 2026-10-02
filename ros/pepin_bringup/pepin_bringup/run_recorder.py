@@ -9,21 +9,25 @@ twist, the three ToF ranges and the local costmap — what `scripts/build_map.py
 read, plus the proof of what the robot itself believed: which cells it held for occupied when it
 refused to move (a question a run could not answer before, and the one every stall raises).
 
-THE POSE ARRIVES AS A TOPIC (2026-09-22, the ``loc_from`` flag). The `loc` rows are
+THE POSE ARRIVES AS A TOPIC (2026-09-22). The `loc` rows are
 ``map -> base_link``, which used to be read here by a TF listener of this node's own —
 and an rclpy listener deserialises the whole /tf stream (map -> odom at 20 Hz, odom -> base_link
 at 50 Hz, the statics) to answer one pose five times a second, ~34 % of an A53 core on a board
 measured at 252 %. The goal server parses that stream for navigation anyway, so it republishes
 what it reads as ``/pose`` and this node subscribes. The rows are unchanged — same fields, same
-5 Hz, ``source`` still ``tf``, because it is the same edge one hop later — and ``loc_from`` tf
-puts the old listener back.
+5 Hz, ``source`` still ``tf``, because it is the same edge one hop later.
+
+What the PLANNER saw goes on the tape too (since 2026-09-18): the global costmap, run-length
+encoded at most once per new plan, and the goal status of Nav2's three actions. On 2026-09-17 two
+legs piled up 78 and 90 recoveries with no path and the tapes could not say why — they carried
+the LOCAL costmap, and the planner reads the GLOBAL one. Cost, measured: 16 kB per grid encoded
+(195 kB raw), 13 kB/s at the plans' 1.2 s cadence beside the 55 kB/s the scans already write.
 """
 
 from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -36,7 +40,6 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profi
 from sensor_msgs.msg import Imu, LaserScan, Range
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet
 from pepin.mounts import Mounts
 from pepin.recording import imu_record, scan_record_from_ros
 from pepin.runlink import (
@@ -61,7 +64,6 @@ from pepin.tape_rows import (
     gcostmap_row,
     laser_odom_row,
     loc_row_from_pose,
-    loc_row_from_transform,
     nav_row,
     plan_row,
     pose_row,
@@ -69,70 +71,12 @@ from pepin.tape_rows import (
     tof_row,
 )
 from pepin_bringup.camera_clip import CameraClip
-from pepin_bringup.node_kit import Switches, TfLookup, spin_main
+from pepin_bringup.node_kit import spin_main
 
-# WHERE THE POSE COMES FROM (the ``loc_from`` flag). The topic is
-# the goal server's — spelled out here rather than imported, because a node does not import
-# another node (pepin_bringup.goal_server's POSE_TOPIC is the same string, and its ``pose_topic``
-# flag is the publisher's half of this switch).
+# WHERE THE POSE COMES FROM. The topic is the goal server's — spelled out here rather than
+# imported, because a node does not import another node (pepin_bringup.goal_server's POSE_TOPIC
+# is the same string).
 POSE_TOPIC = "/pose"
-POSE_TOPIC_SOURCE = "pose_topic"
-TF_SOURCE = "tf"
-LOC_HZ = 5.0  # how often a `loc` row is written in either path: the rate the tape has always had
-
-# The live flags (CLAUDE.md rule 19); their state is printed in the node's ready line.
-FLAGS = FlagSet(
-    Flag(
-        "planner_records",
-        True,
-        description="what the PLANNER saw goes on the tape too: the global costmap (run-length"
-        " encoded, at most one grid per new plan), the goal status of Nav2's three actions"
-        " (navigate_to_pose, compute_path_to_pose, follow_path); off, the tape holds what it"
-        " held before 2026-09-18",
-        why="the tape was blind exactly where the failures were. On 2026-09-17 two legs piled up"
-        " 78 and 90 recoveries in ~125 s with no path (ros/maps/rec/20260917_192935_goto.log,"
-        " ..._201425_goto.log) and the tapes could not say why: they carry /plan and the LOCAL"
-        " costmap, and the planner reads the GLOBAL one. The cart's own footprint was clear in"
-        " every one of the 1740 taped local grids (scratch/footprint_in_costmap.py), so the answer"
-        " was in the grid nobody recorded. Cost, measured on those tapes"
-        " (scratch/costmap_rle_cost.py): the planner's grid is 239x215 = 51385 cells, 195 kB of"
-        " raw JSON, and 16 kB run-length encoded over the four classes that decide whether the"
-        " cart FITS (unknown / free / inflated / the 99-100 lethal band) — 12-fold, and the"
-        " gradient it drops is cost, not feasibility. One grid per plan at the tapes' own 1.2 s"
-        " plan cadence is 13 kB/s beside the 55 kB/s the scans already write, and one encode of"
-        " 51k cells, 2.8 ms on the laptop's core. The status topics carry a message per"
-        " transition and the graph's words arrive at 1 Hz",
-        on_when="always while Nav2 is the thing being debugged",
-        off_when="on a long autonomy run where the tape must stay small, or to reproduce a tape"
-        " recorded before 2026-09-18",
-    ),
-    Flag(
-        "loc_from",
-        POSE_TOPIC_SOURCE,
-        choices=(POSE_TOPIC_SOURCE, TF_SOURCE),
-        description=f"where the tape's `loc` rows come from:"
-        f" {POSE_TOPIC_SOURCE}, the goal server's {POSE_TOPIC} (it parses /tf for navigation"
-        f" anyway and republishes what it reads); {TF_SOURCE}, this node's own TF listener at"
-        f" {1.0 / LOC_HZ:.1f} s, which is what it ran until 2026-09-22. The rows are identical"
-        " either way — same fields, same 5 Hz, source 'tf' in both, because both are that same"
-        " edge",
-        why="an rclpy TF listener deserialises the WHOLE /tf stream — RTAB-Map's map -> odom at"
-        " 20 Hz, the board's odom -> base_link at 50 Hz, the statics — to read one pose five"
-        " times a second, and it cost this node ~34 % of a core on a board measured at 252 %"
-        " with the real-time loops starving (2026-09-22). The goal server owns navigation and"
-        " the jump watch, so its listener is the one that stays; a 5 Hz PoseStamped costs this"
-        " node what any other small topic costs it",
-        on_when="wherever the goal server shares this machine (side all), which is where"
-        " nav.launch.py sets it: one listener for the pose, and that node's pose_topic flag is"
-        " the other half of the switch",
-        off_when=f"{TF_SOURCE} where this node must read the edge itself: a SPLIT stack, where"
-        " the goal server is the laptop's and a tape whose pose rows crossed the WiFi is what"
-        " this recorder is on the board to prevent (nav.launch.py passes it there), or a tape"
-        " that has to be compared against one written before 2026-09-22. The listener is then"
-        " started on the next tick and is NOT stopped again by switching back: that costs a"
-        " restart",
-    ),
-)
 
 # The tape's format — the rows, their rounding, the costmap's encoding and the four feasibility
 # classes — lives in :mod:`pepin.tape_rows`, so the offline converter of a rosbag
@@ -158,21 +102,14 @@ class RunRecorder:
     # 40% of a core on this board (measured 2026-09-08, load average 9 with the controller loop
     # down to 3 Hz), and a prelude does not need 10 Hz. During a run nothing is thinned.
     IDLE_PERIOD_S: ClassVar[dict[str, float]] = {"pose": 0.2, "loc": 0.2}
-    # How often map -> base_link is read into the tape: the same 5 Hz the `loc` records are
-    # thinned to above.
-    LOC_TF_PERIOD_S: ClassVar[float] = 1.0 / LOC_HZ
 
     def __init__(
         self,
         node: Node,
         directory: Path,
         tape: RunTape | None = None,
-        planner_records: Callable[[], bool] = lambda: True,
-        loc_from: Callable[[], str] = lambda: POSE_TOPIC_SOURCE,
     ) -> None:
         self._node = node
-        self._planner_records = planner_records  # the ``planner_records`` flag, read per record
-        self._loc_from = loc_from  # the ``loc_from`` flag, read per record
         self._plan_seq = 0  # how many plans this run has seen: the global costmap's throttle...
         self._gcostmap_seq = -1  # ...and the plan the last taped grid belonged to
         self._last_kept: dict[str, float] = {}
@@ -193,13 +130,8 @@ class RunRecorder:
         # WHERE THE `loc` RECORDS COME FROM: map -> odom (RTAB-Map's, over the transport)
         # composed with the board's own odom -> base_link, which since 2026-09-22 arrives as a
         # TOPIC: the goal server parses /tf for navigation anyway and republishes the pose it
-        # reads (its ``pose_topic`` flag).
-        self._tf: TfLookup | None = None
+        # reads.
         node.create_subscription(PoseStamped, POSE_TOPIC, self._on_pose, 5)
-        # The old path stays one flag away (``loc_from`` tf). Its listener is built on the first
-        # tick that asks for it — from the timer, which runs where the executor runs — and never
-        # in this constructor, so the switch costs nothing while it is off.
-        node.create_timer(self.LOC_TF_PERIOD_S, self._loc_from_tf)
         # Only while a run is open: rclpy turns every LaserScan into Python objects BEFORE our
         # callback can decline it, and that deserialisation alone cost 38% of a core between
         # goals on this board (measured 2026-09-08, load average 8.4). A drive gets them from
@@ -279,13 +211,9 @@ class RunRecorder:
                 # ...and what the PLANNER saw, which is not the local grid the controller reads:
                 # the global costmap (latched, so this subscription gets the full grid at once and
                 # the updates after it) and the goal status of the three actions a drive runs
-                # through. Behind ``planner_records``; see the flag for the cost.
-                *(
-                    self._node.create_subscription(
-                        OccupancyGrid, "/global_costmap/costmap", self._on_global_costmap, latched
-                    )
-                    for _ in (0,)
-                    if self._planner_records()
+                # through (the module's docstring has the cost).
+                self._node.create_subscription(
+                    OccupancyGrid, "/global_costmap/costmap", self._on_global_costmap, latched
                 ),
                 *(
                     self._node.create_subscription(
@@ -295,7 +223,6 @@ class RunRecorder:
                         5,
                     )
                     for action in ("navigate_to_pose", "compute_path_to_pose", "follow_path")
-                    if self._planner_records()
                 ),
             ]
         elif want == "deafen" and self._during_run:
@@ -401,7 +328,7 @@ class RunRecorder:
         planned on answers no question, and a drive that re-plans ten times a second would
         otherwise write ten grids a second.
         """
-        if not self._keep("gcostmap") or not self._planner_records():
+        if not self._keep("gcostmap"):
             return
         if self._plan_seq == self._gcostmap_seq:
             return
@@ -416,7 +343,7 @@ class RunRecorder:
         a plan was ABORTED rather than never asked for, which is the question 78 recoveries with no
         path raise (2026-09-17). The topics carry a message per transition, so they are nearly free.
         """
-        if not self._keep("nav") or not self._planner_records():
+        if not self._keep("nav"):
             return
         self._tape.add(nav_row(action, msg, time.time()))
 
@@ -426,30 +353,10 @@ class RunRecorder:
 
     def _on_pose(self, msg: PoseStamped) -> None:
         """The goal server's republished ``map -> base_link`` (``/pose``, 5 Hz): the tape's
-        `loc` row while ``loc_from`` is ``pose_topic``.
-        """
-        if self._loc_from() != POSE_TOPIC_SOURCE or not self._keep("loc"):
+        `loc` row."""
+        if not self._keep("loc"):
             return
         self._tape.add(loc_row_from_pose(msg, time.time()))
-
-    def _loc_from_tf(self) -> None:
-        """The same record read from ``map -> base_link`` by this node's own TF listener: the
-        path of before 2026-09-22, one flag away (``loc_from`` tf).
-
-        The listener is built on the first tick that asks for it and never in the constructor:
-        it is a subscription to the whole /tf stream and it costs this board ~34 % of a core, so
-        nothing is subscribed while the pose arrives as a topic. Built HERE because a
-        subscription may only be created on the thread that spins the executor, which is where
-        this timer runs.
-        """
-        if self._loc_from() != TF_SOURCE or not self._keep("loc"):
-            return
-        if self._tf is None:
-            self._tf = TfLookup(self._node)
-        transform = self._tf.transform("map", "base_link", timeout_s=0.0)
-        if transform is None:
-            return
-        self._tape.add(loc_row_from_transform(transform, time.time()))
 
 
 class RunRecorderNode(Node):
@@ -463,13 +370,7 @@ class RunRecorderNode(Node):
     def __init__(self) -> None:
         super().__init__("run_recorder")
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
-        self._switches = Switches(self, FLAGS)
-        self._recorder = RunRecorder(
-            self,
-            self._record_dir,
-            planner_records=lambda: self._switches.on("planner_records"),
-            loc_from=lambda: str(self._switches["loc_from"]),
-        )
+        self._recorder = RunRecorder(self, self._record_dir)
         self._clip = CameraClip(self.get_logger())  # curl copying the head camera's stream
         latched = QoSProfile(
             depth=1,
@@ -481,14 +382,8 @@ class RunRecorderNode(Node):
         self._say(RunStatus(IDLE))
         self.get_logger().info(
             f"run recorder ready: tapes in {self._record_dir}"
-            f" (loc from {self._loc_source_note()}); flags: {self._switches.state()}"
+            f" (loc from {POSE_TOPIC}, the goal server's read of map -> base_link)"
         )
-
-    def _loc_source_note(self) -> str:
-        """Which topic or edge writes the tape's `loc` rows right now, for the ready line."""
-        if str(self._switches["loc_from"]) == POSE_TOPIC_SOURCE:
-            return f"{POSE_TOPIC}, the goal server's read of map -> base_link"
-        return "TF map -> base_link, this node's own listener"
 
     def _say(self, status: RunStatus) -> None:
         self._status_pub.publish(String(data=status.to_json()))

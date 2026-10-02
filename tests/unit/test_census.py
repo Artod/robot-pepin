@@ -30,7 +30,7 @@ from pepin.census import (
 )
 
 # A trimmed real dump from the board (2026-09-14 12:40 EDT), plus a kernel thread, the census's
-# own ps, a zombie and an intruder that no manifest entry claims. Since sensor_split (2026-09-24)
+# own ps, a zombie and an intruder that no manifest entry claims. Since 2026-09-24
 # its one sensors_container line is the two containers it became, at the old total's cost split
 # (not yet a real dump of the split board: replace these two lines with the next census).
 PS_DUMP = """    PID    PPID  NI %CPU   RSS     ELAPSED COMMAND
@@ -124,7 +124,7 @@ def test_parse_elapsed_reads_every_ps_shape() -> None:
 
 def test_parse_ps_reads_fields_and_skips_the_header() -> None:
     processes = parse_ps(PS_DUMP)
-    assert len(processes) == 8  # the sensing is two containers since sensor_split
+    assert len(processes) == 8  # the sensing is two containers since 2026-09-24
     nav = next(p for p in processes if "nav2_container" in p.args)
     assert (nav.pid, nav.ppid, nav.nice) == (122289, 122098, 5)
     assert nav.cpu_percent == 79.9

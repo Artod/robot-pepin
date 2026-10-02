@@ -36,9 +36,8 @@ sample is more than ``tf_dead_s`` behind the frame — the last edge and the unc
 once, both counted, instead of CARRY_WAIT_S burnt per frame on a route that has died
 (2026-09-16: the neck's edge 344 s old, 0.9-3 frames/s). The pan is part of the camera's pose
 (:class:`pepin.depth.CameraPose`'s yaw): the lidar's beams are projected into the picture where
-the head looks, and behind ``scan_honours_pan`` the published fan turns with it — the bearings
-of /depth_scan are the cart's whichever way the neck looks, and the fan's angular window sits
-off base_link's x by the pan.
+the head looks, and the published fan turns with it — the bearings of /depth_scan are the cart's
+whichever way the neck looks, and the fan's angular window sits off base_link's x by the pan.
 
 THE STEREO SOURCE: the node also subscribes to ``/camera/right/image`` and
 ``/camera/right/camera_info``, pairs the right eye with the left picture by EXACT stamp (both
@@ -51,11 +50,11 @@ are read off the two ``camera_info`` messages, so this node never opens the cali
 picture, its stamp and its frame are the left eye's throughout.
 
 WHICH ENGINE matches the two eyes is the live ``stereo_matcher`` flag in {sgbm, raft}, default
-``sgbm``. Both are built at start and the flag points the source at one of them, so an A/B costs
+``raft``. Both are built at start and the flag points the source at one of them, so an A/B costs
 no restart and nothing is rebuilt mid-drive. ``raft`` is RAFT-Stereo on the laptop's GPU, in the
 same native host process the mono network uses (:mod:`pepin.stereo_host`, ``ros/depth_host.sh
 stereo``): it turns the reflection phantoms SGBM paints on the parquet from 450 separate specks
-into 94 blobs and costs 89 ms a pair against 17, which is why the default waits for a live drive.
+into 94 blobs and costs 89 ms a pair against 17; it is the default since 2026-09-23.
 A pair the host cannot answer goes to SGBM, and the report line counts it and says how long the
 host has been down.
 
@@ -78,11 +77,10 @@ the signature of a drifting gyro rather than of a tipping body) is treated as no
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set depth_stream <flag>
 <value>``): one per stage of the pipeline — ``edge_filter``, ``lidar_anchor``, ``affine_law``,
 ``floor_anchor`` — plus ``depth_backend``, ``stereo_matcher``, ``scale_ceiling``, the largest 1 /
-scale the law may be fitted to, ``law_slew``, how fast that law may move between fits,
-``tf_dead_s``, how stale a TF edge may be before no frame waits for it, ``imu_lean``,
-``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is published (5 Hz, the
-board's local costmap's own ``update_frequency`` — every frame is still processed, the cap is on the
-publisher); their state is printed in every report line.
+scale the law may be fitted to, ``tf_dead_s``, how stale a TF edge may be before no frame waits for
+it, ``imu_lean``, ``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is
+published (5 Hz, the board's local costmap's own ``update_frequency`` — every frame is still
+processed, the cap is on the publisher); their state is printed in every report line.
 """
 
 from __future__ import annotations
@@ -105,18 +103,10 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 
 from pepin.camera import CameraConfig, mount_transform, optics
-from pepin.contact import (
-    FAN_FLOOR_GATE,
-    FAN_FLOOR_GATES,
-    FloorPlane,
-    contact_scan,
-    fan_min_z,
-    gate_by_contact,
-)
+from pepin.contact import fan_min_z
 from pepin.depth import (
     MIN_SAMPLES,
     POOL_MIN_SAMPLES,
-    SCAN_MIN_Z_M,
     SCAN_WINDOW_S,
     Array,
     CameraPose,
@@ -129,7 +119,6 @@ from pepin.depth import (
     nearest_stamp,
     optical_heading,
     plane_in_view_from,
-    retired_laws,
     save_law,
     scan_points,
     set_scale_ceiling,
@@ -138,7 +127,6 @@ from pepin.depth import (
 from pepin.depth_pipeline import (
     AffineLaw,
     FrameContext,
-    LidarAnchor,
     standard_pipeline,
 )
 from pepin.depth_service import (
@@ -204,7 +192,7 @@ TF_DEAD_S = 3.0  # an edge whose newest sample is older than this is dead: no fr
 PAN_NOTICE_RAD = math.radians(1.0)  # a head turned more than this is worth a line in the report
 SCAN_BEFORE = "floor_anchor"  # the scan is built from the depth as it stands before this stage
 # How far this camera answers for its own depth, in metres. ONE number for two uses — the
-# published image's reach (the ``depth_reach`` flag) and /depth_scan's own cap
+# published image's reach (:meth:`DepthStream._vouched`) and /depth_scan's own cap
 # (``scan_max_range``) — because they are the same physical claim, and two literals would drift:
 # the costmap's obstacle_max_range of 2.5 m has to stay under the scan's cap, and the camera half
 # of RTAB-Map's grid has to stay under the image's. The rig's own reach (pepin.stereo_depth's
@@ -375,91 +363,6 @@ FLAGS = FlagSet(
         " right way and returning to zero",
         off_when="the moment the lean in the report line disagrees with the cart's visible"
         " attitude",
-    ),
-    Flag(
-        "camera_tf_latest",
-        True,
-        description="take the newest base_link <- camera_optical edge TF holds (at most"
-        f" {CAMERA_TF_MAX_AGE_S:.0f} s old, and only while the head has not moved over the half"
-        " second before it) when the frame's own stamp is not covered yet, instead of waiting"
-        " CARRY_WAIT_S for it; off: the old wait at the exact stamp",
-        why="on since 2026-09-15 06:00: the neck's edge crosses the bridge late (bursts of +0.75 s)"
-        " and the head stands still while the cart drives; waiting for the exact stamp cost"
-        " 0.2 s on every frame ('Extrapolation ... into the future' x104 a window), the stream"
-        " fell to 3.5 frames/s and rgbd_odometry starved (0 poses/s)",
-        on_when="always: a turning head is recognised (its edge moved within the last half"
-        " second) and waited for at the exact stamp instead (2026-09-30)",
-        off_when="to measure what the shortcut is worth: every uncovered frame then waits",
-    ),
-    Flag(
-        "fan_floor_gate",
-        FAN_FLOOR_GATE,
-        description="what keeps the floor out of /depth_scan: band (the default) raises the"
-        " band's lower edge with the floor's own noise, 3 sigma of it"
-        " (pepin.contact.fan_min_z), contact drops every mark nearer than that bearing's"
-        " floor-contact range (pepin.contact.gate_by_contact, a range no depth law enters), off"
-        " is the flat 0.15 m edge the fan always had. The report line counts the bearings gated",
-        why="a floor pixel stands camera_height * (relative depth error) above the floor at every"
-        " range, so 12.5 % short is exactly the 0.15 m edge on this mount while the per-frame"
-        " law's own median residual is 10.2 % — the floor marks itself as an obstacle, and it is"
-        " why the fan read 0.58 of the lidar at the working pitch on 2026-09-15"
-        " (scratch/fan_floor_leak.py). Measured on the three pitch tapes of 2026-09-12"
-        " (scratch/fan_gate_offline.py, the per-frame law, 9 frames each): band moves k ="
-        " fan / lidar 0.499 -> 0.595 at 25.8 deg without removing a single bearing (the mark"
-        " simply lands on the real obstacle instead of the floor in front of it), and does"
-        " nothing at 11.1 (0.851 -> 0.853) or 40.9 (0.232). contact is the aggressive one and"
-        " overshoots: it removes 455 of 1399 marks at 11.1 deg and takes k past 1 to 1.215, and"
-        " at 25.8 and 40.9 it removes every mark there is",
-        on_when="band as shipped; contact only against a scene where the floor plane is trusted"
-        " and the fan is known to be floor — and never without reading the bearings gated",
-        off_when="off to reproduce a costmap from before this gate",
-        choices=FAN_FLOOR_GATES,
-    ),
-    Flag(
-        "scan_honours_pan",
-        True,
-        description="fold /depth_scan onto the floor through the neck's pan: the fan's bearings"
-        " turn with the head and its angular window turns with them, so angle_min comes out at"
-        " pan - 40 deg instead of -40. The pan is the yaw of the same base_link <-"
-        " camera_optical edge the volume path reads (camera_tf_latest); with none at the frame's"
-        " stamp the last edge TF held stands in, and only while TF never had one the config"
-        " mount's straight-ahead yaw (the report line counts both). Off: the fan is projected as"
-        " if the head looked along the cart's x, whatever the encoders say",
-        why="the fan carried no pan at all until 2026-09-15, and the report line said so ('head"
-        " panned N frames (projected as if not)'). At rest that is not nothing: the pan"
-        " reference measured that day (config/neck.json pan_note,"
-        " scripts/extrinsics.py's pan_from_bearings, six windows in four scenes) puts the"
-        " resting head +0.79 deg left of the cart's x, which is 4 cm of bearing error at 3 m —"
-        " under PAN_NOTICE_RAD, so the old fan did not even count it. A head panned on purpose puts"
-        " the whole fan in the wrong place: 20 deg of neck is 20 deg of costmap, one metre"
-        " sideways at 3 m",
-        on_when="always once the neck's edge is in TF — a scan whose bearings are the cart's is"
-        " what Nav2's obstacle layer assumes it is being handed",
-        off_when="to reproduce a costmap from before 2026-09-15, or to read a fan against a"
-        " measurement taken while the projection ignored the pan (the yaw-offset probes of"
-        " config/neck.json's pan_note were)",
-    ),
-    Flag(
-        "depth_reach",
-        True,
-        description="the PUBLISHED depth image is NaN past depth_reach_m: the camera answers for"
-        " its own data and says nothing where it does not vouch for the range. /depth_scan is"
-        " unaffected (it is capped at the same range already) and so is every law — the gate is"
-        " applied to the image on its way out, after the pipeline",
-        why="a NaN depth pixel makes no point in any consumer: rtabmap drops it from the cloud"
-        " before the grid (pcl::isFinite, rtabmap/core/util3d.cpp:644), Nav2's obstacle layer"
-        " neither marks nor raytraces it (verified against obstacle_layer.cpp 1.3.12 on"
-        " 2026-09-11), and pepin.tsdf integrates only finite depths. Without the gate the camera's"
-        " far half is a fiction that outvotes the lidar: 44 % of the camera's costmap marks within"
-        " 2.5 m were BEHIND the wall the lidar sees (run 0224, camera layer alone, 2026-09-11),"
-        " and the wall-truth eval put the network 1.24-1.27 of the truth in the middle and top"
-        " thirds of the picture against 0.998 at the beams (errand 0313,"
-        " scratch/wall_truth_eval.py). It is what lets ONE Grid/RangeMax serve both sensors in"
-        " vslam.launch.py: the lidar's 8 m, with the camera's reach carried in the camera's data",
-        on_when="always while any grid, costmap or volume is built from BOTH this depth and the"
-        " lidar — which is every mode since 2026-09-19",
-        off_when="to measure the network past its reach (a range-law session that wants the far"
-        " bins), and to reproduce a volume or a costmap from before this gate",
     ),
 )
 FLOOR_STAGES = ("floor_anchor",)  # the stages that read the IMU's up vector
@@ -735,8 +638,6 @@ class DepthStream(Node):
         for name in self._pipeline.names:  # a launch override reaches the stage it names
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
-        self._law.slew_per_s = float(self._switches["law_slew"])  # how fast the law may move
-        self._ask_lidar_sigma(float(self._switches["lidar_sigma_m"]))  # and what a beam is worth
         self._tally = Tally(STAGES)
         self._lean = LeanFeed(
             self,
@@ -855,9 +756,7 @@ class DepthStream(Node):
 
     def _seed_laws(self, now: float) -> None:
         """Hand the affine law what the last run saved in the law file, and say so in the log.
-        A record of a law that no longer exists (:func:`pepin.depth.retired_laws`) is
-        named in the log line and left alone — the next save drops it. Without a file nothing
-        is published until POOL_MIN_SAMPLES beam pairs are pooled."""
+        Without a file nothing is published until POOL_MIN_SAMPLES beam pairs are pooled."""
         saved = load_law(self._law_file, now)
         if saved is None and self._stereo_on:
             # A stereo depth is already metres. Withholding it until POOL_MIN_SAMPLES beams have
@@ -878,15 +777,9 @@ class DepthStream(Node):
             )
             return
         self._law.seed(saved[0], saved[1])
-        retired = retired_laws(self._law_file)
-        retired_note = (
-            f"; ignoring the retired {', '.join(retired)} law record the file still carries"
-            if retired
-            else ""
-        )
         self.get_logger().info(
             f"depth law from {self._law_file}: a {saved[0]:.2f} b {saved[1]:+.3f}"
-            f" on {saved[2]} beams; publishing at once{retired_note}"
+            f" on {saved[2]} beams; publishing at once"
         )
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
@@ -901,24 +794,13 @@ class DepthStream(Node):
             set_scale_ceiling(float(new))  # the next fit is bounded by it; the law in hand is not
         elif name == "law_watch":
             self._law.watching = bool(new)  # from the next frame on
-        elif name == "law_slew":
-            self._law.slew_per_s = float(new)  # from the next fit on
         elif name == "imu_lean":
             self._poser.apply_lean = bool(new)
             self._lean.use_gyro = bool(new)
         elif name == "lean_min_quality":
             self._poser.min_lean_quality = float(new)
-        elif name == "lidar_sigma_m":
-            self._ask_lidar_sigma(float(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
-
-    def _ask_lidar_sigma(self, sigma_m: float) -> None:
-        """Tell the lidar anchor what one beam's range is trusted to, in metres: its pairs then
-        weigh 1 / sigma^2 in inverse depth. 0 restores the flat weight of 1 a beam used to have."""
-        stage = self._pipeline.stage("lidar_anchor")
-        if isinstance(stage, LidarAnchor):
-            stage.sigma_m = sigma_m
 
     def _on_work_error(self, text: str) -> None:
         self.get_logger().error(f"depth failed on a frame:\n{text}")
@@ -1189,15 +1071,15 @@ class DepthStream(Node):
 
     def _vouched(self, depth: Array) -> Array:
         """The depth as this camera is willing to answer for it: NaN past ``depth_reach_m``, on a
-        copy so nothing the pipeline still holds is touched. Off (``depth_reach``), the array
-        itself, which is what every consumer read before 2026-09-19.
+        copy so nothing the pipeline still holds is touched (since 2026-09-19).
 
         A sensor answers for its own data: NaN is the one value that makes no point in any consumer
-        downstream — no cell in RTAB-Map's grid, no mark and no raytrace in Nav2's obstacle layer,
-        no voxel in the volume — so the range this network's scale stops being a measurement over
-        is stated once, here, instead of in each consumer's own cap."""
-        if not self._switches.on("depth_reach"):
-            return depth
+        downstream — no cell in RTAB-Map's grid (rtabmap/core/util3d.cpp:644), no mark and no
+        raytrace in Nav2's obstacle layer, no voxel in the volume — so the range this network's
+        scale stops being a measurement over is stated once, here, instead of in each consumer's
+        own cap. Without it 44 % of the camera's costmap marks within 2.5 m were BEHIND the wall
+        the lidar sees (run 0224, 2026-09-11), and it is what lets ONE Grid/RangeMax serve both
+        sensors in vslam.launch.py."""
         reach = float(self._switches["depth_reach_m"])
         beyond = np.asarray(depth) > reach  # NaN compares false: what is already unknown stays so
         self._tally.count("beyond_reach", int(np.count_nonzero(beyond)))
@@ -1240,18 +1122,17 @@ class DepthStream(Node):
         pitch and the pan as a yaw: every projection turns with the head) and as the edge
         itself, for the fan. A head turned past PAN_NOTICE_RAD is counted.
 
-        Four asks, cheapest first, and only the third can wait: the frame's own stamp from what
-        TF already holds; the newest edge, while it is younger than CAMERA_TF_MAX_AGE_S and the
-        head has not moved over the half second before it (``camera_tf_latest``,
-        :func:`pepin.frame_pose.settled_pose` — a turning head is never stood in for by an old
-        sample); the blocking lookup at the stamp — refused outright by
-        :class:`LiveEdgeHistory` once the neck's edge is more than ``tf_dead_s`` behind this
-        frame, so a dead route costs no wait; and then the newest edge TF holds at any age, the
-        head's last known pose, counted. config/camera.json's mount, which looks straight ahead,
-        only while TF has never carried the edge at all."""
+        Four asks, cheapest first, and only the third can wait: the frame's own stamp from what TF
+        already holds; the newest edge, while it is younger than CAMERA_TF_MAX_AGE_S and the head
+        has not moved over the half second before it (:func:`pepin.frame_pose.settled_pose` — a
+        turning head is never stood in for by an old sample); the blocking lookup at the stamp —
+        refused outright by :class:`LiveEdgeHistory` once the neck's edge is more than ``tf_dead_s``
+        behind this frame, so a dead route costs no wait; and then the newest edge TF holds at any
+        age, the head's last known pose, counted. config/camera.json's mount, which looks straight
+        ahead, only while TF has never carried the edge at all."""
         at = stamp_seconds(stamp)
         pose = self._history.pose_at_nowait(at, self._camera_frame, self._base_frame)
-        if pose is None and self._switches.on("camera_tf_latest"):
+        if pose is None:
             # The neck's edge crosses the bridge late (bursts of +0.75 s, 2026-09-15): a lookup
             # at the frame's own stamp waited CARRY_WAIT_S on every frame ("Extrapolation ...
             # into the future" x104 a window, 3.5 frames/s, VO starved). The newest edge of a
@@ -1285,23 +1166,22 @@ class DepthStream(Node):
     def _fan_pan(self, ctx: FrameContext) -> float:
         """How far left the head looks while the fan is folded, radians CCW from the cart's x:
         the yaw of the very ``base_link <- camera_optical`` edge the volume path took for this
-        frame (:meth:`_camera_at`, flag ``camera_tf_latest``). With no such edge the frame's
-        pose is config/camera.json's mount, whose yaw is zero — straight ahead — and the report
-        line's ``camera pose from config`` counter is the count of those frames. Returns 0.0
-        while ``scan_honours_pan`` is off: the fan of before 2026-09-15, folded as if the head
-        looked along the cart's x."""
-        if not self._switches.on("scan_honours_pan") or ctx.cam_optical is None:
+        frame (:meth:`_camera_at`). With no such edge the frame's pose is config/camera.json's
+        mount, whose yaw is zero — straight ahead — and the report line's ``camera pose from
+        config`` counter is the count of those frames. A head panned 20 deg is 20 deg of costmap,
+        a metre sideways at 3 m, which the fan of before 2026-09-15 ignored."""
+        if ctx.cam_optical is None:
             return 0.0
         return optical_heading(ctx.cam_optical.rotation)[1]
 
     def _as_scan(self, depth: Array, image: Image, ctx: FrameContext) -> LaserScan:
-        """The depth folded onto the floor plane, in base_link, stamped like the image — with
-        the floor gated out of it the way ``fan_floor_gate`` says (:data:`FAN_FLOOR_GATES`) and
-        its bearings turned by the neck's pan the way ``scan_honours_pan`` says."""
-        gate = str(self._switches["fan_floor_gate"])
-        floor_of: float | Array = SCAN_MIN_Z_M
-        if gate == "band":
-            floor_of = fan_min_z(self._floor_expected(ctx), ctx.cam.z)
+        """The depth folded onto the floor plane, in base_link, stamped like the image, its
+        bearings turned by the neck's pan, and the floor kept out of it by raising the band's
+        lower edge with the floor's own noise (:func:`pepin.contact.fan_min_z`, 3 sigma of it):
+        a floor pixel stands camera_height * (relative depth error) above the floor at every
+        range, so with the flat 0.15 m edge the floor marked itself (scratch/fan_floor_leak.py,
+        scratch/fan_gate_offline.py: k = fan / lidar 0.499 -> 0.595 at 25.8 deg)."""
+        floor_of: float | Array = fan_min_z(self._floor_expected(ctx), ctx.cam.z)
         angle_min, step, ranges = depth_to_scan(
             depth,
             ctx.intr,
@@ -1310,14 +1190,6 @@ class DepthStream(Node):
             min_z=floor_of,
             max_range=self._scan_max_range,
         )
-        before = int(np.count_nonzero(np.isfinite(ranges)))
-        if gate == "contact":
-            # Both fans are indexed by the bearing across the PICTURE (each window turned by the
-            # head's yaw), so the contact scan's bins line up with the panned fan's bin for bin.
-            plane = FloorPlane.of(ctx.intr, ctx.cam, ctx.up)
-            _min, _step, contact, _verdict = contact_scan(depth, plane)
-            ranges, _removed = gate_by_contact(ranges, contact)
-        self._tally.count("fan_gated", before - int(np.count_nonzero(np.isfinite(ranges))))
         return scan_from_ranges(
             ranges,
             float(angle_min),
@@ -1550,18 +1422,15 @@ class DepthStream(Node):
         if c["camera_from_config"]:
             neck = self._dead_edge(w, "neck") or "no TF edge"
             extra += f", camera pose from config {c['camera_from_config']} frames ({neck}"
-            extra += "; fan pan from the mount)" if self._switches.on("scan_honours_pan") else ")"
-        if c["fan_gated"]:
-            extra += f", floor-gated {c['fan_gated']} bearings ({self._switches['fan_floor_gate']})"
-        if self._switches.on("depth_reach") and c["frames"]:
+            extra += "; fan pan from the mount)"
+        if c["frames"]:
             share = c["beyond_reach"] / max(c["frames"] * self._pixels(), 1) * 100.0
             extra += (
                 f", published NaN past {float(self._switches['depth_reach_m']):.1f} m over"
                 f" {share:.1f}% of the pixels"
             )
         if c["camera_panned"]:
-            how = "with the pan" if self._switches.on("scan_honours_pan") else "as if not"
-            extra += f", head panned {c['camera_panned']} frames (projected {how})"
+            extra += f", head panned {c['camera_panned']} frames (projected with the pan)"
         if c["beams_out_of_frame"]:
             near = self._plane_in_view()
             where = "" if near is None else f" (it shows past {near:.2f} m ahead)"

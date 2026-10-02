@@ -2,47 +2,39 @@
 
 Two component containers (high CPU priority, each respawned with fresh nodes when it
 dies: pepin_bringup.launch_kit): the lidar's holds the LD19 driver, the hull box filter that
-turns its scan into /scan, the static base_link->laser transform, the lifecycle manager that
-activates the driver, and — only when it is asked for — the Foxglove bridge; the base's holds
-the C++ base bridge and the IMU's mount (``sensor_split``; off, the one process of before).
-Without the C++ bridge a separate Python process runs ``base_bridge`` (odometry, TF, /cmd_vel to
-the wheels). Every extra ROS process costs ~140 MB on this 1.5 GB board, so composition is not a
-nicety here.
+turns its scan into /scan, the static base_link->laser transform and the lifecycle manager that
+activates the driver; the base's holds the C++ base bridge (``pepin_base_cpp``: odometry, the
+/cmd_vel sink, the IMU). Every extra ROS process costs ~140 MB on this 1.5 GB board, so
+composition is not a nicety here. The board runs no Foxglove bridge: the laptop's
+(vslam.launch.py) sees these topics through zenoh.
 
 The sensor mounts are not arguments: base_link -> laser comes from config/lidar.json (the LD19
-hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home) and base_link -> imu_link
-from config/imu.json, both read through pepin.mounts.Mounts — the one loader every publisher of
-a sensor frame uses — and found by pepin.deployment.config_file at launch time: on the board
-under /ws/pepin_src/config, which ros/sync.sh keeps beside the library.
+hangs upside down, roll pi, yaw -87.5 deg: the calibration's one home), read through
+pepin.mounts.Mounts — the one loader every publisher of a sensor frame uses — and found by
+pepin.deployment.config_file at launch time: on the board under /ws/pepin_src/config, which
+ros/sync.sh keeps beside the library. The IMU's readings are stamped in base_link (the bridge
+rotates each one into base_link's axes itself, base_bridge.cpp to_base_axes, the mount of
+config/imu.json), so no imu_link frame is published.
 
 Arguments:
 
-- ``lidar_port`` (default /dev/lidar), ``lidar_debug`` (default false),
-- ``foxglove`` (default **false**) and ``foxglove_port`` (default 8765): the board's own
-  Foxglove bridge. Off since 2026-09-14 — the laptop runs one (vslam.launch.py serves
-  ws://localhost:8765) and it sees the board's topics through the zenoh bridge, so a second
-  bridge on a 4-core A53 only serialises every topic a second time and logs "rtabmap_msgs not
-  found" 26 times a minute. ``foxglove:=true`` brings it back for watching the board alone.
-- ``tof`` (default false): the ToF bridge (its scan fans reach the laptop's costmaps).
-- ``base_bridge_cpp`` (default false): run the C++ base bridge (``pepin_base_cpp``, ~25 MB)
-  instead of the Python one. Same node, parameters and wire protocol; the default flips
-  once it has driven the cart.
-- ``imu`` (default false): read the MPU6050 on /dev/i2c-2 inside the C++ bridge and publish
-  /imu/data_raw. Needs ``base_bridge_cpp:=true``; the Python bridge has no IMU. The IMU is a
-  sensor of the filter below, never its precondition: with ``imu:=false`` the EKF still runs.
+- ``tof`` (default true): the ToF bridge (its scan fans reach the laptop's costmaps).
+- ``imu`` (default true): read the MPU6050 on /dev/i2c-2 inside the base bridge and publish
+  /imu/data_raw. The IMU is a sensor of the filter below, never its precondition: with
+  ``imu:=false`` the EKF still runs.
 - ``ekf`` (default true): fuse whatever odometry sources are alive (ros/params/ekf.yaml) and
-  own odom -> base_link. Only with ``base_bridge_cpp:=true`` — the Python bridge publishes that
-  transform itself and two publishers of one edge fight. ``ekf:=false`` is the way back to the
-  bridge's own transform with no filter in the chain.
+  own odom -> base_link. ``ekf:=false`` is the way back to the bridge's own transform with no
+  filter in the chain.
 - ``laser_odom`` (default **true**): laser odometry (rf2o, in the image) matching each scan
   against the one before it — no map, no graph — and publishing /odom_laser, which the EKF fuses
   as a twist. It is a source of the filter, never its precondition: ``laser_odom:=false`` leaves
   the wheels, the gyro and the camera exactly as they were. ``ros/feature.sh laser_odom on|off``
   flips it; the node publishes NO transform (the EKF owns odom -> base_link).
-- ``neck`` (default false): the neck's encoders as /neck/state and, behind the node's live
+- ``neck`` (default true): the neck's encoders as /neck/state and, behind the node's live
   ``neck_tf`` switch, base_link -> camera_link from them (pepin_bringup.neck_state, a Python
-  process, ~150 MB). The laptop's camera node must then keep its static edge off
-  (ros/laptop.sh vslam --neck); ros/feature.sh neck on|off flips this one.
+  process, ~150 MB). The laptop's camera node then keeps its static edge off (the default of
+  ros/laptop.sh vslam; ``--fixed-head`` is the static edge for a run without this node);
+  ros/feature.sh neck on|off flips this one.
 - ``board_bag`` (default false): the board's raw sensors recorded on the board itself, always,
   into minute MCAP files under /maps/board_rec, capped at 20 GB with 10 GB of the card always
   left free (pepin.board_bag: one long-lived ``ros2 bag record`` and its supervisor, niced under
@@ -51,11 +43,11 @@ Arguments:
 
 import math
 
-from launch import Condition, LaunchContext, LaunchDescription
+from launch import LaunchContext, LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, OpaqueFunction
-from launch.conditions import IfCondition, UnlessCondition
-from launch.substitutions import LaunchConfiguration, PythonExpression
-from launch_ros.actions import ComposableNodeContainer, Node
+from launch.conditions import IfCondition
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
 from pepin_bringup.launch_kit import respawned_container
 
@@ -77,9 +69,6 @@ RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 
 MOUNTS = Mounts.load()
 LASER = MOUNTS.lidar.transform()
-# The GY-521 sits with its Y axis up (gravity reads +9.8 on Y, 2026-09-07): roll +90 deg maps
-# the chip's Y onto base_link's Z, so its Y gyro is our yaw rate. The numbers live in the file.
-IMU = MOUNTS.imu.transform()
 # The cart's own body, with 5 cm of margin: returns just outside the exact hull are its own
 # posts and cables, they travel with it, and the costmap turned them into a wall that made
 # every in-place turn "a collision ahead" (measured 2026-09-08: |y| 0.28-0.34 m in 41-71%
@@ -107,20 +96,18 @@ def quaternion(roll: float, pitch: float, yaw: float) -> tuple[float, float, flo
 def lidar_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The lidar's nodes, described anew on every call (a respawn loads fresh ones, see
     pepin_bringup.launch_kit): the LD19 driver, the hull filter that makes /scan of its scan,
-    base_link -> laser, the driver's lifecycle manager and, when asked for, the board's Foxglove."""
+    base_link -> laser and the driver's lifecycle manager."""
     laser_x, laser_y, laser_z, laser_roll, laser_pitch, laser_yaw = LASER
     qx, qy, qz, qw = quaternion(laser_roll, laser_pitch, laser_yaw)
-    debug = LaunchConfiguration("lidar_debug").perform(context).lower() == "true"
-    port = int(LaunchConfiguration("foxglove_port").perform(context))
-    components = [
+    return [
         ComposableNode(
             package="ldlidar_component",
             plugin="ldlidar::LdLidarComponent",
             name="ldlidar_node",
             parameters=[
                 {
-                    "general.debug_mode": debug,
-                    "comm.serial_port": LaunchConfiguration("lidar_port").perform(context),
+                    "general.debug_mode": False,
+                    "comm.serial_port": "/dev/lidar",  # board/99-pepin-usb.rules
                     "comm.baudrate": 230400,
                     "comm.timeout_msec": 1000,
                     "lidar.model": "LD19",
@@ -182,83 +169,44 @@ def lidar_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
             parameters=[{"autostart": True, "node_names": ["ldlidar_node"], "bond_timeout": 0.0}],
         ),
     ]
-    # Opt-in: the laptop's bridge (vslam.launch.py) already serves Foxglove and reaches these
-    # topics through zenoh. Two bridges make this board serialise every topic twice.
-    if LaunchConfiguration("foxglove").perform(context).lower() == "true":
-        components.append(
-            ComposableNode(
-                package="foxglove_bridge",
-                plugin="foxglove_bridge::FoxgloveBridge",
-                name="foxglove_bridge",
-                parameters=[{"port": port, "send_buffer_limit": 10000000}],
-            )
-        )
-    return components
 
 
 def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
-    """The base's own nodes, described anew on every call: the IMU's mount and the C++ base
-    bridge (wheels, IMU, the gyro-bias tracker), each only when its argument asks for it. Kept
-    apart from the lidar's so a sensor that dies cannot take the actuator down with it."""
-    imu_x, imu_y, imu_z, imu_roll, imu_pitch, imu_yaw = IMU
-    ix, iy, iz, iw = quaternion(imu_roll, imu_pitch, imu_yaw)
-    parts: list = []  # type: ignore[type-arg]
-    if LaunchConfiguration("imu").perform(context).lower() == "true":
-        parts.append(
-            ComposableNode(
-                package="tf2_ros",
-                plugin="tf2_ros::StaticTransformBroadcasterNode",
-                name="base_to_imu",  # documentation only: the bridge publishes in base_link
-                parameters=[
-                    {
-                        "frame_id": "base_link",
-                        "child_frame_id": "imu_link",
-                        "translation.x": imu_x,
-                        "translation.y": imu_y,
-                        "translation.z": imu_z,
-                        "rotation.x": ix,  # config/imu.json: roll +90 deg, the chip's Y up
-                        "rotation.y": iy,
-                        "rotation.z": iz,
-                        "rotation.w": iw,
-                    }
-                ],
-            )
+    """The base's own node, described anew on every call: the C++ base bridge (wheels, IMU, the
+    gyro-bias tracker). Kept apart from the lidar's so a sensor that dies cannot take the
+    actuator down with it."""
+    imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
+    ekf_on = LaunchConfiguration("ekf").perform(context).lower() == "true"
+    return [
+        ComposableNode(
+            package="pepin_base_cpp",
+            plugin="pepin::BaseBridge",
+            name="base_bridge",
+            # The transform follows the FILTER, not the IMU (2026-09-15): with the EKF up it
+            # owns odom -> base_link and the bridge publishes /odom only, whether or not the
+            # gyro is there to be fused. Keyed on the IMU, `imu off` left the stack with no
+            # /odometry/filtered at all — the tracker of the day read that topic and never
+            # localised.
+            # The speed caps are the base's own, not the bridge's defaults (0.25 m/s).
+            parameters=[
+                {
+                    "imu_enable": imu_on,
+                    "imu_rate_hz": IMU_RATE_HZ,
+                    "publish_tf": not ekf_on,
+                    "max_linear_m_s": BASE_MAX_LINEAR_M_S,
+                    "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
+                }
+            ],
         )
-    if LaunchConfiguration("base_bridge_cpp").perform(context).lower() == "true":
-        imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
-        ekf_on = LaunchConfiguration("ekf").perform(context).lower() == "true"
-        parts.append(
-            ComposableNode(
-                package="pepin_base_cpp",
-                plugin="pepin::BaseBridge",
-                name="base_bridge",
-                # The transform follows the FILTER, not the IMU (2026-09-15): with the EKF up it
-                # owns odom -> base_link and the bridge publishes /odom only, whether or not the
-                # gyro is there to be fused. Keyed on the IMU, `imu off` left the stack with no
-                # /odometry/filtered at all — the tracker of the day read that topic and never
-                # localised.
-                # The speed caps are the base's own, not the bridge's defaults (0.25 m/s).
-                parameters=[
-                    {
-                        "imu_enable": imu_on,
-                        "imu_rate_hz": IMU_RATE_HZ,
-                        "publish_tf": not ekf_on,
-                        "max_linear_m_s": BASE_MAX_LINEAR_M_S,
-                        "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
-                    }
-                ],
-            )
-        )
-    return parts
+    ]
 
 
 def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The sensing containers once the launch arguments have values: the lidar's and the base's,
-    each respawned with fresh nodes (``sensor_split``, default), or the one shared process of
-    before."""
-    # TWO FAILURE DOMAINS (sensor_split, 2026-09-24). Until then the lidar driver, its filter AND
-    # the base bridge shared one process, and at 00:11Z on 2026-09-24 the LD19 driver aborted on
-    # a deactivate ("*** bit out of range 0 - FD_SETSIZE on fd_set ***", exit -6: a select() on a
+    each respawned with fresh nodes."""
+    # TWO FAILURE DOMAINS (2026-09-24). Until then the lidar driver, its filter AND the base
+    # bridge shared one process, and at 00:11Z on 2026-09-24 the LD19 driver aborted on a
+    # deactivate ("*** bit out of range 0 - FD_SETSIZE on fd_set ***", exit -6: a select() on a
     # descriptor its own close had just invalidated) and took the wheels, the IMU and the gyro's
     # bias tracker down with it, unrespawned: the EKF coasted on the camera alone for hours and the
     # 'camera-only' leg that followed had no base to drive. A dead lidar is exactly the failure a
@@ -266,55 +214,23 @@ def sensors_container(context: LaunchContext) -> list:  # type: ignore[type-arg]
     # and each comes back by itself two seconds after it dies (RESPAWN). The rest of the stack
     # already degrades on its own: RTAB-Map's registration follows what the snapshots carry
     # (pepin.graphmode), the costmaps' lidar layer goes quiet, the EKF loses rf2o and keeps the
-    # wheels, the gyro and the camera. Off, the one process of before (no respawn).
-    split = LaunchConfiguration("sensor_split").perform(context).lower() == "true"
-    if not split:
-        container = ComposableNodeContainer(
-            name="sensors_container",
-            namespace="",
-            package="rclcpp_components",
-            executable="component_container_isolated",
-            output="screen",
-            prefix="nice -n -10",  # sensing first: a starved driver ships scans seconds late
-            composable_node_descriptions=lidar_parts(context) + base_parts(context),
-        )
-        return [container]
+    # wheels, the gyro and the camera.
     # sensing first: a starved driver ships scans seconds late; the wheels and the gyro alike
-    containers = respawned_container("lidar_container", lidar_parts, "nice -n -10")
-    if base_parts(context):
-        containers += respawned_container("base_container", base_parts, "nice -n -10")
-    return containers
-
-
-def base_bridge(
-    package: str,
-    condition: Condition,
-    parameters: list | None = None,  # type: ignore[type-arg]
-) -> Node:
-    """The base bridge from ``package`` (the Python or the C++ build), niced above the rest."""
-    return Node(
-        package=package,
-        executable="base_bridge",
-        output="screen",
-        prefix="nice -n -5",
-        parameters=parameters or [],
-        condition=condition,
+    return respawned_container("lidar_container", lidar_parts, "nice -n -10") + (
+        respawned_container("base_container", base_parts, "nice -n -10")
     )
 
 
 def generate_launch_description() -> LaunchDescription:
-    use_cpp = LaunchConfiguration("base_bridge_cpp")
-    # The Python bridge keeps the transform: without the C++ bridge there is no EKF to own it.
-    base = base_bridge("pepin_bringup", UnlessCondition(use_cpp), [{"publish_tf": True}])
     # Wheels, gyro and the camera's odometry fused in the plane (ros/params/ekf.yaml): the wheels
     # over-report rotation on carpet, the gyro does not; the filter publishes odom -> base_link
     # instead of the bridge, and /odometry/filtered, which is the odometry the recorder reads.
     #
-    # THE ONLY PRECONDITION IS THE C++ BRIDGE, NOT THE IMU (2026-09-15). The Python bridge has no
-    # ``publish_tf`` to hand over, so there both would broadcast the same edge. The IMU is one of
-    # three sources and robot_localization needs none of them in particular: it initialises on the
-    # first measurement of ANY configured source and then publishes at ``frequency`` forever, a
-    # silent imu0 costing nothing but its own weight. Gated on ``imu`` instead, `ros/feature.sh imu
+    # THE IMU IS NOT A PRECONDITION (2026-09-15): the bridge hands ``publish_tf`` over whenever
+    # the filter runs (base_parts). The IMU is one of three sources and robot_localization needs
+    # none of them in particular: it initialises on the first measurement of ANY configured
+    # source and then publishes at ``frequency`` forever, a silent imu0 costing nothing but its
+    # own weight. Gated on ``imu`` instead, `ros/feature.sh imu
     # off` took the whole filter down with the gyro: /odometry/filtered went to zero messages, the
     # tracker of the day carried its scans on an odometry that never arrived and goto refused
     # with "not localized". Without the gyro the heading comes off the wheels (ekf.yaml's odom0
@@ -326,13 +242,9 @@ def generate_launch_description() -> LaunchDescription:
         output="screen",
         prefix="nice -n -5",
         parameters=["/params/ekf.yaml"],
-        condition=IfCondition(
-            PythonExpression(
-                ["'", LaunchConfiguration("ekf"), "' == 'true' and '", use_cpp, "' == 'true'"]
-            )
-        ),
+        condition=IfCondition(LaunchConfiguration("ekf")),
     )
-    # Off by default: a rclpy process costs ~140 MB on this board.
+    # A rclpy process costs ~140 MB on this board; ros/feature.sh tof off saves it.
     # Respawned like every other node of this launch: on 2026-09-21 the bridge died once (a
     # logging call rclpy refuses) and stayed dead — a near-field sensor that silently never comes
     # back is worse than one that was never on.
@@ -390,8 +302,8 @@ def generate_launch_description() -> LaunchDescription:
     )
     # The neck's encoders and the live camera transform (pepin_bringup.neck_state). As a module,
     # like the recorder: the image's console scripts are generated at build time and the sources
-    # are mounted over them. Off by default until the switch-over is measured: the laptop's
-    # static edge must go off in the same breath (two publishers of one edge fight).
+    # are mounted over them. The laptop's static edge stays off while this runs (two publishers
+    # of one edge fight): ros/laptop.sh vslam's default, --fixed-head when this node is off.
     neck = ExecuteProcess(
         cmd=["python3", "-m", "pepin_bringup.neck_state"],
         output="screen",
@@ -413,22 +325,13 @@ def generate_launch_description() -> LaunchDescription:
     )
     return LaunchDescription(
         [
-            DeclareLaunchArgument("lidar_port", default_value="/dev/lidar"),
-            DeclareLaunchArgument("lidar_debug", default_value="false"),
-            DeclareLaunchArgument("foxglove", default_value="false"),
-            DeclareLaunchArgument("foxglove_port", default_value="8765"),
-            DeclareLaunchArgument("tof", default_value="false"),
-            DeclareLaunchArgument("base_bridge_cpp", default_value="false"),
-            DeclareLaunchArgument("imu", default_value="false"),
+            DeclareLaunchArgument("tof", default_value="true"),
+            DeclareLaunchArgument("imu", default_value="true"),
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
-            DeclareLaunchArgument("neck", default_value="false"),
+            DeclareLaunchArgument("neck", default_value="true"),
             DeclareLaunchArgument("board_bag", default_value="false"),
-            # The lidar and the base in two respawned processes (see sensors_container); false is
-            # the single sensors_container of before.
-            DeclareLaunchArgument("sensor_split", default_value="true"),
             OpaqueFunction(function=sensors_container),
-            base,
             ekf,
             tof,
             laser_odom,

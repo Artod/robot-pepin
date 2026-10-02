@@ -6,10 +6,10 @@ they run as an ordered list of stages, each switchable by name, so a node's flag
 instead of branches, every stage's cost and effect is counted per frame, and a new source of truth
 is one more stage in the list.
 
-Two roles. An :class:`Anchor` is an external truth about some pixels: it contributes
-:class:`Pairs` — (measured depth, true depth, weight) — to the pool the law fits on, and / or
-corrects the pixels it knows directly. A :class:`Law` is the map from the measured depth to
-metres, fitted on the pooled pairs and applied to the whole image. The chain is
+Two roles. An anchor is an external truth about some pixels: it contributes :class:`Pairs` —
+(measured depth, true depth, weight) — to the pool the law fits on, and / or corrects the pixels
+it knows directly. A law is the map from the measured depth to metres, fitted on the pooled pairs
+and applied to the whole image. The chain is
 :class:`EdgeFilter` -> :class:`LidarAnchor` -> :class:`AffineLaw` -> :class:`FloorAnchor`. Under
 the metric stereo head the affine law watches rather than corrects (``watching``): its numbers
 are the head's health.
@@ -22,7 +22,7 @@ anchor, range law, frame law with its scale field, wall correction) are on the t
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from functools import cached_property
 from typing import Protocol
@@ -48,8 +48,6 @@ from pepin.depth import (
     fit_affine,
     floor_anchor,
     floor_depth,
-    inverse_sigma,
-    pair_weight,
     project,
 )
 
@@ -57,18 +55,6 @@ from pepin.depth import (
 # count, because its pool is POOL_FRAMES (600) frames deep and a fit costs the total.
 POOL_CAP_PER_SOURCE = 100
 LEAN_STEP = 0.003  # the floor's expected depth is recomputed when the up vector moves this much
-LIDAR_SIGMA_M = 0.0  # metres: one beam's range noise, 0 meaning every beam weighs a flat 1 —
-# the reference pair itself (REF_SIGMA_INV, "a beam at 2 m").
-# Measured 2026-09-15 (scratch/parallax_ruler_recheck.txt, the four errands of 2026-09-14,
-# 112 frames, odd beams fitting and even beams judging): weighing each beam 1 / sigma^2 at
-# sigma_m = 1.5 cm makes the LIDAR-ONLY law worse, 7.4 % -> 11.4 % of median |residual| overall
-# and 6.4 % -> 18.3 % over 1.0-1.5 m, because sigma_m / z^2 puts the weight as z^4 (a beam at
-# 8 m counts 256 beams at 2 m) and the far beams then fit themselves: 3-12 m improves
-# 10.5 % -> 4.4 % and everything the cart parks against loses. The reason is that the fit
-# minimises the residual of the NETWORK's 1 / D, whose own noise (0.02-0.10 of inverse depth at
-# a few per cent of range) dwarfs a beam's (0.0002-0.023) everywhere — so a beam's sigma is not
-# the residual's sigma, and 1 / sigma_beam^2 is not that pair's weight in this fit.
-# Live knob: the node's lidar_sigma_m, > 0 to weigh the beams by range again.
 
 
 # ---- what flows through the pipeline ----------------------------------------------------------
@@ -195,16 +181,6 @@ class Frame:
         self.pairs.append(found)
         self.sources.append(source)
 
-    @property
-    def rulers(self) -> dict[str, float]:
-        """How much fit weight each anchor contributed to this frame, by the anchor's name —
-        the sum of its pairs' weights, which is the only honest measure of who is fitting the
-        law when one ruler brings 30 pairs at weight 1 and another 200 at weight 0.03."""
-        out: dict[str, float] = {}
-        for name, part in zip(self.sources, self.pairs, strict=False):
-            out[name] = out.get(name, 0.0) + float(np.sum(part.weight))
-        return out
-
     @cached_property
     def edge(self) -> Mask:
         """Pixels on a depth discontinuity of the raw depth (:func:`pepin.depth.edge_mask`)."""
@@ -277,47 +253,6 @@ class Stage(Protocol):
 
     def describe(self) -> str:
         """The stage's state in a few words, for the report line."""
-        ...
-
-
-class Law(Protocol):
-    """The map from the network's depth to metres."""
-
-    name: str
-
-    @property
-    def ready(self) -> bool:
-        """Whether there is a law worth applying."""
-        ...
-
-    def fit(self, pairs: Pairs | None) -> None:
-        """Feed a frame's pooled pairs (``None`` when no anchor had any) and refit."""
-        ...
-
-    def apply(self, depth: Array, ctx: FrameContext) -> Array:
-        """The depth image in metres (NaN where the law cannot place a pixel)."""
-        ...
-
-    def describe(self) -> str:
-        """The law's parameters in a few words."""
-        ...
-
-
-class Anchor(Protocol):
-    """An external truth about some pixels of a frame."""
-
-    name: str
-
-    def pairs(self, frame: Frame) -> Pairs | None:
-        """(network, true) pairs for the laws' pool, from the raw depth; ``None`` for none."""
-        ...
-
-    def correct(self, depth: Array, frame: Frame) -> tuple[Array, int]:
-        """``depth`` with the pixels this anchor knows set right, and how many."""
-        ...
-
-    def describe(self) -> str:
-        """The anchor's settings in a few words."""
         ...
 
 
@@ -551,17 +486,16 @@ class LidarAnchor(AnchorStage):
     get no pairs from the lidar and hold — the failure mode of a lidar that stops, and the
     measure of what the lidar buys.
 
-    A beam weighs a flat 1 by default — the reference pair (:data:`pepin.depth.REF_SIGMA_INV`).
-    ``sigma_m`` above 0 weighs each beam ``1 / sigma^2`` in inverse
-    depth instead (``sigma_m / z^2``, :func:`pepin.depth.pair_weight`), which reads as a weight
-    proportional to ``z^4`` and measured WORSE on the beams alone (:data:`LIDAR_SIGMA_M`); it is
-    kept as the live ``lidar_sigma_m`` knob, not as the default."""
+    A beam weighs a flat 1. Weighing
+    each beam ``1 / sigma^2`` in inverse depth (``sigma_m / z^2``, a weight as ``z^4``) measured
+    WORSE (2026-09-15, scratch/parallax_ruler_recheck.txt: 7.4 % -> 11.4 % of median |residual|
+    at sigma_m 1.5 cm), because the fit minimises the residual of the NETWORK's 1 / D, whose own
+    noise dwarfs a beam's everywhere."""
 
     name = "lidar_anchor"
 
-    def __init__(self, weight: float = 1.0, sigma_m: float = LIDAR_SIGMA_M) -> None:
+    def __init__(self, weight: float = 1.0) -> None:
         self.weight = weight
-        self.sigma_m = sigma_m
 
     def pairs(self, frame: Frame) -> Pairs | None:
         """The beams' pairs, or ``None`` without a scan or under MIN_SAMPLES clean hits."""
@@ -574,24 +508,17 @@ class LidarAnchor(AnchorStage):
         cols = beams[hits, 0].astype(int)
         rows = beams[hits, 1].astype(int)
         intr = frame.ctx.intr
-        z = beams[hits, 2]
-        weight: float | Array = self.weight
-        if self.sigma_m > 0.0:
-            weight = self.weight * pair_weight(inverse_sigma(self.sigma_m, z))
         return Pairs.of(
             frame.raw[rows, cols],
-            z,
+            beams[hits, 2],
             lift_of(rows, intr),
-            weight,
+            self.weight,
             left_of(cols, intr),
         )
 
     def describe(self) -> str:
-        """The weight a beam carries: its own 1 / sigma^2 at ``sigma_m`` of range noise, or the
-        flat number every beam shared before."""
-        if self.sigma_m <= 0.0:
-            return f"weight {self.weight:g} flat"
-        return f"weight {self.weight:g} / sigma^2, sigma {self.sigma_m * 100:.1f} cm"
+        """The weight a beam carries."""
+        return f"weight {self.weight:g} flat"
 
 
 class AffineLaw(LawStage):
@@ -601,37 +528,26 @@ class AffineLaw(LawStage):
     a frame without pairs keeps the law. Until POOL_MIN_SAMPLES pairs are pooled there is no
     law worth applying (``ready`` is false: the raw network's depth is 1.5-2x too far and must
     not reach the costmap) — unless a saved law was ``seed``-ed, which holds until the live
-    pool can replace it.
+    pool can replace it. Every fit is applied whole (bit for bit :class:`pepin.depth.AffineScale`
+    on unit weights).
 
-    ``slew_per_s`` caps how fast the law may move: the largest relative change of the published
-    inverse depth over the pool's own depth range, per second (0 applies every fit whole, which
-    is bit for bit :class:`pepin.depth.AffineScale` on unit weights). The pool is a queue of
-    frames, not of seconds, so at 9.4 frames/s a 600-frame pool is 64 s deep and half a minute
-    of driving replaces half of it; and the shift term switches on and off with the pool's
-    depth spread (:data:`pepin.depth.MIN_DEPTH_SPREAD`), so the same pairs are described first
-    as a scale alone and then as a scale and a shift. Both were seen on 2026-09-14: a 1.74 b 0
+    The pool is a queue of frames, not of seconds, so at 9.4 frames/s a 600-frame pool is 64 s deep
+    and half a minute of driving replaces half of it; and the shift term switches on and off with
+    the pool's depth spread (:data:`pepin.depth.MIN_DEPTH_SPREAD`), so the same pairs are described
+    first as a scale alone and then as a scale and a shift. Both were seen on 2026-09-14: a 1.74 b 0
     standing, a 2.33 b -0.200 within 30 s of driving, and back — while the volume kept the
     paint of whichever law was in force."""
 
     name = "affine_law"
 
-    def __init__(
-        self,
-        pool_frames: int = POOL_FRAMES,
-        slew_per_s: float = 0.0,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
+    def __init__(self, pool_frames: int = POOL_FRAMES) -> None:
         self.a = 1.0
         self.b = 0.0
         self.frames = 0
         self.held = 0
-        self.slew_per_s = slew_per_s
         self._pool: list[Pairs] = []
         self._pool_frames = pool_frames
         self._seeded = False
-        self._clock = clock
-        self._last_fit: float | None = None  # when the law last moved, for the slew's seconds
-        self._asked: tuple[float, float] | None = None  # the fit the slew is still walking to
         # Watching: the law is fitted and reported, and the depth goes out as it came in. It is
         # what the law is for under a METRIC source (a calibrated stereo head): nothing to
         # correct, and a fit that leaves a 1.00 says the head has been knocked.
@@ -683,44 +599,7 @@ class AffineLaw(LawStage):
             return  # the map's law outranks a fit on a handful of pairs
         pool = self.pool
         assert pool is not None
-        self.a, self.b = self._toward(*fit_affine(pool.d, pool.z, pool.weight), pool)
-
-    def _toward(self, a_fit: float, b_fit: float, pool: Pairs) -> tuple[float, float]:
-        """The law to hold now, walking toward the fresh fit no faster than ``slew_per_s``.
-
-        The step is measured where it hurts: the largest relative move of the published inverse
-        depth over the pool's own depth range (its 5th and 95th percentiles of network depth),
-        not in ``a``, because the fit's two parameters trade against each other and agree near
-        the pool's middle while they differ at its ends. Over the allowance the law takes the
-        blend of old and new that exactly spends it — a blend of two affine laws is affine.
-        ``slew_per_s`` at or below zero, or the first live fit (nothing to walk from), applies
-        the fit whole."""
-        now = self._clock()
-        last, self._last_fit = self._last_fit, now
-        if self.slew_per_s <= 0.0 or last is None:
-            self._asked = None
-            return a_fit, b_fit
-        step = self._reach(a_fit, b_fit, pool)
-        allowed = self.slew_per_s * max(0.0, now - last)
-        if step <= allowed:
-            self._asked = None
-            return a_fit, b_fit
-        self._asked = (a_fit, b_fit)
-        t = allowed / step
-        return self.a + t * (a_fit - self.a), self.b + t * (b_fit - self.b)
-
-    def _reach(self, a_fit: float, b_fit: float, pool: Pairs) -> float:
-        """How far the fresh law is from the one in hand: the largest relative change of the
-        published inverse depth at the pool's 5th and 95th percentiles of network depth."""
-        d = pool.d[np.isfinite(pool.d) & (pool.d > 0.0)]
-        if d.size == 0:
-            return 0.0
-        ends = np.percentile(d, (5, 95))
-        old = self.a / ends + self.b
-        new = a_fit / ends + b_fit
-        with np.errstate(divide="ignore", invalid="ignore"):
-            rel = np.abs(new - old) / np.abs(old)
-        return float(np.max(rel[np.isfinite(rel)], initial=0.0))
+        self.a, self.b = fit_affine(pool.d, pool.z, pool.weight)
 
     def apply(self, depth: Array, ctx: FrameContext) -> Array:
         """The depth through 1 / z = a / D + b."""
@@ -733,11 +612,8 @@ class AffineLaw(LawStage):
         source = "" if self.fitted else " (seed)" if self._seeded else " (none yet)"
         clipped = at_bound(self.a, self.b)
         edge = f" [{clipped} AT BOUND]" if clipped else ""
-        asked = ""
-        if self._asked is not None:
-            asked = f", slewing to a {self._asked[0]:.2f} b {self._asked[1]:+.3f}"
         role = "watching, depth untouched: " if self.watching else ""
-        return f"{role}a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}{asked}"
+        return f"{role}a {self.a:.2f} b {self.b:+.3f} on {self.pooled} pairs{source}{edge}"
 
 
 class FloorGeometry:
@@ -804,7 +680,6 @@ def standard_pipeline(law: AffineLaw | None = None) -> DepthPipeline:
 
 __all__ = [
     "AffineLaw",
-    "Anchor",
     "AnchorStage",
     "DepthPipeline",
     "EdgeFilter",
@@ -812,7 +687,6 @@ __all__ = [
     "FloorGeometry",
     "Frame",
     "FrameContext",
-    "Law",
     "LawStage",
     "LidarAnchor",
     "Pairs",

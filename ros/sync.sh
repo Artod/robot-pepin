@@ -7,7 +7,7 @@
 #   ros/sync.sh --restart  the files, then the board's stack (systemd unit pepin-ros): what a
 #                          launch, params or config change needs; ros/restart.sh board --deploy
 # A restart by default was a surprise more than once (journal 2026-09-22): a laptop-only change
-# restarted the board. --no-restart, the old way to say the default, is still accepted.
+# restarted the board.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
@@ -16,7 +16,6 @@ RESTART=false
 for arg in "$@"; do
     case "$arg" in
         --restart) RESTART=true ;;
-        --no-restart) ;;
         *) echo "usage: ros/sync.sh [--restart]"; exit 2 ;;
     esac
 done

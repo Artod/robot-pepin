@@ -4,12 +4,13 @@ live ``base_link -> camera_link`` transform.
 The camera rides two servos (pan, tilt). RTAB-Map and the depth fusion on the laptop look the
 camera up by TF at each frame's stamp, so an edge published here at ``poll_hz`` interpolates
 cleanly between readings — and the static edge the laptop's camera node broadcasts from
-config/camera.json must then stay off (camera_stream's ``static_camera_tf``, ros/laptop.sh vslam
---neck): two publishers of one edge fight. The encoders come from the base server, the bus's
-owner, over the same JSON-lines socket the base bridge uses: ``{"cmd": "neck"}`` answered by
-``{"type": "neck", ...}`` (pepin.neck.parse_neck; the server caches and rate-limits the bus
-read, this node only asks). The geometry is pepin.neck on config/neck.json: at the reference
-ticks the transform equals the static one, so flipping the switch moves nothing.
+config/camera.json must then stay off (camera_stream's ``static_camera_tf``, off by default;
+ros/laptop.sh vslam --fixed-head turns it on): two publishers of one edge fight. The encoders
+come from the base server, the bus's owner, over the same JSON-lines socket the base bridge
+uses: ``{"cmd": "neck"}`` answered by ``{"type": "neck", ...}`` (pepin.neck.parse_neck; the
+server caches and rate-limits the bus read, this node only asks). The geometry is pepin.neck on
+config/neck.json: at the reference ticks the transform equals the static one, so flipping the
+switch moves nothing.
 
 Parameters: ``host``/``port`` (the base server, 127.0.0.1:3336), ``poll_hz`` (2 since
 2026-09-14), ``move_poll_hz`` (20, while the head moves), ``tf_hz`` (10), ``config``
@@ -37,9 +38,10 @@ commands a move can close that (scratch/neck_aware/DESIGN.md).
 in config/neck.json were read at the measured mount pose and both servo signs were verified by
 moving the head by hand while watching /neck/state (config/neck.json says how, and how to redo
 it after the neck is re-assembled). With the reference null again the transform is the static
-mount at any head pose. The laptop's camera node must run with ``ros/laptop.sh vslam --neck``
-whenever this is on, or two nodes publish base_link -> camera_link; ``ros/flags.sh set
-neck_state neck_tf false`` hands the edge back to the laptop's static one.
+mount at any head pose. The laptop's camera node keeps its static edge off whenever this is on
+(``ros/laptop.sh vslam``'s default), or two nodes publish base_link -> camera_link; with
+``ros/flags.sh set neck_state neck_tf false`` the edge comes back only from a camera node
+started with ``ros/laptop.sh vslam --fixed-head``.
 """
 
 from __future__ import annotations
@@ -77,8 +79,8 @@ FLAGS = FlagSet(
         "neck_tf",
         True,
         description="base_link -> camera_link is published live from the neck's encoders; the"
-        " laptop's camera node must then run with ros/laptop.sh vslam --neck, or two nodes"
-        " publish that edge",
+        " laptop's camera node then keeps its static edge off (ros/laptop.sh vslam's default,"
+        " not --fixed-head), or two nodes publish that edge",
         why="the encoders are honest and their signs are checked by hand: the tilt reads 26 ->"
         " 103 degrees as the head goes down and the pan 0 -> -124 degrees to the left"
         " (config/neck.json's tilt_sign +1, pan_sign -1), 50 reads of a still head gave the same"

@@ -1,7 +1,7 @@
 """Every entry point answers --help: its imports resolve and its parser builds.
 
-The servo bench tools (jog, calibrate_neck, scan_bus, setup_motor_id) import
-lerobot, which pulls torch; they are left out to keep the unit tier fast.
+The servo bench tools (jog, calibrate_neck, setup_motor_id) import lerobot, which pulls torch;
+they are left out to keep the unit tier fast.
 """
 
 import json
@@ -15,7 +15,7 @@ import pytest
 
 REPO = Path(__file__).resolve().parents[2]
 PAN_REFERENCE = json.loads((REPO / "config/neck.json").read_text())["reference"]["pan_ticks"]
-BENCH = {"jog.py", "calibrate_neck.py", "scan_bus.py", "setup_motor_id.py"}
+BENCH = {"jog.py", "calibrate_neck.py", "setup_motor_id.py"}
 SCRIPTS = sorted(p.name for p in (REPO / "scripts").glob("*.py") if p.name not in BENCH)
 
 
@@ -690,7 +690,7 @@ def test_restart_sh_parses_and_never_drives() -> None:
 
 def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """Nothing about the map is passed any more (World R): the database IS the map, the launch
-    reads for itself whether it exists, and the board's tracker adopts whatever grid it publishes.
+    reads for itself whether it exists, and Nav2's costmaps read whatever grid it publishes.
     The board is not asked which map it serves, because there is no answer that would change
     anything here. The neck owns base_link -> camera_link, so --neck always goes with it."""
     code, out, sent = _restart(tmp_path, "laptop", "--no-check")
@@ -702,22 +702,13 @@ def test_the_laptop_half_is_started_without_a_word_about_the_map(tmp_path) -> No
     assert "no proof and no checks" in out
 
 
-def test_fresh_graph_empties_the_database_and_moves_the_volume_of_its_frame_aside(
-    tmp_path,
-) -> None:  # type: ignore[no-untyped-def]
-    """One frame (World R): the graph's map frame IS ``map`` and the fused volume is painted in it.
-    An empty database starts a new frame, so --fresh-graph moves the old frame's volume aside —
-    moved, never deleted — and says so. The file names are literals on purpose."""
-    world = tmp_path / "ros/maps/rtabmap.world.npz"
-    world.parent.mkdir(parents=True, exist_ok=True)
-    world.write_bytes(b"the old frame")
+def test_fresh_graph_empties_the_database(tmp_path) -> None:  # type: ignore[no-untyped-def]
+    """--fresh-graph is laptop.sh vslam --fresh: an empty RTAB-Map database, nothing else. The
+    fused volume is the odometry's rolling window, born empty at every start, so no file beside
+    the database is moved."""
     code, out, sent = _restart(tmp_path, "laptop", "--no-check", "--fresh-graph")
     assert code == 0, out
     assert "laptop.sh vslam --neck --fresh" in sent
-    assert not world.exists(), out
-    kept = list(world.parent.glob("rtabmap.world.npz.before-fresh-*"))
-    assert len(kept) == 1 and kept[0].read_bytes() == b"the old frame", out
-    assert "moved aside" in out
 
 
 def test_fresh_graph_is_refused_on_the_board_half_that_owns_neither(tmp_path) -> None:  # type: ignore[no-untyped-def]
@@ -754,13 +745,9 @@ def _planner_answers(tmp_path: Path, *answers: str) -> str:
     ],
 )
 def test_a_dry_run_prints_the_order_and_touches_nothing(tmp_path, args, first, absent) -> None:  # type: ignore[no-untyped-def]
-    world = tmp_path / "ros/maps/rtabmap.world.npz"
-    world.parent.mkdir(parents=True, exist_ok=True)
-    world.write_bytes(b"kept")
     code, out, sent = _restart(tmp_path, *args, "--dry-run")
     assert code == 0, out
     assert sent == [], "a dry run asks no host anything and restarts nothing"
-    assert world.read_bytes() == b"kept", "--fresh-graph moves nothing aside in a dry run"
     steps = [line for line in out.splitlines() if line[:3].strip().rstrip(".").isdigit()]
     assert steps[0].split(". ", 1)[1].startswith(first), out
     assert absent not in out, out
@@ -1154,13 +1141,13 @@ def _flags_sh(tmp_path: Path, *args: str, **env: str) -> tuple[int, str, list[st
 def test_flags_sh_reaches_each_node_in_its_own_container(tmp_path: Path) -> None:
     """The goal server and Nav2 are pepin-macnav's, the camera nodes pepin-vslam's, both by docker
     exec; the board is asked nothing about where they run (no side any more, 2026-10-01)."""
-    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "pose_topic", "true")
+    code, out, calls = _flags_sh(tmp_path, "set", "goal_server", "start_needs_placement", "true")
     assert code == 0, out
-    sets = [c for c in calls if "param set /goal_server pose_topic true" in c]
+    sets = [c for c in calls if "param set /goal_server start_needs_placement true" in c]
     assert len(sets) == 1 and sets[0].startswith("docker exec pepin-macnav"), calls
     assert not [c for c in calls if c.startswith("ssh")], calls
 
-    code, out, calls = _flags_sh(tmp_path, "get", "depth_fusion", "align")
+    code, out, calls = _flags_sh(tmp_path, "get", "depth_fusion", "lidar_layer")
     assert code == 0, out
     assert [c for c in calls if c.startswith("docker exec pepin-vslam") and "param get" in c]
 
@@ -1319,17 +1306,16 @@ def _sync(tmp_path: Path, *args: str) -> tuple[int, str, list[str]]:
     return run.returncode, run.stdout + run.stderr, log.read_text().splitlines()
 
 
-@pytest.mark.slow  # four runs of the script, ~0.8 s
+@pytest.mark.slow  # three runs of the script, ~0.6 s
 def test_sync_puts_the_code_on_the_board_and_restarts_only_when_asked(tmp_path: Path) -> None:
     """A restart by default restarted the board for a laptop-only change (journal 2026-09-22);
-    ros/push.sh kicks the nodes a change reaches instead. --no-restart, the old spelling of the
-    default, still works; restart.sh --deploy asks for the restart by name."""
-    for name, args in (("plain", ()), ("old", ("--no-restart",))):
-        code, out, sent = _sync(tmp_path / name, *args)
-        assert code == 0, out
-        assert sum(c.startswith("rsync -a --delete") for c in sent) == 3
-        assert not any("restart" in c for c in sent), sent
-        assert "board.sh census" in sent
+    ros/push.sh kicks the nodes a change reaches instead; restart.sh --deploy asks for the
+    restart by name."""
+    code, out, sent = _sync(tmp_path / "plain")
+    assert code == 0, out
+    assert sum(c.startswith("rsync -a --delete") for c in sent) == 3
+    assert not any("restart" in c for c in sent), sent
+    assert "board.sh census" in sent
     code, out, sent = _sync(tmp_path / "restart", "--restart")
     assert code == 0, out
     assert any("restart pepin-zrouter && systemctl start pepin-ros" in c for c in sent), sent

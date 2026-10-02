@@ -24,12 +24,12 @@
     {
       "name": "lidar_container",
       "match": "component_container_isolated .*__node:=lidar_container",
-      "role": "The lidar in a process of its own at high priority, respawned 2 s after it dies: the LD19 driver, the hull filter that makes /scan, its static mount and the lifecycle manager that activates the driver. A lidar that dies must not take the base with it (sensor_split, 2026-09-24).",
+      "role": "The lidar in a process of its own at high priority, respawned 2 s after it dies: the LD19 driver, the hull filter that makes /scan, its static mount and the lifecycle manager that activates the driver. A lidar that dies must not take the base with it (2026-09-24).",
       "on_board_because": [
         "real-time",
         "hardware-attached"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn; sensor_split:=true)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn)",
       "components": [
         {
           "name": "ldlidar_node",
@@ -57,20 +57,16 @@
     {
       "name": "base_container",
       "match": "component_container_isolated .*__node:=base_container",
-      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest, a zero-velocity update for the EKF while the cart is certainly still) and the IMU's static mount.",
+      "role": "The base in a process of its own at high priority, respawned 2 s after it dies: the wheel bridge (cmd_vel in, odom and the IMU's yaw rate out, the gyro's zero re-measured at rest, a zero-velocity update for the EKF while the cart is certainly still).",
       "on_board_because": [
         "real-time",
         "hardware-attached"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn; sensor_split:=true)",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ComposableNodeContainer, nice -10, respawn)",
       "components": [
         {
           "name": "base_bridge",
-          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness, and /zupt (the EKF's odom2, a zero twist at 10 Hz) while that rest, no fresh cmd_vel and a quiet gyro agree (C++ build when base_bridge_cpp:=true, else its own Python process, which has no gyro and no /zupt)"
-        },
-        {
-          "name": "base_to_imu",
-          "role": "static base_link -> imu_link from config/imu.json (imu:=true only)"
+          "role": "wheel speeds and odometry over TCP 3336, /cmd_vel in, /odom out, the MPU6050's yaw rate as imu/data_raw whose zero is re-measured from the rest the wheels witness, and /zupt (the EKF's odom2, a zero twist at 10 Hz) while that rest, no fresh cmd_vel and a quiet gyro agree (ros/pepin_base_cpp)"
         }
       ],
       "budget": {
@@ -161,7 +157,7 @@
         "real-time",
         "wifi-loss"
       ],
-      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (imu:=true and base_bridge_cpp:=true), ros/params/ekf.yaml, nice -5",
+      "owner": "pepin-ros.service -> ros/pepin_bringup/launch/robot.launch.py (ekf:=true), ros/params/ekf.yaml, nice -5",
       "budget": {
         "cpu_percent": 35.0,
         "rss_mb": 75.0
@@ -318,11 +314,11 @@
     {
       "name": "session_logger",
       "match": "session_logger\\.py",
-      "role": "The per-drive recorder started by ros/goto.sh and ros/teleop.sh: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
+      "role": "The recorded teleop run's recorder, started by ros/teleop.sh NAME: scans, odometry, pose and commands into one jsonl for the post-drive plots.",
       "on_board_because": [
         "wifi-loss"
       ],
-      "owner": "started inside the pepin-ros container by ros/goto.sh:95, ros/teleop.sh:32 (ros/tools/session_logger.py)",
+      "owner": "started inside the pepin-ros container by ros/teleop.sh NAME (ros/tools/session_logger.py)",
       "when": "sometimes",
       "budget": {
         "cpu_percent": 25.0,
@@ -335,13 +331,13 @@
       "match": "foxglove_bridge",
       "role": "The Foxglove websocket. Being removed: the laptop reads the board through the zenoh routers, and a second serialiser of every topic is a luxury on four A53 cores.",
       "on_board_because": [],
-      "owner": "a component of sensors_container behind foxglove:=true, which defaults to false since 2026-09-14 (ros/pepin_bringup/launch/robot.launch.py)",
+      "owner": "none: robot.launch.py composes no Foxglove bridge since 2026-10-02 (it sat behind foxglove:=true, off since 2026-09-14)",
       "expected": false,
       "budget": {
         "cpu_percent": 0.0,
         "rss_mb": 0.0
       },
-      "note": "Not expected on the board any more: the laptop runs one Foxglove bridge and it sees the board through the zenoh routers. If a process with this name appears, someone passed foxglove:=true. As a component inside sensors_container it is invisible to ps \u2014 the census cannot prove its absence, only catch it as a standalone process. Check the launch argument, not this line."
+      "note": "Not expected on the board: the laptop runs one Foxglove bridge and it sees the board through the zenoh routers. If a process with this name appears, someone started one by hand."
     }
   ]
 }

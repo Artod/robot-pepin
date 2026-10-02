@@ -4,9 +4,7 @@ A macOS status-bar item that keeps an eye on the robot: a monochrome icon like
 the system's own, with a glyph next to it only when something needs a look
 (`⚠` something is down, `✕` board unreachable, `?` the last report is stale) and one
 click drops down the last health report — every subsystem probe with a green check or a
-red cross, board vitals, and actions. Choosing "Refresh now" closes the menu (macOS closes
-a menu on any choice; only the system's own menu extras stay open) — the poll takes a few
-seconds, then reopen it.
+red cross, board vitals, and actions.
 
 Run it: `uv run --group macos python apps/macos/tray.py`
 
@@ -14,26 +12,15 @@ Smoke-test it with the robot off: `uv run --group macos python apps/macos/tray.p
 imports everything, builds the menu from a fake report, renders it into real menu items and
 exits 0 without touching the network or the menu bar.
 
-## Pepin.app: Spotlight and Finder
+## Pepin.app
 
-`apps/macos/install_app.sh` builds `~/Applications/Pepin.app`, so command-space, "Pepin"
-starts the tray (no Dock icon; it lives in the menu bar). The bundle's executable is a
-shell script that runs `/opt/homebrew/bin/uv run --directory <this checkout> --group macos
-python apps/macos/tray.py` — uv by its full path, because a Finder-launched app has no
-PATH — with everything it prints appended to `~/Library/Logs/Pepin.log` (the tray's own
-log stays in `logs/`). The icon is `icon_template.png` scaled with `sips` + `iconutil`.
-
-- `apps/macos/install_app.sh` — build (or rebuild) the bundle for the checkout the script is
-  in; `PEPIN_REPO=/path/to/pepin` points it at another one; a directory argument installs
-  elsewhere than `~/Applications`.
-- `apps/macos/install_app.sh --desktop` — also an alias on the Desktop (Finder makes it;
-  macOS may ask once to let the shell control Finder).
-- Check: `~/Applications/Pepin.app/Contents/MacOS/Pepin --check` (exit 0), and
-  `mdfind "kMDItemDisplayName == 'Pepin*'"` lists the bundle once Spotlight has indexed it
-  (the installer runs `mdimport` on it; a fresh index can lag a minute).
-
-Start it at login: System Settings → General → Login Items, add `Pepin.app` (a `launchd`
-plist in `~/Library/LaunchAgents` works too, and restarts it on crash).
+`apps/macos/install_app.sh` builds `~/Applications/Pepin.app`, so Spotlight's "Pepin" starts the
+tray (no Dock icon). The bundle runs `/opt/homebrew/bin/uv run --directory <this checkout> --group
+macos python apps/macos/tray.py` (uv by its full path: a Finder-launched app has no PATH) and
+appends its output to `~/Library/Logs/Pepin.log`. `PEPIN_REPO=/path/to/pepin` points it at another
+checkout, a directory argument installs elsewhere, `--desktop` adds a Desktop alias. Check:
+`~/Applications/Pepin.app/Contents/MacOS/Pepin --check` (exit 0). Start it at login: System
+Settings → General → Login Items, add `Pepin.app`.
 
 ## What the menu does
 

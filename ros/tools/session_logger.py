@@ -13,7 +13,7 @@ marks mark), but /contact_scan's layer is off, so subscribing to it here would o
 new bridge route from the laptop for a recording — the board carries what is real-time critical
 and nothing else (CLAUDE.md rule 20), and this is the owner's switch, not the recorder's habit.
 
-Format: exactly `pepin.recording.SessionRecorder`'s (topics ``scan`` and
+Format: the tape's own (:mod:`pepin.recording`, topics ``scan`` and
 ``pose``), so `scripts/build_map.py --match --loop` consumes it unchanged.
 The recorded angles are ROBOT-frame radians (that is what `LaserScan.angles`
 holds after ingestion in the Python stack); the verified relation to the ROS

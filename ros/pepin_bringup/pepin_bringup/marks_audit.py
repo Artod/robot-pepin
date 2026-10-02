@@ -42,9 +42,10 @@ and the phantoms are the cells that light up — and one report line every 10 s 
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, all live, ``ros/flags.sh set marks_audit
 <name> <value>``): ``marks_audit`` (the whole node: off, it subscribes and computes nothing),
-``radius_m``, ``match_cells``, ``inscribed_counts`` (judge the inflation's 99 band too) and
-``phantom_cloud`` (publish the red points); their state is in the start line and in every report
-line.
+``radius_m``, ``match_cells`` and ``inscribed_counts`` (judge the inflation's 99 band too);
+their state is in the start line and in every report line. The red points are always published:
+the cloud is bounded by the grid (3600 cells of a 3 x 3 m grid at 5 cm, 32 bytes each), about
+3 kB/s for the hundred cells a real frame has, and none of it crosses the radio.
 """
 
 from __future__ import annotations
@@ -118,20 +119,6 @@ FLAGS = FlagSet(
         on_when="to see the band the planners' footprint check really refuses — the cells that"
         " made Hybrid-A* call a start pose blocked",
         off_when="whenever the question is which sensor SAW something",
-    ),
-    Flag(
-        "phantom_cloud",
-        True,
-        description="the camera-only cells are published as red points on /marks_audit/phantoms;"
-        " off, only the counts go out",
-        why="on, and the bandwidth is bounded by the grid: the cloud can never hold more than the"
-        " 3600 cells of a 3 x 3 m grid at 5 cm, 32 bytes each in the PCL layout"
-        " (pepin_bringup.msgs.cloud_from_points), so 115 kB/s at the impossible worst and about"
-        " 3 kB/s for the hundred cells a real frame has — and none of it crosses the radio, since"
-        " both this node and Foxglove's bridge are on the laptop. The counts alone do not say"
-        " WHERE the phantoms are, and where is what sends the operator to the right furniture",
-        on_when="always, while looking at the 3D panel",
-        off_when="on a link already saturated by the surface cloud",
     ),
 )
 
@@ -312,8 +299,6 @@ class MarksAudit(Node):
                 )
             )
         )
-        if not self._switches.on("phantom_cloud"):
-            return
         xy = verdict.camera_only_xy
         # 5 cm up: at z = 0 the red cells hide under /map, the costmaps and the orange marks
         points = np.column_stack((xy, np.full(len(xy), PHANTOM_Z_M)))

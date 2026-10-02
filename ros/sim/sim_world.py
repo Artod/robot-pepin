@@ -1,6 +1,6 @@
 """The robot and the laptop's RTAB-Map, simulated for Nav2: everything Nav2 reads, from pepin.sim.
 
-Stands in for exactly the publishers the stack has under ``PEPIN_LOCALIZER=rtabmap``, on the
+Stands in for exactly the publishers the stack has with RTAB-Map as the map, on the
 same topics and frames: RTAB-Map's grid latched on ``/map``, its ``map -> odom`` (identity here:
 the sim's pose is the truth), the places node's ``/places`` and rtabmap_frame's placement word
 (so the goal server's start gate passes, as it does once RTAB-Map has recognised the room); the

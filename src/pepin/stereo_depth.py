@@ -32,8 +32,7 @@ calibrated rig live in :mod:`pepin.stereo`.
 WHICH ENGINE answers is the depth node's live ``stereo_matcher`` flag in {sgbm, raft}, default
 ``sgbm`` until a live drive says otherwise (CLAUDE.md rule 19): both are built at start and the
 flag picks which one the next pair goes to, so an A/B needs no restart and nothing is rebuilt
-mid-drive. :func:`build_matcher` is the name-to-engine map, and the switch's state is in the
-node's report line.
+mid-drive. The switch's state is in the node's report line.
 
 THE ERROR MODEL is why a reach exists. A disparity measured to ``sigma_d`` pixels gives a depth
 good to ``sigma_z = z^2 / (fx * B) * sigma_d``: the error grows with the SQUARE of the range, so
@@ -530,26 +529,6 @@ class RaftMatcher:
             f" {total.median_ms:.0f}/{total.p95_ms:.0f} ms a pair"
             f" (host {self.host.last_infer_ms:.0f} ms){fell}"
         )
-
-
-def build_matcher(
-    name: str,
-    settings: MatcherSettings | None = None,
-    url: str = "",
-    timeout_s: float = 2.0,
-) -> DisparityMatcher:
-    """The engine ``name`` asks for: ``sgbm`` (OpenCV, the default everywhere until a live drive
-    says otherwise) or ``raft`` (the network on the host at ``url``, falling back to that same
-    SGBM). An unknown name raises rather than quietly falling back — a costmap marked from a
-    matcher nobody chose is the bug this prevents."""
-    if name not in MATCHERS:
-        raise ValueError(f"matcher must be one of {MATCHERS}, not {name!r}")
-    sgbm = StereoMatcher(settings)
-    if name == "sgbm":
-        return sgbm
-    if not url:
-        raise ValueError("the raft matcher needs the stereo host's URL")
-    return RaftMatcher(url, sgbm, timeout_s=timeout_s)
 
 
 def _grey(picture: Array) -> Array:

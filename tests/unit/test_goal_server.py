@@ -20,12 +20,7 @@ import ros_stubs
 ros_stubs.install()
 
 
-from pepin_bringup.goal_server import (  # noqa: E402
-    CLEAR_LOCAL_COSTMAP,
-    FLAGS,
-    JUMP_WATCH_HZ,
-    GoalServer,
-)
+from pepin_bringup.goal_server import GoalServer  # noqa: E402
 from ros_stubs import (  # noqa: E402
     Header,
     Quaternion,
@@ -52,11 +47,9 @@ class Wire:
 
 
 def server(tmp_path: Path) -> Any:
-    """A goal server on an ephemeral port, its places book in ``tmp_path``: no TF, no placement,
+    """A goal server on an ephemeral port, its records in ``tmp_path``: no TF, no placement,
     no Nav2 — a test adds what its stack has."""
-    with ros_stubs.parameters(
-        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path)
-    ):
+    with ros_stubs.parameters(port=0, record_dir=str(tmp_path)):
         node = GoalServer()
     node.clock.seconds = NOW
     return node
@@ -151,7 +144,7 @@ def test_a_fresh_transform_is_the_pose_and_the_goal_goes(tmp_path) -> None:  # t
     assert abs(pose["age_s"] - 0.1) < 1e-3
     assert "fit" not in pose, "TF carries no fit, and none is invented"
     ready = node._ready()
-    assert ready.ready and not ready.search
+    assert ready.ready
 
     wire = Wire()
     node._handle({"cmd": "go", "x": 1.0, "y": 0.3, "yaw_deg": 0.0}, wire)
@@ -163,7 +156,7 @@ def test_without_a_transform_the_goal_is_refused_with_the_reason(tmp_path) -> No
     """Nothing knows where the cart is: the refusal says so."""
     node = server(tmp_path)
     ready = node._ready()
-    assert not ready.ready and not ready.search
+    assert not ready.ready
     assert node._pose_now() == {}
 
     wire = Wire()
@@ -182,34 +175,17 @@ def test_a_transform_that_stopped_coming_is_as_good_as_none(tmp_path) -> None:  
     placed(node)
     standing_at(node, at(0.0, 0.0, 0.0, age_s=4.2))
     ready = node._ready()
-    assert not ready.ready and not ready.search
+    assert not ready.ready
     assert "map -> base_link is 4.2 s old" in ready.reason
     standing_at(node, at(0.0, 0.0, 0.0, age_s=TF_FRESH_S - 0.01))
     assert node._ready().ready
-
-
-def test_a_place_is_marked_from_the_transform_and_carries_no_fit(tmp_path) -> None:  # type: ignore[no-untyped-def]
-    """A mark is refused on the same evidence a goal is, and it writes no fit at all rather than
-    a 0.00 that would read as "marked lost"."""
-    node = server(tmp_path)
-    standing_at(node, at(2.0, -1.0, -45.0, age_s=0.2))
-    placed(node)
-    answer = node.mark("charger")
-    assert answer["event"] == "marked"
-    book = json.loads((tmp_path / "places.yaml").read_text())
-    assert book["charger"] == {"x": 2.0, "y": -1.0, "yaw_deg": -45.0}
-
-    standing_at(node, at(2.0, -1.0, -45.0, age_s=9.0))
-    stale = node.mark("printer")
-    assert stale["event"] == "error" and "9.0 s old" in stale["detail"]
-    assert "printer" not in json.loads((tmp_path / "places.yaml").read_text())
 
 
 def test_a_name_is_never_answered_from_the_old_map_s_file(tmp_path) -> None:  # type: ignore[no-untyped-def]
     """The yaml beside the map holds coordinates of a frame that no longer exists. Until the
     graph's book has arrived a named goal is refused with THAT reason — on 2026-09-21 `printer`
     was answered from the file 2.1 s after a cold start, as (-11.38, +0.77), outside the map,
-    and the behaviour tree backed the cart into a sofa. The flag gives the old answer back."""
+    and the behaviour tree backed the cart into a sofa. The file is never read."""
     (tmp_path / "places.yaml").write_text(
         json.dumps({"printer": {"x": -11.38, "y": 0.77, "yaw_deg": 140.0}})
     )
@@ -226,88 +202,8 @@ def test_a_name_is_never_answered_from_the_old_map_s_file(tmp_path) -> None:  # 
     node._handle({"cmd": "go", "place": "printer"}, wire)
     assert "no such place" in wire.events()[0]["detail"], "the book arrived and has no such name"
 
-    with ros_stubs.parameters(
-        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path),
-        places_from_the_file=True,
-    ):  # fmt: skip
-        old = GoalServer()
-    assert old.places()["printer"]["x"] == -11.38
 
-
-# ---- the map -> odom jump watch (flag jump_clear) --------------------------------------------
-def jump_tick(node: Any) -> None:
-    """One turn of the node's 5 Hz jump watch, as the executor would run it."""
-    (tick,) = [
-        cb
-        for period, cb in node.timers
-        if period == 1.0 / JUMP_WATCH_HZ and cb == node._watch_map_odom
-    ]
-    tick()
-
-
-def corrected_by(node: Any, x: float, y: float = 0.0) -> None:
-    """Put ``map -> odom`` in the node's TF buffer: the correction alone, with the cart's own
-    motion (which lives in odom -> base_link) taken out of it."""
-    node._tf.buffer.transforms[("map", "odom")] = TransformStamped(
-        header=Header(stamp=ros_stubs.Time(sec=int(NOW)), frame_id="map"),
-        child_frame_id="odom",
-        transform=ros_stubs.Transform(
-            translation=Vector3(x=x, y=y), rotation=Quaternion(z=0.0, w=1.0)
-        ),
-    )
-
-
-def test_a_jump_of_map_to_odom_clears_nav2_s_local_costmap(tmp_path: Path) -> None:
-    """RTAB-Map owns map -> odom now, and when that edge STEPS the marks in Nav2's local costmap
-    were laid where the cart used to be — nothing else takes them back. The lidar tracker did this
-    while it owned the edge; the watch moved here with the edge (pepin.watch.JumpClear, unchanged).
-    A step past the threshold buys one clear, a centimetre buys none, and the first reading after
-    the flag goes on is a baseline and never a jump."""
-    node = server(tmp_path)
-    clear = node.service_clients[CLEAR_LOCAL_COSTMAP]
-    node._switches.set("jump_clear", True)
-
-    jump_tick(node)  # the listener starts on the first tick, and TF holds nothing yet
-    corrected_by(node, 0.0)
-    jump_tick(node)
-    assert clear.calls == [] and node._clears == 0, "the first transform is the baseline"
-
-    corrected_by(node, 0.02)  # a scan match's own centimetres: the costmap absorbs them
-    jump_tick(node)
-    assert clear.calls == [] and node._clears == 0
-
-    corrected_by(node, 0.42)  # a word that moved the pose 40 cm
-    jump_tick(node)
-    assert len(clear.calls) == 1 and node._clears == 1
-    line = node.logger.texts("info")[-1]
-    assert "map -> odom jumped 0.40 m: local costmap cleared" in line
-    assert "jump_clear=on" in line and "1 clears this run" in line
-
-    corrected_by(node, 1.42)  # a second jump within the gap: one clear, not two
-    jump_tick(node)
-    assert len(clear.calls) == 1, "emptying the grid costs its owner a rebuild from live scans"
-
-
-def test_the_jump_watch_reads_nothing_at_all_while_its_flag_is_off(tmp_path: Path) -> None:
-    """Default off, and off means nothing runs: no service call is made, however far the edge
-    steps, and the first reading after the flag goes on is a baseline, not a jump."""
-    with ros_stubs.parameters(
-        port=0, places=str(tmp_path / "places.yaml"), record_dir=str(tmp_path)
-    ):
-        node = GoalServer()
-    node.clock.seconds = NOW
-    for _ in range(5):
-        jump_tick(node)
-    assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [] and node._clears == 0
-
-    node._switches.set("jump_clear", True)
-    jump_tick(node)
-    corrected_by(node, 5.0)  # a huge step, seen for the first time
-    jump_tick(node)
-    assert node.service_clients[CLEAR_LOCAL_COSTMAP].calls == [], "a baseline is not a jump"
-
-
-# ---- a cancel means every goal on the board (flag cancel_every_goal) ----------------------------
+# ---- a cancel means every goal on the board ---------------------------------------------------
 
 CANCEL_SERVICES = {
     "navigate_to_pose": "/navigate_to_pose/_action/cancel_goal",
@@ -329,7 +225,6 @@ def test_a_cancel_reaches_every_goal_on_both_navigators_whoever_sent_it(tmp_path
     goto_ros.py prints, so the laptop's pepin.goal_link shows the operator the same line."""
     from pepin.goal_link import cancel_line
 
-    assert FLAGS.flag("cancel_every_goal").live
     node = server(tmp_path)
     navigators_up(
         node,
@@ -377,22 +272,6 @@ def test_a_navigator_that_is_not_up_or_does_not_answer_is_said_so(tmp_path: Path
     }
     waited = node.service_clients[CANCEL_SERVICES["navigate_through_poses"]].waits
     assert waited and max(waited) <= 15.0, "an absent navigator costs half the window, not more"
-
-
-def test_the_flag_off_cancels_only_this_node_s_own_goal(tmp_path: Path) -> None:
-    """CLAUDE.md rule 19: the old cancel stays one flag away; its answer names no navigators,
-    which is how the laptop's client knows to fall back to goto_ros.py."""
-    node = server(tmp_path)
-    navigators_up(node)
-    own = Handle(ticks=5)
-    node._goal_handle, node._driving = own, True
-    node._switches.set("cancel_every_goal", False)
-    wire = Wire()
-    node._handle({"cmd": "cancel"}, wire)
-    assert wire.events() == [{"event": "cancelled", "had_goal": True}]
-    assert own.cancelled == 1
-    assert all(node.service_clients[name].calls == [] for name in CANCEL_SERVICES.values())
-    assert "cancel_every_goal=off" in node._switches.state()
 
 
 # ---- a cancel stops a drive at every stage of it ----------------------------------------------

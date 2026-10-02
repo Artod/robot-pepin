@@ -111,7 +111,6 @@ def test_the_pipeline_reproduces_the_node_s_chain_bit_for_bit() -> None:
     pipeline = standard_pipeline()
     beams = pipeline.stage("lidar_anchor")
     assert isinstance(beams, LidarAnchor)
-    assert beams.sigma_m == 0.0, "and every beam weighing the same, as the node's law was fitted"
     law = pipeline.stage("affine_law")
     assert isinstance(law, AffineLaw)
     assert pipeline.names == ["edge_filter", "lidar_anchor", "affine_law", "floor_anchor"]
@@ -252,61 +251,13 @@ def _law_pairs(a: float, b: float, n: int = 400) -> Pairs:
     return Pairs.of(d, z, lift_of(np.full(n, INTR.cy), INTR))
 
 
-def _reach(law: AffineLaw, a: float, b: float, pairs: Pairs) -> float:
-    """The relative move of the inverse depth at the pool's ends between the law and (a, b)."""
-    ends = np.percentile(pairs.d, (5, 95))
-    return float(np.max(np.abs((a / ends + b) - (law.a / ends + law.b)) / (law.a / ends + law.b)))
-
-
-def test_the_law_walks_to_a_far_fit_no_faster_than_the_slew_allows() -> None:
-    """A law with a slew takes its first live fit whole and then moves at most ``slew_per_s``
-    of inverse depth a second, saying in its report line where it is walking to; with the slew
-    off it takes every fit whole, as the node always did."""
-    now = [0.0]
-    law = AffineLaw(pool_frames=1, slew_per_s=0.01, clock=lambda: now[0])
-    law.fit(_law_pairs(1.75, 0.0))
-    assert (law.a, law.b) == pytest.approx((1.75, 0.0), abs=0.02)  # the first fit, whole
-    assert "slewing" not in law.describe()
-    far = _law_pairs(2.30, -0.15)
-    before, asked = (law.a, law.b), _reach(law, 2.30, -0.15, far)
-    now[0] += 1.0
-    law.fit(far)
-    assert asked > 0.05  # the fit really is far away: worth a speed limit
-    moved = np.max(
-        np.abs(
-            (law.a / np.percentile(far.d, (5, 95)) + law.b)
-            - (before[0] / np.percentile(far.d, (5, 95)) + before[1])
-        )
-        / (before[0] / np.percentile(far.d, (5, 95)) + before[1])
-    )
-    assert moved == pytest.approx(0.01, rel=1e-6)  # one second of the allowance, no more
-    assert "slewing to a 2.30 b -0.150" in law.describe()
-    for _ in range(400):  # given the seconds, it arrives and stops saying so
-        now[0] += 1.0
-        law.fit(far)
-    assert (law.a, law.b) == pytest.approx((2.30, -0.15), abs=0.01)
-    assert "slewing" not in law.describe()
-    quick = AffineLaw(pool_frames=1, clock=lambda: now[0])  # slew off: every fit whole
-    quick.fit(_law_pairs(1.75, 0.0))
-    now[0] += 1.0
-    quick.fit(far)
-    assert (quick.a, quick.b) == pytest.approx((2.30, -0.15), abs=0.01)
-
-
 # ---- two rulers in one fit -------------------------------------------------------------------
-def test_a_beam_ships_weighing_a_flat_one_and_sigma_m_weighs_it_by_range_instead() -> None:
-    """A beam ships weighing 1 whatever its range — the reference pair the corners are weighed
-    against — and ``sigma_m`` above 0 is the live knob that weighs it 1 / sigma^2 in inverse
-    depth instead, which puts the weight as z^4 and measured worse (LIDAR_SIGMA_M)."""
+def test_a_beam_weighs_a_flat_one_whatever_its_range() -> None:
+    """A beam weighs 1 whatever its range: weighing it 1 / sigma^2 in inverse depth puts the
+    weight as z^4 and measured worse (2026-09-15)."""
     frame = Frame(_network(_scene(2.0), 1.3, 0.0, noise=0.0, seed=0), _context(_wall_returns(2.0)))
-    weighed = LidarAnchor(sigma_m=0.015).pairs(frame)
     flat = LidarAnchor().pairs(frame)
-    assert weighed is not None and flat is not None
-    assert np.array_equal(weighed.z, flat.z) and np.all(flat.weight == 1.0)
-    near, far = np.argmin(weighed.z), np.argmax(weighed.z)
-    ratio = (weighed.z[far] / weighed.z[near]) ** 4  # 1 / (sigma_m / z^2)^2
-    assert weighed.weight[far] / weighed.weight[near] == pytest.approx(ratio, rel=1e-9)
-    assert "sigma 1.5 cm" in LidarAnchor(sigma_m=0.015).describe()
+    assert flat is not None and np.all(flat.weight == 1.0)
     assert "flat" in LidarAnchor().describe()
 
 

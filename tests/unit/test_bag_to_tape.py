@@ -21,7 +21,7 @@ import ros_stubs
 ros_stubs.install()
 
 from action_msgs.msg import GoalStatus, GoalStatusArray  # noqa: E402
-from geometry_msgs.msg import PoseWithCovarianceStamped, Twist  # noqa: E402
+from geometry_msgs.msg import Twist  # noqa: E402
 from nav_msgs.msg import OccupancyGrid, Odometry  # noqa: E402
 from nav_msgs.msg import Path as PathMsg  # noqa: E402
 from pepin_bringup.bag_recorder import BAG_TOPICS, record_command  # noqa: E402
@@ -101,17 +101,6 @@ def imu(t: float) -> Imu:
     msg.linear_acceleration.x = 0.12
     msg.linear_acceleration.y = -0.34
     msg.linear_acceleration.z = 9.79
-    return msg
-
-
-def tracker_pose(t: float) -> PoseWithCovarianceStamped:
-    """The tracker's belief with a covariance that makes a readable confidence."""
-    msg = PoseWithCovarianceStamped(header=header(t))
-    msg.pose.pose.position.x, msg.pose.pose.position.y = 2.3456, -1.2345
-    msg.pose.pose.orientation.z, msg.pose.pose.orientation.w = 0.3827, 0.9239
-    msg.pose.covariance[0] = 0.04
-    msg.pose.covariance[7] = 0.05
-    msg.pose.covariance[35] = 0.02
     return msg
 
 
@@ -244,11 +233,11 @@ def transforms(t: float, edges: list[tuple[str, str, float, float, float]]) -> T
     return msg
 
 
-def test_the_loc_rows_are_composed_from_tf_where_no_tracker_publishes_a_pose() -> None:
+def test_the_loc_rows_are_composed_from_tf() -> None:
     """map -> odom (the laptop's correction) times odom -> base_link (the board's odometry) is
     the pose every other consumer composes; 5 Hz, and no confidence, because TF carries no
     covariance."""
-    builder = TOOL.TapeBuilder(loc_from_tf=True)
+    builder = TOOL.TapeBuilder()
     assert builder.feed("/tf", transforms(1000.0, [("map", "odom", 1.0, 2.0, 0.0)]), 1000.0) == []
     rows = builder.feed(
         "/tf",
@@ -265,17 +254,6 @@ def test_the_loc_rows_are_composed_from_tf_where_no_tracker_publishes_a_pose() -
     assert builder.feed("/tf", soon, 1000.2) == []
     later = transforms(1000.4, [("odom", "base_link", 0.7, 0.0, 0.0)])
     assert len(builder.feed("/tf", later, 1000.4)) == 1
-
-
-def test_a_tracker_pose_in_the_bag_keeps_tf_out_of_the_loc_rows() -> None:
-    """Two sources of one record would double every pose in the tape."""
-    builder = TOOL.TapeBuilder(loc_from_tf=False)
-    builder.feed("/tf", transforms(1000.0, [("map", "odom", 1.0, 2.0, 0.0)]), 1000.0)
-    assert (
-        builder.feed("/tf", transforms(1000.1, [("odom", "base_link", 0.5, 0.0, 0.0)]), 1000.1)
-        == []
-    )
-    assert builder.feed("/tracker_pose", tracker_pose(1000.2), 1000.2)[0]["topic"] == "loc"
 
 
 def test_the_bag_records_every_topic_the_jsonl_recorder_subscribes_to(tmp_path: Path) -> None:

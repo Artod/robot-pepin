@@ -25,8 +25,8 @@ namespace pepin
 {
 
 // EVERY NUMBER BELOW THAT DECIDES BEHAVIOUR IS THE DEFAULT OF A LIVE PARAMETER of the base bridge
-// (`ros2 param set /base_bridge <name> <value>`, in force at the next tick; ros/README.md has the
-// table). The two that are not — kUnclaimedVariance and ZuptGate's `max_gap_s` — say why.
+// (`ros2 param set /base_bridge <name> <value>`, in force at the next tick; this package's
+// README.md has the table). The two that are not — kUnclaimedVariance and ZuptGate's `max_gap_s` — say why.
 //
 // What the update claims on vx, vy and vyaw: a variance of 1e-6, a sigma of 1 mm/s and 1 mrad/s.
 // Tight because the claim is true — ZuptGate only lets it out while three witnesses agree that the

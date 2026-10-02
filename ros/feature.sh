@@ -1,9 +1,8 @@
 #!/bin/bash
 # Persistent switches of the board's sensor stack (kept across restarts and reboots):
-#   ros/feature.sh cpp on|off    the C++ base bridge instead of the Python one (~25 MB vs ~190 MB)
-#   ros/feature.sh imu on|off    read the MPU6050 and fuse it with the wheels (needs cpp on)
+#   ros/feature.sh imu on|off    read the MPU6050 and fuse it with the wheels (on by default)
 #   ros/feature.sh ekf on|off    fuse the live odometry sources and own odom -> base_link
-#                                (needs cpp on; on by default). The IMU is a source of this
+#                                (on by default). The IMU is a source of this
 #                                filter, never its switch: `imu off` leaves the EKF running on
 #                                the wheels. Off, the bridge publishes odom -> base_link itself
 #                                and nothing publishes /odometry/filtered, which every
@@ -13,10 +12,11 @@
 #                                for the EKF (odom3). On by default. A source of the filter, never
 #                                its switch: off, the wheels, the gyro and the camera are what
 #                                they were. It publishes no transform — the EKF owns odom -> base_link
-#   ros/feature.sh tof on|off    the three ToF sensors into the local costmap (a Python bridge, ~150 MB)
+#   ros/feature.sh tof on|off    the three ToF sensors into the local costmap (a Python bridge,
+#                                ~150 MB; on by default)
 #   ros/feature.sh neck on|off   the neck's encoders as /neck/state and the live base_link -> camera_link
-#                                (a Python node, ~150 MB); the laptop's SLAM must then run with
-#                                `ros/laptop.sh vslam --neck`, or two nodes publish that one edge
+#                                (a Python node, ~150 MB; on by default); with it off the laptop's
+#                                SLAM must run with `ros/laptop.sh vslam --fixed-head`
 #   ros/feature.sh board_bag on|off
 #                                the board's raw sensors recorded on the board, always, in minute
 #                                MCAP files under maps/board_rec (pepin.board_bag): 20 GB cap,
@@ -25,16 +25,13 @@
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?cpp | imu | ekf | laser_odom | tof | neck | board_bag}"; STATE="${2:?on | off}"
-case "$FEATURE" in cpp) VAR=PEPIN_CPP_BRIDGE ;; imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; board_bag) VAR=PEPIN_BOARD_BAG ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+FEATURE="${1:?imu | ekf | laser_odom | tof | neck | board_bag}"; STATE="${2:?on | off}"
+case "$FEATURE" in imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; neck) VAR=PEPIN_NECK ;; board_bag) VAR=PEPIN_BOARD_BAG ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
 case "$STATE" in
     on) VAL=true ;;
     off) VAL=false ;;
     *) echo "on or off"; exit 2 ;;
 esac
-if { [ "$FEATURE" = imu ] || [ "$FEATURE" = ekf ]; } && [ "$VAL" = true ]; then
-    ssh "root@$BOARD" "grep -q 'PEPIN_CPP_BRIDGE=true' /etc/default/pepin-ros" || { echo "$FEATURE needs the C++ bridge: ros/feature.sh cpp on first"; exit 1; }
-fi
 ssh "root@$BOARD" "grep -v '^$VAR=' /etc/default/pepin-ros > /etc/default/pepin-ros.new; echo '$VAR=$VAL' >> /etc/default/pepin-ros.new; mv /etc/default/pepin-ros.new /etc/default/pepin-ros; systemctl restart pepin-ros"
 T0=$(date +%s); echo -n "$FEATURE $STATE; restarting the stack..."
 for i in $(seq 1 60); do ssh "root@$BOARD" "docker logs pepin-ros 2>&1 | grep -q 'lifecycle_manager_sensors.*Managed nodes are active'" 2>/dev/null && break; sleep 2; done

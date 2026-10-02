@@ -18,7 +18,6 @@ import source_facts as sf
 from pepin.camera_grid import GRID_RESOLUTION_M, GRID_SIZE_M
 from pepin.contact import CONTACT_MAX_RANGE
 from pepin.depth import SCALE_CEILING
-from pepin.depth_pipeline import LIDAR_SIGMA_M
 from pepin.flags import FlagSet, knob, knobs_of, load_knobs, load_table, read_knobs, with_knobs
 from pepin.global_descriptor import MAX_NULL_SHARE
 from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
@@ -27,7 +26,6 @@ from pepin.marks_audit import MATCH_CELLS, RADIUS_M
 from pepin.snapshot import PAIR_PERIODS
 from pepin.tsdf import band_half_z_m
 from pepin.volume_scan import MARKS_MIN_Z_M
-from pepin.watch import PAINT_SIGMA_M
 
 REPO = Path(__file__).resolve().parents[2]
 NODES = "ros/pepin_bringup/pepin_bringup"
@@ -40,7 +38,6 @@ def _node_constant(node: str, name: str) -> float:
 # (node, knob) -> the number the library or the node already names
 NAMED = {
     ("contact_scan", "max_range"): CONTACT_MAX_RANGE,
-    ("depth_fusion", "paint_sigma_m"): PAINT_SIGMA_M,
     ("depth_fusion", "lean_gate_deg"): SCAN_LEAN_GATE_DEG,
     ("depth_fusion", "lean_min_quality"): LEAN_QUALITY_FLOOR,
     ("depth_fusion", "marks_min_z"): MARKS_MIN_Z_M,
@@ -49,7 +46,6 @@ NAMED = {
     ("depth_fusion", "band_half_z"): band_half_z_m(REPO / "config/fusion.json"),
     ("depth_stream", "scale_ceiling"): SCALE_CEILING,
     ("depth_stream", "lean_min_quality"): LEAN_QUALITY_FLOOR,
-    ("depth_stream", "lidar_sigma_m"): LIDAR_SIGMA_M,
     ("marks_audit", "radius_m"): RADIUS_M,
     ("marks_audit", "match_cells"): MATCH_CELLS,
     ("rtabmap_frame", "pnp_reproj_px"): PNP_REPROJ_PX,

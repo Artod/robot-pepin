@@ -1,6 +1,6 @@
 """The ToF bridge under the ROS stubs: what leaves it, in what shape, and on which frames.
 
-The whiskers reach Nav2 as small LaserScan fans read by an ``ObstacleLayer`` (``range_as``,
+The whiskers reach Nav2 as small LaserScan fans read by an ``ObstacleLayer`` (since
 2026-09-21). That is the answer to the two defects of ``nav2_costmap_2d::RangeSensorLayer``
 that have each stopped this robot — a ``canTransform`` that blocks a whole
 ``transform_tolerance`` per message it cannot place, and an unbounded loop over unsigned cell
@@ -26,19 +26,12 @@ import ros_stubs
 ros_stubs.install()
 
 from pepin_bringup import tof_bridge as module  # noqa: E402
-from pepin_bringup.tof_bridge import FLAGS, TofBridge  # noqa: E402
+from pepin_bringup.tof_bridge import TofBridge  # noqa: E402
 
 from pepin.tof_horizon import cone_beams  # noqa: E402
 
 READING = {"front": 500, "left": 900, "right": None, "status": {"front": 0, "left": 0, "right": 2}}
 NAMES = ("front", "left", "right")
-
-
-class Param:
-    """What ``ros2 param set`` hands the node's callback."""
-
-    def __init__(self, name: str, value: Any) -> None:
-        self.name, self.value = name, value
 
 
 class FakeLink:
@@ -58,10 +51,10 @@ class FakeLink:
         return None
 
 
-def bridge(monkeypatch: Any, **flags: Any) -> TofBridge:
+def bridge(monkeypatch: Any, **overrides: Any) -> TofBridge:
     """A bridge on a fake link, built with the launch overrides a test asks for."""
     monkeypatch.setattr(module, "JsonLineLink", FakeLink)
-    with ros_stubs.parameters(**flags):
+    with ros_stubs.parameters(**overrides):
         return TofBridge()
 
 
@@ -128,23 +121,14 @@ def test_every_reading_leaves_and_the_whole_line_carries_one_stamp(monkeypatch: 
     assert {(s.header.stamp.sec, s.header.stamp.nanosec) for s in scans(node)} == stamps
 
 
-def test_the_report_line_carries_the_sensors_verdicts_and_the_flags(monkeypatch: Any) -> None:
-    """CLAUDE.md rule 19: the switches are in the node's own report line, beside the raw
-    VL53L1X statuses that say which sensor is answering at all."""
+def test_the_report_line_carries_the_sensors_verdicts(monkeypatch: Any) -> None:
+    """The raw VL53L1X statuses are in the node's own report line: they say which sensor is
+    answering at all."""
     node = bridge(monkeypatch)
     feed(node)
     node._report_status()
     line = node.logger.texts("info")[-1]
     assert "front [0:100%]" in line and "right [2:100%]" in line
-    assert "range_as=scan" in line
-
-
-def test_the_flags_are_the_features_own_names_and_live() -> None:
-    """Rule 19: a flag is named after its feature, it takes effect at once, and it carries the
-    measurement its default rests on. The gate's three came out with the range layers."""
-    assert FLAGS.names == ("range_as",)
-    assert all(flag.live and flag.measured for flag in FLAGS)
-    assert FLAGS["range_as"] == "scan"
 
 
 # ---- the fan: one cone as points, because a RangeSensorLayer is not safe to run ---------------
@@ -216,16 +200,3 @@ def test_a_silent_sensor_is_said_once_in_the_log(monkeypatch: Any) -> None:
     assert len(said()) == 3, "one per sensor"
     feed(node, quiet)
     assert len(said()) == 3, "said once, not once per reading"
-
-
-def test_the_old_plugin_is_one_live_flag_away(monkeypatch: Any) -> None:
-    """Rule 19: ``range_as=range`` is the node before 2026-09-21 — the three Range topics and
-    nothing on the fans — and the switch works in both directions on a running robot, because a
-    field that has to be reverted is not a switch."""
-    node = bridge(monkeypatch, range_as="range")
-    feed(node)
-    assert len(published(node)) == 3 and scans(node) == []
-    assert node.set_parameters([Param("range_as", "scan")])[0].successful
-    feed(node)
-    assert len(scans(node)) == 3, "a flag flipped live puts the cones on the wire at once"
-    assert not node.set_parameters([Param("range_as", "cone")])[0].successful

@@ -62,7 +62,7 @@ MOUNTS=(-v "$HERE/pepin_bringup/pepin_bringup:$SITE:ro"
 # settings as ros/laptop.sh gives them (no tracker: RTAB-Map's role is the world's).
 ENVS=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
       -e "ZENOH_CONFIG_OVERRIDE=connect/endpoints=[\"tcp/127.0.0.1:$ZPORT\"];listen/endpoints=[\"tcp/127.0.0.1:0\"]"
-      -e ROS_DOMAIN_ID=$DOMAIN -e PEPIN_LOCALIZER=rtabmap -e PYTHONUNBUFFERED=1)
+      -e ROS_DOMAIN_ID=$DOMAIN -e PYTHONUNBUFFERED=1)
 
 down() { pepin_remove_container "$NAV" "$WORLD" "$ROUTER"; }  # Nav2 leaves before its router
 

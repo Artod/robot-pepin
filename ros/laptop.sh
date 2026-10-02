@@ -9,7 +9,7 @@
 #   ros/laptop.sh logs [vslam|macnav]   follow a container's output (macnav by default)
 #   ros/laptop.sh vslam      start (or restart) the camera mapping container beside them: RTAB-Map
 #                            on its one database (ros/maps/rtabmap.db), whose loop-closed grid is
-#                            THE map — published on /map for the board's tracker. The database is
+#                            THE map — published on /map for Nav2's costmaps. The database is
 #                            kept across restarts and is only ever deleted by --fresh
 #   ros/laptop.sh vslam --camera-only   no lidar in the snapshots: the grid is the camera's depth
 #   ros/laptop.sh vslam --fresh   build the room from nothing: the database is deleted and no volume
@@ -21,8 +21,10 @@
 #   ros/laptop.sh vslam --vo-depth   the visual odometry reads the picture and the depth (rgbd_odometry)
 #                            at the depth's rate; the default reads the two eyes (stereo_odometry) at
 #                            the camera's: 8 poses/s, 0.15-0.2 s behind, measured at rest 2026-10-02
-#   ros/laptop.sh vslam --neck    the board's neck node owns base_link -> camera_link (ros/feature.sh
-#                            neck on): the camera node here keeps its static edge off
+#   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
+#                            config/camera.json: for a run with the board's neck node off (ros/feature.sh
+#                            neck off). By default the neck node owns that edge; --neck, the old way to
+#                            say the default, is still accepted
 #   ros/laptop.sh kick NODE  restart one node from the mounted sources (seconds, no container restart)
 #   ros/laptop.sh vslam      runs the camera mapping container on pepin-laptop:xfeat whenever that
 #                            image exists and was built on the laptop image below
@@ -262,38 +264,35 @@ case "${1:-}" in
         # reads which it is and picks the memory mode itself — so this subcommand needs no mode, and
         # asks the board nothing.
         start_check
-        CAMERA_ONLY=false; FRESH=false; RESUME_VOLUME=true
+        CAMERA_ONLY=false; FRESH=false
         # The camera as a third odometry (rtabmap_odom's rgbd_odometry + pepin_bringup.visual_odometry):
         # on unless --no-vo. It costs this laptop a quarter of a core and the robot nothing at
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
         # vo_publish true).
         VO=true
         VO_INPUT=stereo
-        # --neck: the board's neck node publishes base_link -> camera_link live (ros/feature.sh
-        # neck on), so the camera node's static edge goes off. Explicit on purpose: a wrong guess
-        # would be two publishers of one edge; the camera node's report warns of a mismatch.
-        STATIC_CAMERA_TF=true
+        # The board's neck node publishes base_link -> camera_link live (ros/feature.sh neck on, the
+        # default), so the camera node's static edge is off; --fixed-head puts it back for a run
+        # with the neck node off. A wrong choice is two publishers of one edge, or none; the
+        # camera node's report warns of a mismatch.
+        STATIC_CAMERA_TF=false
         for arg in ${*:2}; do
             case "$arg" in
                 --camera-only) CAMERA_ONLY=true ;;
                 --fresh) FRESH=true ;;
                 --neck) STATIC_CAMERA_TF=false ;;
+                --fixed-head) STATIC_CAMERA_TF=true ;;
                 --no-vo) VO=false ;;
                 --vo-depth) VO_INPUT=depth ;;
-                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-depth]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth]"; exit 2 ;;
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads
-        # that and starts RTAB-Map in mapping mode; the volume is born empty under the cart in the
-        # new frame (no snapshot resumed), and nothing existing is deleted except the database
-        # itself, so a --fresh run is a measurement and not a loss. The volume of the OLD frame is
-        # moved aside by ros/restart.sh --fresh-graph, which passes this flag.
+        # that and starts RTAB-Map in mapping mode. The fused volume is the odometry's rolling
+        # window and is born empty at every start whatever is on disk.
         if [ "$FRESH" = true ]; then
             rm -f "$HERE"/maps/rtabmap.db "$HERE"/maps/rtabmap.db-*
-            RESUME_VOLUME=false
-            echo "vslam --fresh: ros/maps/rtabmap.db deleted, so RTAB-Map starts an empty graph and"
-            echo "               the volume is born empty under the cart; the existing"
-            echo "               ros/maps/*.world.npz are left untouched until it saves"
+            echo "vslam --fresh: ros/maps/rtabmap.db deleted, so RTAB-Map starts an empty graph"
         fi
         VSLAM_IMAGE="$(vslam_image)" || exit 2
         pepin_remove_container pepin-vslam
@@ -360,9 +359,9 @@ case "${1:-}" in
             ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
-            "camera_only:=$CAMERA_ONLY" "resume_volume:=$RESUME_VOLUME" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
+            "camera_only:=$CAMERA_ONLY" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null
         echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         echo "foxglove: reconnect the app to $("$HERE/foxglove.sh" url) when you want it (nothing is opened for you)"
         exit 0 ;;
-    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--neck] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
 esac

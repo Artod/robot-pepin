@@ -42,6 +42,10 @@ ros/maps/world_*.npz
 ros/maps/*.world.npz
 ros/maps/*.world.pgm
 ros/maps/*.world.yaml
+# and the suffixed copies kept by hand or by older restart.sh --fresh runs
+ros/maps/world_*.npz.*
+ros/maps/*.world.npz.*
+ros/maps/depth_law.json.*
 
 # The replay stand's engine build, prepared drives and snapshots (ros/replay.sh)
 ros/replay/.cache/

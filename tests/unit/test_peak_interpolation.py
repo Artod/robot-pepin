@@ -61,7 +61,8 @@ def test_interpolation_never_leaves_the_winning_cell() -> None:
     headings = np.radians(np.arange(-2, 3) * 1.5)
     for _ in range(50):
         scores = rng.normal(size=(len(headings), len(positions)))
-        pose, _ = matcher._peak(scores, positions, headings)
+        field, k_won, i_won = matcher._winner(scores)
+        pose = matcher._refined(field, positions, headings, k_won, i_won)
         k, i = np.unravel_index(int(np.argmax(scores)), scores.shape)
         assert abs(pose.x - positions[i, 0]) <= 0.015 + 1e-9
         assert abs(pose.y - positions[i, 1]) <= 0.015 + 1e-9

@@ -101,7 +101,7 @@ def test_list_places_without_a_pose_or_a_book() -> None:
     ]
     goals(robot).book = {}
     empty = call(robot, "list_places")
-    assert empty["ok"] and empty["places"] == [] and "ros/go.sh mark" in empty["note"]
+    assert empty["ok"] and empty["places"] == [] and "ros/goto.sh mark" in empty["note"]
 
 
 # -- go_to, go_to_pose, cancel --------------------------------------------------------------------

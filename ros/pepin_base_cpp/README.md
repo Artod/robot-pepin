@@ -1,9 +1,11 @@
 # pepin_base_cpp
 
 The base bridge in C++: `/cmd_vel` down to the board's base server, its state stream up as
-`/odom` and `odom -> base_link`. Same node name, parameters and wire protocol as the Python
-`base_bridge` in `pepin_bringup`, which stays. Why: on the board each rclpy process costs
-~190 MB RSS and this node ~10% of a core; here it is ~25 MB and ~1%, and RAM runs out first.
+`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw` and the rest `/zupt`. It is the
+board's only base bridge: the Python one it was ported from (same node name, parameters and wire
+protocol) cost ~190 MB RSS and ~10% of a core, this one ~25 MB and ~1%, and RAM runs out first;
+that node is in git history before 2026-10-02. Its live switches are described in
+`pepin_bringup/base_bridge.py` (the `FLAGS` table ros/flags.sh reads).
 
 - `include/pepin_base_cpp/protocol.hpp` — the wire format, no ROS and no sockets in it.
 - `include/pepin_base_cpp/link.hpp` — reconnecting JSON-lines TCP client, one reader thread.
@@ -16,7 +18,7 @@ The base bridge in C++: `/cmd_vel` down to the board's base server, its state st
 ## IMU
 
 `imu_enable` (false), `imu_device` (/dev/i2c-2), `imu_address` (0x68), `imu_rate_hz` (50),
-`imu_frame` (imu_link), `imu_bias_s` (2.0), `imu_bias_tracking` (true): a thread samples an
+`imu_frame` (base_link), `imu_bias_s` (2.0), `imu_bias_tracking` (true): a thread samples an
 MPU6050 and publishes `imu/data_raw` without orientation; a missing chip is one warning and the
 wheels carry on. Registers PWR_MGMT_1 0x01, SMPLRT_DIV 1000/rate-1, CONFIG 0x03 (DLPF ~44 Hz),
 GYRO_CONFIG 0x08 (+-500 dps), ACCEL_CONFIG 0x08 (+-4 g), WHO_AM_I 0x68, 14 bytes from
@@ -27,8 +29,9 @@ robot.launch.py passes `imu_rate_hz` 100 (`pepin.deployment.IMU_RATE_HZ`, since 
 DLPF's ~44 Hz is under that rate's Nyquist limit, so the samples are the same noise as at 50 Hz,
 twice as many and unaliased. 200 Hz would want DLPF_CFG 2 (~94 Hz, 1.5x the per-sample noise, and
 the zero-velocity update's gyro threshold re-measured), which `configure()` does not write yet. A
-read is one 14-byte burst, ~1.6 ms on the 100 kHz bus (no `clock-frequency` in the board's device
-tree for i2c@5002c00, the mv64xxx default), which the three VL53L1X share.
+read is one 14-byte burst on the bus the three VL53L1X share; at the default 100 kHz (~1.6 ms a
+read) their transactions held the IMU at 53 Hz, and since 2026-10-02 the bus runs at 400 kHz
+(`board/i2c3-400k.dts`): 100.2 Hz with the ToF running.
 
 ### The gyro's zero is re-measured, not taken once
 
@@ -47,7 +50,7 @@ Nothing is published until one block has finished, which also fixes a node start
 was rolling: it now waits for rest instead of subtracting the roll forever.
 `imu_bias_tracking:=false` is the old boot-only bias, for an A/B without a restart.
 
-Measured on the 30 s at-rest tape (`scratch/gyro_block_mean_noise.py`): per-sample noise
+Measured on a 30 s at-rest tape: per-sample noise
 0.036 deg/s, and a 2.0 s block mean scatters by 0.30 deg/min — a one-way creep becomes a
 zero-mean walk (~0.35 deg over 40 min against the +27 measured). A longer `imu_bias_s` shrinks the
 error in force at any one moment, which is what a drive inherits (0.21 deg/min at 5 s, 0.02 at 10);
@@ -75,13 +78,33 @@ Every tunable is a live parameter — `zupt_publish`, `zupt_rate_hz`, `zupt_var_
 `ros2 param set /base_bridge ...` and in force at the next tick; a new rate re-times the timer at
 once. An on-set callback refuses a value outside its range (`zupt.hpp`'s `kZuptRanges`, logged
 and returned to the caller) and a post-set callback stores the accepted one in an atomic, so the
-timer and the 50 Hz IMU loop look nothing up per tick. The two windows borrow their defaults
-without moving the parameters they come from. The table, the ranges and the lines to try are in
-`ros/README.md` ("The base bridge's zero-velocity update"); the reasons for every default are in
-`zupt.hpp`. The report line names `zupt_publish=on|off`, and the zupt state ends the link-up and
-minute lines with every setting in force: `zupt publishing for N s, M sent [rate 10 Hz, var 1e-06
-xy 1e-06 yaw, settle 2 s, cmd hold 0.5 s, gyro quiet 0.005 rad/s]`. The Python bridge has no gyro
-and no update.
+timer and the IMU loop look nothing up per tick. The two windows borrow their defaults without
+moving the parameters they come from. The reasons for every default are in `zupt.hpp`; a value
+outside its range, or not a number, is refused with the reason and the value in force stays
+(`50` arriving as an integer and `1e-4` as a string are taken as the numbers they are). The
+report line names `zupt_publish=on|off`, and the zupt state ends the link-up and minute lines
+with every setting in force: `zupt publishing for N s, M sent [rate 10 Hz, var 1e-06 xy 1e-06
+yaw, settle 2 s, cmd hold 0.5 s, gyro quiet 0.005 rad/s]`.
+
+| name | default | range | what it does |
+| --- | --- | --- | --- |
+| `zupt_publish` | true | bool | the update at all; false is the bridge before 2026-09-24: nothing on `/zupt` |
+| `zupt_rate_hz` | 10 | 1..100 Hz | how often the update is published while the cart is at rest |
+| `zupt_var_linear` | 1e-6 | 1e-9..1 (m/s)^2 | the variance claimed on vx and vy |
+| `zupt_var_yaw` | 1e-6 | 1e-9..1 (rad/s)^2 | the variance claimed on vyaw (the gyro's is 4e-4, rf2o's 2.5e-3) |
+| `zupt_settle_s` | `imu_bias_s` (2.0) | 0..60 s | witnessed rest before the update, and the hold after a gyro turn |
+| `zupt_cmd_hold_s` | `cmd_timeout_s` (0.5) | 0..10 s | how long a non-zero `/cmd_vel` holds the update off |
+| `zupt_gyro_quiet_rad_s` | 0.005 | 1e-4..0.5 rad/s | a bias-corrected yaw rate at or above this is a turn (7.9 sigma of the parked chip's noise) |
+
+A parked A/B, one variable at a time, reading the heading creep between each:
+
+```bash
+ros2 param set /base_bridge zupt_publish false        # the filter as it was: the baseline creep
+ros2 param set /base_bridge zupt_publish true
+ros2 param set /base_bridge zupt_rate_hz 50           # every other gyro sample's worth
+ros2 param set /base_bridge zupt_var_yaw 1.0e-4       # a hundred times looser
+ros2 param get /base_bridge zupt_rate_hz              # what is in force
+```
 
 Board cost: one Odometry message per tick while parked (10 Hz by default, 100 at most), a timer
 at that rate and two atomic stores per IMU sample; no new process, no new thread.
@@ -92,8 +115,7 @@ at that rate and two atomic stores per IMU sample; no new process, no new thread
 `pepin_bringup` into `/ws/install`. A change here needs an image rebuild (`ros/build-image.sh --ship`),
 not `ros/sync.sh`: only the Python package is mounted from the host.
 
-    ros2 launch pepin_bringup robot.launch.py base_bridge_cpp:=true  # this node
-    ros2 launch pepin_bringup robot.launch.py                        # the Python one (default)
+    ros2 launch pepin_bringup robot.launch.py  # composed into base_container
 
 ## test/
 
@@ -105,10 +127,9 @@ skipped without a `c++`).
   its own header comment has the `c++` line.
 - `test/zupt_contract.cpp` — the zero-velocity update's table, replayed against `zupt.hpp` the same
   way, verdict words and defaults included.
-- `test/protocol_samples.json` — lines from the running Python stack
-  (`scratch/gen_protocol_samples.py`). A gtest would assert: `encode_twist`/`encode_stop` reproduce
-  every `requests[].line` byte for byte, `parse_state` yields `states[].parsed` and nothing for
-  `not_states[]`, `LineReader` the `reader[].objects`.
+- `test/protocol_samples.json` — wire lines recorded from the Python bridge this one was ported
+  from: the twists and stops `protocol.hpp` must encode byte for byte, and the state lines it must
+  parse.
 
 `pepin.odometry.TwistFromPose` is the Python twin of the odometry header; the gyro and
 zero-velocity headers carry their own contracts above.

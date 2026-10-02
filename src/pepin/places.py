@@ -71,42 +71,6 @@ def load_places(map_path: Path) -> dict[str, Place]:
     return {name: Place(name=name, **entry) for name, entry in data.get("places", {}).items()}
 
 
-def save_places(map_path: Path, places: dict[str, Place]) -> Path:
-    """Write the places file next to the map (sorted by name); returns its path."""
-    path = places_path(map_path)
-    entries = {
-        name: {k: v for k, v in asdict(place).items() if k != "name"}
-        for name, place in sorted(places.items())
-    }
-    payload = {
-        "map": map_path.name,
-        "frame": "map frame of that grid: meters, x/y as in the .npz, theta_deg counter-clockwise",
-        "places": entries,
-    }
-    path.write_text(json.dumps(payload, indent=2) + "\n")
-    return path
-
-
-def resolve_goal(tokens: list[str], map_path: Path) -> tuple[tuple[float, float], Place | None]:
-    """``["kitchen"]`` or ``["-2.0", "0.5"]`` into a goal in meters (and the Place, if named).
-
-    Raises ``ValueError`` naming the known places when a name is unknown.
-    """
-    if len(tokens) == 2:
-        return (float(tokens[0]), float(tokens[1])), None
-    if len(tokens) != 1:
-        raise ValueError("a goal is either a place name or two numbers X Y")
-    places = load_places(map_path)
-    place = places.get(tokens[0])
-    if place is None:
-        known = ", ".join(sorted(places)) or "none yet"
-        raise ValueError(
-            f"unknown place {tokens[0]!r} for {map_path.name}; known: {known} "
-            f"(add one: uv run python scripts/places.py {map_path} add NAME X Y)"
-        )
-    return place.xy, place
-
-
 def heading_residual_deg(target_deg: float, current_deg: float) -> float:
     """How far the cart must still turn to face ``target_deg`` from ``current_deg``, in
     (-180, 180] degrees: positive is counter-clockwise, the Spin behaviour's convention."""

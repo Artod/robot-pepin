@@ -546,19 +546,8 @@ def test_a_moment_past_its_pairing_patience_goes_out_with_what_could_be_placed(
     assert "frames TF could not place" in line and "tf: " in line
 
 
-def test_the_retry_is_a_flag_and_off_it_drops_the_member_at_once(build: Build) -> None:
-    """CLAUDE.md rule 19: the old behaviour stays reachable without a restart."""
-    node = build(tf=False, pack_hz=15.0, tf_retry=False)
-    node._tf.buffer.transforms[("base_link", "laser")] = _edge()
-    _warm(node)
-    msg = sent(node)[-1]
-    assert msg.left.width == 0 and msg.laser_scan.width == 5, "dropped at once, as before"
-    node._report()
-    assert "moments put back" not in node.logger.texts("info")[-1]
-
-
 # ---- the flags -------------------------------------------------------------------------------
-def test_the_flags_are_the_eight_the_report_line_prints(build: Build) -> None:
+def test_the_flags_and_knobs_the_report_line_prints(build: Build) -> None:
     node = build()
     assert FLAGS.flag("global_descriptor").env == "PEPIN_GLOBAL_DESCRIPTOR"
     assert load_knobs("sensor_pack")["pair_periods"] == PAIR_PERIODS

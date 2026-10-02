@@ -2,11 +2,11 @@
 
 nav2_bringup's launch adds docking, route, waypoint and smoother servers and a collision
 monitor; this launch composes the planner, controller, behaviours, bt_navigator and the velocity
-smoother into one container (map_server only on request), with the goal server and the run
-recorder beside it. ``ros/laptop.sh nav`` runs it in the ``pepin-macnav`` container: the board is
-a sensor box whose scans, ToF and odometry arrive over the routers, and the velocity goes back on
-/cmd_vel. Arguments: ``map`` (whose places book the goal server reads), ``params_file``,
-``map_server`` and ``recorder``.
+smoother into one container, with the goal server and the run recorder beside it.
+``ros/laptop.sh nav`` runs it in the ``pepin-macnav`` container: the board is a sensor box
+whose scans, ToF and odometry arrive over the routers, and the velocity goes back on /cmd_vel.
+Arguments: ``map`` (the map this container was started with, which ros/goto.sh reads
+off it), ``params_file`` and ``recorder``.
 Command chain: controller/behaviors -> cmd_vel_nav -> velocity_smoother -> /cmd_vel -> base_bridge.
 
 ONE OWNER OF ``map -> odom``: the laptop's RTAB-Map publishes it, and both costmaps' static layer
@@ -23,7 +23,7 @@ from launch.actions import (
     SetLaunchConfiguration,
 )
 from launch.launch_context import LaunchContext
-from launch.substitutions import LaunchConfiguration, PythonExpression
+from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 from launch_ros.descriptions import ComposableNode
 from pepin_bringup.launch_kit import respawned_container
@@ -39,23 +39,12 @@ RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 
 def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
     """The Nav2 nodes, described anew on every call (a respawned container loads fresh ones, see
-    pepin_bringup.launch_kit): the servers of pepin.deployment.NAV_NODES, map_server when
-    ``map_server:=true`` asks for it, and the lifecycle manager."""
-    # A pgm served by map_server is no longer part of the running loop: both costmaps' static
-    # layers read RTAB-Map's grid on /map (ros/params/nav2_params.yaml). So map_server is off by
-    # default in a known room and `map_server:=true` is what brings a file back — the very first
-    # boot of a room nobody has ever mapped, or a session that must start from a frozen pgm.
-    map_server = LaunchConfiguration("map_server").perform(context).lower() == "true"
+    pepin_bringup.launch_kit): the servers of pepin.deployment.NAV_NODES and the lifecycle
+    manager. No map_server: both costmaps' static layers read RTAB-Map's grid on /map
+    (ros/params/nav2_params.yaml), and an unmapped room starts from ros/laptop.sh vslam --fresh."""
     params = LaunchConfiguration("params_file")
-    map_file = LaunchConfiguration("map")
     to_smoother = [("cmd_vel", "cmd_vel_nav")]
     catalogue = {
-        "map_server": ComposableNode(
-            package="nav2_map_server",
-            plugin="nav2_map_server::MapServer",
-            name="map_server",
-            parameters=[params, {"yaml_filename": map_file}],
-        ),
         "controller_server": ComposableNode(
             package="nav2_controller",
             plugin="nav2_controller::ControllerServer",
@@ -91,16 +80,6 @@ def nav_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ),
     }
     nodes = [catalogue[name] for name in NAV_NODES]
-    if map_server:
-        nodes.append(catalogue["map_server"])
-        nodes.append(
-            ComposableNode(
-                package="nav2_lifecycle_manager",
-                plugin="nav2_lifecycle_manager::LifecycleManager",
-                name="lifecycle_manager_localization",
-                parameters=[{"autostart": True, "node_names": ["map_server"]}],
-            )
-        )
     nodes.append(
         ComposableNode(
             package="nav2_lifecycle_manager",
@@ -153,33 +132,20 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     else:
         actions.append(
             ExecuteProcess(
-                cmd=[
-                    "python3",
-                    "-m",
-                    "pepin_bringup.run_recorder",
-                    "--ros-args",
-                    # Which of the two readers of map -> base_link writes the tape's `loc` rows
-                    # (the `loc_from` flag): the goal server beside it parses /tf anyway and
-                    # republishes what it reads on /pose, so this node needs no listener of its
-                    # own.
-                    "-p",
-                    "loc_from:=pose_topic",
-                ],
+                # The tape's `loc` rows come from the goal server's /pose: it parses /tf anyway,
+                # so this node needs no listener of its own.
+                cmd=["python3", "-m", "pepin_bringup.run_recorder"],
                 output="screen",
                 **RESPAWN,
             )
         )
-    # Waits for orders on a socket so a goal costs a socket write, not a client boot.
-    # Its places book follows the map in use: /maps/flat3.yaml -> /maps/flat3.places.yaml.
-    places: object = PythonExpression(
-        ["'", LaunchConfiguration("map"), "'.rsplit('.', 1)[0] + '.places.yaml'"]
-    )
+    # Waits for orders on a socket so a goal costs a socket write, not a client boot. Its places
+    # are the graph's book (pepin_bringup.places on /places), never a file beside the map.
     actions.append(
         Node(
             package="pepin_bringup",
             executable="goal_server",
             output="screen",
-            parameters=[{"places": places}],
             **RESPAWN,
         )
     )
@@ -203,12 +169,8 @@ def generate_launch_description() -> LaunchDescription:
     return LaunchDescription(
         [
             *SHUTDOWN,
-            DeclareLaunchArgument("map", default_value="/maps/20260903_182653_lap3_loop.yaml"),
+            DeclareLaunchArgument("map", default_value="/maps/flat3_straight.yaml"),
             DeclareLaunchArgument("params_file", default_value="/params/nav2_params.yaml"),
-            # The pgm is out of the loop: on a known room RTAB-Map's grid is the only map. true
-            # serves `map` through map_server again, which is what the FIRST boot of an unmapped
-            # room needs.
-            DeclareLaunchArgument("map_server", default_value="false", choices=["true", "false"]),
             # jsonl: the Python recorder writes the numbered tape. bag: `ros2 bag record` writes
             # an MCAP bag instead and ros/tools/bag_to_tape.py makes the tape from it
             # (ros/README.md, "Two recorders").

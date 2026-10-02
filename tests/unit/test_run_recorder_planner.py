@@ -127,11 +127,3 @@ def test_nav2_s_own_outcome_is_on_the_tape_per_action(recorder: tuple[RunRecorde
         ("compute_path_to_pose", [6]),
         ("follow_path", [2, 4]),
     ]
-
-
-def test_the_records_stop_with_the_flag(tmp_path: Path) -> None:
-    """CLAUDE.md rule 19: the tape of before 2026-09-18 stays reachable without a restart."""
-    rec, tape = opened(tmp_path, planner_records=lambda: False)
-    rec._on_global_costmap(grid([0, 0, 99, 100]))
-    rec._on_action_status("follow_path", GoalStatusArray(status_list=[GoalStatus(status=4)]))
-    assert records(tape, "gcostmap") == [] and records(tape, "nav") == []

@@ -9,17 +9,17 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
 
     {"cmd": "go", "place": "printer"}      {"cmd": "go", "x": -11.4, "y": 0.8, "yaw_deg": 140}
     {"cmd": "cancel"}                      {"cmd": "where"}
-    {"cmd": "mark", "name": "printer"}     {"cmd": "places"}
+    {"cmd": "places"}                      {"cmd": "planner", "name": "navfn"}
 
 and answers with one JSON line per event: accepted, feedback, arrival, done. It also owns the
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
 recording can no longer outlive its run.
 
-A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (flag ``cancel_every_goal``):
-both navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
-asks them, so a drive ``ros/goto.sh`` started through goto_ros.py is stopped from here too — by a
-socket write from the laptop (pepin.goal_link) instead of a fresh ROS process on the board, whose
-new zenoh session stalls every laptop -> board stream for about three seconds.
+A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (since 2026-09-25): both
+navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
+asks them, so a goal any client sent is stopped from here too — by a socket write
+(pepin.goal_link) instead of a fresh ROS process, whose new zenoh session stalls every
+laptop -> board stream for about three seconds.
 
 WHERE THE POSE COMES FROM. The laptop's RTAB-Map owns ``map -> odom`` (one localiser,
 2026-09-22), so this node reads ``map -> base_link`` from TF and judges a goal by how fresh that
@@ -27,20 +27,13 @@ edge is (:class:`pepin.watch.GoalGate`) and by whether this start of RTAB-Map is
 (``start_needs_placement``). ``where`` answers ``"pose": "tf"``. The board tracker that answered
 ``/where_am_i`` with a fit before is on the tag alt/tracker-2026-09-22.
 
-WHO WATCHES THE CORRECTION ITSELF. When ``map -> odom`` steps, the marks in Nav2's local costmap
-were laid where the cart used to be, and nothing else takes them back. The lidar tracker used to
-empty that grid on such a step while it owned the edge; RTAB-Map owns it now, so the watch sits
-here — a 5 Hz read of the edge into :class:`pepin.watch.JumpClear`, one asynchronous clear per
-jump, under the ``jump_clear`` flag, which ships OFF (nobody has yet watched RTAB-Map's own
-corrections with it).
-
 AND BECAUSE IT ALREADY PARSES ``/tf``, IT IS THE BOARD'S ONE LISTENER. A TF listener is a
 subscription to the whole stream — RTAB-Map's ``map -> odom`` at 20 Hz, the board's
 ``odom -> base_link`` at 50 Hz, the statics — deserialised in Python whatever one pose the reader
 wanted out of it, and two of them ran on a 4-core A53: this one and the tape recorder's. So this
 node republishes the pose it reads as ``/pose`` (PoseStamped in ``map``, 5 Hz, stamped with the
-transform's own stamp) under the ``pose_topic`` flag, and pepin_bringup.run_recorder subscribes to
-that instead of running a listener of its own (its ``loc_from`` flag).
+transform's own stamp), and pepin_bringup.run_recorder subscribes to that instead of running a
+listener of its own.
 """
 
 from __future__ import annotations
@@ -60,7 +53,6 @@ from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose, Spin
-from nav2_msgs.srv import ClearEntireCostmap
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
@@ -82,7 +74,6 @@ from pepin.watch import (
     BY_PLACEMENT,
     PLACEMENT_TOPIC,
     GoalGate,
-    JumpClear,
     Placement,
     Preflight,
     Readiness,
@@ -101,18 +92,10 @@ RECORDER_PATIENCE_S = (
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
-ODOM_FRAME = "odom"
-# Nav2's own service for emptying the grid the controller steers on, and the watch's rules over it
-# (pepin.watch.JumpClear). The board tracker made this call while IT owned map -> odom; that edge
-# is RTAB-Map's now, so the call lives here, in the one node on the board that is awake between
-# goals.
-CLEAR_LOCAL_COSTMAP = "/local_costmap/clear_entirely_local_costmap"
-CLEAR_MIN_GAP_S = 1.0
-JUMP_WATCH_HZ = 5.0  # how often map -> odom is read for a step: twice Nav2's own control period
-# THE BOARD'S ONE POSE TOPIC (flag pose_topic). This node already parses /tf for the pose; every
-# other node on the board that wants it reads this instead of starting a second listener
-# (pepin_bringup.run_recorder's loc_from). 5 Hz is the rate the tape thinned its `loc` rows to
-# anyway (RunRecorder.LOC_TF_PERIOD_S) and the local costmap's own update_frequency.
+# THE ONE POSE TOPIC. This node already parses /tf for the pose; every other node beside it that
+# wants it reads this instead of starting a second listener (pepin_bringup.run_recorder). 5 Hz is
+# the rate the tape thinned its `loc` rows to anyway and the local costmap's own
+# update_frequency.
 POSE_TOPIC = "/pose"
 POSE_HZ = 5.0
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
@@ -120,71 +103,6 @@ TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's start line.
 FLAGS = FlagSet(
-    Flag(
-        "places_from_the_file",
-        False,
-        description="before the graph's book of places has been heard, a name is answered from"
-        " the yaml beside the map (coordinates of the frozen-grid era); off, a name is refused"
-        " until the book arrives, with that reason",
-        why="that file holds coordinates of a frame that no longer exists, and the board keeps its"
-        " own stale copy (the sync excludes it). Twice a name was answered from it and sent the"
-        " cart at a point outside the map: `home` -> (-9.39, +2.53) on 2026-09-19, `printer` ->"
-        " (-11.38, +0.77) on 2026-09-21, 2.1 s after RTAB-Map's first graph of a cold start of"
-        " both halves — the planner said 'outside bounds', the behaviour tree ran 33 recoveries"
-        " in 28 s and backed the cart into a sofa. A refusal costs a second try a minute later",
-        on_when="only on a robot driven without the laptop's graph at all, on the old frozen map",
-        off_when="always under World R: a place rides a graph node, and only the graph can say"
-        " where that node is now",
-    ),
-    Flag(
-        "jump_clear",
-        False,
-        description="map -> odom is read from TF five times a second and, when it STEPS further"
-        f" than {JumpClear.clear_costmap_jump_m:.2f} m, Nav2's local costmap is emptied"
-        f' ("{CLEAR_LOCAL_COSTMAP}", asynchronously, at most once per {CLEAR_MIN_GAP_S:.0f} s):'
-        " the marks in that grid were laid where the cart used to be. The step in that edge is the"
-        " correction alone — the cart's own motion lives in odom -> base_link — whoever published"
-        " it. Off, nothing reads the edge and no listener is started for it",
-        why="OFF, AND SINCE 2026-09-22 ITS PREMISE IS GONE: the local costmap is built in the"
-        " ODOM frame (ros/params/nav2_params.yaml), and a step in map -> odom does not move a"
-        " grid that is not drawn in map — the marks stay exactly where the cart saw them. A clear"
-        " would now throw away good evidence for nothing. The flag stays because the frame is one"
-        " word away from being map again, and there it is the right behaviour: the lidar tracker"
-        " did exactly this while it owned map -> odom (pepin.watch.JumpClear, written for the"
-        " camera-only return of 2026-09-16, where the pose lagged 1.4 m behind the cart and Nav2"
-        " spent 29 recoveries fighting marks placed at the poses before each correction). Even"
-        " then the other side of the trade was unmeasured: RTAB-Map corrects in centimetres at a"
-        " loop closure, which the costmap absorbs, and the raytracing of the live scans re-clears"
-        " a stranded mark within seconds anyway. The threshold and the gap are the tracker's"
-        " measured ones, inherited unchanged",
-        on_when="only together with a local costmap put back into the map frame, and then when a"
-        " drive is seen fighting a second copy of the room after a correction: recoveries at"
-        " obstacles that are not there, the grid holding marks offset from the live scans by the"
-        " size of the last jump",
-        off_when="the shipped state, and the only sane one while that costmap is in odom: a clear"
-        " there costs a controller its picture of the room and buys nothing",
-    ),
-    Flag(
-        "pose_topic",
-        True,
-        description=f"the pose this node reads out of TF is republished as {POSE_TOPIC}"
-        f" (geometry_msgs/PoseStamped in {MAP_FRAME}, {POSE_HZ:.0f} Hz, stamped with the"
-        " transform's own stamp), so the other nodes beside it can have the pose without a TF"
-        " listener of their own. Off, nothing is published and this node's listener goes back"
-        " to being started on the first ask",
-        why="a TF listener is a subscription to the whole /tf stream — RTAB-Map's map -> odom at"
-        " 20 Hz plus the board's odom -> base_link at 50 Hz plus the statics — deserialised in"
-        " Python whatever the reader wanted out of it. Two of them ran on a 4-core A53 to read"
-        " one pose now and then: this node's, for `where`, the preflight and the jump watch"
-        " (~22 % of a core), and pepin_bringup.run_recorder's 5 Hz read for the tape's `loc`"
-        " rows (~34 %), on a board measured at 252 % with the real-time loops starving"
-        " (2026-09-22). This node owns navigation and the jump watch, so its listener is the one"
-        " that stays and the tape reads the topic instead (run_recorder's loc_from)",
-        on_when="always where this node and the tape recorder share a machine: it is what lets"
-        " every other node there read the pose for the price of a 5 Hz PoseStamped",
-        off_when="to put the two independent listeners back for a comparison — turn this off"
-        " here and run_recorder's loc_from to tf, or the tape loses its pose rows",
-    ),
     Flag(
         "controller",
         "mppi",
@@ -216,8 +134,7 @@ FLAGS = FlagSet(
         description="a goal or a mark waits for the laptop's word"
         f" on {PLACEMENT_TOPIC} (pepin_bringup.rtabmap_frame, latched) that this start of"
         " RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and"
-        " nothing heard is refused like not placed. ros/tools/goto_ros.py asks this node for"
-        " this same flag before its own preflight. Off, a fresh map -> base_link is enough, as"
+        " nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as"
         " before 2026-09-23",
         why="on, measured 2026-09-23: after a restart RTAB-Map publishes map -> odom from the"
         " pose it SAVED at its last shutdown, and a fresh transform was taken for a localisation"
@@ -231,24 +148,6 @@ FLAGS = FlagSet(
         off_when="when the word cannot come and the cart is known to stand where RTAB-Map's pose"
         " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
         " on the checkout), or a dark room with no seed at hand",
-    ),
-    Flag(
-        "cancel_every_goal",
-        True,
-        description="a cancel on the socket also asks both navigators' own cancel services"
-        f" ({' and '.join(NAV_ACTIONS)}, <action>/_action/cancel_goal) for EVERY goal — a zero"
-        " goal id, whoever sent it — and answers what each said (``navigators``); off, it"
-        " cancels only the goal this node sent, as before 2026-09-25",
-        why="ros/goto.sh drives through ros/tools/goto_ros.py, a goal this node never sent, so"
-        " this cancel reached nothing, and goto.sh's own cancel started goto_ros.py on the board"
-        " mid-drive: a new ROS process is a new zenoh session, and each one stalled all laptop ->"
-        " board delivery for 2.6-3.1 s about 1.5 s after it started (34 of 39 cases, journal"
-        " 2026-09-25). Asked from this long-lived node the same cancel costs a socket write;"
-        f" one {CANCEL_CONFIRM_S:.0f} s deadline is shared by both navigators, as in goto_ros.py",
-        on_when="always: the operator's cancel means every goal on the board, whichever client"
-        " sent it",
-        off_when="to put the old answer back for a comparison — pepin.goal_link then finds no"
-        " navigators in the answer and ros/goto.sh cancel falls back to goto_ros.py",
     ),
 )
 
@@ -293,20 +192,18 @@ class GoalServer(Node):
         # (the pattern depth_fusion paid for on 2026-09-22, when a pair that met a half-built
         # node killed the executor and silenced the marks).
         self._up = False
-        self._places_path = Path(str(self.declare_parameter("places", "/maps/places.yaml").value))
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         self._port = int(self.declare_parameter("port", PORT).value)
         self._client = ActionClient(self, NavigateToPose, "navigate_to_pose")
         self._spin = ActionClient(self, Spin, "spin")
-        # Every goal on either navigator, whoever sent it (flag cancel_every_goal): the action
-        # servers' own cancel services, made once here so a cancel never waits for discovery.
+        # Every goal on either navigator, whoever sent it: the action servers' own cancel
+        # services, made once here so a cancel never waits for discovery.
         self._cancel_clients = {
             action: self.create_client(CancelGoal, f"/{action}/_action/cancel_goal")
             for action in NAV_ACTIONS
         }
         # The cart's pose: map -> base_link, RTAB-Map's correction composed with the board's own
-        # odometry. The listener behind it is started on the first ask (_tf_pose) or by the pose
-        # topic below, whichever comes first.
+        # odometry. The listener behind it is started by the pose topic below.
         self._tf: TfLookup | None = None
         self._gate = GoalGate()
         # THE ROOM'S PLACES, FROM THE GRAPH (World R). The laptop's places node republishes every
@@ -393,12 +290,11 @@ class GoalServer(Node):
         with contextlib.suppress(OSError):
             saved = self._planner_path.read_text().strip()
         self.pick_planner(saved or self.planner)
-        self._start_jump_watch()  # the map -> odom jump watch (flag jump_clear, default off)
-        self._start_pose_topic()  # /pose, the one pose topic (flag pose_topic)
+        self._start_pose_topic()  # /pose, the one pose topic
         threading.Thread(target=self._serve, daemon=True).start()
         self.get_logger().info(
             f"goal server ready on port {self._port} (pose: map -> base_link from TF);"
-            f" {self._pose_topic_note()};"
+            f" {POSE_TOPIC} at {POSE_HZ:.0f} Hz from map -> base_link, for the other readers;"
             f" {self._switches.state()}"
         )
         self._up = True  # last: everything above exists, the timers may run
@@ -425,10 +321,6 @@ class GoalServer(Node):
         with self._lock:
             driving = self._driving or self._spin_handle is not None
         return driving or any(self._nav_active.values())
-
-    def _clock_s(self) -> float:
-        """The node's clock in seconds."""
-        return float(self.get_clock().now().nanoseconds) * 1e-9
 
     @staticmethod
     def _wait(future: Any, timeout: float) -> Any:
@@ -540,19 +432,17 @@ class GoalServer(Node):
                     **pose,
                 },
             )
-        elif command == "mark":
-            self._send(connection, self.mark(str(request.get("name", ""))))
         elif command == "planner":
             self._send(connection, self.pick_planner(str(request.get("name", ""))))
         elif command == "cancel":
-            # Under cancel_every_goal this node's own goal is one of "every": its handle is only
-            # let go here, so the navigators' answer counts it once instead of rejecting a goal
-            # a second request had already put into canceling.
-            every = self._switches.on("cancel_every_goal")
-            answer: dict[str, Any] = {"event": "cancelled", "had_goal": self.cancel(send=not every)}
-            if every:
-                answer["navigators"] = self.cancel_every_goal()
-            self._send(connection, answer)
+            # This node's own goal is one of "every": its handle is only let go here, so the
+            # navigators' answer counts it once instead of rejecting a goal a second request had
+            # already put into canceling.
+            had_goal = self.cancel(send=False)
+            navigators = self.cancel_every_goal()
+            self._send(
+                connection, {"event": "cancelled", "had_goal": had_goal, "navigators": navigators}
+            )
         elif command == "go":
             self._go(request, connection)
         else:
@@ -583,23 +473,13 @@ class GoalServer(Node):
 
     def places(self) -> dict[str, dict[str, float]]:
         """The named places of the map in use: the graph's book, and ONLY it. Until the book has
-        been heard there are no places — a name is refused with that reason — unless
-        ``places_from_the_file`` asks for the yaml beside the map, the answer this server gave
-        before World R."""
-        if self._graph_places is not None:
-            return dict(self._graph_places)
-        if not self._switches.on("places_from_the_file"):
-            return {}
-        try:
-            data: dict[str, dict[str, float]] = json.loads(self._places_path.read_text())
-            return data
-        except (OSError, ValueError):
-            return {}
+        been heard there are no places — a name is refused with that reason."""
+        return {} if self._graph_places is None else dict(self._graph_places)
 
     def _why_no_place(self, name: str) -> str:
         """The refusal for a name that cannot be answered, saying which of the two it is: the
         book has not arrived at all, or it has and the name is not in it."""
-        if self._graph_places is None and not self._switches.on("places_from_the_file"):
+        if self._graph_places is None:
             return (
                 f"no place {name!r} yet: the graph's book of places has not arrived from the"
                 " laptop (is ros/laptop.sh vslam up, and has RTAB-Map published its first graph?)"
@@ -617,9 +497,8 @@ class GoalServer(Node):
         (``age_s``). Empty when nobody publishes it."""
         wait = TF_WAIT_S
         if self._tf is None:
-            # Started on the first ask when the pose topic did not start it: a TF listener is a
-            # subscription to /tf, sixty messages a second on the board. Its buffer starts
-            # empty, so this one lookup waits longer.
+            # Started on the first ask when the pose topic has not started it yet. Its buffer
+            # starts empty, so this one lookup waits longer.
             self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
         transform = self._tf.transform(MAP_FRAME, BASE_FRAME, timeout_s=wait)
         if transform is None:
@@ -635,30 +514,16 @@ class GoalServer(Node):
     def _ready(self, pose: dict[str, float] | None = None) -> Readiness:
         """May a goal start now (:class:`pepin.watch.GoalGate`): the age of map -> base_link, and
         whether this start of RTAB-Map is placed (flag ``start_needs_placement``). ``pose`` is a
-        reading already taken by the caller (mark's), so the edge is not looked up twice."""
+        reading already taken by the caller, so the edge is not looked up twice."""
         edge = self._tf_pose() if pose is None else pose
-        ready = self._gate.verdict(None, edge.get("age_s"))
+        ready = self._gate.verdict(edge.get("age_s"))
         if ready.ready:
             placed = Preflight.placement(
                 self._placement_standing(), asked=self._switches.on("start_needs_placement")
             )
             if not placed.ok:
-                return Readiness(False, tracker=False, rule=BY_PLACEMENT, reason=placed.detail)
+                return Readiness(False, rule=BY_PLACEMENT, reason=placed.detail)
         return ready
-
-    def mark(self, name: str) -> dict[str, Any]:
-        """Remember where the robot stands as ``name``; refused on the same evidence a goal is
-        — a stale transform, or a start of RTAB-Map nobody has placed."""
-        pose = self._pose_now()
-        if not name or not pose:
-            return {"event": "error", "detail": "no name, or nothing answered about the pose"}
-        ready = self._ready(pose)  # the same reading the mark is written from, not a second one
-        if not ready.ready:
-            return {"event": "error", "detail": ready.reason}
-        places = self.places()
-        places[name] = {k: round(pose[k], 3) for k in ("x", "y", "yaw_deg")}
-        self._places_path.write_text(json.dumps(places, indent=2, sort_keys=True) + "\n")
-        return {"event": "marked", "name": name, **places[name]}
 
     def pick_planner(self, name: str) -> dict[str, Any]:
         """Choose the planner, the controller that follows it (flag ``controller``) and the goal
@@ -918,25 +783,22 @@ class GoalServer(Node):
             )
         return None
 
-    # ---- the one pose topic (flag pose_topic) -------------------------------------------------
+    # ---- the one pose topic --------------------------------------------------------------------
     def _start_pose_topic(self) -> None:
         """Wire ``/pose``: the cart's pose in ``map``, five times a second, out of the TF
         listener this node already owns.
 
         The listener is built HERE, in the constructor, rather than on the first ask: this timer
-        wants it from the first tick, and it is the one listener the stack keeps (the flag's
-        ``why``). It starts a spin thread for this node, which is why ``_up`` guards the tick.
+        wants it from the first tick, and it is the one listener the stack keeps — a TF listener
+        is a subscription to the whole /tf stream, deserialised in Python whatever the reader
+        wanted out of it, and two of them (this node's and the tape recorder's) cost a board
+        measured at 252 % about 56 % of a core (2026-09-22). It starts a spin thread for this
+        node, which is why ``_up`` guards the tick.
         """
         self._pose_pub = self.create_publisher(PoseStamped, POSE_TOPIC, 5)
         if self._tf is None:
             self._tf = TfLookup(self)
         self.create_timer(1.0 / POSE_HZ, self._publish_pose)
-
-    def _pose_topic_note(self) -> str:
-        """Where the other nodes get the pose from, in one phrase for the start line."""
-        if not self._switches.on("pose_topic"):
-            return f"{POSE_TOPIC} off: every reader of the pose parses /tf for itself"
-        return f"{POSE_TOPIC} at {POSE_HZ:.0f} Hz from map -> base_link, for the other readers"
 
     def _publish_pose(self) -> None:
         """One pose onto ``/pose``, or nothing at all: this is a relay of an edge, never a
@@ -947,7 +809,7 @@ class GoalServer(Node):
         buffer and never waited for: this runs on the executor thread, beside the socket's own
         callbacks, and a missing edge is simply no message.
         """
-        if not self._up or not self._switches.on("pose_topic") or self._tf is None:
+        if not self._up or self._tf is None:
             return
         transform = self._tf.transform(MAP_FRAME, BASE_FRAME, None, 0.0)
         if transform is None:
@@ -960,64 +822,6 @@ class GoalServer(Node):
         message.pose.position.z = transform.transform.translation.z
         message.pose.orientation = transform.transform.rotation
         self._pose_pub.publish(message)
-
-    # ---- the map -> odom jump watch (flag jump_clear) -----------------------------------------
-    def _start_jump_watch(self) -> None:
-        """Wire the jump watch: the rules (:class:`pepin.watch.JumpClear`), a client of Nav2's
-        clearing service and a 5 Hz timer that reads ``map -> odom``.
-
-        The watch lives HERE because this node is the one on the board that is awake between goals
-        and already owns a TF path. It used to live in the lidar tracker, which published that edge
-        itself and could watch its own steps; RTAB-Map owns it now, and a correction nobody watches
-        leaves the local costmap holding a copy of the room offset by the jump."""
-        self._jumps = JumpClear(self._clear_local_costmap, min_gap_s=CLEAR_MIN_GAP_S)
-        self._clear_costmap = self.create_client(ClearEntireCostmap, CLEAR_LOCAL_COSTMAP)
-        self._clears = 0
-        self.create_timer(1.0 / JUMP_WATCH_HZ, self._watch_map_odom)
-
-    def _watch_map_odom(self) -> None:
-        """Five times a second: the newest ``map -> odom`` TF holds, into the watch.
-
-        Nothing at all happens while ``jump_clear`` is off — not even the TF listener is started,
-        which is the point of starting it here rather than in the constructor: a listener is a
-        subscription to ``/tf``, sixty messages a second on the board. The first reading after the
-        flag goes on is the watch's baseline and never a jump.
-
-        The edge is read from whatever is in the buffer, never waited for: this runs on the
-        executor thread, beside the socket's own callbacks. A missing edge is simply no reading.
-        """
-        if not self._switches.on("jump_clear"):
-            return
-        if self._tf is None:
-            self._tf = TfLookup(self)
-        transform = self._tf.transform(MAP_FRAME, ODOM_FRAME, None, 0.0)
-        if transform is None:
-            return
-        self._jumps.moved(
-            (
-                transform.transform.translation.x,
-                transform.transform.translation.y,
-                yaw_of(transform.transform.rotation),
-            ),
-            time.monotonic(),
-        )
-
-    def _clear_local_costmap(self, jump_m: float) -> None:
-        """Ask Nav2 to empty its local costmap because ``map -> odom`` has just stepped
-        ``jump_m``: the marks in that grid were laid where the cart used to be
-        (:class:`pepin.watch.JumpClear` decides when).
-
-        The call is asynchronous and its answer is never waited for — this runs on the executor
-        thread, which the socket handler and the drive both need — and it is the only line this
-        watch logs, so the flag's state and the count are in it."""
-        self._clears += 1
-        self._clear_costmap.call_async(ClearEntireCostmap.Request())
-        self.get_logger().info(
-            f"map -> odom jumped {jump_m:.2f} m: local costmap cleared, its marks were laid at the"
-            f" old pose ({self._clears} clears this run; jump_clear=on,"
-            f" jump {self._jumps.clear_costmap_jump_m:.2f} m, no oftener than"
-            f" {CLEAR_MIN_GAP_S:.0f} s)"
-        )
 
     def _pose_msg(self, x: float, y: float, yaw_deg: float) -> PoseStamped:
         """A goal pose in the map frame."""

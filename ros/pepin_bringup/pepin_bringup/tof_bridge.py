@@ -8,10 +8,10 @@ got no return; ROS wants metres and, by convention, ``+inf`` for "nothing
 within max_range"; a reading equal to max_range means "nothing seen", which is
 what a costmap clears the cone on.
 
-EACH CONE ALSO LEAVES AS A LaserScan (2026-09-21, the ``range_as`` flag), and that is how Nav2
-is fed now: ``/tof/<name>/scan``, a small fan in the sensor's own frame, read by an
-``ObstacleLayer``. Nav2 Jazzy's ``RangeSensorLayer`` — the plugin written for exactly this
-message — carries two unfixed defects that have each taken this robot's navigation down:
+EACH CONE ALSO LEAVES AS A LaserScan (since 2026-09-21), and that is how Nav2 is fed:
+``/tof/<name>/scan``, a small fan in the sensor's own frame, read by an ``ObstacleLayer``.
+Nav2 Jazzy's ``RangeSensorLayer`` — the plugin written for exactly this message — carries two
+unfixed defects that have each taken this robot's navigation down:
 
 1. it calls ``canTransform(..., the message's stamp, timeout=transform_tolerance)`` once per
    message, and tf2 blocks the WHOLE timeout on any failure, so a broken chain buries
@@ -24,8 +24,8 @@ message — carries two unfixed defects that have each taken this robot's naviga
    the loop runs for ever holding the costmap's mutex: one thread at 100 %, "Pose Goes Off
    Grid", every service timing out, zero plans. It takes a jump of the pose in ``map`` between
    a Range's stamp and the costmap update — a tracker restart, a relocalisation, the cart
-   carried by hand — and it was reproduced on this robot on 2026-09-21 with
-   ``ros/thin.sh kick relocalizer`` (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
+   carried by hand — and it was reproduced on this robot on 2026-09-21 by restarting the
+   relocaliser (tid 191 of the Nav2 container: 415 s of CPU in 700 s).
    The jump happens AFTER the reading has left, so no publisher could hold it off.
 
 An ``ObstacleLayer`` has neither defect: its MessageFilter drops what it cannot place instead
@@ -33,9 +33,8 @@ of blocking on it, its queue is bounded, and it walks the points it was given ra
 cell rectangle. What it costs is that a cone must arrive as points — hence the fan, one beam
 every cell-width of arc at the sensor's ceiling (:func:`pepin.tof_horizon.cone_beams`), every
 beam carrying the one distance the sensor measured, because a whisker cannot say where across
-its 27 degrees the thing stands and the honest mark is the whole arc. The old layers stay in
-ros/params/nav2_params.yaml, unlisted; ``range_as:=range`` and one line of ``plugins:`` put
-them back (CLAUDE.md rule 19).
+its 27 degrees the thing stands and the honest mark is the whole arc. The Range-only node and
+the RangeSensorLayer blocks are in git history (before 2026-10-02).
 
 THE PUBLISHER DOES NOT GUARD THE CONSUMER (2026-09-22). For one day this node carried two more
 switches against defect 1: a ``tf_gate`` that withheld every reading while ``map <- base_link``
@@ -57,14 +56,8 @@ rmw_zenoh a subscriber that matched a moment too early or too late never gets a 
 So a range in ``tof_left`` lands in the right place without anyone having to know where the
 shelf is.
 
-One live flag is left (:data:`FLAGS`, ``ros/flags.sh set tof_bridge ...``):
-
-``range_as``
-    ``scan`` (the default) publishes each cone on ``/tof/<name>/scan`` as well, for the
-    ObstacleLayer that feeds Nav2 now; ``range`` is the node as it was, the Range topics alone.
-    The sensor_msgs/Range is published EITHER WAY and unchanged: it is what the run recorder
-    tapes (run_recorder.py:261) and what Foxglove draws, and the three of them together cost
-    less than one lidar revolution.
+The sensor_msgs/Range is published beside each fan, unchanged: it is what the run recorder tapes
+and what Foxglove draws, and the three of them together cost less than one lidar revolution.
 """
 
 from __future__ import annotations
@@ -80,13 +73,12 @@ from rclpy.node import Node
 from sensor_msgs.msg import LaserScan, Range
 from tf2_ros import StaticTransformBroadcaster
 
-from pepin.flags import Flag, FlagSet
 from pepin.footprint import CONTACT_BAND_M
 from pepin.mounts import TOF_FRAME, Mount, Mounts
 from pepin.tof_horizon import RangeHold, cone_beams, trusted_max_range
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.msgs import scan_from_ranges, transform_from_rpy
-from pepin_bringup.node_kit import Switches, spin_main
+from pepin_bringup.node_kit import spin_main
 from pepin_bringup.protocol import TOF_NAMES, parse_tof, parse_tof_status
 
 # VL53L1X: a ~27 deg cone, 4 cm dead zone, 1.3 m in short mode (the mode the board runs).
@@ -112,44 +104,6 @@ _QUEUE_MAX = 100
 # A reading is stamped this far behind "now": it is at least that old (sensor -> ToF server ->
 # TCP -> here), and a stamp behind the newest odom -> base_link never makes a costmap wait.
 _STAMP_LAG_S = 0.06
-
-# The live flags (CLAUDE.md rule 19), declared last in __init__ so the kit's callback sees no
-# other declaration, and printed in every report line.
-FLAGS = FlagSet(
-    Flag(
-        "range_as",
-        "scan",
-        choices=("scan", "range"),
-        description="what Nav2 is fed with: scan also publishes each cone on /tof/<name>/scan as"
-        " a small LaserScan fan for an ObstacleLayer; range publishes nothing there, which is the"
-        " node before 2026-09-21 and needs the three RangeSensorLayer blocks back in the local"
-        " costmap's plugins list. The sensor_msgs/Range topics are published either way",
-        why="nav2_costmap_2d::RangeSensorLayer carries two defects that are both unfixed on main"
-        " and have each stopped this robot. One: it asks tf2 to transform every message at the"
-        " message's own stamp with transform_tolerance as the timeout, and tf2 blocks the whole"
-        " timeout on any failure, so a broken chain amplifies 4.5x per update cycle until"
-        " updateMap never returns (4 of 7 board starts on 2026-09-21; scratch/nav2_hang/"
-        "wedge_gain.py). Two: after clamping its cell"
-        " bounds to the grid (range_sensor_layer.cpp:362-369) bx1/by1 stay NEGATIVE when the cone"
-        " falls off the left or bottom edge, and the loops cast them to unsigned: about 4e9"
-        " iterations holding the costmap mutex, one thread at 100 % for ever, 'Pose Goes Off"
-        " Grid', every service timing out and zero plans. It takes one jump of the pose in map"
-        " between a reading's stamp and the update — a tracker restart, a relocalisation, the"
-        " cart carried by hand — and no publisher can gate it, because the jump happens after"
-        " the reading has left. Reproduced on 2026-09-21 with ros/thin.sh kick relocalizer (tid"
-        " 191 of the Nav2 container: 415 s of CPU in 700 s). An ObstacleLayer drops what it"
-        " cannot place instead of blocking on it and walks points instead of a cell rectangle, so"
-        " it has neither; the fan is what turns one distance into points, one beam per costmap"
-        " cell of arc at the sensor's ceiling (pepin.tof_horizon.cone_beams: 11 beams front, 7"
-        " and 7 at the sides), every beam carrying that distance",
-        on_when="always while Nav2 reads the ToF: it is the arrangement with no unbounded loop"
-        " and no blocking transform in it",
-        off_when="to compare against the old plugin, or if an ObstacleLayer ever proves worse at"
-        " a cone than the range layer was — put tof_front_layer, tof_left_layer and"
-        " tof_right_layer back into the local costmap's plugins list at the same time, or the"
-        " whiskers reach no costmap at all",
-    ),
-)
 
 
 def _status_key(item: tuple[int | None, int]) -> tuple[int, int]:
@@ -185,7 +139,7 @@ def fan_scan(value_m: float, ceiling_m: float, stamp: Any, frame_id: str) -> Any
 
 class TofBridge(Node):
     """Bridges the ToF server to ROS: /tof/front, /tof/left, /tof/right, the scan fan of each
-    (/tof/<name>/scan, with ``range_as`` at ``scan``) and the three sensor frames."""
+    (/tof/<name>/scan) and the three sensor frames."""
 
     def __init__(self) -> None:
         """Declare parameters, publish the sensor frames, and start reading the ToF server."""
@@ -197,9 +151,6 @@ class TofBridge(Node):
         self._range_pubs = {
             name: self.create_publisher(Range, f"tof/{name}", 10) for name in TOF_NAMES
         }
-        # The fans exist whatever ``range_as`` says: a publisher nobody writes to costs an entry
-        # in the graph, and the flag has to be live in BOTH directions — turning it back to
-        # ``scan`` on a running robot must put the cones on the wire on the next reading.
         self._scan_pubs = {
             name: self.create_publisher(LaserScan, _SCAN_TOPIC.format(name=name), 10)
             for name in TOF_NAMES
@@ -245,16 +196,12 @@ class TofBridge(Node):
         self._last_valid = dict.fromkeys(TOF_NAMES, time.monotonic())  # judged from startup
         self._warned = dict.fromkeys(TOF_NAMES, False)
         self._status_counts: dict[str, dict[int | None, int]] = {n: {} for n in TOF_NAMES}
-        # The switches are built after the LAST ordinary declare_parameter: the kit's callback
-        # runs on declarations too and refuses every name that is not a flag.
-        self._switches = Switches(self, FLAGS)
         self.create_timer(_STATUS_REPORT_S, self._report_status)
         self.get_logger().info(
             "tof ceilings: "
             + ", ".join(
                 f"{n} {self._ceiling[n]:.2f} m ({self._fan[n][2]} beams)" for n in TOF_NAMES
             )
-            + f"; flags: {self._switches.state()}"
         )
 
         self._link = JsonLineLink(host, port, self._enqueue_ranges, name="tof server")
@@ -327,9 +274,7 @@ class TofBridge(Node):
             )
             report.append(f"{name} [{share}]")
             self._status_counts[name] = {}
-        self.get_logger().info(
-            "tof status " + "; ".join(report) + f"; flags: {self._switches.state()}"
-        )
+        self.get_logger().info("tof status " + "; ".join(report))
 
     def _publish_pending(self) -> None:
         """ROS thread: publish every reading the reader queued, then report link changes.
@@ -353,16 +298,14 @@ class TofBridge(Node):
     ) -> None:
         """One sensor's reading on both faces of this bridge at ``stamp`` (the whole line's, so
         the three sensors agree about the moment): the sensor_msgs/Range it has always
-        published, and — with ``range_as`` at ``scan`` — the same cone as a fan for Nav2's
-        ObstacleLayer.
+        published, and the same cone as a fan for Nav2's ObstacleLayer.
 
         The verdict is taken ONCE, here, so the two messages can never disagree about what the
         sensor said.
         """
         value = self._verdict(name, distance_m, status)
         self._publish_range(name, value, stamp)
-        if self._switches["range_as"] == "scan":
-            self._publish_scan(name, value, stamp)
+        self._publish_scan(name, value, stamp)
 
     def _verdict(self, name: str, distance_m: float | None, status: int | None) -> float:
         """What sensor ``name`` says right now, in metres: the return itself, the last one while

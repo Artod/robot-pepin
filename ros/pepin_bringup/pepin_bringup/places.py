@@ -41,8 +41,10 @@ A MARK NEEDS A POSE AND A GRAPH: ``map -> base_link`` fresher than :data:`BELIEF
 carries no covariance, so freshness is the whole of the evidence), and a graph that has
 recognised the room at all, or ``set_label`` 0 has no node to hang the name on.
 
-The flags (:data:`FLAGS`, ``ros/flags.sh set places <flag> <value>``): ``publish_places``,
-``label_nodes``.
+A mark also sets RTAB-Map's own label on the node (``set_label``): it costs one service call and
+is the only name RTAB-Map itself understands. It is NOT the storage and this node never reads it
+back as one: beside a loaded database nothing is written (Mem/IncrementalMemory false) and a
+label on a node in the working memory only flips a dirty bit (Signature.h:76).
 """
 
 from __future__ import annotations
@@ -59,7 +61,6 @@ from rtabmap_msgs.msg import MapGraph
 from rtabmap_msgs.srv import ListLabels, RemoveLabel, SetLabel
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet
 from pepin.odometry import Pose2D
 from pepin.places import (
     MARK_TOPIC,
@@ -72,7 +73,7 @@ from pepin.places import (
     save_graph_places,
 )
 from pepin_bringup.msgs import stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, TfLookup, spin_main
+from pepin_bringup.node_kit import TfLookup, spin_main
 
 RATE_HZ = 1.0  # the republish beat: /rtabmap/mapGraph itself comes about once a second
 MAP_FRAME = "map"
@@ -93,39 +94,6 @@ BELIEF_FRESH_S = 3.0
 # to last node"; beside a loaded database, the node nearest the last localisation).
 HERE = 0
 MARKS_REMEMBERED = 32  # ids of requests already answered, so a repeat cannot mark twice
-
-FLAGS = FlagSet(
-    Flag(
-        "publish_places",
-        True,
-        description=f"the resolved places are published on {PLACES_TOPIC} whenever the graph"
-        " moves; off, the book is still kept and marked but nothing is published and every"
-        " consumer falls back to the coordinates beside the map",
-        why="default by design, unmeasured: it is the one output of this node. The switch exists"
-        " to prove which book a drive resolved a name from — with it off, ros/goto.sh printer must"
-        " print the fallback warning and reach the same furniture, which is the A/B between a"
-        " place that rides its node and a coordinate that does not",
-        on_when="always: a coordinate written before a loop closure names a spot beside the"
-        " furniture rather than in front of it",
-        off_when="for that A/B, and if a resolved place is ever seen further from the furniture"
-        " than the file's own coordinate",
-    ),
-    Flag(
-        "label_nodes",
-        True,
-        description="a mark also sets RTAB-Map's own label on the node (set_label), which is what"
-        " makes the place a thing in its tools and in its set_goal; off, only our own book records"
-        " the node id and the offset",
-        why="on, because the label costs one service call and is the only name RTAB-Map itself"
-        " understands. It is NOT the storage and this node never reads it back as one: beside a"
-        " loaded database nothing is written (Mem/IncrementalMemory false) and a label on a node in"
-        " the working memory only flips a dirty bit (Signature.h:76), so a label set while"
-        " localising never reaches the file. list_labels is still called with it off — it is the"
-        " only way to learn which node RTAB-Map considers the current one",
-        on_when="always beside a database that may be written; it costs nothing where it cannot",
-        off_when="on a database that must not be touched at all, even by a dirty bit",
-    ),
-)
 
 
 @dataclass(frozen=True)
@@ -162,11 +130,9 @@ class Places(Node):
 
     def __init__(self) -> None:
         super().__init__("places")
-        # Which database the places hang on, declared before the flags the way every node here
-        # declares its startup parameters: a node id means nothing without it, so a SLAM session
-        # writing its own file gets its own book and can never claim the known map's names.
+        # Which database the places hang on: a node id means nothing without it, so a SLAM
+        # session writing its own file gets its own book and can never claim the known map's names.
         self._database = Path(str(self.declare_parameter("database", DATABASE).value))
-        self._switches = Switches(self, FLAGS)
         self._book = graph_places_path(self._database)
         self._places: dict[str, GraphPlace] = load_graph_places(self._book)
         self._poses: dict[int, Pose2D] = {}  # the graph's optimised node poses, in map
@@ -202,7 +168,7 @@ class Places(Node):
             f"places up: {len(self._places)} in {self._book}, republished on {PLACES_TOPIC}"
             f" whenever {GRAPH_TOPIC} moves them; mark on {MARK_TOPIC}, answered on"
             f" {MARKED_TOPIC}; a place is the cart's pose relative to its labelled node, so it"
-            f" rides the node when the graph bends; flags: {self._switches.state()}"
+            " rides the node when the graph bends"
         )
 
     # ---- inputs ------------------------------------------------------------------------------
@@ -250,16 +216,11 @@ class Places(Node):
         if refusal is not None:
             self._answer(request, ok=False, detail=refusal)
             return
-        if self._switches.on("label_nodes") and not (
-            self._forgetter.service_is_ready() and self._labeller.service_is_ready()
-        ):
+        if not (self._forgetter.service_is_ready() and self._labeller.service_is_ready()):
             self._answer(request, ok=False, detail=f"{SET_LABEL_SERVICE} is not answering")
             return
         if not self._lister.service_is_ready():
             self._answer(request, ok=False, detail=f"{LIST_LABELS_SERVICE} is not answering")
-            return
-        if not self._switches.on("label_nodes"):
-            self._list(request)
             return
         # ONE AFTER THE OTHER, each on the answer of the one before. Sent together they race:
         # live on 2026-09-19 RTAB-Map logged "List labels service: 1 labels found" 4 ms BEFORE
@@ -368,8 +329,6 @@ class Places(Node):
         moved resolves to the same numbers, so an unchanged book costs nothing. ``force`` is a fresh
         mark, which must go out even if its numbers happen to match.
         """
-        if not self._switches.on("publish_places"):
-            return
         payload = places_json(self._places, self._poses)
         if payload == self._published and not force:
             return
@@ -384,7 +343,7 @@ class Places(Node):
             f"places: {len(self._places)} in {self._book}, {answerable} the graph can place"
             f" ({self._graphs} graphs, {len(self._poses)} nodes); {self._marks} marked,"
             f" {self._refused} refused; last {self._last or 'nothing asked yet'};"
-            f" cart {self._cart_text()}; flags: {self._switches.state()}"
+            f" cart {self._cart_text()}"
         )
 
     def _cart_text(self) -> str:

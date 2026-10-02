@@ -54,7 +54,7 @@ rtabmap_slam ALSO applies every change it hears on its own ``/parameter_events``
 (CoreWrapper.cpp:907-970, the same launch-table filter): a ``set_parameters`` request of five names
 lands as five notifications and five ``parseParameters``, a ``set_parameters_atomically`` request
 as one (measured 2026-09-24, scratch/xfeat_critic/atomic_set.sh) — so a set that must land whole
-goes atomically (``atomic_parameter_sets`` in pepin_bringup.rtabmap_frame).
+goes atomically (pepin_bringup.rtabmap_frame sends nothing else).
 
 THE MEMORY. RTAB-Map has two memories. In MAPPING mode every update may become a node in the
 database; in LOCALISATION mode nothing is written and the graph only recognises what it already
@@ -66,26 +66,17 @@ database grew a session per launch, its sessions ended up 1.6 m and 129 degrees 
 then rejected its own correct recognitions on ``RGBD/OptimizeMaxError``, and a parked cart kept a
 node a second — 250 junk nodes in one evening. ALWAYS LOCALISING can never learn a new room.
 
-So two conditions, in the order a person would ask them:
-
-* SHARPNESS — the tracker's own published covariance, of this moment, under
-  :func:`seating_refusal`. A lidar-held pose passes at 1-2 cm; a mono camera-only pose held by
-  graph words sits at a sigma around 20 cm and fails by itself, with nothing here naming it;
-* THE PUPIL IS NOT THE TEACHER — whoever HOLDS the pose must not be the graph. The holder is read
-  off the board's own per-source report (:func:`pepin.watch.source_words`,
-  :meth:`pepin.watch.Preflight.holding`), so no rule here spells "lidar" and a stereo matcher
-  good to a few centimetres will teach the database the day it exists.
-
-A fit is not an error bar, which is why the sharpness test reads the covariance and not the score:
-at the charger, along a sofa, the lidar's seatings spread up to 55 cm in y at fit 0.67-0.79,
-because the scan there is pinned in one axis only.
+So two conditions, in the order a person would ask them: SHARPNESS (the pose's own error bar
+says it is pinned) and THE PUPIL IS NOT THE TEACHER (whoever HOLDS the pose must not be the graph).
+:class:`ModeRule` takes both as readings; ``pepin_bringup.rtabmap_frame`` runs it pinned to
+localising (``ALWAYS_LOCALISE``). The seating test that read the board tracker's covariance is on
+the tag alt/tracker-2026-09-22.
 
 Nothing here is ROS: a refusal, a holder name and a clock in; a verdict out.
 """
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 __all__ = [
@@ -105,8 +96,6 @@ __all__ = [
     "PNP_REPROJ_RANGE_PX",
     "PROXIMITY_STOCK",
     "REGISTRATION_PARAMETERS",
-    "SHARP_SIGMA_DEG",
-    "SHARP_SIGMA_M",
     "STRATEGY_ICP",
     "STRATEGY_VIS",
     "STRATEGY_VISICP",
@@ -116,9 +105,7 @@ __all__ = [
     "ModeVerdict",
     "StrategyRule",
     "StrategyVerdict",
-    "describe_sigma",
     "registration_verdict",
-    "seating_refusal",
     "visual_parameters",
 ]
 
@@ -171,8 +158,8 @@ STRATEGY_NAMES = {
 # KNOWN COST of refined links, measured 2026-09-14 beside a known map: a refined link carries
 # ICP's own tiny covariance (median 0.75 cm / 0.135 deg), and RGBD/OptimizeMaxError then rejects a
 # closure that asks more than ~2 cm of any one of them — every closure ACROSS two sessions did.
-# Watch the log for "Rejecting all added loop closures"; the launch's neighbor_refining argument
-# and graph_memory are the ways out.
+# Watch the log for "Rejecting all added loop closures"; RTABMAP's RGBD/NeighborLinkRefining
+# (vslam.launch.py) and graph_memory are the ways out.
 #
 # Grid/Sensor DOES NOT TRAVEL WITH THEM — it did for half a day and that was wrong (2026-09-19,
 # first camera-only drive under World R). A change of Grid/Sensor makes RTAB-Map re-render its
@@ -320,54 +307,9 @@ def visual_parameters(
     }
 
 
-# What a seating must be worth for the database to be taught from it. The peak's own covariance is
-# the error bar (/tracker_pose, covariance=peak, NEES-calibrated), so the test waits for a seating
-# the scan pins in BOTH axes. 3 cm because that is where the gate starts to be a gate: over tapes
-# 0293-0298 the worse of the two position sigmas has a median of 1.50 cm and a p90 of 3.18 cm, so
-# 3 cm refuses the worst 11 % of seatings and 1 cm would refuse 79 % — a database that can never be
-# taught is its own failure. One degree of heading is 7 cm at the far wall of this flat, and the
-# lidar's heading sigma at a sharp seating is 0.06-1.14 deg (median 0.4) over the same tapes.
-SHARP_SIGMA_M = 0.03
-SHARP_SIGMA_DEG = 1.0
-
 MAPPING, LOCALISING = "mapping", "localising"
 # The three settings of the override: let the rule decide, or pin one mode.
 BY_TRUST, ALWAYS_MAP, ALWAYS_LOCALISE = "trust", "map", "localise"
-
-
-def describe_sigma(sigma: tuple[float, float, float] | None) -> str:
-    """One seating's uncertainty for a report line: ``1.0/1.3 cm, 0.30 deg`` (x, y, heading),
-    or ``unknown`` when the belief carried no covariance."""
-    if sigma is None:
-        return "unknown"
-    return f"{sigma[0] * 100.0:.1f}/{sigma[1] * 100.0:.1f} cm, {math.degrees(sigma[2]):.2f} deg"
-
-
-def seating_refusal(
-    sigma: tuple[float, float, float] | None,
-    max_sigma_m: float = SHARP_SIGMA_M,
-    max_sigma_deg: float = SHARP_SIGMA_DEG,
-) -> str | None:
-    """Why this seating is not sharp enough to teach from, in one phrase for a log, or ``None``
-    when it is.
-
-    ``sigma`` is the tracker's own error bar at the moment — the roots of its covariance diagonal
-    (x, y in metres, heading in radians). The seating must be sharp in BOTH position axes, not
-    merely well-matched: a scan sliding along a corridor reports an honest fit and a metre of
-    freedom in the other axis.
-    """
-    if sigma is None:
-        return "the tracker's belief carries no covariance"
-    if max(sigma[0], sigma[1]) > max_sigma_m:
-        return (
-            f"the lidar's seating is soft ({describe_sigma(sigma)}, over"
-            f" {max_sigma_m * 100.0:.1f} cm)"
-        )
-    if math.degrees(sigma[2]) > max_sigma_deg:
-        return (
-            f"the lidar's heading is soft ({describe_sigma(sigma)}, over {max_sigma_deg:.1f} deg)"
-        )
-    return None
 
 
 @dataclass(frozen=True)

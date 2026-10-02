@@ -1,8 +1,8 @@
 #!/bin/bash
 # One command per sensor, for the redundancy demo: the lidar and the camera go on and off while
 # the robot runs, in what writes into the costmaps (the per-sensor layers of
-# ros/params/nav2_params.yaml, on the local and the global costmap alike). The board tracker's
-# `sources` half of this switch is on the tag alt/tracker-2026-09-22.
+# ros/params/nav2_params.yaml, on the local and the global costmap alike). What RTAB-Map's
+# snapshots carry is sensor_pack's `sources` flag.
 #   ros/sensor.sh status            which layers are on, what is fresh
 #   ros/sensor.sh lidar on|off      the lidar as lidar_layer
 #   ros/sensor.sh lidar off --hard  ... and the driver deactivated: /scan stops, a real absence
@@ -213,7 +213,7 @@ switch() {  # SENSOR on|off [--hard]: the layers and, for the lidar, the driver
             # REFUSED since 2026-09-24: deactivating the LD19 driver ABORTS its process ("*** bit
             # out of range 0 - FD_SETSIZE on fd_set ***", exit -6, a select() on the descriptor its
             # own close invalidated). In the shared sensors_container of before that took the wheels
-            # and the IMU down for hours; in the split one (sensor_split) the lidar process simply
+            # and the IMU down for hours; in its own lidar_container the lidar process simply
             # respawns 2 s later and the driver is active again, so a hard off can hold neither way.
             # A camera-only cart is 'lidar off' (the layers) plus sensor_pack sources=camera; a dead
             # lidar is simulated by killing the lidar_container process (it respawns).

@@ -19,7 +19,7 @@
 # done by the script instead of by hand.
 #
 # Exit status: 1 if any check failed (or, for `reopen`, if the link could not be opened).
-# PEPIN_FOXGLOVE_HOST / _PORT move the bridge; PEPIN_FOXGLOVE_LAYOUT names a layout file.
+# PEPIN_FOXGLOVE_HOST / _PORT move the bridge.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 CONTAINER="${PEPIN_FOXGLOVE_CONTAINER:-pepin-vslam}"
@@ -66,7 +66,7 @@ check() {
         [ "$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null)" = true ]; then
         line true "$CONTAINER is up since $started (it carries the bridge)"
     else
-        line false "$CONTAINER is not running — nothing serves Foxglove (ros/laptop.sh vslam --neck)"
+        line false "$CONTAINER is not running — nothing serves Foxglove (ros/laptop.sh vslam)"
         started=""
     fi
 

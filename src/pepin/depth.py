@@ -525,44 +525,6 @@ def beam_pairs(
     return np.asarray(depth, dtype=float)[rows, cols], samples[hits, 2]
 
 
-REF_SIGMA_INV = 0.005  # 1/m: the inverse-depth noise a weight of 1 stands for. It is a lidar
-# beam of 2 cm at 2 m. Nothing depends on the value itself — a weighted fit is invariant to a
-# common factor — only on every ruler being weighed against the SAME one.
-
-
-def pair_weight(sigma_inv: Array, cap: float | None = None) -> Array:
-    """The weight a pair deserves in a fit from its own inverse-depth noise: ``1 / sigma^2``
-    expressed against :data:`REF_SIGMA_INV`, so a pair as precise as a lidar beam at 2 m weighs
-    1 and one twice as noisy weighs a quarter. ``cap`` bounds it from above.
-
-    The fit lives in inverse depth, so this is where a ruler's noise belongs: a ruler with a
-    constant noise in METRES is not equally good at every range there — a beam of 1.5 cm at
-    1 m is 0.015 in inverse depth and the same beam at 3 m is 0.0017, eight times better.
-
-    What this is NOT is the variance of the residual being minimised. The fit regresses the
-    network's noisy 1 / D on the ruler's 1 / z and takes the ruler as exact
-    (:func:`fit_affine`), so the residual's own noise is the NETWORK's — 0.02-0.10 of inverse
-    depth at a few per cent of range, above a beam's 0.0002-0.023 everywhere. The weight is
-    therefore a RELATIVE TRUST between rulers, sound for ranking a 7-10 cm corner against a
-    1.5 cm beam and unsound for ranking beam against beam by range: applied inside one ruler it
-    tilts the law as z^4 and measured worse on the lidar alone
-    (:data:`pepin.depth_pipeline.LIDAR_SIGMA_M`, 2026-09-15)."""
-    sigma = np.asarray(sigma_inv, dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        w = np.where(np.isfinite(sigma) & (sigma > 0.0), (REF_SIGMA_INV / sigma) ** 2, 0.0)
-    out: Array = w if cap is None else np.minimum(cap, w)
-    return out
-
-
-def inverse_sigma(sigma_m: float | Array, z: Array) -> Array:
-    """The inverse-depth noise of a ruler whose noise is ``sigma_m`` metres at depth ``z``:
-    ``sigma_m / z^2``, the first-order image of a metre error in 1 / z."""
-    depth = np.asarray(z, dtype=float)
-    with np.errstate(divide="ignore", invalid="ignore"):
-        out: Array = np.asarray(sigma_m, dtype=float) / depth**2
-    return out
-
-
 def weighted_median(values: Array, weight: Array | None) -> float:
     """The median of ``values``, each counting ``weight`` times (the plain median when
     ``weight`` is ``None``): the value at which half the total weight lies below — the mean of
@@ -704,10 +666,8 @@ def apply_affine(depth: Array, a: float | Array, b: float | Array) -> Array:
 
 
 LAW_VERSION = 3  # 1: the affine law alone; 2: the ray law's record beside it (retired 2026-09-15,
-# written by nobody since); 3: the range law's (retired with the mono chain)
-# Records of laws that no longer exist, which a file written by an older build still carries:
-# read by nobody, and gone from the file at the first save.
-RETIRED_LAW_KEYS = ("ray", "range")
+# written by nobody since); 3: the range law's (retired with the mono chain). A file written by
+# an older build may still carry those records: read by nobody, and gone at the first save.
 
 
 def save_law(
@@ -729,19 +689,6 @@ def save_law(
     }
     tmp.write_text(json.dumps(record))
     os.replace(tmp, path)
-
-
-def retired_laws(path: Path) -> tuple[str, ...]:
-    """The records of retired laws (:data:`RETIRED_LAW_KEYS`) a law file still carries, for a
-    log line: such a record is read by nobody and the next save drops it. Empty when the file
-    is missing, unreadable or carries none."""
-    try:
-        data = json.loads(path.read_text())
-    except (OSError, ValueError):
-        return ()
-    if not isinstance(data, dict):
-        return ()
-    return tuple(key for key in RETIRED_LAW_KEYS if data.get(key) is not None)
 
 
 def load_law(

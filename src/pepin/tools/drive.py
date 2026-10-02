@@ -85,7 +85,7 @@ def list_places(robot: Robot) -> Result:
         return ok(
             places=[],
             note="no named places yet: the book comes from RTAB-Map's graph (ros/laptop.sh"
-            " vslam), and a place is named on the robot with ros/go.sh mark NAME",
+            " vslam), and a place is named on the robot with ros/goto.sh mark NAME",
         )
     try:
         here = pose_on_map(robot)

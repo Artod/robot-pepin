@@ -106,7 +106,6 @@ CONTENT_DISPARITY = "application/x-pepin-disparity16"
 # the host's CPU (raft_bench.py, 8 rectified pairs).
 CONTENT_DISPARITY_Z = "application/x-pepin-disparity16z"
 DISPARITY_PATH = "/disparity"
-DEFAULT_WEIGHTS = "models/raftstereo-realtime.pth"  # relative to the repo root; see .gitignore
 DEFAULT_EYE = (600, 800)  # (height, width) of one eye of the stereo head, for the warm-up
 STAGES = ("decode", "infer", "pack", "total")
 

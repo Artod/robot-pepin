@@ -33,7 +33,7 @@ def test_the_rehearsal_moves_to_the_descriptor_s_scale_only_with_descriptors_on_
     assert float(str(overlay["Mem/RehearsalSimilarity"])) > 0.5, "a null pair never merges"
     source = (REPO / VSLAM_LAUNCH).read_text()
     assert "table.update(DESCRIPTOR_REHEARSAL)" in source
-    assert "place_descriptors(packing)" in source, "decided as sensor_pack decides it"
+    assert "rtabmap_parameters(memory, place_descriptors())" in source, "decided once, here"
 
 
 def test_the_census_is_taken_by_the_launch_on_every_start_of_the_file_rtabmap_is_given() -> None:

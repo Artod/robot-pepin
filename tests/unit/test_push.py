@@ -15,7 +15,6 @@ from pathlib import Path
 import pytest
 
 from pepin.push import (
-    FRESH_EACH_START,
     HELD,
     HOST_SERVICES,
     LAUNCH_HALVES,
@@ -51,13 +50,13 @@ TREE = {
     "ros/pepin_bringup/pepin_bringup/rec.py": "from pepin_bringup.kit import spin\n",
     "ros/pepin_bringup/pepin_bringup/goal.py": "from pepin import b\n",
     "ros/pepin_bringup/pepin_bringup/fusion.py": "def main():\n    import pepin.c as c\n",
-    "ros/pepin_bringup/pepin_bringup/base_bridge.py": "from pepin.a import x\n",
     "ros/pepin_bringup/pepin_bringup/teleop_keys.py": "from pepin.d import keys\n",
     "ros/pepin_bringup/launch/robot.launch.py": "from pepin.lc import z\n",
     "ros/pepin_bringup/launch/vslam.launch.py": "",
     "ros/params/ekf.yaml": "",
     "ros/params/nav2_params.yaml": "",
     "ros/tools/probe.py": "from pepin.a import x\n",
+    "ros/xfeat/rtabmap_xfeat.py": "from pepin.a import x\n",
     "ros/foxglove/layout.json": "",
     "ros/run.sh": "",
     "src/pepin/__init__.py": "",
@@ -128,7 +127,7 @@ def test_a_module_reaches_every_node_that_imports_it_through_any_chain(repo: Pat
         Kick("laptop", "goal", ("pepin_bringup.goal", "pepin.b")),
     ]
     assert [(h.held.name, h.chain) for h in plan.held] == [
-        ("base_bridge", ("pepin_bringup.base_bridge", "pepin.a", "pepin.b"))
+        ("rtabmap", ("xfeat:rtabmap_xfeat", "pepin.a", "pepin.b"))
     ]
     assert plan.notes == [
         f"not reached: pepin.base_server imports it ({HOST_SERVICES['pepin.base_server']})"
@@ -214,7 +213,7 @@ def test_the_dry_run_text_and_the_shell_lines_say_the_same_plan(
         "kick on the laptop (a node not running there is skipped):\n"
         "  goal              pepin_bringup.goal > pepin.b\n"
         "refused if running (the launch does not respawn it):\n"
-        "  board pepin-ros base_bridge: pepin_bringup.base_bridge > pepin.a > pepin.b\n"
+        "  laptop pepin-vslam rtabmap: xfeat:rtabmap_xfeat > pepin.a > pepin.b\n"
         "notes:\n"
         f"  not reached: pepin.base_server imports it ({HOST_SERVICES['pepin.base_server']})\n"
     )
@@ -224,8 +223,7 @@ def test_the_dry_run_text_and_the_shell_lines_say_the_same_plan(
         "kick\tboard\trec\n"
         "kick\tboard\tgoal\n"
         "kick\tlaptop\tgoal\n"
-        "held\tboard\tpepin-ros\t-f\tpepin_bringup[./]base_bridge\tbase_bridge\t"
-        "ros/restart.sh board --deploy\n"
+        "held\tlaptop\tpepin-vslam\t-x\trtabmap\trtabmap\tros/restart.sh laptop\n"
     )
 
 
@@ -237,9 +235,9 @@ def graph() -> ImportGraph:
     return ImportGraph.scan(REPO)
 
 
-def test_every_node_a_launch_starts_is_kickable_held_or_fresh_at_each_start() -> None:
+def test_every_node_a_launch_starts_is_kickable_held_or_per_call() -> None:
     """A new node in a launch file that no kick script lists would be left running the old code
-    by every push: it must be kickable on its half, held (refuses while it runs) or exec'd anew."""
+    by every push: it must be kickable on its half, held (refuses while it runs) or per call."""
     halves = kickable(REPO)
     for half, nodes in halves.items():
         for node in nodes:
@@ -248,7 +246,7 @@ def test_every_node_a_launch_starts_is_kickable_held_or_fresh_at_each_start() ->
     covered = (
         {n for nodes in halves.values() for n in nodes}
         | {h.name for h in HELD}
-        | {m.removeprefix("pepin_bringup.") for m in (*FRESH_EACH_START, *PER_CALL)}
+        | {m.removeprefix("pepin_bringup.") for m in PER_CALL}
     )
     for launch in sorted((REPO / "ros/pepin_bringup/launch").glob("*.launch.py")):
         text = launch.read_text()
@@ -315,7 +313,7 @@ printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0") $1" in
     "ssh "*) exit "${FAKE_SSH_RC:-1}" ;;
     "docker inspect") [ -n "${FAKE_MOUNT:-}" ] || exit 1; echo "$FAKE_MOUNT" ;;
-    "docker exec") exit 1 ;;
+    "docker exec") exit "${FAKE_EXEC_RC:-1}" ;;
 esac
 """
 # The planner the script calls (`uv run -q python -m pepin.push ...`), on this interpreter.
@@ -365,10 +363,10 @@ def test_a_dry_run_prints_the_plan_and_what_would_run_and_touches_nothing(tmp_pa
     assert code == 0, out
     assert calls == "", "a dry run asks nobody anything"
     assert out.startswith("push plan: 1 file(s) to the board, 3 kick(s)\n")
-    tail = out[out.index("would check: base_bridge") :]
+    tail = out[out.index("would check: rtabmap") :]
     assert tail == (
-        "would check: base_bridge in pepin-ros on the board (runs -> refused,"
-        " ros/restart.sh board --deploy)\n"
+        "would check: rtabmap in pepin-vslam on the laptop (runs -> refused,"
+        " ros/restart.sh laptop)\n"
         "would run: (cd src && rsync -a --relative pepin/b.py"
         " root@10.0.0.187:/root/pepin-ros/pepin_src/)\n"
         "would run: ros/board.sh kick rec\n"
@@ -409,12 +407,12 @@ def test_a_push_rsyncs_exactly_its_files_and_kicks_exactly_its_nodes(tmp_path: P
 
 @pytest.mark.slow
 def test_a_running_held_process_refuses_before_the_rsync(tmp_path: Path) -> None:
-    code, out, calls = _push(tmp_path, "src/pepin/b.py", FAKE_SSH_RC="0")
+    code, out, calls = _push(tmp_path, "src/pepin/b.py", FAKE_EXEC_RC="0")
     assert code == 2, out
-    assert "base_bridge runs in pepin-ros on the board and no kick restarts it" in out
+    assert "rtabmap runs in pepin-vslam on the laptop and no kick restarts it" in out
     assert "rsync" not in calls and " kick " not in calls
-    code, out, calls = _push(tmp_path / "unreachable", "src/pepin/b.py", FAKE_SSH_RC="255")
-    assert code == 2 and "could not ask pepin-ros on the board" in out and "rsync" not in calls
+    code, out, calls = _push(tmp_path / "unreachable", "src/pepin/b.py", FAKE_EXEC_RC="255")
+    assert code == 2 and "could not ask pepin-vslam on the laptop" in out and "rsync" not in calls
 
 
 @pytest.mark.slow

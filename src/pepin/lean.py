@@ -22,8 +22,6 @@ turns them into one number every consumer asks for:
 * :class:`LeanSource` — the port a :class:`pepin.frame_pose.FramePoser` takes a lean through.
 * :class:`LeanGate` — how far the body may be from level before a measurement is thrown away
   instead of corrected, and the counters of what it did, for a node's report line.
-* :func:`scan_height_shift` — how far a lidar's returns move in height when the body leans: the
-  physical size of the problem, in metres, per beam.
 * :data:`LEAN_QUALITY_FLOOR` — how much of a lean gravity must have voted for before a consumer
   places a measurement by it. A drifting gyro reports a tip nobody made, and its only signature
   is a quality near zero: below the floor the lean is unknown rather than wrong, and the
@@ -119,9 +117,6 @@ class Lean:
         :meth:`up_vector`."""
         ux, uy, uz = (float(v) for v in np.asarray(up, dtype=float))
         return cls(math.atan2(uy, uz), math.atan2(-ux, math.hypot(uy, uz)), stamp, quality)
-
-
-LEVEL = Lean(0.0, 0.0, 0.0, 0.0)
 
 
 class LeanSource(Protocol):
@@ -426,24 +421,6 @@ class LeanGate:
         return True
 
 
-def scan_height_shift(ranges: Array, bearings: Array, lean: Lean) -> Array:
-    """How far each return's height in the world moves because the body leans: metres per
-    return, positive up, ``NaN`` where there was no return.
-
-    A beam of length ``r`` at robot-frame bearing ``b`` leaves the sensor in its own plane; tip
-    the body and the far end of that beam rises or falls by ``r`` times the vertical part of
-    the turned ray — ``r sin(lean)`` for a beam straight ahead under a pure pitch, 44 cm at 5 m
-    under 5 degrees. This is the whole physical case for placing a scan by the body's real
-    pose: the range itself changes by 1/cos, four parts in a thousand, and nobody would care.
-    The mount's own rise (centimetres, the same for every beam) is not in this number.
-    """
-    r = np.asarray(ranges, dtype=float)
-    b = np.asarray(bearings, dtype=float)
-    m = lean.rotation()
-    shift: Array = r * (m[2, 0] * np.cos(b) + m[2, 1] * np.sin(b))
-    return shift
-
-
 @dataclass(frozen=True)
 class LevelPose:
     """What the IMU says while the cart stands still on a floor that is level: the residual
@@ -492,7 +469,6 @@ __all__ = [
     "LEAN_NORM_TOLERANCE",
     "LEAN_QUALITY_FLOOR",
     "LEAN_TAU_S",
-    "LEVEL",
     "SCAN_LEAN_GATE_DEG",
     "Lean",
     "LeanEstimator",
@@ -501,5 +477,4 @@ __all__ = [
     "LeanSource",
     "LevelPose",
     "imu_mount_rotation",
-    "scan_height_shift",
 ]

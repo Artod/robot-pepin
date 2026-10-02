@@ -14,9 +14,6 @@
 #                  about the map is passed: the database IS the map, the launch reads whether it
 #                  exists
 #   --fresh-graph  the camera half starts on an empty RTAB-Map database (laptop.sh vslam --fresh)
-#                  AND the volume of the old frame is moved aside: the volume is painted in the
-#                  graph's frame, so a kept snapshot beside an empty database is a room painted
-#                  somewhere else
 #   both           board first, then laptop. Never the other way: a board restart re-zeroes the
 #                  odometry under a running RTAB-Map. Nav2 waits for the map and map -> odom
 #                  (initial_transform_timeout, ros/params/nav2_params.yaml) and the proof below
@@ -78,7 +75,7 @@ for arg in "$@"; do
     esac
 done
 if [ "$HALF" = board ] && [ "$FRESH_GRAPH" = true ]; then
-    echo "--fresh-graph is the laptop's database and its volume: ros/restart.sh laptop|both"
+    echo "--fresh-graph is the laptop's database: ros/restart.sh laptop|both"
     exit 2
 fi
 
@@ -150,17 +147,6 @@ restart_board() {
     fi
 }
 
-drop_volume() {  # --fresh-graph: the volume shares the database's frame, so it goes with it
-    # One frame (World R): the graph's map frame IS `map`, and the fused volume is painted in it.
-    # An empty database starts a new frame, and a volume kept from the old one would be a room
-    # painted somewhere else — so the snapshot beside the database is moved aside, never deleted.
-    local world="$HERE/maps/rtabmap.world.npz"
-    if [ -f "$world" ]; then
-        mv "$world" "$world.before-fresh-$(date +%Y%m%d_%H%M%S)"
-        echo "--fresh-graph: the volume of the old frame moved aside ($world.before-fresh-*)"
-    fi
-}
-
 restart_laptop() {  # [vslam]: the camera half only (after a board restart), else vslam then Nav2
     local what="restarting the laptop"
     [ "${1:-}" != vslam ] || what="restarting the laptop's vslam (RTAB-Map onto the new odometry)"
@@ -171,7 +157,6 @@ restart_laptop() {  # [vslam]: the camera half only (after a board restart), els
     args=(vslam --neck)
     if [ "$FRESH_GRAPH" = true ]; then
         args+=(--fresh)
-        drop_volume
     fi
     "$HERE/laptop.sh" "${args[@]}"
     [ "${1:-}" = vslam ] || "$HERE/laptop.sh" nav
@@ -257,7 +242,7 @@ ensure_planner() {  # 4.1: prove it, repair it (Nav2 alone, then both halves onc
 # ---- --dry-run: the order, and nothing touched ------------------------------------------------
 describe() {
     local n=0 fresh=""
-    [ "$FRESH_GRAPH" = false ] || fresh=" --fresh (the old volume moved aside)"
+    [ "$FRESH_GRAPH" = false ] || fresh=" --fresh"
     say() { n=$((n + 1)); printf '%2d. %s\n' "$n" "$1"; }
     echo "dry run, nothing is touched — ros/restart.sh $HALF would:"
     if [ "$HALF" != laptop ]; then
@@ -575,11 +560,11 @@ print(("BAD " if bad else "OK ") + "; ".join(
     # 2.11 is INFORMATIONAL and never fails a restart: who painted the lethal cells of the local
     # costmap right now (pepin_bringup.marks_audit). There is no healthy value — a room with a
     # table in it SHOULD show camera-only cells — so this prints the split and leaves the verdict
-    # to the person in front of the robot. Absent when the node is out (marks_audit:=false) or
-    # when no grid has crossed yet, and that absence is worth seeing too.
+    # to the person in front of the robot. Absent when the node is down or when no grid has
+    # crossed yet, and that absence is worth seeing too.
     line="$(last '\]: marks audit: ')"
     if [ -z "$line" ]; then
-        warn 2.11 "marks audit: no report line (marks_audit:=false, or no local costmap has reached this laptop yet)"
+        warn 2.11 "marks audit: no report line (the node is down, or no local costmap has reached this laptop yet)"
     else
         warn 2.11 "marks audit: ${line#*: marks audit: }"
     fi
