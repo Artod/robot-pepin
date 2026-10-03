@@ -212,6 +212,7 @@ parallel, with a coverage floor and the flags-doc check.
 Built on the open-source [XLeRobot](https://github.com/Vector-Wangel/XLeRobot) platform
 (dual-wheel variant) and the [LeRobot](https://github.com/huggingface/lerobot) ecosystem for arm
 calibration. RAFT-Stereo is vendored from
-[princeton-vl/RAFT-Stereo](https://github.com/princeton-vl/RAFT-Stereo) (MIT).
+[princeton-vl/RAFT-Stereo](https://github.com/princeton-vl/RAFT-Stereo) (MIT), the SO-101 URDF
+from [TheRobotStudio/SO-ARM100](https://github.com/TheRobotStudio/SO-ARM100) (Apache-2.0).
 
 License: to be added.
