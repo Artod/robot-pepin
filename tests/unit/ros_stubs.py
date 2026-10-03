@@ -293,6 +293,22 @@ class RemoveLabel:
 
 
 DurationMsg = _msg("Duration", sec=0, nanosec=0)
+ColorRGBA = _msg("ColorRGBA", r=0.0, g=0.0, b=0.0, a=0.0)
+Marker = _msg(
+    "Marker",
+    header=Header,
+    ns="",
+    id=0,
+    type=0,
+    action=0,
+    pose=Pose,
+    scale=Vector3,
+    color=ColorRGBA,
+    lifetime=DurationMsg,
+    frame_locked=False,
+)
+Marker.CUBE, Marker.ADD, Marker.DELETEALL = 1, 0, 3  # type: ignore[attr-defined]
+MarkerArray = _msg("MarkerArray", markers=list)
 Transition = _msg("Transition", id=0)
 State = _msg("State", id=0, label="")
 
@@ -911,7 +927,16 @@ def install() -> Any:
         ),
         "std_msgs": _module("std_msgs"),
         "std_msgs.msg": _module(
-            "std_msgs.msg", Header=Header, Bool=Bool, Float32=Float32, String=String
+            "std_msgs.msg",
+            Header=Header,
+            Bool=Bool,
+            Float32=Float32,
+            String=String,
+            ColorRGBA=ColorRGBA,
+        ),
+        "visualization_msgs": _module("visualization_msgs"),
+        "visualization_msgs.msg": _module(
+            "visualization_msgs.msg", Marker=Marker, MarkerArray=MarkerArray
         ),
         "geometry_msgs": _module("geometry_msgs"),
         "geometry_msgs.msg": _module(

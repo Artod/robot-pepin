@@ -23,7 +23,7 @@ ros_stubs.install()
 
 from pepin_bringup.depth_fusion import DepthFusion  # noqa: E402
 from pepin_bringup.msgs import fields_from_cloud  # noqa: E402
-from ros_stubs import Header, LaserScan, TransformStamped  # noqa: E402
+from ros_stubs import Header, JointState, LaserScan, TransformStamped  # noqa: E402
 from ros_stubs import Time as TimeMsg  # noqa: E402
 
 from pepin.tof_rays import fans_to_speak  # noqa: E402
@@ -162,6 +162,7 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
     # each bearing is KNOWN OPEN. Still an answer about obstacles, still nothing to seat a pose on.
     # ...and, behind grid_out (off as shipped), the same columns as grids the costmaps only draw.
     # /fusion/frame carries stamps only: which camera frames went in (the gaze arbiter's count).
+    # /fusion/arm is the robot's own arm as boxes in base_link, for the eye.
     assert set(node.pubs) == {
         "/fusion/surface",
         "/depth_marks",
@@ -170,6 +171,7 @@ def test_the_volume_reaches_no_matcher_and_no_planner(tmp_path: Path) -> None:
         "/camera_grid_map",
         "/camera_grid_map_updates",
         "/fusion/frame",
+        "/fusion/arm",
     }
     assert [name for name, _period in node.timers] or True
     line = node._world_line(node._tally.take())
@@ -712,3 +714,122 @@ def test_the_report_line_counts_the_whiskers_and_states_the_clearing_arithmetic(
     line = node._tof_line(node._tally.take())
     assert "2 fans" in line and "1 hits, 1 misses, 1 silent" in line
     assert "carved by 15 misses (1.0 s at 15 Hz)" in line
+
+
+# ---- the robot's own arm (arm_filter, pepin.arm) -------------------------------------------------
+# The arm of these tests is one box, the URDF's base link, standing 0.19-0.31 m ahead of the cart
+# with its 3 cm margin and covering the front whisker's height (0.27 m): a whisker's rays meet it,
+# and a test can paint voxels inside it and watch them go.
+ARM_BOX = {"name": "base_link", "link": "base_link", "centre_m": [0.0, 0.0, 0.05],
+           "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.03, 0.1, 0.05]}  # fmt: skip
+
+
+def with_arm(tmp_path: Path, **joints: Any) -> None:
+    """config/arm.json beside the node's config: the shipped file with :data:`ARM_BOX` alone,
+    standing at x 0.22, z 0.22 in base_link, its joints as the shipped file's unless overridden."""
+    data = json.loads((REPO / "config" / "arm.json").read_text())
+    data["mount"] = {"x_m": 0.22, "y_m": 0.0, "z_m": 0.22, "yaw_deg": 0.0, "measured": True}
+    data["links"] = [ARM_BOX]
+    data["joints"] = {**data["joints"], **joints}
+    (tmp_path / "arm.json").write_text(json.dumps(data))
+
+
+def arm_voxels(node: DepthFusion) -> tuple[Any, ...]:
+    """The voxel indices whose centres lie inside the grown arm box (in odom: the cart stands at
+    the origin)."""
+    boxes = node._arm_boxes(TOF_S)
+    assert len(boxes) == 1
+    s = node._world.spec
+    index = np.stack(np.meshgrid(*(np.arange(n) for n in s.shape), indexing="ij"), -1)
+    centres = (index.reshape(-1, 3) + 0.5) * s.voxel_m + np.array(s.origin)
+    inside = boxes[0].holds(centres).reshape(s.shape)
+    assert inside.sum() > 4
+    return tuple(np.nonzero(inside))
+
+
+def test_arm_filter_off_paints_the_arm_like_the_room_and_says_what_the_arm_is(
+    tmp_path: Path,
+) -> None:
+    with_arm(tmp_path)
+    node = whisker_node(tmp_path)
+    at = arm_voxels(node)
+    node._world.volume.weight[at] = 5.0
+    node._on_scan_work(scan_msg())
+    assert np.all(node._world.volume.weight[at] >= 5.0), "nothing forgotten with the flag off"
+    line = node._arm_line(node._tally.take())
+    assert line == "arm filter off (1 boxes grown 3 cm, joints from config)"
+
+
+def test_under_arm_filter_every_integration_forgets_what_stands_inside_the_arm(
+    tmp_path: Path,
+) -> None:
+    """A revolution and a whisker fan each leave nothing inside the grown arm, whoever painted
+    it before; the report says how many went."""
+    with_arm(tmp_path)
+    node = whisker_node(tmp_path)
+    node._switches.set("arm_filter", True)
+    at = arm_voxels(node)
+    node._world.volume.weight[at] = 5.0
+    node._world.lidar_weight[at] = 5.0
+    node._on_scan_work(scan_msg())
+    assert not node._world.volume.weight[at].any() and not node._world.lidar_weight[at].any()
+    node._world.volume.weight[at] = 5.0
+    node._on_tof_work(tof_msg(0.4))
+    assert not node._world.volume.weight[at].any()
+    w = node._tally.take()
+    assert w.counts["arm_forgotten"] == 2 * len(at[0]) and w.counts["arm_config"] >= 2
+    line = node._arm_line(w)
+    assert line.startswith("arm filter: the arm met 0 of 0 frames")
+    assert f"forgot {2 * len(at[0])} voxels" in line and "joints config" in line
+
+
+def test_a_whisker_ray_that_enters_the_arm_carves_nothing_behind_it(tmp_path: Path) -> None:
+    """The front whisker answers +inf (nothing within 0.96 m): unfiltered it carves through the
+    arm 0.19 m ahead to the far end of its reach; with arm_filter its rays stop at the arm, and a
+    voxel 0.5 m ahead is never carved."""
+    beyond = np.array([[0.5, 0.0, 0.27]])
+
+    def carved(on: bool) -> float:
+        with_arm(tmp_path)
+        node = whisker_node(tmp_path)
+        node._switches.set("arm_filter", on)
+        for i in range(4):
+            node._on_tof_work(tof_msg(math.inf, TOF_S + 0.07 * i))
+        idx, inside = node._world.volume.voxel_of(beyond)
+        assert inside[0]
+        return float(node._world.volume.weight[tuple(idx[0])])
+
+    assert carved(False) > 0.0
+    assert carved(True) == 0.0
+
+
+def test_the_arm_s_grown_boxes_go_out_for_the_eye_with_the_flag_off(tmp_path: Path) -> None:
+    """/fusion/arm: a DELETEALL, then one teal CUBE per box in base_link at the grown size, the
+    file's pose stamped zero (the newest transform)."""
+    with_arm(tmp_path)
+    node = whisker_node(tmp_path)
+    node._publish_arm()
+    (sent,) = node.pubs["/fusion/arm"].sent
+    clear, cube = sent.markers
+    assert clear.action == 3 and cube.type == 1 and cube.action == 0
+    assert cube.header.frame_id == "base_link" and cube.header.stamp.sec == 0
+    assert (cube.scale.x, cube.scale.y, cube.scale.z) == pytest.approx((0.12, 0.26, 0.16))
+    assert (cube.pose.position.x, cube.pose.position.z) == pytest.approx((0.22, 0.27))
+    assert cube.color.a > 0.0
+
+
+def test_joints_from_the_topic_pose_the_arm_at_the_observation_s_stamp(tmp_path: Path) -> None:
+    """source topic: a /arm/joint_states sample near the stamp poses the arm (counted as topic)
+    and dates the markers; none near it falls back to the file's pose, counted stale."""
+    with_arm(tmp_path, source="topic")
+    node = whisker_node(tmp_path)
+    names = ["shoulder_pan", "shoulder_lift", "elbow_flex", "wrist_flex", "wrist_roll", "gripper"]
+    node._on_joints(JointState(header=Header(stamp=stamp(TOF_S)), name=names, position=[0.0] * 6))
+    near, far = node._arm_pose(TOF_S + 0.1, count=True), node._arm_pose(TOF_S + 5.0, count=True)
+    assert near is not None and near.source == "topic"
+    assert far is not None and far.source == "stale"
+    node._publish_arm()
+    assert node.pubs["/fusion/arm"].sent[-1].markers[1].header.stamp.sec == int(TOF_S)
+    w = node._tally.take()
+    assert w.counts["arm_joints_in"] == 1
+    assert w.counts["arm_topic"] == 1 and w.counts["arm_stale"] == 1, "the markers count none"

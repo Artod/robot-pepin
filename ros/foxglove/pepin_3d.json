@@ -122,6 +122,9 @@
           "visible": true,
           "pointSize": 5,
           "colorMode": "rgb"
+        },
+        "/fusion/arm": {
+          "visible": true
         }
       },
       "layers": {
