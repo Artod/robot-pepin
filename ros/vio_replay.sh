@@ -61,6 +61,7 @@ docker run --rm --network none \
     -e ARM="$ARM" -e DRIVE="/rec/$DRIVE" -e CAM="${CAM:+/rec/$CAM}" -e OUT="/rec/$OUT" -e CONFIG="$CONFIG" \
     --entrypoint /bin/bash "$IMAGE" -c '
 set -eo pipefail
+set -m  # job control: a background job of a non-interactive shell would ignore the SIGINT below
 source /opt/ros/jazzy/setup.bash; source /ws/install/setup.bash
 [ -f /ws_vio/install/setup.bash ] && source /ws_vio/install/setup.bash
 SIM=(--ros-args -p use_sim_time:=true)
@@ -90,7 +91,11 @@ INPUTS=(-i "$DRIVE")
 ros2 bag play "${INPUTS[@]}" --clock 100 --exclude-topics /vo /odometry/filtered /vo/raw
 sleep 3
 kill -INT "$REC_PID"; wait "$REC_PID" || true
-kill -INT "${pids[@]}" 2>/dev/null || true; wait || true
+# Each job is its own process group under job control: the wrappers (ros2 run, ros2 launch) and
+# the nodes under them take the SIGINT together; whatever is still up 10 s later gets a SIGTERM.
+for p in "${pids[@]}"; do kill -INT -- "-$p" 2>/dev/null || true; done
+for _ in $(seq 1 20); do jobs -r | grep -q . || break; sleep 0.5; done
+for p in "${pids[@]}"; do kill -TERM -- "-$p" 2>/dev/null || true; done; wait || true
 python3 /repo/ros/tools/bag_poses.py "$OUT.bag" /odometry/filtered > "$OUT.csv"
 echo "wrote $OUT.bag and $OUT.csv"
 '
