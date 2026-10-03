@@ -3,6 +3,9 @@
 # LD19 lidar UART adapter: Silabs CP2102 (10c4:ea60)
 SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="55d3", SYMLINK+="servo-bus"
 SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="lidar"
+# The head ESP32 (ideaspark board, 1.9" ST7789): WCH CH340 usb-serial (1a86:7523), the only
+# CH340 on the robot (the servo bus's is a CH343, 55d3). pepin.head_server owns it.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="1a86", ATTRS{idProduct}=="7523", SYMLINK+="pepin-head"
 # reSpeaker XVF3800 USB 4-mic array (Seeed, 2886:001a). Its ALSA card id would be the last word of
 # the product name, "Array"; "respeaker" names it whatever else is plugged in
 # (plughw:CARD=respeaker,DEV=0). The audio group, which owns /dev/snd/*, also gets the USB node the

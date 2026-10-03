@@ -487,3 +487,65 @@ def ask(
                 answer = json.loads(line)
                 if isinstance(answer, dict) and answer.get("type") in wanted:
                     return answer
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Talk to the head server by hand: the bring-up's and a bench's commands."""
+    import argparse
+    import os
+
+    parser = argparse.ArgumentParser(
+        description="Talk to the head server (pepin.head_server, TCP 3340).",
+        epilog="e.g.  express happy 3   |   event arrived   |   show 'Temps|left: 41/70 C' 6"
+        "   |   imu 5   |   status",
+    )
+    parser.add_argument("--host", default=os.environ.get("PEPIN_HOST", "10.0.0.187"))
+    parser.add_argument("--port", type=int, default=HEAD_PORT)
+    parser.add_argument("command", choices=("status", "express", "event", "clear", "show", "imu"))
+    parser.add_argument("args", nargs="*")
+    args = parser.parse_args(argv)
+    a = args.args
+    request: dict[str, Any]
+    if args.command == "express":
+        hold = float(a[1]) if len(a) > 1 else None
+        request = {"cmd": "express", "source": "cli", "name": a[0], "hold_s": hold}
+    elif args.command == "event":
+        request = {"cmd": "event", "source": "cli", "name": a[0]}
+    elif args.command == "clear":
+        request = {"cmd": "clear", "source": "cli"}
+    elif args.command == "show":
+        request = {"cmd": "show", "text": a[0], "seconds": float(a[1]) if len(a) > 1 else 8.0}
+    elif args.command == "imu":
+        return _print_imu(args.host, args.port, int(a[0]) if a else 5)
+    else:
+        request = {"cmd": "status"}
+    print(json.dumps(ask(request, args.host, args.port), ensure_ascii=False))
+    return 0
+
+
+def _print_imu(host: str, port: int, lines: int) -> int:
+    """Subscribe and print ``lines`` IMU lines, each as its first sample in SI units."""
+    with socket.create_connection((host, port), timeout=3.0) as sock:
+        sock.sendall(b'{"cmd": "subscribe", "imu": true}\n')
+        buffer = b""
+        while lines > 0:
+            chunk = sock.recv(65536)
+            if not chunk:
+                return 1
+            buffer += chunk
+            *done, buffer = buffer.split(b"\n")
+            for line in done:
+                message = json.loads(line) if line.strip() else {}
+                if message.get("type") != "imu" or lines <= 0:
+                    continue
+                t, esp_us, *raw = message["s"][0]
+                acc = [round(v * message["acc_scale"], 2) for v in raw[:3]]
+                gyro = [round(v * message["gyro_scale"], 3) for v in raw[3:]]
+                print(f"t {t:.6f} esp_us {esp_us} n {len(message['s'])} acc {acc} m/s2 gyro"
+                      f" {gyro} rad/s")  # fmt: skip
+                lines -= 1
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

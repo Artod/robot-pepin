@@ -241,6 +241,21 @@
       "note": "Measured 1.6 % / 20 MB idle and 2.0 % / 20 MB with a client listening (2026-10-02)."
     },
     {
+      "name": "head_server",
+      "match": "pepin\\.head_server",
+      "role": "Owns the head ESP32's serial port (/dev/pepin-head, CH340 at 921600 baud) on TCP 3340: the mouth's expressions, speech levels and info screens down; the head IMU's samples up, mapped onto the board's clock and streamed to the base bridge; the brain lease.",
+      "on_board_because": [
+        "hardware-attached",
+        "wifi-loss"
+      ],
+      "owner": "pepin-head.service (/opt/pepin, systemd), config/head.json, config/face.json",
+      "budget": {
+        "cpu_percent": 12.0,
+        "rss_mb": 25.0
+      },
+      "note": "TO MEASURE: an ESTIMATE until the head is plugged in. 200 serial frames a second (1 kHz IMU in batches of 5), one JSON line per frame to one subscriber, a 5 ms select loop; tof_server's measured 9 % for 45 I2C reads a second is the yardstick, so 5-10 %, +20 % headroom. The memory is audio_server's measured 20 MB plus the face table. Outside Docker on purpose, like base_server: the face and the IMU must survive a container restart, and the face falls asleep on WiFi loss by the lease rather than by dying."
+    },
+    {
       "name": "ser2net",
       "match": "(^|/)ser2net ",
       "role": "The servo bus and the lidar as TCP ports (3333/3334) so the laptop's tools can reach them without a serial cable.",

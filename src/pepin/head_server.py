@@ -43,6 +43,7 @@ import os
 import select
 import signal
 import struct
+import sys
 import threading
 import time
 from collections import deque
@@ -166,6 +167,11 @@ class SerialPort:
         import termios
 
         speed = getattr(termios, f"B{baud}", None)
+        # macOS has no B921600: open at B230400, then set the real rate with IOSSIOSPEED (as
+        # pyserial does), so the head can be brought up on the laptop's USB before the robot's.
+        mac_speed = speed is None and sys.platform == "darwin"
+        if mac_speed:
+            speed = termios.B230400
         if speed is None:
             raise ValueError(f"{baud} baud is not a termios speed on this system")
         self.path = path
@@ -180,6 +186,8 @@ class SerialPort:
             attrs[6][termios.VMIN] = 0
             attrs[6][termios.VTIME] = 0
             termios.tcsetattr(self._fd, termios.TCSANOW, attrs)
+            if mac_speed:
+                fcntl.ioctl(self._fd, 0x80045402, struct.pack("I", baud))  # IOSSIOSPEED
             lines = getattr(termios, "TIOCM_DTR", 0x002) | getattr(termios, "TIOCM_RTS", 0x004)
             with contextlib.suppress(OSError):
                 fcntl.ioctl(self._fd, getattr(termios, "TIOCMBIC", 0x5417), struct.pack("I", lines))

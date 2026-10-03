@@ -271,6 +271,33 @@ def test_an_absent_port_is_retried_and_reported(table: FaceTable) -> None:
     assert service.status(clock.now)["link"] == "up" and head.config_id == 1
 
 
+def test_the_serial_port_is_a_raw_tty() -> None:
+    """Over a pseudo-terminal: raw bytes both ways (no echo, no line discipline, 0x0D and 0x03
+    untouched), an empty read on a timeout."""
+    import os
+
+    from pepin.head_server import SerialPort
+
+    master, slave = os.openpty()
+    port = SerialPort(os.ttyname(slave), 115200)
+    try:
+        frame = bytes((0xA5, ord("Q"), 4, 0, 0x0D, 0x03, 0x0A, 0x11, 0x42))
+        os.write(master, frame)
+        got = b""
+        for _ in range(20):
+            got += port.read(0.05)
+            if len(got) >= len(frame):
+                break
+        assert got == frame
+        assert port.read(0.0) == b""
+        port.write(b"\x00\xa5\x0d")
+        assert os.read(master, 16) == b"\x00\xa5\x0d"
+    finally:
+        port.close()
+        os.close(master)
+        os.close(slave)
+
+
 def test_a_damaged_frame_is_counted_not_fatal(table: FaceTable) -> None:
     clock, head, server, service = make(table)
     service.step(0.0)
@@ -279,3 +306,51 @@ def test_a_damaged_frame_is_counted_not_fatal(table: FaceTable) -> None:
     run(service, clock, 0.1)
     status = server.broadcasts[-1]
     assert status["crc_errors"] == 1 and status["esp"] is not None
+
+
+@pytest.mark.slow
+def test_clients_over_real_sockets(table: FaceTable) -> None:
+    """The door end to end: a HeadClient's fire-and-forget lines and ask()'s answers against
+    the service stepping on its own thread behind a JsonLinesServer."""
+    import threading
+    import time
+
+    from pepin.head_link import HeadClient, ask
+    from pepin.streams import JsonLinesServer
+
+    clock = FakeClock(time.monotonic())
+    head = FakeHead(clock)
+    server = JsonLinesServer(0, outbox_size=400).start()
+    service = HeadService(lambda: head, server, table, HeadSettings(), clock=clock)
+    stop = threading.Event()
+
+    def loop() -> None:
+        while not stop.is_set():
+            clock.now = time.monotonic()
+            service.step(0.002)
+            time.sleep(0.002)
+
+    thread = threading.Thread(target=loop, daemon=True)
+    thread.start()
+    client = HeadClient("127.0.0.1", server.port, source="voice").start()
+    try:
+        deadline = time.monotonic() + 3.0
+        while not client.connected and time.monotonic() < deadline:
+            time.sleep(0.01)
+        client.express("thinking")
+        client.lease(5.0)
+        client.mouth(0.5)
+        deadline = time.monotonic() + 3.0
+        while head.expression != table.id_of("thinking") and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert head.expression == table.id_of("thinking")
+        assert head.sent("M") == [bytes((128,))]
+        status = ask({"cmd": "status"}, "127.0.0.1", server.port)
+        assert status["showing"] == "thinking" and status["leases"] == ["voice"]
+        reply = ask({"cmd": "event", "source": "goal", "name": "arrived"}, "127.0.0.1", server.port)
+        assert reply["showing"] == "happy"
+    finally:
+        client.close()
+        stop.set()
+        thread.join(2.0)
+        server.close()
