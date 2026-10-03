@@ -214,6 +214,13 @@ class CameraConfig:
     net_iters: int = 7
     net_device: str = "mps"
     net_gate: bool = False
+    # The head IMU's extrinsics (a stereo block's ``head_imu``): Kalibr's T_cam_imu, the 4x4 that
+    # carries a point in the IMU's axes into the RECTIFIED LEFT EYE's optical frame, and the time
+    # shift (the camera stamp plus this is the IMU's clock). Relative to the eye and not to
+    # camera_link because the IMU is glued to the module and moves with the eyes when the module
+    # is re-taped (vio.md S7). Empty: no IMU on this head, or not measured yet.
+    head_imu: tuple[tuple[float, ...], ...] = ()
+    head_imu_time_offset_s: float = 0.0
 
     @property
     def stereo(self) -> bool:
@@ -256,6 +263,8 @@ class CameraConfig:
             net_iters=int(net.get("iters", 7)),
             net_device=str(net.get("device", "mps")),
             net_gate=bool(net.get("gate", False)),
+            head_imu=head_imu_transform(data.get("head_imu")),
+            head_imu_time_offset_s=float((data.get("head_imu") or {}).get("time_offset_s", 0.0)),
         )
 
     @classmethod
@@ -351,6 +360,37 @@ def camera_info_arrays(
     r = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]
     p = [fx, 0.0, cx, 0.0, 0.0, fy, cy, 0.0, 0.0, 0.0, 1.0, 0.0]
     return k, d, r, p
+
+
+def head_imu_transform(block: Any) -> tuple[tuple[float, ...], ...]:
+    """A ``head_imu`` block's ``T_cam_imu`` as four rows of four, checked: a rigid transform
+    (orthonormal rotation, det +1 to 1e-3, last row 0 0 0 1); ``()`` without a block."""
+    if not block:
+        return ()
+    rows = block.get("T_cam_imu") if isinstance(block, dict) else None
+    if (
+        not isinstance(rows, list)
+        or len(rows) != 4
+        or any(not isinstance(r, list) or len(r) != 4 for r in rows)
+    ):
+        raise ValueError("head_imu.T_cam_imu is a 4x4 list of rows")
+    matrix = tuple(tuple(float(v) for v in row) for row in rows)
+    if matrix[3] != (0.0, 0.0, 0.0, 1.0):
+        raise ValueError(f"head_imu.T_cam_imu's last row is 0 0 0 1, not {matrix[3]}")
+    r = [list(row[:3]) for row in matrix[:3]]
+    for i in range(3):
+        for j in range(3):
+            dot = sum(r[k][i] * r[k][j] for k in range(3))
+            if abs(dot - (1.0 if i == j else 0.0)) > 1e-3:
+                raise ValueError("head_imu.T_cam_imu's rotation is not orthonormal")
+    det = (
+        r[0][0] * (r[1][1] * r[2][2] - r[1][2] * r[2][1])
+        - r[0][1] * (r[1][0] * r[2][2] - r[1][2] * r[2][0])
+        + r[0][2] * (r[1][0] * r[2][1] - r[1][1] * r[2][0])
+    )
+    if abs(det - 1.0) > 1e-3:
+        raise ValueError(f"head_imu.T_cam_imu's rotation has det {det:.4f}, not +1")
+    return matrix
 
 
 @dataclass(frozen=True)

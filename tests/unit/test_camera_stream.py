@@ -733,3 +733,32 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     assert line.endswith(
         "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
     )
+
+
+def test_a_head_with_a_measured_imu_gets_the_static_optical_to_head_imu_edge(
+    build: Build, tmp_path: Path
+) -> None:
+    """config/camera.json's head_imu block (Kalibr's T_cam_imu, relative to the rectified left
+    eye) becomes the static camera_optical -> head_imu the VIO relay composes through; without
+    the block nothing changes (the test above)."""
+    import json
+
+    path = Path(stereo_config(tmp_path, ideal_stereo_calibration()))
+    data = json.loads(path.read_text())
+    quarter = [[0.0, -1.0, 0.0, 0.02], [1.0, 0.0, 0.0, -0.01], [0.0, 0.0, 1.0, 0.03], [0, 0, 0, 1]]
+    data["stereo"]["head_imu"] = {"T_cam_imu": quarter, "time_offset_s": 0.004}
+    path.write_text(json.dumps(data))
+    node, _ = build(config=str(path))
+    assert edges(node) == [
+        ("camera_link", "camera_optical"),
+        ("base_link", "laser"),
+        ("camera_optical", "head_imu"),
+    ]
+    imu = node._static.sent[2].transform
+    assert (imu.translation.x, imu.translation.y, imu.translation.z) == pytest.approx(
+        (0.02, -0.01, 0.03)
+    )
+    q = imu.rotation
+    assert (q.x, q.y, q.z, q.w) == pytest.approx(
+        (0.0, 0.0, math.sin(math.pi / 4), math.cos(math.pi / 4))
+    )

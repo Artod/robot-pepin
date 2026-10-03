@@ -2,10 +2,12 @@
 
 The node itself is C++ (ros/pepin_base_cpp, composed into robot.launch.py's base container):
 /odom, odom -> base_link while no EKF owns it, the /cmd_vel sink, the MPU6050 as
-/imu/data_raw and the rest /zupt. Its two sensor mutes and /odom's stamp are declared there by
-these names and defaults; this table is their one description, read by ros/tools/flags_doc.py
-and ros/flags.sh (``ros/sensor.sh mute imu|odom``), and contract tests hold the C++ to it. The
-Python bridge that ran before 2026-09-06 is in git history.
+/imu/data_raw and the rest /zupt, and (head_imu:=true) the head IMU from head_server as
+/head/imu with the mast-sway filter. Its three sensor mutes, /odom's stamp and the sway's
+composition into the camera edge are declared there by these names and defaults; this table is
+their one description, read by ros/tools/flags_doc.py and ros/flags.sh (``ros/sensor.sh mute
+imu|odom``), and contract tests hold the C++ to it. The Python bridge that ran before 2026-09-06
+is in git history.
 """
 
 from __future__ import annotations
@@ -61,5 +63,37 @@ FLAGS = FlagSet(
         on_when="`encoder` always: it is the measurement's own time",
         off_when="`arrival` to compare against the old stamps, or if the EKF or a TF consumer"
         " reports extrapolation into the past after the switch; live, the next state line",
+    ),
+    Flag(
+        "head_imu_publish",
+        True,
+        description="the head IMU's samples (head_server's TCP 3340 stream, under the launch's"
+        " head_imu:=true) leave the bridge as /head/imu in the chip's axes, dated by the sample's"
+        " own moment on the board's clock; off, the link, the counters and the mast filter keep"
+        " running and nothing is published",
+        why="on by design, unmeasured: nothing exists to publish until the head is mounted and"
+        " head_imu:=true; the VIO (pepin-vio) is its only consumer and the mute is how its"
+        " behaviour without the IMU is seen without restarting the board",
+        on_when="always once the head IMU is calibrated into config/camera.json",
+        off_when="to watch OpenVINS meet a silent IMU (it drops images newer than its last IMU),"
+        " or if /head/imu's bandwidth is ever in the way of the board's WiFi; unmute and the"
+        " next batch (20 ms) is published",
+    ),
+    Flag(
+        "mast_sway",
+        False,
+        description="the mast's sway, from the head gyro minus the base gyro's yaw and the"
+        " neck's joints (mast.hpp), is composed INTO base_link -> camera_link as a rotation about"
+        " the mast's hinge, so every consumer of that edge gets the corrected camera; off, the"
+        " edge is the neck's alone, exactly as before, and /mast/state publishes either way",
+        why="off until measured (vio.md S6): at the shipped tilt cap (600 deg/s^2) the ring is"
+        " <= 0.08 deg (2026-10-02), under the correction's own pass line; wheel jerks are"
+        " unmeasured, and a wrong sign DOUBLES the error, so the sign check (the image's ring by"
+        " phase correlation against /mast/state's pitch, scratch/gaze/tilt_sway.py) comes first",
+        on_when="after the sign check passes and the S3 drives' bags show more than ~0.15 deg"
+        " p-p of sway; then the tilt_sway pass line: >= 70 % of a 0.3-0.4 deg ring removed,"
+        " lag <= 10 ms, theta at rest <= 0.02 deg rms",
+        off_when="the moment the depth law or RTAB-Map's registrations get worse with it on, or"
+        " /mast/state reads more than a degree at rest; live, the next neck line (50 Hz)",
     ),
 )

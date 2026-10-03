@@ -1510,8 +1510,11 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     ros/flags.sh reads), so the two parameter names have to exist in both or `ros/sensor.sh mute
     imu` validates a name the running bridge does not have."""
     flags = load_table(REPO / NODES / "base_bridge.py")
-    mutes = [name for name in flags.names if flags.flag(name).kind == "bool"]
-    assert mutes == ["imu_publish", "odom_publish"]
+    mutes = [name for name in flags.names if flags.flag(name).kind == "bool" and flags[name]]
+    assert mutes == ["imu_publish", "odom_publish", "head_imu_publish"]
+    # The one bool that is not a mute: the mast's sway composed into the camera edge, off until
+    # its sign is checked (vio.md section 5), live, read per neck line.
+    assert flags["mast_sway"] is False and flags.flag("mast_sway").live
     for name in mutes:
         assert flags.flag(name).live and flags[name] is True, f"{name}: on, and live, or no test"
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()

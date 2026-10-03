@@ -458,6 +458,13 @@ class CameraStream(Node):
             transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp),
             transform_from_mount("base_link", LASER_FRAME, load_lidar_mount(config_dir), stamp),
         ]
+        # The head IMU, glued to the module: Kalibr's T_cam_imu as the static
+        # camera_optical -> head_imu (config/camera.json's head_imu), the edge the VIO relay
+        # composes base_link through. Without the block nothing is published.
+        if camera.imu is not None:
+            transforms.append(
+                transform_from_mount(camera.optical_frame, camera.imu_frame, camera.imu, stamp)
+            )
         if self._switches.on("static_camera_tf"):
             transforms.insert(
                 0, transform_from_mount("base_link", camera.link_frame, camera.link, stamp)

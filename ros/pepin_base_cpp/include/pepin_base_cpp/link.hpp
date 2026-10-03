@@ -47,15 +47,18 @@ public:
   using MessageHandler = std::function<void (const nlohmann::json &)>;
 
   /// Prepare a link to `host:port` called `name` in logs; nothing connects until start().
+  /// `hello`, when not empty, is sent on every (re)connection before anything is read: a server
+  /// that streams only to subscribers (head_server's IMU) is asked again after each reconnect.
   JsonLineLink(
     std::string host, int port, MessageHandler on_message, std::string name,
-    double min_backoff_s = 0.5, double max_backoff_s = 5.0)
+    double min_backoff_s = 0.5, double max_backoff_s = 5.0, std::string hello = std::string())
   : host_(std::move(host)),
     port_(port),
     on_message_(std::move(on_message)),
     name_(std::move(name)),
     min_backoff_s_(min_backoff_s),
-    max_backoff_s_(max_backoff_s) {}
+    max_backoff_s_(max_backoff_s),
+    hello_(std::move(hello)) {}
 
   JsonLineLink(const JsonLineLink &) = delete;
   JsonLineLink & operator=(const JsonLineLink &) = delete;
@@ -171,6 +174,9 @@ private:
     {
       const std::lock_guard<std::mutex> guard(mutex_);
       fd_ = fd;
+    }
+    if (!hello_.empty() && !send(hello_)) {
+      set_status(false, name_ + " refused the hello line");
     }
     char buffer[kRecvBytes];
     while (!stopped()) {
@@ -315,6 +321,7 @@ private:
   std::string name_;
   double min_backoff_s_;
   double max_backoff_s_;
+  std::string hello_;
 
   mutable std::mutex mutex_;  // guards the descriptor and the status below
   int fd_ = -1;

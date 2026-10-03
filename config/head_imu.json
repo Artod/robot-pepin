@@ -1,0 +1,37 @@
+{
+  "_note": "The head IMU (the MPU6050 glued to the stereo camera, read by the head ESP32, served by pepin.head_server on TCP 3340) as the board's C++ base bridge publishes it (/head/imu) and as the mast-sway filter and the VIO read it. robot.launch.py hands every number here to the bridge (pepin.head_imu.HeadImuConfig.bridge_parameters); ros/tools/vio_config.py writes OpenVINS's and Kalibr's IMU files from the noise block. The chip's own sampling (rate, DLPF, full scales) is config/head.json's, head_server's file.",
+  "timing": {
+    "output_rate_hz": 200.0,
+    "extra_delay_s": 0.0,
+    "max_age_s": 0.5,
+    "note": "output_rate_hz: the rate /head/imu carries, min(the chip's rate in config/head.json, publish.hz): what OpenVINS and Kalibr are told (update_rate). vio.md proposes the chip itself at 200 Hz (SMPLRT_DIV 4: this clone reads 1.02 against 1.15 mrad/s yaw-rate noise at DIV 0, 2026-10-02, and a fifth of the serial and board load); head_server ships 1000, so the bridge's publish cap keeps 1 in 5. extra_delay_s: subtracted from every stamp on top of what head_server already took off (its t is the data-ready edge mapped to the board's monotonic clock LESS the chip's filter delay, delay_s in each line): 0 until the tap test says otherwise. max_age_s: a sample older than this when it reaches the bridge (or in the future) is dated on arrival and counted, the neck's neck_stamp_max_age_s"
+  },
+  "publish": {
+    "hz": 200.0,
+    "frame": "head_imu",
+    "gyro_var": 1.3e-5,
+    "accel_var": 2.5e-4,
+    "note": "hz: the cap on /head/imu (every n-th sample, n = ceil(chip rate / hz); 0 publishes every sample): 200 x ~330 B = 66 kB/s over the WiFi bridge, where 1 kHz would be 330 kB/s on a link that already stalls 2.6-3.8 s (2026-09-25). frame: the chip's axes, the child of camera_optical (config/camera.json's head_imu, published by camera_stream). gyro_var, accel_var: the diagonal of the message's covariances, (rad/s)^2 and (m/s^2)^2, ~10x the base clone's per-sample variance (1.15e-3 rad/s and 10-17 mm/s^2 std, 2026-10-02); nothing fuses them (the VIO reads its own noise block below)"
+  },
+  "link": {
+    "host": "127.0.0.1",
+    "port": 3340
+  },
+  "noise": {
+    "gyro_noise_density": 1.0e-3,
+    "gyro_random_walk": 1.0e-4,
+    "accel_noise_density": 1.0e-2,
+    "accel_random_walk": 1.0e-3,
+    "note": "Kalibr's / OpenVINS's continuous-time densities: rad/s/sqrt(Hz), rad/s^2/sqrt(Hz), m/s^2/sqrt(Hz), m/s^3/sqrt(Hz). rtabmap's OdomOpenVINS defaults, 5-6x the base clone's measured white noise (1.15e-3 / sqrt(42 Hz) = 1.8e-4 rad/s/sqrt(Hz); 10-17 mm/s^2 -> 1.5-2.6e-3), i.e. already inflated as OpenVINS advises (10-20x for unmodelled errors). REPLACED by the Allan block of the parked recording (python -m pepin.allan), then inflated again"
+  },
+  "mast": {
+    "crossover_hz": 0.5,
+    "arm_window_s": 0.5,
+    "ring_hz": 5.3,
+    "hinge_x_m": -0.058,
+    "hinge_z_m": 0.78,
+    "publish_hz": 50.0,
+    "bias_s": 2.0,
+    "note": "The mast-sway filter in the bridge (mast.hpp, pepin.mast; vio.md section 5). crossover_hz: the leak, tau 0.32 s; at 5.3 Hz the gain is 0.996 with a 5.4 deg phase lead. arm_window_s: after the neck settles, theta minus its running mean over one ring period (ring_hz 5.3, measured 2026-10-02): 84 % of a 0.35 deg p-p ring armed at 0.17 deg removed over its first full period (mast_contract.cpp). hinge_x_m, hinge_z_m: where the mast bends, the column's centre (config/body.json) at the shelf top (0.78 m, a catalogue number, untaped): only the camera's POSITION correction depends on it (0.35 m x 0.006 rad = 2 mm). publish_hz: /mast/state. bias_s: the head gyro's rest block (wheels AND neck still), the base gyro's imu_bias_s. The correction is composed into base_link -> camera_link only under the bridge's mast_sway flag (off until the sign check and the S3 bags' sway number, vio.md S6); /mast/state publishes either way once the head IMU's extrinsics are in config/camera.json"
+  }
+}
