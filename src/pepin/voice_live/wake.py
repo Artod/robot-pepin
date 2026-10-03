@@ -171,12 +171,15 @@ class Transcriber(Protocol):
 
 class MlxWhisper:
     """Whisper on the Mac's GPU (mlx-whisper), Russian forced: Artem's English comes out
-    transliterated, which is all the name needs. No initial prompt: a prompt holding the name
-    lifts recall but turns near misses into the name and is echoed back on noise ("Робота
-    зовут Пепин." out of a hiss). Loaded and warmed at construction."""
+    transliterated, which is all the name needs. No initial prompt by default: a prompt holding
+    the name lifts recall in noise but turns near misses into the name and can be echoed back
+    out of a hiss. Loaded and warmed at construction."""
 
     def __init__(
-        self, repo: str = "mlx-community/whisper-large-v3-turbo", language: str = "ru"
+        self,
+        repo: str = "mlx-community/whisper-large-v3-turbo",
+        language: str = "ru",
+        initial_prompt: str | None = None,
     ) -> None:
         """``repo``: the Hugging Face repo of an MLX Whisper model (cached after the first use)."""
         import mlx_whisper  # lazy: macOS-only, and the unit tests never load a model
@@ -185,6 +188,8 @@ class MlxWhisper:
         self._np = np
         self._transcribe: Callable[..., dict[str, Any]] = mlx_whisper.transcribe
         self._kwargs = {"path_or_hf_repo": repo, "language": language}
+        if initial_prompt:
+            self._kwargs["initial_prompt"] = initial_prompt
         self.transcribe(b"\x00\x00" * (RATE // 2))
 
     def transcribe(self, pcm: bytes) -> str:

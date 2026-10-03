@@ -29,9 +29,10 @@
   },
   "wake": {
     "whisper_repo": "mlx-community/whisper-large-v3-turbo",
+    "initial_prompt": null,
     "silence_s": 0.5,
     "max_s": 8.0,
     "keep_wavs": true,
-    "note": "local gate: a loudness-cut segment (ends after silence_s, at most max_s) transcribed by mlx-whisper (turbo, ~0.3 s a segment on the M5, ~1.6 GB of unified memory; whisper-small-mlx is 0.12 s but hears the name in 69 % of clean/20 dB clips against turbo's 89 %), no prompt; the session opens only on the robot's name. Every segment heard is kept as data/voice/<day>/wake/<HHMMSS_mmm>.wav with its transcript in wake.jsonl (keep_wavs)"
+    "note": "local gate: a loudness-cut segment (ends after silence_s, at most max_s) transcribed by mlx-whisper (turbo, ~0.3 s a segment on the M5, ~1.6 GB of unified memory; whisper-small-mlx is 0.12 s but hears the name in 69 % of clean/20 dB clips against turbo's 89 %). initial_prompt null: 'Пепин.' there lifts turbo's 20 dB recall 86 -> 103 of 108 but costs 2/90 near-miss false accepts at 20 dB and 14/90 at 8 dB (0 without it); scratch/voice_live/wake_eval.py. The session opens only on the robot's name. Every segment heard is kept as data/voice/<day>/wake/<HHMMSS_mmm>.wav with its transcript in wake.jsonl (keep_wavs)"
   }
 }

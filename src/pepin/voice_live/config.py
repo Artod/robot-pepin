@@ -41,6 +41,7 @@ class LiveConfig:
     barge_in: bool = False
     playback_lead_s: float = 0.5
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
+    whisper_prompt: str | None = None
     wake_silence_s: float = 0.5
     wake_max_s: float = 8.0
     keep_wake_wavs: bool = True
@@ -78,6 +79,7 @@ class LiveConfig:
             barge_in=bool(session.get("barge_in", d.barge_in)),
             playback_lead_s=float(session.get("playback_lead_s", d.playback_lead_s)),
             whisper_repo=str(wake.get("whisper_repo", d.whisper_repo)),
+            whisper_prompt=wake.get("initial_prompt") or None,
             wake_silence_s=float(wake.get("silence_s", d.wake_silence_s)),
             wake_max_s=float(wake.get("max_s", d.wake_max_s)),
             keep_wake_wavs=bool(wake.get("keep_wavs", d.keep_wake_wavs)),

@@ -142,7 +142,7 @@ def main() -> int:
         mic = link or BoardLink(args.host)
 
     print(f"loading the wake gate ({config.whisper_repo})...", flush=True)
-    whisper = MlxWhisper(config.whisper_repo)
+    whisper = MlxWhisper(config.whisper_repo, initial_prompt=config.whisper_prompt)
     logs = args.logs
     resume = ResumeStore(logs / "resume.json", config.resume_valid_s)
 
