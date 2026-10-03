@@ -5,20 +5,58 @@
   "boxes": [
     {
       "name": "cart",
-      "min_m": [-0.300, -0.225, 0.0],
-      "max_m": [0.027, 0.225, 0.78],
+      "min_m": [
+        -0.3,
+        -0.225,
+        0.0
+      ],
+      "max_m": [
+        0.027,
+        0.225,
+        0.78
+      ],
       "source": "x: config/base.json's footprint as measured on 2026-09-04 (rear edge 0.30 m behind the axle, front plane x=0.027); y and z: the IKEA RASKOG catalogue (35 W x 45 D x 78 H cm, the 45 cm across the cart since the 35 cm matches the measured 0.327 m along x). The top at 0.78 m is NOT taped on Pepin: tape the top shelf and anything standing on it"
     },
     {
+      "name": "top_load",
+      "min_m": [
+        -0.13,
+        -0.18,
+        0.78
+      ],
+      "max_m": [
+        0.08,
+        0.05,
+        0.95
+      ],
+      "source": "what stands on the top basket above its rim: the folded arm (teal, right side), the speaker box and the mic array at the front, cable loops. Measured 2026-10-02 from the head's own depth at pan -90/+90 tilt 63 and pan +-150 tilt 45, cart parked: 45200 points over the cart above 0.83 m, z p99 0.939, p99.9 0.944; outside the mast x p1..p99 -0.13..0.08, y -0.18..0.05 (scratch/body_fit). Until the arm has its own URDF model this box hides it folded; a cover over the basket would let it drop to the rim."
+    },
+    {
       "name": "wheels",
-      "min_m": [-0.0625, -0.275, 0.0],
-      "max_m": [0.0625, 0.275, 0.125],
+      "min_m": [
+        -0.0625,
+        -0.275,
+        0.0
+      ],
+      "max_m": [
+        0.0625,
+        0.275,
+        0.125
+      ],
       "source": "config/base.json: 0.125 m wheels on the front axle (x=0), 0.55 m over the wheels; one box spanning both, the cart between them is inside the cart box anyway"
     },
     {
       "name": "mast",
-      "min_m": [-0.078, -0.02, 0.78],
-      "max_m": [-0.038, 0.02, 1.0],
+      "min_m": [
+        -0.078,
+        -0.02,
+        0.78
+      ],
+      "max_m": [
+        -0.038,
+        0.02,
+        1.0
+      ],
       "source": "the neck column from the top shelf to under the pan servo, centred on the pan axis where the neck model puts it: x -0.058, y 0, the tilt axis at 1.134 m (pepin.neck.pan_pivot of config/neck.json: the lens at x 0 at the reference pose, less its 0.025/0.086 m lever pitched 23.8 deg). The 4 x 4 cm section and the 1.0 m top are NOT measured; the top stays under the pan servo and, grown, under every ray of the working pose (the frame's bottom edge, 55 deg down, passes its grown top 10 cm ahead of it)"
     }
   ],

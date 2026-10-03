@@ -84,7 +84,7 @@ def voxel_centres(spec: GridSpec) -> np.ndarray:
 def test_the_shipped_body_loads_and_the_camera_never_stands_inside_it() -> None:
     """At every pose the neck can reach the lens stays outside every grown box: a margin that
     swallowed the lens would cut every pixel of the frame."""
-    assert [box.name for box in SHIPPED.boxes] == ["cart", "wheels", "mast"]
+    assert [box.name for box in SHIPPED.boxes] == ["cart", "top_load", "wheels", "mast"]
     assert SHIPPED.margin_m == 0.05 and SHIPPED.stride_px == 4
     (pan_lo, pan_hi), (tilt_lo, tilt_hi) = angle_limits(NECK)
     for pan in np.linspace(pan_lo, pan_hi, 37):
@@ -188,17 +188,20 @@ def test_a_ray_that_enters_the_body_carves_nothing_behind_it() -> None:
 
 def test_a_frame_that_never_sees_the_body_is_written_bit_for_bit() -> None:
     """The working pose (straight ahead, 23.8 deg down): no ray meets the body, the mask says so
-    (None: the integrator pays nothing), and a clip of nothing but infinities changes nothing."""
+    (None: the integrator pays nothing), and a clip of nothing but infinities changes nothing. The
+    synthetic eye's bottom edge is the real eye's, 55 deg down (fy 50 over 30 rows): the grown
+    top_load box's front face at x 0.13 m stands 3 cm short of where that edge crosses its top."""
+    intr = Intrinsics(fx=50.0, fy=50.0, cx=39.5, cy=29.5, width=80, height=60)
     pose = camera(0.0, 23.8)
-    depth = march(INTR, pose, SHIPPED.boxes)
+    depth = march(intr, pose, SHIPPED.boxes)
     mask = BodyMask(SHIPPED)
-    assert mask.for_frame(INTR, pose) is None
-    assert mask.for_frame(INTR, pose) is None and mask.rebuilds == 1, "cached while still"
+    assert mask.for_frame(intr, pose) is None
+    assert mask.for_frame(intr, pose) is None and mask.rebuilds == 1, "cached while still"
     plain, clipped = Tsdf(room()), Tsdf(room())
-    plain.integrate(depth, None, INTR, pose, DepthLaw(no_depth_free=True, reach_m=3.0))
-    nothing = MODEL.ray_depth(INTR, pose)
+    plain.integrate(depth, None, intr, pose, DepthLaw(no_depth_free=True, reach_m=3.0))
+    nothing = MODEL.ray_depth(intr, pose)
     assert np.isinf(nothing.z).all()
-    clipped.integrate(depth, None, INTR, pose, DepthLaw(no_depth_free=True, reach_m=3.0), nothing)
+    clipped.integrate(depth, None, intr, pose, DepthLaw(no_depth_free=True, reach_m=3.0), nothing)
     assert np.array_equal(plain.sdf, clipped.sdf) and np.array_equal(plain.weight, clipped.weight)
 
 
@@ -219,13 +222,18 @@ def test_the_mask_is_rebuilt_only_when_the_head_the_optics_or_the_model_move() -
 
 
 def test_at_the_working_tilt_a_forward_or_side_look_never_sees_the_body() -> None:
-    """At 23.8 deg down and a pan within +-95 deg — path-gaze's +-60 and every side look — the
-    frame's bottom edge (55 deg down) passes over the grown body, so the mask answers None and the
-    integrator runs exactly as without the filter. Looking further back the 5 cm margin enters the
-    bottom rows (1-2 % of the rays at 120-156 deg), the body as measured still does not."""
+    """At 23.8 deg down, straight ahead and to the left the frame's bottom edge (55 deg down)
+    passes over the grown body, so the mask answers None and the integrator runs exactly as
+    without the filter. To the right the folded arm on the top basket (the top_load box, measured
+    2026-10-02) is really in the bottom rows: under a tenth of the rays at pans -30..-95 deg.
+    Looking further back the margin enters the bottom rows, the body as measured does not."""
     mask = BodyMask(SHIPPED)
-    for pan in np.linspace(-95.0, 95.0, 39):
-        assert mask.for_frame(EYE, camera(pan, 23.8)) is None, pan
+    for pan in np.linspace(0.0, 95.0, 20):
+        hit = mask.for_frame(EYE, camera(pan, 23.8))
+        assert hit is None or hit.share < 0.005, pan
+    for pan in np.linspace(-95.0, -30.0, 14):
+        hit = mask.for_frame(EYE, camera(pan, 23.8))
+        assert hit is not None and hit.share < 0.10, pan
     back = mask.for_frame(EYE, camera(150.0, 23.8))
     assert back is not None and back.share < 0.03
     measured = BodyModel(SHIPPED.boxes, margin_m=0.0, stride_px=4).ray_depth(EYE, camera(150, 23.8))
