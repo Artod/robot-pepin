@@ -84,6 +84,7 @@ HOST_SERVICES: dict[str, str] = {
     "pepin.base_server": "board: pepin-base.service runs it from /opt/pepin (board/README.md)",
     "pepin.tof_server": "board: pepin-tof.service runs it from /opt/pepin (board/README.md)",
     "pepin.audio_server": "board: pepin-audio.service runs it from /opt/pepin (board/README.md)",
+    "pepin.head_server": "board: pepin-head.service runs it from /opt/pepin (board/README.md)",
     "pepin.depth_service": "laptop: ros/models.sh restart depth",
     "pepin.localization_service": "laptop: ros/models.sh restart localization",
 }
@@ -93,6 +94,7 @@ PER_CALL = (
     "pepin.camera_controls",  # pepin-camera's ExecStartPre and ros/exposure.sh, once each
     "pepin.census",
     "pepin.goal_link",
+    "pepin.head_link",  # the head server's door by hand (bring-up, a bench)
     "pepin.push",
     "pepin.red_button",
     "pepin.speed",
