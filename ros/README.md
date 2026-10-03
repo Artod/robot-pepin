@@ -713,6 +713,25 @@ costmaps' clock and loop, so the same bag gives the same costmap bit for bit. Th
 is not re-fused (`/depth_marks` is replayed as recorded) and the loop is open: the recorded plan
 and motion, no planner or controller run. The columns are in `ros/replay/score.py`.
 
+### The camera of a drive (`ros/clip_to_bag.sh`)
+
+The drives record no image topics; the board-side clip `<run>_cam.mjpeg` beside each bag is the
+camera's record (`pepin_bringup.camera_clip`, curl's raw copy, which keeps every part's headers;
+its URL asks for `?extra_headers=1`, so the V4L2 capture stamp rides along). `ros/clip_to_bag.sh`
+turns it into a camera bag of the four stereo topics, rectified exactly as `camera_stream` does
+(`pepin_bringup.stereo_frames`) and dated by the capture (`pepin.mjpeg.capture_time` grab):
+
+```bash
+ros/clip_to_bag.sh 0512                  # ros/maps/rec/0512_*_cam.mjpeg -> 0512_*_cam.bag
+ros/clip_to_bag.sh 0512 --require-grab   # refuse a clip recorded without the capture stamps
+ros2 bag play --clock ros/maps/rec/0512_*/ ros/maps/rec/0512_*_cam.bag   # the drive with its camera
+```
+
+It prints the frames, the parts that fell back to the send stamp and the send-grab lag. The raw
+rectified eyes are ~17 MB/s with MCAP's zstd (a 4-minute drive is ~4 GB): convert the drives being
+replayed, not the archive. Clips recorded before 2026-10-03 carry no grab headers (send stamps,
+1-68 ms late and bimodal): fine for looking, not for a VIO or a Kalibr run.
+
 ## Simulation
 
 A kinematic simulator for Nav2's behaviour on the Mac: `ros/sim.sh` runs our Nav2

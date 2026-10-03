@@ -91,22 +91,31 @@ from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, Window, spin_main
+from pepin_bringup.stereo_frames import (
+    LEFT_IMAGE_TOPIC,
+    LEFT_INFO_TOPIC,
+    RIGHT_IMAGE_TOPIC,
+    RIGHT_INFO_TOPIC,
+    camera_info,
+    eye_messages,
+    rectified_optics,
+    right_camera_info,
+)
 
 CONFIG = "/ws/config/camera.json"
 # The socket's own timeout: a stream that stops feeding raises instead of hanging. It is not
 # the cost of stopping the node — close() shuts the socket down rather than waiting for it.
 STREAM_TIMEOUT_S = 5.0
 RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does not sit it out
-# The right eye of a stereo rig, beside /camera/image and /camera/camera_info. The names are
-# ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is published on
-# them while the head has no calibration.
-RIGHT_IMAGE_TOPIC = "/camera/right/image"
+# The right eye of a stereo rig, beside /camera/image and /camera/camera_info: RIGHT_IMAGE_TOPIC
+# and RIGHT_INFO_TOPIC (pepin_bringup.stereo_frames, shared with ros/tools/clip_to_bag.py). The
+# names are ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is
+# published on them while the head has no calibration.
 # The right eye goes out grey. RAFT-Stereo's own loaders copy a grey eye into three channels,
 # and with both eyes in colour the depth fell from 5-6 to 3 frames a second (2026-09-28) for a
 # gain the literature calls slight. True publishes bgr8, and the matcher then sends the pair
 # in colour by itself (pepin.stereo_depth.RaftMatcher, pepin.stereo_host's X-Channels).
 RIGHT_EYE_COLOUR = False
-RIGHT_INFO_TOPIC = "/camera/right/camera_info"
 # What a stereo frame is made of, in the order it happens; every one is timed into the tally and
 # printed in the report line as median/p95 milliseconds.
 STEREO_STAGES = ("decode", "split", "rectify", "publish")
@@ -483,15 +492,8 @@ class CameraStream(Node):
         maps: tuple[Any, Any] | None = None
         if rectifier is not None:
             size = (rectifier.width, rectifier.height)
-            lens = Optics(
-                rectifier.fx,
-                rectifier.fy,
-                rectifier.cx,
-                rectifier.cy,
-                size[0],
-                size[1],
-                (),
-                True,
+            lens = rectified_optics(
+                rectifier,
                 f"stereo calibration ({self._calibration_source}), rectified to"
                 f" {rectifier.fx:.0f} px focal",
             )
@@ -509,23 +511,11 @@ class CameraStream(Node):
                 True,
                 f"{lens.source}, rectified to {new_k[0, 0]:.0f} px focal",
             )
-        info = self._camera_info(size, lens)
+        info = camera_info(size, lens, self._cfg.optical_frame)
         right = None
         if rectifier is not None:
-            right = self._camera_info(size, lens)
-            right.p = list(right.p)
-            right.p[3] = rectifier.right_projection_tx()
+            right = right_camera_info(rectifier, lens, self._cfg.optical_frame)
         return Published(size, info, lens, maps, rectifier, right)
-
-    def _camera_info(self, size: tuple[int, int], lens: Optics) -> CameraInfo:
-        """One ``sensor_msgs/CameraInfo`` for a picture of ``size`` with these optics, in the
-        camera's optical frame and with no stamp yet (the frame's own is put on at publish)."""
-        info = CameraInfo()
-        info.header.frame_id = self._cfg.optical_frame
-        info.width, info.height = size
-        info.distortion_model = "plumb_bob"
-        info.k, info.d, info.r, info.p = lens.camera_info_arrays()
-        return info
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``scale`` and ``undistort`` rebuild the published size, its optics and
@@ -664,25 +654,25 @@ class CameraStream(Node):
                 left, right = rectifier.rectify(left, right)
             self._tally.count("rectified")
         with self._tally.measure("publish"):
-            published.info.header.stamp = stamp
-            self._image_pub.publish(image_from_array(left, "bgr8", stamp, self._cfg.optical_frame))
-            self._info_pub.publish(published.info)
-            if (
-                rectifier is not None
-                and published.right is not None
-                and self._right_image_pub is not None
-                and self._right_info_pub is not None
+            rectified = rectifier is not None and published.right is not None
+            publishers = {
+                LEFT_IMAGE_TOPIC: self._image_pub,
+                LEFT_INFO_TOPIC: self._info_pub,
+                RIGHT_IMAGE_TOPIC: self._right_image_pub,
+                RIGHT_INFO_TOPIC: self._right_info_pub,
+            }
+            for topic, msg in eye_messages(
+                left,
+                right if rectified else None,
+                published.info,
+                published.right if rectified else None,
+                stamp,
+                self._cfg.optical_frame,
+                RIGHT_EYE_COLOUR,
             ):
-                published.right.header.stamp = stamp
-                self._right_image_pub.publish(
-                    image_from_array(
-                        right,
-                        "bgr8" if RIGHT_EYE_COLOUR else "mono8",
-                        stamp,
-                        self._cfg.optical_frame,
-                    )
-                )
-                self._right_info_pub.publish(published.right)
+                publisher = publishers[topic]
+                if publisher is not None:
+                    publisher.publish(msg)
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
