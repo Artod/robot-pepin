@@ -337,6 +337,42 @@ a row the host is left alone and probed again every 30 s. **The checkpoint** liv
 device are in `config/camera.json`'s `net` block. The model's source is vendored under
 `src/pepin/vendor/raft_stereo/` (MIT, princeton-vl/RAFT-Stereo at 6e93ed2).
 
+## The head IMU and the visual-inertial odometry
+
+The head ESP32 reads an MPU6050 glued to the stereo module; `pepin.head_server` (board,
+`pepin-head`, TCP 3340) owns its serial port and maps its clock onto the board's. The base bridge
+subscribes (`head_imu:=true`, `ros/feature.sh head_imu on`) and is the one publisher of what
+follows from it:
+
+- `/head/imu` (sensor_msgs/Imu, frame `head_imu`, the chip's axes), every sample under a 200 Hz cap,
+  dated by the sample's data-ready edge less the chip's filter delay (the `imu_config` line);
+  `head_imu_publish` mutes it live;
+- `/mast/state` (JointState `mast_roll|pitch|yaw`, the sway's angles and rates, NaN while the neck
+  moves) once the IMU's extrinsics are in `config/camera.json` (`stereo.head_imu`); the gaze gate
+  drops a frame on it with `gate_sway_dps`/`gate_sway_deg` (both 0, off, as shipped);
+- the sway composed into `base_link -> camera_link` only under `mast_sway` (off until its sign is
+  checked, docs/head_imu_calibration.md section 7).
+
+The minute line says it all: `head imu: 200.0 Hz published of 200.0 received, link up, server clock
+ready spread 0.21 ms skew +4.5 ppm, 0 gaps > 1.5 periods ...; mast: armed, peak 0.080 deg, ...`.
+
+OpenVINS runs on the laptop in its own container (`pepin-laptop:vio`, OpenVINS pinned to master
+2025-11-30 plus PR #500, its own simulator as the build's gate) and enters the board's EKF through
+the visual odometry's one slot:
+
+```bash
+uv run python ros/tools/vio_config.py          # OpenVINS's files from the repo's numbers (ros/maps/vio)
+ros/laptop-build.sh vio                        # once: 16 min of build, 34 s of gate
+ros/laptop.sh vio                              # OpenVINS in pepin-vio; vio logs | down | kick (at rest)
+ros/laptop.sh vslam --vo-vio                   # the relay reads /ov_msckf/poseimu instead of rtabmap
+```
+
+The relay composes base_link's pose through TF (`head_imu <- base_link`: camera_stream's static
+edge from the extrinsics, the neck chain from the board), gives it the per-step `vio` covariance
+(`vio_step_fraction` of the step, floored at `vo_sigma_m`), counts OpenVINS's re-inits and withholds
+a lost VIO (`vio_lost_*` knobs). Calibration: docs/head_imu_calibration.md. The offline A/B: the
+"Replay" section.
+
 ## Camera calibration
 
 **The stereo head** (writes `config/stereo_calibration.json`):
@@ -730,13 +766,31 @@ turns it into a camera bag of the four stereo topics, rectified exactly as `came
 ```bash
 ros/clip_to_bag.sh 0512                  # ros/maps/rec/0512_*_cam.mjpeg -> 0512_*_cam.bag
 ros/clip_to_bag.sh 0512 --require-grab   # refuse a clip recorded without the capture stamps
-ros2 bag play --clock ros/maps/rec/0512_*/ ros/maps/rec/0512_*_cam.bag   # the drive with its camera
+ros2 bag play --clock 100 -i ros/maps/rec/0512_*/ -i ros/maps/rec/0512_*_cam.bag  # drive + camera
 ```
 
 It prints the frames, the parts that fell back to the send stamp and the send-grab lag. The raw
 rectified eyes are ~17 MB/s with MCAP's zstd (a 4-minute drive is ~4 GB): convert the drives being
 replayed, not the archive. Clips recorded before 2026-10-03 carry no grab headers (send stamps,
 1-68 ms late and bimodal): fine for looking, not for a VIO or a Kalibr run.
+
+### The visual odometry's A/B (`ros/vio_replay.sh`, `ros/tools/vio_score.py`)
+
+One drive, one arm, the board's EKF (`ros/params/ekf.yaml`) replayed on the drive's own inputs
+plus the arm's `/vo`, in real time (OpenVINS has no ROS 2 serial reader) in a throwaway container
+with no network; then every arm's `/odometry/filtered` scored against the lidar truth with the
+metrics fixed before the drives (vio.md section 6: the median relative pose error per metre over
+1 m segments, the paired bootstrap CI against B, the per-drive wins):
+
+```bash
+ros/vio_replay.sh 0601 --arm A      # the EKF with no /vo
+ros/vio_replay.sh 0601 --arm B      # stereo_odometry + the relay (vo_input stereo): the baseline
+ros/vio_replay.sh 0601 --arm E      # OpenVINS + the relay (vo_input vio); Ez: its ZUPT on
+uv run python ros/tools/vio_score.py runs/06* --arms A B E --baseline B --s3 0601 0602 0603 0604 0605 0606
+```
+
+Each run leaves `<run>_arm_<ARM>.bag` and `.csv` beside the drive; the scorer reads a directory per
+drive holding `truth.csv` (the lidar truth) and one `<ARM>.csv` per arm.
 
 ## Simulation
 
