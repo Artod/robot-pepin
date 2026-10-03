@@ -156,3 +156,15 @@ def test_without_the_head_imu_block_only_kalibr_s_files_or_a_nominal_guess(tmp_p
     chain = (tmp_path / "c" / "kalibr_imucam_chain.yaml").read_text()
     assert "NOMINAL: axes x,-z,y" in chain
     assert "zupt_max_disparity: 0.0" in (tmp_path / "c" / "estimator_config.yaml").read_text()
+
+
+def test_the_nominal_block_is_one_camera_json_accepts(tmp_path: Path) -> None:
+    """--print-block writes the guess as config/camera.json's head_imu block, which the camera's
+    reader accepts as a rigid transform and the generator then uses as T_cam_imu."""
+    from pepin.camera import head_imu_transform
+
+    block = TOOL.nominal_block("x,-z,y", (0.0, 0.03, 0.04))
+    assert head_imu_transform(block)[0][:3] == (1.0, 0.0, 0.0)
+    config = _config_with_imu(tmp_path / "config", np.asarray(block["T_cam_imu"], dtype=float))
+    rig = TOOL.load_rig(config)
+    assert np.allclose(rig.t_cam_imu, TOOL.nominal_t_cam_imu("x,-z,y", (0.0, 0.03, 0.04)))

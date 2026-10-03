@@ -26,6 +26,12 @@ uv run python ros/tools/vio_config.py --nominal "x,-z,y" 0.0 0.03 0.04
 
 `AXES` lists the optical axis of chip x, y and z in turn; the three numbers are the chip's position
 in the left eye's optical frame (metres, tape). The files say `NOMINAL` until Kalibr replaces them.
+The live relay composes through TF, so the same guess also goes into `config/camera.json` as the
+`stereo.head_imu` block (camera_stream then publishes `camera_optical -> head_imu`):
+
+```bash
+uv run python ros/tools/vio_config.py --print-block --nominal "x,-z,y" 0.0 0.03 0.04
+```
 Sign check: pan the head left by hand (torque off) and see which `/head/imu` axis reads positive;
 tilt down, the same. Write both into the `head_imu` block's `note` when it is created.
 

@@ -32,6 +32,7 @@ refine the camera-IMU transform online (a dedicated well-excited session only, v
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -94,6 +95,19 @@ def nominal_t_cam_imu(axes: str, offset_m: Sequence[float]) -> Array:
     matrix[:3, :3] = rotation
     matrix[:3, 3] = np.asarray(offset_m, dtype=float)
     return matrix
+
+
+def nominal_block(axes: str, offset_m: Sequence[float]) -> dict[str, object]:
+    """config/camera.json's ``stereo.head_imu`` block for a nominal guess: what camera_stream
+    publishes as camera_optical -> head_imu until Kalibr's numbers replace it."""
+    return {
+        "T_cam_imu": [
+            [round(float(v), 6) for v in row] for row in nominal_t_cam_imu(axes, offset_m)
+        ],
+        "time_offset_s": 0.0,
+        "method": f"nominal: axis photo {axes}, tape {list(offset_m)} m (Kalibr pending)",
+        "note": "chip axes against the rectified left eye's optical frame, from the photo",
+    }
 
 
 def invert(transform: Array) -> Array:
@@ -390,10 +404,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--zupt-arm", action="store_true", help="the A/B's E' arm")
     parser.add_argument("--tag-size", type=float, default=None, help="metres, measured")
     parser.add_argument("--kalibr-only", action="store_true")
+    parser.add_argument(
+        "--print-block",
+        action="store_true",
+        help="print --nominal as config/camera.json's stereo.head_imu block (for the live TF)",
+    )
     args = parser.parse_args(argv)
     nominal = None
     if args.nominal is not None:
         nominal = (args.nominal[0], [float(v) for v in args.nominal[1:]])
+    if args.print_block:
+        if nominal is None:
+            raise SystemExit("--print-block prints the --nominal guess")
+        print(json.dumps(nominal_block(*nominal), indent=2))
+        return 0
     rig = load_rig(args.config, args.camera, nominal, need_imu=not args.kalibr_only)
     sys.path.insert(0, str(REPO / "src"))
     from pepin.head_imu import HeadImuConfig
