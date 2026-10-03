@@ -14,14 +14,15 @@ from pepin.tools.robot import Robot
 @tool
 def status(robot: Robot) -> Result:
     """What is up and what is not: the goal server (driving and where the robot is), the head,
-    the memory (world), the voice and the camera, each with a short detail. Call it when a tool
-    says a service is not answering."""
+    the memory (world), the voice, the camera and the face screen, each with a short detail.
+    Call it when a tool says a service is not answering."""
     checks: dict[str, Callable[[], Any]] = {
         "goal_server": lambda: _goal_server(robot),
         "head": lambda: robot.neck.pose().as_dict(),
         "world": robot.world.health,
         "voice": robot.speech.health,
         "camera": robot.camera.health,
+        "face": robot.face.health,
     }
     with ThreadPoolExecutor(len(checks)) as pool:
         futures = {name: pool.submit(probe, check) for name, check in checks.items()}

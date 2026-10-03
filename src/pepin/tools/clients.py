@@ -628,3 +628,126 @@ def audio_client_link(host: str, port: int) -> AudioLink:
         ) from error
     client = module.AudioClient(host, port).start(listen=False)
     return _AudioClientLink(client, module.play_paced)
+
+
+# -- the face: the head server's mouth and info screen ------------------------------------------
+
+HEAD_PORT = 3340  # pepin.head_link.HEAD_PORT
+BASE_PORT = 3336  # pepin.base_link.BASE_PORT
+
+
+class Face(Protocol):
+    """The mouth on the head's screen and the info screen beside it (the head server)."""
+
+    def express(self, name: str, seconds: float) -> dict[str, Any]:
+        """Show expression ``name`` for ``seconds``; the head server's ack (what shows now)."""
+        ...
+
+    def show(self, text: str, seconds: float) -> dict[str, Any]:
+        """Show ``text`` (pepin.head_link.show_items markup) for ``seconds``; the ack."""
+        ...
+
+    def health(self) -> dict[str, Any]:
+        """The head server's link, what it shows, the face's frame rate."""
+        ...
+
+
+class HeadFace:
+    """:class:`Face` through the board's head server (``pepin.head_server``, TCP 3340): one
+    connection per call, its answer awaited. The tools' expressions are the ``llm`` source's and
+    always timed, so the face goes back by itself to whatever stood before (a drive's focus, the
+    voice loop's listening)."""
+
+    SOURCE = "llm"
+    HINT = "Is the board up and pepin-head running on it, with the head's ESP32 plugged in?"
+
+    def __init__(self, host: str, port: int = HEAD_PORT, timeout_s: float = HTTP_TIMEOUT_S) -> None:
+        """The head server at ``host:port``."""
+        self.host, self.port, self.timeout_s = host, port, timeout_s
+
+    def express(self, name: str, seconds: float) -> dict[str, Any]:
+        """An ``express`` of the ``llm`` source, held ``seconds``."""
+        request = {"cmd": "express", "source": self.SOURCE, "name": name, "hold_s": seconds}
+        return self._ask(request)
+
+    def show(self, text: str, seconds: float) -> dict[str, Any]:
+        """A ``show`` of ``text``."""
+        return self._ask({"cmd": "show", "text": text, "seconds": seconds})
+
+    def health(self) -> dict[str, Any]:
+        """The status line, cut to what a person checks first."""
+        status = self._ask({"cmd": "status"})
+        esp = status.get("esp") or {}
+        return {
+            "link": status.get("link"),
+            "showing": status.get("showing"),
+            "face_fps": esp.get("fps"),
+            "imu_hz": esp.get("imu_rate_hz"),
+        }
+
+    def _ask(self, request: dict[str, Any]) -> dict[str, Any]:
+        from pepin.head_link import ask as ask_head
+
+        where = f"{self.host}:{self.port}"
+        try:
+            answer = ask_head(request, self.host, self.port, self.timeout_s)
+        except (OSError, ValueError) as error:
+            raise ServiceDownError("head server", where, error, self.HINT) from error
+        if answer.get("type") == "error":
+            raise ToolError(f"the head server refused it: {answer.get('error')}")
+        return answer
+
+
+class Body(Protocol):
+    """The base's own readings beyond where it is."""
+
+    def temperatures(self) -> dict[str, int]:
+        """Each servo's temperature, degrees C, by name."""
+        ...
+
+
+class BaseBody:
+    """:class:`Body` from the base server's state lines (``pepin.base_server``, TCP 3336): it
+    connects, reads until a state line carries the temperatures, and leaves. It sends nothing,
+    so it is never a driver and its leaving releases nothing."""
+
+    HINT = "Is the board up and pepin-base running on it?"
+
+    def __init__(self, host: str, port: int = BASE_PORT, timeout_s: float = HTTP_TIMEOUT_S) -> None:
+        """The base server at ``host:port``."""
+        self.host, self.port, self.timeout_s = host, port, timeout_s
+
+    def temperatures(self) -> dict[str, int]:
+        """The newest state line's ``temp_c`` (the servos are read every 5 s)."""
+        import socket
+        import time
+
+        where = f"{self.host}:{self.port}"
+        heard = False  # a state line came: the server is up, the temperatures are not
+        try:
+            with socket.create_connection((self.host, self.port), self.timeout_s) as sock:
+                deadline = time.monotonic() + self.timeout_s
+                buffer = b""
+                while (left := deadline - time.monotonic()) > 0:
+                    sock.settimeout(left)
+                    try:
+                        chunk = sock.recv(65536)
+                    except TimeoutError:
+                        break
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    *lines, buffer = buffer.split(b"\n")
+                    for line in reversed(lines):
+                        state = json.loads(line) if line.strip() else {}
+                        heard = heard or state.get("type") == "state"
+                        if state.get("type") == "state" and isinstance(state.get("temp_c"), dict):
+                            return {str(k): int(v) for k, v in state["temp_c"].items()}
+        except (OSError, ValueError) as error:
+            raise ServiceDownError("base server", where, error, self.HINT) from error
+        if not heard:
+            raise ServiceDownError("base server", where, "no state line", self.HINT)
+        raise ToolError(
+            "the base server has not read the servos' temperatures yet (it does every 5 s, while"
+            " the bus answers); ask again in a few seconds"
+        )

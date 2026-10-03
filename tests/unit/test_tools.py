@@ -483,7 +483,7 @@ def test_status_asks_every_owner_and_lists_what_is_down() -> None:
     world(robot).down = True
     result = call(robot, "status")
     assert result["ok"]
-    assert result["up"] == ["goal_server", "head", "camera"]
+    assert result["up"] == ["goal_server", "head", "camera", "face"]
     assert result["down"] == ["world", "voice"]
     assert result["services"]["goal_server"]["detail"] == (
         "pose 0.05 s old, planner hybrid, lidar ok"
@@ -507,6 +507,8 @@ def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel() 
         "recall": {"thing": "cup"},
         "remember": {"name": "hall", "what": "zone"},
         "say": {"text": "hi"},
+        "express": {"emotion": "happy"},
+        "show": {"text": "Temps\nleft: 41/70 C"},
     }
     for t in TOOLS:
         assert call(robot, t.name, **arguments.get(t.name, {}))["ok"], t.name

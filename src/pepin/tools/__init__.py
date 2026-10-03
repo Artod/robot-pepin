@@ -12,7 +12,7 @@ in a new module added to that list. The registry, the adapters and their tests d
     uv run python -m pepin.tools.mcp          # the MCP server, on stdio
 """
 
-from pepin.tools import drive, head, memory, speech, status  # noqa: F401 -- they register the tools
+from pepin.tools import drive, face, head, memory, speech, status  # noqa: F401 -- they register
 from pepin.tools.registry import TOOLS, Image, Registry, Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Endpoints, Robot
 
