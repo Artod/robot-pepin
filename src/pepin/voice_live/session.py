@@ -137,7 +137,7 @@ class SessionLog:
 class _Turn:
     user: str = ""
     model: str = ""
-    user_done_s: float | None = None  # the local gate heard the user stop
+    user_done_s: float | None = None  # the last voiced frame of the user's turn
     first_audio_s: float | None = None
     tools: list[str] = field(default_factory=list)
 
@@ -207,7 +207,7 @@ class _Session:
         self.last_activity_s = wake.cut_s
         self.last_speaking_s = 0.0
         self.awaiting_s: float | None = wake.cut_s  # the wake segment itself awaits an answer
-        self.turn = _Turn(user_done_s=wake.cut_s)
+        self.turn = _Turn(user_done_s=wake.ended_s)
         self.turns: list[dict[str, Any]] = []
         self.tool_log: list[dict[str, Any]] = []
         self.running: dict[str, ToolCall] = {}
@@ -293,10 +293,10 @@ class _Session:
                 ears.reset()
                 continue
             if ears.feed(frame.pcm, frame.t) is not None:
-                self.turn.user_done_s = self.clock()
                 self.awaiting_s = self.clock()
             if ears.talking:
-                self.last_user_voice_s = self.clock()
+                self.last_user_voice_s = max(self.last_user_voice_s, ears.last_voice_s)
+                self.turn.user_done_s = self.last_user_voice_s
                 self.awaiting_s = None
             await self.send_mic(session, frame.pcm)
 
@@ -438,7 +438,7 @@ class _Session:
             result = await asyncio.to_thread(self.o.tools, call.name, call.args)
         finally:
             self.running.pop(call.id, None)
-            self.last_activity_s = self.clock()
+            self.last_activity_s = self.awaiting_s = self.clock()  # the answer to it comes next
         text, images = render(result)
         ms = round((self.clock() - t0) * 1000)
         self.tool_log.append({"name": call.name, "args": call.args, "result": text[:500], "ms": ms})
