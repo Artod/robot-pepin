@@ -43,6 +43,11 @@ llm = [
     "google-genai>=1.0",
     "mcp>=2.2.0",
 ]
+# The voice loop's local wake gate (pepin.voice_live.wake.MlxWhisper, scripts/voice_live.py):
+# Whisper on the Mac's GPU. Apple silicon only; the unit tier never imports it.
+voice = [
+    "mlx-whisper>=0.4.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+]
 
 
 [build-system]
@@ -56,7 +61,7 @@ packages = ["src/pepin"]
 # menu-bar app (rumps) and the game-mode teleop (pygame) must not die on a missing import. The
 # board never installs from this file (board/README.md: src/pepin is rsynced).
 [tool.uv]
-default-groups = ["dev", "macos", "llm"]
+default-groups = ["dev", "macos", "llm", "voice"]
 
 [tool.ruff]
 line-length = 100
@@ -100,6 +105,7 @@ files = [
     "ros/sim",
     "scripts/timesync.py",
     "scripts/extrinsics.py",
+    "scripts/voice_live.py",
     "apps/macos",
 ]
 strict = true
