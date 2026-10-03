@@ -122,14 +122,17 @@
     g.phase = shape.wavePhase;
     g.mid = (u) => {
       const u2 = f(u * u);
+      const line = f(f(g.cy - f(g.smile_px * u2)) - f(g.asym_px * u));
+      if (g.wave_px === 0) return line;
       const taper = f(1 - f(f(u2 * u2) * u2));
       const ph = f(f(f(f(u + 1) * 0.5) * g.wave_n) - g.phase);
       const wave = f(f(f(1 - g.sharp) * sinf(TWO_PI * ph)) + f(g.sharp * triangle(ph)));
-      return f(f(f(g.cy - f(g.smile_px * u2)) - f(g.asym_px * u)) + f(f(g.wave_px * taper) * wave));
+      return f(line + f(f(g.wave_px * taper) * wave));
     };
     g.profile = (u) => {
       const a = Math.abs(u);
       if (a >= 1) return 0;
+      if (g.pexp === 2) return f(Math.sqrt(f(1 - f(a * a))));
       return f(Math.pow(f(1 - f(Math.pow(a, g.pexp))), f(1 / g.pexp)));
     };
     return g;
@@ -149,7 +152,7 @@
       if (k === k1 + 1) xs = right;
       const u = clampf(f(f(xs - g.cx) / g.half_w), -1, 1);
       const m = g.mid(u);
-      const o = f(g.open_px * g.profile(u));
+      const o = g.open_px > 0 ? f(g.open_px * g.profile(u)) : 0;
       sx.push(xs);
       st.push(f(m - f(o * g.upper)));
       sb.push(f(m + f(o * f(1 - g.upper))));

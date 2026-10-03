@@ -29,16 +29,20 @@ struct Geometry {
   // The mouth's line at u (-1 left corner .. 1 right corner, as seen).
   float mid(float u) const {
     const float u2 = u * u;
+    const float line = cy - smile_px * u2 - asym_px * u;
+    if (wave_px == 0.0f) return line;  // no sinf where there is no wave (the ESP32's is slow)
     const float taper = 1.0f - u2 * u2 * u2;
     const float ph = (u + 1.0f) * 0.5f * wave_n - phase;
     const float wave = (1.0f - sharp) * sinf(kTwoPi * ph) + sharp * triangle(ph);
-    return cy - smile_px * u2 - asym_px * u + wave_px * taper * wave;
+    return line + wave_px * taper * wave;
   }
 
-  // The opening's profile: 1 in the middle, 0 at the corners.
+  // The opening's profile: 1 in the middle, 0 at the corners. An ellipse (exponent 2, most
+  // expressions) is a square root; anything else costs two powf.
   float profile(float u) const {
     const float a = fabsf(u);
     if (a >= 1.0f) return 0.0f;
+    if (pexp == 2.0f) return sqrtf(1.0f - a * a);
     return powf(1.0f - powf(a, pexp), 1.0f / pexp);
   }
 };
@@ -131,7 +135,7 @@ void layout(const Shape& shape, Layout* out) {
     if (k == k1 + 1) xs = right;
     const float u = clampf((xs - g.cx) / g.half_w, -1.0f, 1.0f);
     const float m = g.mid(u);
-    const float o = g.open_px * g.profile(u);
+    const float o = g.open_px > 0.0f ? g.open_px * g.profile(u) : 0.0f;
     sm.x[sm.n] = xs;
     sm.top[sm.n] = m - o * g.upper;
     sm.bot[sm.n] = m + o * (1.0f - g.upper);
