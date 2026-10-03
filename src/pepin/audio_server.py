@@ -33,6 +33,7 @@ import argparse
 import array
 import contextlib
 import logging
+import math
 import os
 import queue
 import re
@@ -58,6 +59,7 @@ from pepin.audio_link import (
     ProtocolError,
     encode,
 )
+from pepin.face import FaceTable, load_face_table, mouth_level
 from pepin.telemetry import LatencyTracker
 from pepin.xvf3800 import Xvf3800, firmware_warning, open_array
 
@@ -628,6 +630,109 @@ class AplaySink:
             self._proc.kill()
 
 
+class LipSync:
+    """The mouth's levels for the speech the speaker plays (``--lipsync``): the loudness of each
+    ``window_s`` of every chunk the player hands its device, dated by when that window will be
+    heard, and sent to the head server (``send``, a level 0..1) as each comes due.
+
+    The device takes a chunk long before it sounds (aplay's pipe alone holds two seconds), so
+    a window's moment is counted in samples from the utterance's first sound: the moment its
+    device opened plus ``start_latency_s``. A chunk that comes after its own moment (the laptop
+    fell behind and the speaker ran dry) restarts that count where the sound resumes. A flush or
+    the end of the utterance closes the mouth at once. ``table`` is config/face.json: the window,
+    the latency and the dB range a level spans.
+    """
+
+    def __init__(
+        self,
+        send: Callable[[float], None],
+        table: FaceTable,
+        *,
+        rate: int = RATE,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        """``send`` gets each level when it is due, on this object's own thread (:meth:`run`)."""
+        self._send = send
+        self._table = table
+        self._rate = rate
+        self._clock = clock
+        lipsync = table.lipsync
+        self._window = max(1, round(lipsync["window_s"] * rate))
+        self._latency_s = lipsync["start_latency_s"] - lipsync["lead_s"]
+        self._cond = threading.Condition()
+        self._due: deque[tuple[float, float]] = deque()  # (when, level)
+        self._anchor: float | None = None  # when the utterance's sample 0 is heard
+        self._samples = 0  # samples of this utterance handed to the device
+        self._acc = 0.0  # the open window's sum of squares...
+        self._acc_n = 0  # ...and its samples
+        self._open = False  # the last level sent was not a zero
+        self.sent = 0
+        self.late = 0  # chunks that came after their moment: the count restarted
+
+    def chunk(self, pcm: bytes) -> None:
+        """A chunk the device has just taken (whole s16le samples)."""
+        now = self._clock()
+        samples = array.array("h", pcm[: len(pcm) - len(pcm) % SAMPLE_BYTES])
+        with self._cond:
+            if self._anchor is None:
+                self._anchor = now + self._latency_s
+            elif self._anchor + self._samples / self._rate < now:
+                self.late += 1
+                self._anchor = now + self._latency_s - self._samples / self._rate
+            start = 0
+            while start < len(samples):
+                take = min(self._window - self._acc_n, len(samples) - start)
+                part = samples[start : start + take]
+                self._acc += float(sum(v * v for v in part))
+                self._acc_n += take
+                start += take
+                self._samples += take
+                if self._acc_n == self._window:
+                    rms = math.sqrt(self._acc / self._window) / 32768.0
+                    db = 20.0 * math.log10(rms) if rms > 0.0 else -120.0
+                    when = self._anchor + (self._samples - self._window) / self._rate
+                    self._due.append((when, mouth_level(db, self._table)))
+                    self._acc, self._acc_n = 0.0, 0
+            self._cond.notify_all()
+
+    def stop(self) -> None:
+        """The utterance is over (played out, or flushed): the mouth closes now."""
+        with self._cond:
+            self._due.clear()
+            self._anchor = None
+            self._samples = 0
+            self._acc, self._acc_n = 0.0, 0
+            self._due.append((self._clock(), 0.0))
+            self._cond.notify_all()
+
+    def step(self, timeout_s: float = 0.05) -> None:
+        """Send whatever came due; wait up to ``timeout_s`` (less when a level is due sooner)."""
+        with self._cond:
+            if not self._due:
+                self._cond.wait(timeout_s)
+            now = self._clock()
+            ready = []
+            while self._due and self._due[0][0] <= now:
+                ready.append(self._due.popleft()[1])
+            wait = self._due[0][0] - now if self._due else None
+        for level in ready[-1:]:  # behind: only the newest level matters
+            if level > 0.0 or self._open:
+                self._send(level)
+                self.sent += 1
+            self._open = level > 0.0
+        if wait is not None and not ready:
+            time.sleep(min(max(wait, 0.0), timeout_s))
+
+    def run(self, stop: threading.Event) -> None:
+        """Step until ``stop``."""
+        while not stop.is_set():
+            self.step()
+
+    def status(self) -> dict[str, Any]:
+        """For the status line."""
+        return {"lipsync_sent": self.sent, "lipsync_late": self.late}
+
+
 class Player:
     """The speaker's queue: the laptop's chunks in, one playback device at a time out.
 
@@ -649,9 +754,12 @@ class Player:
         max_queue_s: float = 10.0,
         idle_close_s: float = 2.0,
         clock: Callable[[], float] = time.monotonic,
+        lipsync: LipSync | None = None,
     ) -> None:
-        """``open_sink`` starts a playback device (raises OSError when it cannot)."""
+        """``open_sink`` starts a playback device (raises OSError when it cannot); ``lipsync``
+        is told every chunk the device takes and every end (``--lipsync``)."""
         self._open_sink = open_sink
+        self._lipsync = lipsync
         self._rate = rate
         self._max_bytes = int(max_queue_s * rate) * SAMPLE_BYTES
         self._idle_close_s = idle_close_s
@@ -709,6 +817,8 @@ class Player:
         for sink in sinks:
             if sink is not None:
                 sink.abort()
+        if self._lipsync is not None:
+            self._lipsync.stop()
 
     @property
     def queued_s(self) -> float:
@@ -772,6 +882,8 @@ class Player:
         except (OSError, ValueError):  # killed by flush meanwhile: the chunk was meant to die
             return
         self.played_s += len(chunk) / SAMPLE_BYTES / self._rate
+        if self._lipsync is not None and self.flushes == generation:
+            self._lipsync.chunk(chunk)
 
     def _close_sink(self) -> None:
         with self._cond:
@@ -779,6 +891,8 @@ class Player:
             self._finishing = sink
         if sink is not None:
             sink.finish()
+            if self._lipsync is not None:
+                self._lipsync.stop()
         with self._cond:
             if self._finishing is sink:
                 self._finishing = None
@@ -992,13 +1106,16 @@ class AudioService:
         capture_xruns: XrunCounter,
         play_xruns: XrunCounter,
         clock: Callable[[], float] = time.monotonic,
+        lipsync: LipSync | None = None,
     ) -> None:
         """``doa`` None: no direction (``--doa-hz 0``); the xrun counters are arecord's
-        overruns (audio lost) and aplay's underruns (the speaker ran dry)."""
+        overruns (audio lost) and aplay's underruns (the speaker ran dry); ``lipsync`` the
+        player's (``--lipsync``), stepped on a thread of its own."""
         self._server = server
         self._capture = capture
         self._player = player
         self._doa = doa
+        self._lipsync = lipsync
         self._capture_xruns = capture_xruns
         self._play_xruns = play_xruns
         self._clock = clock
@@ -1054,6 +1171,8 @@ class AudioService:
             "underruns": self._play_xruns.count,
             "play_overflows": self._player.overflows,
             "play_errors": self._player.errors,
+            "lipsync": self._lipsync is not None,
+            **(self._lipsync.status() if self._lipsync is not None else {}),
             **self._server.stats(),
         }
 
@@ -1077,6 +1196,9 @@ class AudioService:
             workers.append(
                 threading.Thread(target=self._doa.run, args=(stop,), name="doa", daemon=True)
             )
+        if self._lipsync is not None:
+            lips = threading.Thread(target=self._lipsync.run, args=(stop,), daemon=True)
+            workers.append(lips)
         for worker in workers:
             worker.start()
         next_report = self._clock() + report_every_s
@@ -1128,6 +1250,11 @@ def main() -> None:
         "--doa-hz", type=float, default=10.0, help="direction reads a second; 0 = off"
     )
     parser.add_argument("--deadman-s", type=float, default=DEADMAN_S)
+    parser.add_argument(
+        "--lipsync", action="store_true",
+        help="send the speech's loudness to the head server's mouth (pepin.head_server, :3340)",
+    )  # fmt: skip
+    parser.add_argument("--head-port", type=int, default=3340)
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s"
@@ -1171,12 +1298,26 @@ def main() -> None:
             open_array, lambda reading: server.broadcast(reading.encode()), hz=args.doa_hz
         )
         doa_ref.append(doa)
+    lipsync = None
+    if args.lipsync:
+        from pepin.head_link import HeadClient
+
+        head = HeadClient("127.0.0.1", args.head_port, source="audio").start()
+        lipsync = LipSync(head.mouth, load_face_table(), rate=args.play_rate)
+        logger.info("lip sync: the speech's loudness to the head server on :%d", args.head_port)
     player = Player(
         lambda: AplaySink(args.device, rate=args.play_rate, xruns=play_xruns),
         rate=args.play_rate,
+        lipsync=lipsync,
     )
     service = AudioService(
-        server.start(), capture, player, doa, capture_xruns=capture_xruns, play_xruns=play_xruns
+        server.start(),
+        capture,
+        player,
+        doa,
+        capture_xruns=capture_xruns,
+        play_xruns=play_xruns,
+        lipsync=lipsync,
     )
     service.run(stop)
 
