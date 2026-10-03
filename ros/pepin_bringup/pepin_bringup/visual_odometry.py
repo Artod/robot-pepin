@@ -151,6 +151,9 @@ class VisualOdometry(Node):
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),
+            stamp_end=float(self._switches["gate_stamp_end"]),
+            sway_dps=float(self._switches["gate_sway_dps"]),
+            sway_deg=float(self._switches["gate_sway_deg"]),
         )
         self._after_gate = False  # the last pose was gated: this one only anchors the next step
         # Both of these cross the bridge, so their QoS is not this node's to choose: it is

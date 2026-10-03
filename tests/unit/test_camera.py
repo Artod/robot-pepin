@@ -30,7 +30,7 @@ def test_the_config_loads_and_names_the_board() -> None:
     block and flips calibrated, and rewrites nothing asserted here. The mono rig by NAME, so
     what it pins stays pinned while the robot's head is whatever it is."""
     cfg = CameraConfig.load(REPO / "config/camera.json", name="overview", board="10.0.0.187")
-    assert cfg.stream == "http://10.0.0.187:8080/stream"
+    assert cfg.stream == "http://10.0.0.187:8080/stream?extra_headers=1"  # the grab stamps
     # the mount measured 2026-09-12: the pitch off the encoder and the level frames
     # (scratch/neck_tilt_scale.txt), the height off a tape
     assert cfg.z_m == 1.203 and cfg.x_m == 0.0 and cfg.pitch_deg == 23.8
@@ -125,7 +125,7 @@ def test_the_stereo_block_is_one_eye_beside_the_frame_that_carries_two() -> None
     assert (cfg.rig.frame_width, cfg.rig.frame_height) == (1600, 600)
     assert cfg.rig.layout == "side_by_side" and cfg.rig.upside_down
     assert cfg.rig.baseline_m_nominal == 0.063
-    assert cfg.stream == "http://10.0.0.187:8080/stream"  # one camera on the board, one stream
+    assert cfg.stream == "http://10.0.0.187:8080/stream?extra_headers=1"  # one camera, one stream
     assert cfg.rig.calibration_path("/ws/config") == Path("/ws/config/stereo_calibration.json")
 
 

@@ -6,9 +6,12 @@ the stream with OpenCV, and publishes ``/camera/image`` (bgr8) and ``/camera/cam
 the optics of ``config/camera.json`` — the checkerboard's measured K and distortion once
 ``ros/calibrate.sh`` has written them (``calibrated: true``), the nominal pinhole of the
 configured field of view until then, one reader deciding (:func:`pepin.camera.optics`) and the
-report line saying which — stamped with the moment the board captured the frame (ustreamer's
-X-Timestamp, the clock that stamps the lidar): a frame stamped when the laptop decoded it was a
-few hundred milliseconds late, a picture placed ten degrees wrong while the cart turns.
+report line saying which — stamped on the board's clock (the clock that stamps the lidar): a
+frame stamped when the laptop decoded it was a few hundred milliseconds late, a picture placed ten
+degrees wrong while the cart turns. WHICH board moment is the ``camera_stamp`` flag: ustreamer's
+X-Timestamp is the moment it SENT the frame, 1-68 ms after the capture and bimodal (2026-10-02);
+``grab`` moves the V4L2 capture stamp onto the same clock (:func:`pepin.mjpeg.capture_time`, the
+stream URL carries ``?extra_headers=1`` for it), and the report line prints the send-grab lag.
 
 WHICH CAMERA is not this node's decision and not a flag: ``config/camera.json`` holds the rigs
 by name and says which is active, ``PEPIN_CAMERA`` overrides it for one process, and the
@@ -47,10 +50,11 @@ the base server, and this side must not publish the same edge.
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
-included); ``undistort``, live (the picture is straightened by the calibration before it goes out,
-and its CameraInfo then carries no distortion); ``static_camera_tf``, read at start and not live — a
-static transform cannot be withdrawn once sent, so the other value needs a restart. All three are
-printed in every report line.
+included); ``camera_stamp``, live (send or grab, above); ``undistort``, live (the picture is
+straightened by the calibration before it goes out, and its CameraInfo then carries no
+distortion); ``static_camera_tf``, read at start and not live — a static transform cannot be
+withdrawn once sent, so the other value needs a restart. All of them are printed in every report
+line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -82,7 +86,7 @@ from tf2_ros import StaticTransformBroadcaster
 from pepin.calibration import undistort_optics
 from pepin.camera import CameraConfig, Optics, optics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.mjpeg import capture_time, parts
+from pepin.mjpeg import STAMP_MODES, capture_time, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
@@ -115,6 +119,23 @@ CALIBRATION_POLL_S = 2.0
 # other declaration; both are printed in every report line. The range's low end is inclusive
 # and a scale of zero is a picture of no pixels, so _on_switch refuses that one value.
 FLAGS = FlagSet(
+    Flag(
+        "camera_stamp",
+        "send",
+        choices=STAMP_MODES,
+        description="which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp"
+        " (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock"
+        " (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the"
+        " stream URL and falls back to send per frame without it, counted in the report line)",
+        why="send until one drive is measured: X-Timestamp sits 1-68 ms after the capture,"
+        " bimodal (~1-5 or ~50 ms) with a median moving 4-48 ms between windows"
+        " (scratch/head_imu/ustreamer_stamps.py, 2026-10-02), so every consumer has carried that"
+        " jitter; switching changes every stamp the depth law, RTAB-Map and the VO were tuned on",
+        on_when="after one drive with grab, back to back with send on the same route, shows the"
+        " depth law residual or stereo_odometry's lost frames improve and nothing worse (RTAB-Map"
+        " registrations, the gate's blind count); and always for a VIO or Kalibr recording",
+        off_when="a consumer shows TF extrapolation errors or the law residual worsens under grab",
+    ),
     Flag(
         "undistort",
         False,
@@ -568,7 +589,7 @@ class CameraStream(Node):
                         # A calibration finished while the robot runs: picked up here, on this
                         # thread, so the frame after it is already rectified (a no-op for mono).
                         self._check_calibration()
-                        self._publish(frame, capture_time(headers))
+                        self._publish(frame, self._frame_time(headers))
                     if self._stop.is_set():
                         return  # the socket was shut down under the reader: that is the way out
                     self.get_logger().warning("camera stream ended; reconnecting")
@@ -666,6 +687,18 @@ class CameraStream(Node):
         if taken_at is None:
             self._tally.count("unstamped")
 
+    def _frame_time(self, headers: dict[str, str]) -> float | None:
+        """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
+        that carries both goes into the period's samples, and a ``grab`` part without them is
+        counted (it falls back to the send time)."""
+        mode = str(self._switches["camera_stamp"])
+        lag = send_lag_s(headers)
+        if lag is not None:
+            self._tally.sample("send_lag_ms", lag * 1e3)
+        elif mode == "grab":
+            self._tally.count("no_grab")
+        return capture_time(headers, mode)
+
     def _stamp(self, taken_at: float | None) -> Any:
         """The moment a frame is published under: the board's capture time when ustreamer sent
         one (the clock that stamps the lidar), the laptop's own when it did not."""
@@ -687,11 +720,27 @@ class CameraStream(Node):
             f", {w.counts['unstamped']} without a capture time" if w.counts["unstamped"] else ""
         )
         self.get_logger().info(
-            f"camera: {w.rate('frames'):.1f} frames/s{unstamped},"
+            f"camera: {w.rate('frames'):.1f} frames/s{unstamped}, {self._stamp_report(w)},"
             f"{self._stereo_report(w)}"
             f" optics: {self._published.optics.source},"
             f" flags: {self._switches.state(live_only=False)}"
         )
+
+    def _stamp_report(self, w: Window) -> str:
+        """The stamp mode and the period's send-grab lag as median/p90 milliseconds, or why
+        there is none (the URL without ``?extra_headers=1``, an older ustreamer)."""
+        mode = str(self._switches["camera_stamp"])
+        lags = sorted(w.samples.get("send_lag_ms", ()))
+        if not lags and mode == "send":
+            return "stamp=send (no grab headers)"
+        if not lags:
+            return (
+                f"stamp=grab (no grab headers: is ?extra_headers=1 on the URL?"
+                f" {w.counts['no_grab']} frames fell back to send)"
+            )
+        median = lags[len(lags) // 2]
+        p90 = lags[min(len(lags) - 1, int(0.9 * len(lags)))]
+        return f"stamp={mode}, send-grab median/p90 {median:.0f}/{p90:.0f} ms"
 
     def _stereo_report(self, w: Window) -> str:
         """What a stereo rig adds to the report line — the head, the stages and whatever went

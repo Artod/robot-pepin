@@ -121,3 +121,11 @@ def test_the_last_word_is_dropped_when_the_context_is_already_down(
     monkeypatch.setattr(RCLPY, "ok", lambda: True)
     with pytest.raises(RuntimeError, match="context is invalid"):
         node.stop()
+
+
+def test_the_camera_clip_asks_for_the_capture_stamps() -> None:
+    """The board-side clip is the replay's camera (ros/tools/clip_to_bag.py): its URL asks
+    ustreamer for the extra headers, the capture stamp beside the send stamp (pepin.mjpeg)."""
+    from pepin_bringup.camera_clip import CAMERA_STREAM
+
+    assert CAMERA_STREAM.endswith("/stream?extra_headers=1")

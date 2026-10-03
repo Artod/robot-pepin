@@ -278,6 +278,47 @@ def test_a_frame_goes_out_at_the_scale_with_the_board_s_capture_time(build: Buil
     assert (info.k[2], info.k[5]) == (320.0, 180.0), "the optics scale with the picture"
 
 
+def grab_part(sent: float, lag_s: float, body: bytes) -> bytes:
+    """One part as ustreamer writes it with ``?extra_headers=1``: X-Timestamp (realtime at the
+    send) beside the monotonic send and grab stamps, the capture ``lag_s`` before the send."""
+    send = 5000.0
+    head = (
+        f"Content-Type: image/jpeg\r\nContent-Length: {len(body)}\r\n"
+        f"X-Timestamp: {sent:.6f}\r\nX-UStreamer-Send-Time: {send:.6f}\r\n"
+        f"X-UStreamer-Grab-Time: {send - lag_s:.6f}\r\n"
+    )
+    return b"--boundarydonotcross\r\n" + head.encode() + b"\r\n" + body + b"\r\n"
+
+
+def test_the_stamp_mode_picks_the_send_or_the_capture_and_the_report_prints_the_lag(
+    build: Build,
+) -> None:
+    """``send`` (the default) stamps ustreamer's X-Timestamp; ``grab``, live, the V4L2 capture
+    moved onto the same clock — 48 ms earlier here; the report names the mode and the lag."""
+    body = jpeg(1280, 720)
+    node, _ = build(grab_part(1_750_000_000.30, 0.048, body))
+    images = node.pubs["/camera/image"].sent
+    assert until(lambda: images)
+    assert stamp_seconds(images[0].header.stamp) == pytest.approx(1_750_000_000.30, abs=1e-6)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "stamp=send, send-grab median/p90 48/48 ms" in line
+    assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
+    headers = {
+        "x-timestamp": "1750000001.300000",
+        "x-ustreamer-send-time": "5001.000000",
+        "x-ustreamer-grab-time": "5000.952000",
+    }
+    assert node._frame_time(headers) == pytest.approx(1_750_000_001.252, abs=1e-6)
+    assert node._frame_time({"x-timestamp": "7.0"}) == 7.0, "no grab headers: the send time"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "stamp=grab, send-grab median/p90 48/48 ms" in line
+    node._report()
+    assert "stamp=grab (no grab headers" in node.logger.texts("info")[-1]
+    assert not node.set_parameters([Param("camera_stamp", "exposure")])[0].successful
+
+
 # ---- the optics ------------------------------------------------------------------------------
 def calibrated_config(tmp_path: Path, calibrated: bool = True) -> str:
     """A copy of config/camera.json carrying a checkerboard calibration (and lidar.json beside
@@ -366,7 +407,9 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     assert until(lambda: len(node.pubs["/camera/image"].sent) == 2)
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "flags: undistort=off fold_mask=on static_camera_tf=off scale=0.5" in line
+    assert (
+        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5" in line
+    )
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
 
@@ -631,7 +674,9 @@ def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
     assert "stages: " in line and " ms median/p95" in line
     for stage in ("decode", "split", "rectify", "publish"):
         assert f"{stage} " in line.split("stages: ")[1]
-    assert "flags: undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
+    assert (
+        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
+    )
 
 
 def test_a_stereo_frame_of_the_wrong_size_is_counted_and_named_in_the_report(
@@ -685,4 +730,6 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     assert (image.width, image.height) == (640, 360) and image.encoding == "bgr8"
     node._report()
     line = node.logger.texts("info")[-1]
-    assert line.endswith("flags: undistort=off fold_mask=on static_camera_tf=off scale=0.5")
+    assert line.endswith(
+        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
+    )
