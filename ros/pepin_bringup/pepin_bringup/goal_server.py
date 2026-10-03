@@ -59,7 +59,8 @@ from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
-from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
+from pepin.face_events import DriveFace, FaceSink
+from pepin.flags import UNMEASURED, Flag, FlagSet, load_knobs, with_knobs
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
@@ -153,7 +154,31 @@ FLAGS = FlagSet(
         " says: pepin-vslam down or started before this build (ros/laptop.sh vslam restarts it"
         " on the checkout), or a dark room with no seed at hand",
     ),
+    Flag(
+        "face_events",
+        False,
+        description="the drive's moments on the head's face (pepin.face_events, through the"
+        " board's head server on PEPIN_HOST:3340): focused while a goal runs, struggling for a"
+        " moment at each new Nav2 recovery, happy on arrival, sad on an abort or a refusal, a"
+        " flat line on a cancel (config/face.json's events say what each looks like); and a"
+        " brain lease every 2 s, so the face falls asleep when this node or the WiFi is gone",
+        why=UNMEASURED,
+        on_when="the head is on the robot and its server answers (uv run python -m"
+        " pepin.head_link status)",
+        off_when="the face gets in the way of a test, or the head server is not there (each"
+        " moment is then dropped, the reconnection logged every 5 s)",
+    ),
 )
+FACE_LEASE_EVERY_S = 2.0  # pepin.face_events.LEASE_S lasts three of these
+
+
+def face_client() -> FaceSink:
+    """The head server's door for this node's moments (``source`` goal), on the board."""
+    from pepin.audio_link import board_host
+    from pepin.head_link import HEAD_PORT, HeadClient
+
+    return HeadClient(board_host(), HEAD_PORT, source="goal").start()
+
 
 PLANNERS = {
     "navfn": ("GridBased", "FollowPath"),
@@ -297,11 +322,16 @@ class GoalServer(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         self._lock = threading.Lock()
+        # The drive's moments on the head's face (flag face_events): before the switches, whose
+        # callback runs on the declarations too.
+        self._drive_face: DriveFace | None = None
         # Last, after every other declare_parameter: rclpy runs the switches' callback on
         # declarations too, and a name outside the table is refused there (node_kit.Switches).
         self._switches = Switches(
             self, with_knobs(FLAGS, load_knobs("goal_server")), on_change=self._on_switch
         )
+        self._face_switch(bool(self._switches["face_events"]))
+        self.create_timer(FACE_LEASE_EVERY_S, self._renew_face_lease)
         # The saved planner (the default where none was saved), with the follower the
         # `controller` flag names for it: after the switches, because the pick reads that flag,
         # and always, because the tree's own defaults are the RPP pair's.
@@ -603,9 +633,28 @@ class GoalServer(Node):
             self.get_logger().info(f"goal over: {was} -> {pair[0]} ({pair[1]}) for the next one")
 
     def _on_switch(self, name: str, old: Any, new: Any) -> None:
-        """A live flag changed: a new ``controller`` re-publishes the pick with its follower."""
+        """A live flag changed: a new ``controller`` re-publishes the pick with its follower;
+        ``face_events`` opens or closes the head server's door."""
         if name == "controller" and new != old:
             self.pick_planner(self.planner)
+        if name == "face_events" and hasattr(self, "_drive_face"):
+            self._face_switch(bool(new))
+
+    def _face_switch(self, on: bool) -> None:
+        """The face's door open (``face_events`` on) or closed."""
+        if on and self._drive_face is None:
+            self._drive_face = DriveFace(face_client())
+            self.get_logger().info("face events on: the drive's moments go to the head server")
+        elif not on and self._drive_face is not None:
+            face, self._drive_face = self._drive_face, None
+            face.close()
+            self.get_logger().info("face events off")
+
+    def _renew_face_lease(self) -> None:
+        """The brain lease (pepin.head_server): this node is here; dropped until up."""
+        face = self._drive_face
+        if self._up and face is not None:
+            face.lease()
 
     def cancel(self, send: bool = True) -> bool:
         """Stop the running drive, if any; True when there was one.
@@ -703,6 +752,7 @@ class GoalServer(Node):
             f"{self.controller} ({mode}{parks}) -> {name or 'coordinates'}"
             f" ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
         )
+        face = self._drive_face  # this drive's, whatever the flag does meanwhile
         try:
             if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
                 self._send(
@@ -719,6 +769,8 @@ class GoalServer(Node):
             )
             handle = self._wait(send, 10.0)
             if handle is None or not handle.accepted:
+                if face is not None:
+                    face.refused()
                 self._send(connection, {"event": "error", "detail": "the goal was refused"})
                 return
             with self._lock:
@@ -751,6 +803,8 @@ class GoalServer(Node):
                     "sent_in_ms": round((time.monotonic() - started) * 1000),
                 },
             )
+            if face is not None:
+                face.accepted()
             if handover is not None:
                 self._send(connection, handover)
             result_future = handle.get_result_async()
@@ -760,6 +814,8 @@ class GoalServer(Node):
                 handover = self._hand_over(x, y)
                 if handover is not None:
                     self._send(connection, handover)
+                if face is not None and feedback:
+                    face.progress(int(feedback.get("recoveries") or 0))
                 now = time.monotonic()
                 if feedback and now - last > 1.0:
                     last = now
@@ -776,6 +832,8 @@ class GoalServer(Node):
             ended_on_position = self.goal_checker == RPP_GOAL_CHECKER
             if status == 4 and ended_on_position and not self._cancelled_since(cancels):
                 self._pivot_to(yaw_deg, connection, cancels)
+            if face is not None:
+                face.done(int(status))
             self.stop_recording()  # closed before the answer: the caller fetches it on reading
             self._send(
                 connection,
@@ -792,6 +850,8 @@ class GoalServer(Node):
         finally:  # a refused goal or a broken connection must not leave a recorder running
             self.stop_recording()
             self._hand_back()
+            if face is not None:
+                face.abandoned()  # nothing when the drive's end was shown
             with self._lock:
                 self._driving = False
 

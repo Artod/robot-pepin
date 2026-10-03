@@ -417,8 +417,9 @@ class HeadClient(JsonLinesClient):
     :meth:`start`."""
 
     def __init__(self, host: str, port: int = HEAD_PORT, *, source: str) -> None:
-        """``source`` names this client's expressions (each source holds its own)."""
-        super().__init__(host, port, name=f"head:{source}")
+        """``source`` names this client's expressions (each source holds its own). A head
+        server that is away is asked again every 5 s (each try is logged)."""
+        super().__init__(host, port, name=f"head:{source}", retry_s=5.0)
         self.source = source
         self.last_status: dict[str, Any] | None = None
 
