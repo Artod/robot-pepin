@@ -25,6 +25,12 @@
 #   ros/laptop.sh vslam --vo-depth   the visual odometry reads the picture and the depth (rgbd_odometry)
 #                            at the depth's rate; the default reads the two eyes (stereo_odometry) at
 #                            the camera's: 8 poses/s, 0.15-0.2 s behind, measured at rest 2026-10-02
+#   ros/laptop.sh vslam --vo-vio   the visual odometry relay reads OpenVINS (ros/laptop.sh vio, its own
+#                            container) instead of rtabmap's: no odometry node runs in pepin-vslam
+#   ros/laptop.sh vio        start (or restart) OpenVINS in pepin-vio on pepin-laptop:vio
+#                            (ros/laptop-build.sh vio): the head IMU (/head/imu) and the two eyes,
+#                            config generated into ros/maps/vio by ros/tools/vio_config.py;
+#                            vio down | logs | kick (kick only at rest: OpenVINS inits from stillness)
 #   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
 #                            config/camera.json: for a rig without neck servos. By default the board's
 #                            base bridge owns that edge (from the neck's encoders); --neck, the old way
@@ -308,7 +314,8 @@ case "${1:-}" in
                 --fixed-head) STATIC_CAMERA_TF=true ;;
                 --no-vo) VO=false ;;
                 --vo-depth) VO_INPUT=depth ;;
-                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth]"; exit 2 ;;
+                --vo-vio) VO_INPUT=vio ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] [--vo-vio]"; exit 2 ;;
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads

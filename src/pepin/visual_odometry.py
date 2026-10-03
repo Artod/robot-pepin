@@ -19,6 +19,12 @@ it every refused jump as a velocity; :class:`PublishCap` says how often that may
 wheels standing still, every centimetre the visual odometry walks is its own drift, and that
 number decides whether it may be fused at all.
 
+A VISUAL-INERTIAL source (OpenVINS on the head IMU and the two eyes, vio.md) enters through the
+same gate and track: :func:`compose_base_pose` turns its IMU pose in its own gravity frame into
+base_link's through the neck's TF chain, :data:`VIO_STEP_FRACTION` is its per-step covariance
+model (its own marginal covariance only grows and is read as a health signal, :class:`VioHealth`),
+and :class:`VioLost` says when it has diverged (it never resets itself).
+
 Nothing here is ROS: poses and wheel speeds in, verdicts and a report line out
 (:mod:`pepin_bringup.visual_odometry` is the node around it).
 """
@@ -28,6 +34,9 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
+
+import numpy as np
 
 __all__ = [
     "LOST_VARIANCE",
@@ -35,12 +44,22 @@ __all__ = [
     "REST_YAW_RAD_S",
     "SCALE_ERROR",
     "SIGMA_FLOOR_M",
+    "VIO_LOST_S",
+    "VIO_LOST_SPEED_M_S",
+    "VIO_MIN_FEATURES",
+    "VIO_REINIT_RATIO",
+    "VIO_REST_SPEED_M_S",
+    "VIO_STEP_FRACTION",
     "PublishCap",
     "RestDrift",
     "RestWatch",
+    "VioHealth",
+    "VioLost",
     "VoGate",
     "VoPose",
     "VoTrack",
+    "compose_base_pose",
+    "homogeneous",
     "is_lost",
     "planar_covariance",
     "scaled_covariance",
@@ -72,6 +91,24 @@ RESET_RADIUS_M = 0.05
 # How long the wheels must have been still before the drift counts as drift. A drive ends with
 # the cart rocking on its own suspension for a moment; that motion is real and not the camera's.
 REST_SETTLE_S = 1.0
+
+# The VIO's drift per metre of step, the `vio` covariance mode's scale error (vio.md M3): 3 % is
+# an ESTIMATE until Phase 1 measures it; the floor beside it is vo_sigma_m (one wheel sample at
+# 10 Hz, scratch/vo_weight.py), so a VIO pose never weighs more than a wheel sample.
+VIO_STEP_FRACTION = 0.03
+# A step change of OpenVINS's marginal covariance trace by this factor is a re-initialisation.
+VIO_REINIT_RATIO = 10.0
+# The three LOST rules (vio.md section 4, S9): the composed base speed disagreeing with the
+# wheels by this much for this long while the board does not say rest; moving faster than
+# VIO_REST_SPEED_M_S while /zupt says rest; fewer tracked features than this.
+VIO_LOST_SPEED_M_S = 0.1
+VIO_LOST_S = 1.0
+VIO_MIN_FEATURES = 20
+VIO_REST_SPEED_M_S = 0.03
+# /zupt is published while the board's witnesses agree on rest; heard within this, it holds.
+ZUPT_FRESH_S = 0.5
+# A wheel speed or a feature count older than this says nothing any more.
+WITNESS_FRESH_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -427,6 +464,143 @@ class RestWatch:
             return "moving (no drift measured)"
         worst = f", worst so far {self._worst}" if self._worst is not None else ""
         return f"at rest {self._drift}{worst}"
+
+
+def homogeneous(rotation: Any, translation: Any) -> Any:
+    """A 4x4 transform from a 3x3 rotation and a translation."""
+    matrix = np.eye(4)
+    matrix[:3, :3] = np.asarray(rotation, dtype=float)
+    matrix[:3, 3] = np.asarray(translation, dtype=float).reshape(3)
+    return matrix
+
+
+def compose_base_pose(t_g_i: Any, t_i_b: Any, stamp: float) -> VoPose:
+    """base_link's planar pose in the VIO's gravity frame G: ``T_G_B = T_G_I * T_I_B``.
+
+    ``t_g_i`` is the IMU's pose in G (OpenVINS's poseimu), ``t_i_b`` base_link's pose in the
+    IMU's frame at the same stamp (TF ``head_imu <- base_link``: the static head_imu edge, the
+    neck's encoders, the mast's sway). The yaw is ``atan2(R[1,0], R[0,0])`` of the COMPOSED
+    rotation (vio.md N3: never "IMU yaw minus pan" — the 23.8 deg mount pitch and the tilt make
+    that subtraction wrong). With the cart parked and the head panning, T_G_I and T_I_B change
+    in opposite ways and the product stands still to the TF's accuracy."""
+    t_g_b = np.asarray(t_g_i, dtype=float) @ np.asarray(t_i_b, dtype=float)
+    yaw = math.atan2(float(t_g_b[1, 0]), float(t_g_b[0, 0]))
+    return VoPose(stamp=stamp, x=float(t_g_b[0, 3]), y=float(t_g_b[1, 3]), yaw=yaw)
+
+
+class VioHealth:
+    """OpenVINS's own covariance read as a health signal, never as a weight: its marginal pose
+    covariance only grows (global x, y and yaw are unobservable), so a STEP of its trace by
+    ``reinit_ratio`` either way is a re-initialisation, counted for the report line."""
+
+    def __init__(self, reinit_ratio: float = VIO_REINIT_RATIO) -> None:
+        self.reinit_ratio = reinit_ratio
+        self.reinits = 0
+        self.last_trace: float | None = None
+
+    def observe(self, covariance: Sequence[float]) -> bool:
+        """One poseimu covariance (6x6 row-major): True when it marks a re-initialisation."""
+        if len(covariance) < 36:
+            return False
+        trace = sum(float(covariance[i * 6 + i]) for i in range(6))
+        previous, self.last_trace = self.last_trace, trace
+        if previous is None or previous <= 0.0 or trace <= 0.0:
+            return False
+        ratio = max(trace / previous, previous / trace)
+        if ratio > self.reinit_ratio:
+            self.reinits += 1
+            return True
+        return False
+
+
+class VioLost:
+    """When the VIO has diverged: OpenVINS does not reset itself when lost, it propagates on the
+    IMU and drifts — at 0.5 m/s that passes the gate's 1 m/s ceiling on a cart capped at 0.30.
+
+    Three rules, each counted (vio.md section 4): (a) the composed base speed disagrees with the
+    wheels by more than ``lost_speed_m_s`` for ``lost_s`` while the board does not say rest; (b)
+    it moves faster than ``rest_speed_m_s`` while ``/zupt`` (wheels, gyro and command witnessed)
+    says rest; (c) fewer than ``min_features`` tracked. Times are the receiving node's clock."""
+
+    def __init__(
+        self,
+        lost_speed_m_s: float = VIO_LOST_SPEED_M_S,
+        lost_s: float = VIO_LOST_S,
+        min_features: int = VIO_MIN_FEATURES,
+        rest_speed_m_s: float = VIO_REST_SPEED_M_S,
+    ) -> None:
+        self.lost_speed_m_s = lost_speed_m_s  # live: vio_lost_speed_m_s
+        self.lost_s = lost_s  # live: vio_lost_s
+        self.min_features = min_features  # live: vio_min_features
+        self.rest_speed_m_s = rest_speed_m_s
+        self._wheels: tuple[float, float] | None = None  # (now, |speed|)
+        self._zupt: float | None = None
+        self._features: tuple[float, int] | None = None
+        self._disagree_since: float | None = None
+        self.counts = {"wheels": 0, "rest": 0, "features": 0}
+        self.last: str | None = None
+        self._was_lost = False
+
+    def wheels(self, now: float, speed_m_s: float) -> None:
+        """The wheels' forward speed (m/s) from /odom."""
+        self._wheels = (now, abs(speed_m_s))
+
+    def zupt(self, now: float) -> None:
+        """A /zupt message: the board says the cart is at rest."""
+        self._zupt = now
+
+    def features(self, now: float, count: int) -> None:
+        """How many features the VIO tracked in its last update."""
+        self._features = (now, count)
+
+    def check(self, now: float, vio_speed_m_s: float) -> str | None:
+        """Why the VIO is lost now, or ``None``; a new episode is counted under its rule."""
+        reason, rule = self._reason(now, abs(vio_speed_m_s))
+        if reason is not None and not self._was_lost and rule is not None:
+            self.counts[rule] += 1
+            self.last = reason
+        self._was_lost = reason is not None
+        return reason
+
+    def _reason(self, now: float, speed: float) -> tuple[str | None, str | None]:
+        features = self._features
+        if (
+            self.min_features > 0
+            and features is not None
+            and now - features[0] <= WITNESS_FRESH_S
+            and features[1] < self.min_features
+        ):
+            return f"{features[1]} features tracked (under {self.min_features})", "features"
+        if self._zupt is not None and now - self._zupt <= ZUPT_FRESH_S:
+            self._disagree_since = None
+            if speed > self.rest_speed_m_s:
+                return f"moving at {speed:.2f} m/s while /zupt says rest", "rest"
+            return None, None
+        wheels = self._wheels
+        if wheels is None or now - wheels[0] > WITNESS_FRESH_S:
+            self._disagree_since = None
+            return None, None
+        if abs(speed - wheels[1]) <= self.lost_speed_m_s:
+            self._disagree_since = None
+            return None, None
+        if self._disagree_since is None:
+            self._disagree_since = now
+        if now - self._disagree_since >= self.lost_s:
+            return (
+                f"{speed:.2f} m/s against the wheels' {wheels[1]:.2f} for"
+                f" {now - self._disagree_since:.1f} s",
+                "wheels",
+            )
+        return None, None
+
+    def report(self) -> str:
+        """The lost episodes by rule and the last reason, for the report line."""
+        total = sum(self.counts.values())
+        last = f" (last: {self.last})" if self.last else ""
+        return (
+            f"lost {total} (wheels {self.counts['wheels']}, rest {self.counts['rest']},"
+            f" features {self.counts['features']}){last}"
+        )
 
 
 def _at_origin(pose: VoPose, radius_m: float) -> bool:

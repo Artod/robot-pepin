@@ -531,7 +531,10 @@ TF_DELAY_S = float(PUBLISH_MAP_TO_ODOM["tf_delay"])  # for the report line, from
 # which then measures from the new origin — were measured with this table as it stands: 9.4-9.7
 # poses/s through the gate, none dropped, 0.2 cm and 0.0 deg of drift over 60 s at rest.
 VO_RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output; /vo is what the gate publishes for the EKF
-VO_INPUTS = ("depth", "stereo")  # the vo_input launch argument: what the visual odometry reads
+# The vo_input launch argument: what the visual odometry reads. "vio" starts NO odometry node in
+# this container: OpenVINS runs in its own (pepin-vio, ros/laptop.sh vio, vio.launch.py) and the
+# relay reads its /ov_msckf/poseimu, composing base_link through TF (vio.md).
+VO_INPUTS = ("depth", "stereo", "vio")
 VISUAL_ODOMETRY = {
     # The EKF owns odom -> base_link. This node names its frame "odom" because that is the frame
     # its poses are differences in, and publishes no transform at all.
@@ -842,7 +845,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
     vo_input = LaunchConfiguration("vo_input").perform(context).strip()
     if vo_input not in VO_INPUTS:
         raise ValueError(f"vo_input:={vo_input}: one of {', '.join(VO_INPUTS)}")
-    if vo_input == "stereo":
+    odometry: Node | LogInfo
+    if vo_input == "vio":
+        odometry = LogInfo(
+            msg="vo_input vio: no odometry node in this container; OpenVINS runs in pepin-vio"
+            " (ros/laptop.sh vio) and visual_odometry reads /ov_msckf/poseimu"
+        )
+    elif vo_input == "stereo":
         odometry = Node(
             package="rtabmap_odom",
             executable="stereo_odometry",
@@ -876,7 +885,14 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
             **RESPAWN,
         )
     vo = ExecuteProcess(
-        cmd=["python3", "-m", "pepin_bringup.visual_odometry"],
+        cmd=[
+            "python3",
+            "-m",
+            "pepin_bringup.visual_odometry",
+            "--ros-args",
+            "-p",
+            f"vo_input:={vo_input}",
+        ],
         output="screen",
         condition=IfCondition(LaunchConfiguration("vo")),
         **RESPAWN,
@@ -961,9 +977,13 @@ def _describe(context: LaunchContext) -> list:  # type: ignore[type-arg]
         ],
         remappings=remappings,
     )
+    source = {
+        "stereo": f"stereo_odometry -> {VO_RAW_TOPIC}",
+        "depth": f"rgbd_odometry -> {VO_RAW_TOPIC}",
+        "vio": "OpenVINS in pepin-vio -> /ov_msckf/poseimu",
+    }[vo_input]
     vo_note = (
-        f" {'stereo' if vo_input == 'stereo' else 'rgbd'}_odometry (vo_input {vo_input}) ->"
-        f" {VO_RAW_TOPIC} -> /vo for the board's EKF (withheld until"
+        f" {source} (vo_input {vo_input}) -> /vo for the board's EKF (withheld until"
         " visual_odometry's vo_publish is on)"
         if _flag(context, "vo")
         else " no visual odometry (vo:=false): the board's odometry is the wheels and the gyro"
@@ -1027,8 +1047,9 @@ def generate_launch_description() -> LaunchDescription:
             # rest and costs only this laptop (0.25 core); what it costs the ROBOT is still
             # nothing until visual_odometry's vo_publish flag is turned on.
             DeclareLaunchArgument("vo", default_value="true"),
-            # What that odometry reads: depth (rgbd_odometry, at the depth's rate) or stereo
-            # (stereo_odometry on the two eyes, at the camera's). See the node's comment above.
+            # What that odometry reads: depth (rgbd_odometry, at the depth's rate), stereo
+            # (stereo_odometry on the two eyes, at the camera's) or vio (OpenVINS in its own
+            # container, ros/laptop.sh vio). See the node's comment above.
             DeclareLaunchArgument("vo_input", default_value="stereo"),
             DeclareLaunchArgument("static_camera_tf", default_value="false"),
             OpaqueFunction(function=_describe),
