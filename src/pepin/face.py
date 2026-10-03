@@ -73,6 +73,7 @@ class FaceTable:
     colors: dict[str, str]
     timing: dict[str, float]
     screen: dict[str, int]
+    lipsync: dict[str, float]
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -166,7 +167,21 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
         colors=colors,
         timing={k: float(v) for k, v in data["timing"].items() if k != "note"},
         screen={k: int(v) for k, v in data["screen"].items() if k != "note"},
+        lipsync=_lipsync({k: float(v) for k, v in data["lipsync"].items() if k != "note"}),
     )
+
+
+def _lipsync(block: dict[str, float]) -> dict[str, float]:
+    """The lip-sync block, checked: a positive window and a floor below full."""
+    if not block["window_s"] > 0.0 or not block["floor_db"] < block["full_db"]:
+        raise ValueError(f"lipsync {block}: window_s > 0 and floor_db < full_db")
+    return block
+
+
+def mouth_level(rms_dbfs: float, table: FaceTable) -> float:
+    """A window's loudness (dBFS) as the mouth's opening, 0..1 (config/face.json lipsync)."""
+    lo, hi = table.lipsync["floor_db"], table.lipsync["full_db"]
+    return min(max((rms_dbfs - lo) / (hi - lo), 0.0), 1.0)
 
 
 def rgb565(color: str) -> int:
@@ -257,6 +272,7 @@ def render_script(table: FaceTable) -> str:
         "screen": table.screen,
         "geometry": table.geometry,
         "timing": table.timing,
+        "lipsync": table.lipsync,
         "colors": table.colors,
         "rgb565": {k: rgb565(v) for k, v in table.colors.items()},
     }

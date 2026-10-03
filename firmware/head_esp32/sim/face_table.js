@@ -499,6 +499,13 @@ const FACE_TABLE = {
   "mouth_release_s": 0.09,
   "mouth_stale_s": 0.25
  },
+ "lipsync": {
+  "window_s": 0.04,
+  "floor_db": -48.0,
+  "full_db": -15.0,
+  "lead_s": 0.0,
+  "start_latency_s": 0.12
+ },
  "colors": {
   "background": "#000000",
   "lip": "#7FE8FF",

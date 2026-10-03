@@ -87,6 +87,14 @@
     "speaking":       {"name": "smile",      "hold_s": null, "intensity": 0.6, "note": "the robot speaks: lip sync rides on top"},
     "brain_lost":     {"name": "sleepy",     "hold_s": null, "note": "every brain lease lapsed (the laptop or the WiFi is gone)"}
   },
+  "lipsync": {
+    "window_s": 0.04,
+    "floor_db": -48.0,
+    "full_db": -15.0,
+    "lead_s": 0.0,
+    "start_latency_s": 0.12,
+    "note": "pepin.audio_server's levels: the RMS of each window_s of the speech it plays, in dBFS, mapped linearly from floor_db (closed) to full_db (fully open) and sent as an 'M' level when that window reaches the speaker. start_latency_s: from the first chunk written to aplay to its first sound (an estimate: aplay's start plus the ALSA buffer, unmeasured); lead_s: sent this much earlier than that, for the mouth's own attack. The simulator maps its microphone and audio files the same way"
+  },
   "timing": {
     "transition_ms": 280,
     "host_silent_s": 3.0,
