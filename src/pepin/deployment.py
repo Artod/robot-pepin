@@ -152,7 +152,7 @@ LAPTOP_SLAM_NODES = (
 # The visual-inertial odometry's own container (ros/laptop.sh vio, vio.launch.py): OpenVINS's
 # subscriber node, kept apart from pepin-vslam so it can be kicked and its memory counted alone.
 VIO_CONTAINER = "pepin-vio"
-LAPTOP_VIO_NODES = ("/ov_msckf",)
+LAPTOP_VIO_NODES = ("/ov_msckf/run_subscribe_msckf",)  # vio.launch.py's namespace ov_msckf
 
 
 # Fully qualified names of the ROS nodes of the Mac's navigation container

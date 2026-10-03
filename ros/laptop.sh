@@ -251,7 +251,7 @@ case "${1:-}" in
         # The router is this side's own, so a stop takes it too. The time server (pepin-chrony) is left running: it is the board's clock, not a part of this
         # half, and a board that lost it would change source at every stop (ros/time.sh server
         # stop takes it down on purpose).
-        pepin_remove_container "$NAV" pepin-vslam "$PEPIN_ZROUTER_LAPTOP"
+        pepin_remove_container "$NAV" pepin-vslam pepin-vio "$PEPIN_ZROUTER_LAPTOP"
         [ "${PEPIN_DEPTH_HOST:-}" = 0 ] || "$HERE/depth_host.sh" stop
         # The localisation models leave with the session, as the depth host does: ~1 GB of this
         # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
@@ -259,6 +259,41 @@ case "${1:-}" in
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-macnav}" ;;
+    vio)
+        # THE VISUAL-INERTIAL ODOMETRY (vio.md): OpenVINS in its own container, pepin-vio on
+        # pepin-laptop:vio (ros/laptop-build.sh vio), behind this side's router like vslam; the
+        # relay reads it under ros/laptop.sh vslam --vo-vio. Its config is generated into
+        # ros/maps/vio by ros/tools/vio_config.py and never edited.
+        #   ros/laptop.sh vio [up]   start (or restart) it
+        #   ros/laptop.sh vio down   stop it; vio logs follows it
+        #   ros/laptop.sh vio kick   restart the node inside (the launch respawns it): AT REST
+        #                            only, OpenVINS initialises from stillness and then motion
+        case "${2:-up}" in
+            down) pepin_remove_container pepin-vio; echo "pepin-vio stopped"; exit 0 ;;
+            logs) exec docker logs -f pepin-vio ;;
+            kick)
+                docker exec pepin-vio sh -c 'pkill -INT -f run_subscribe_msckf' \
+                    || { echo "no OpenVINS process in pepin-vio (ros/laptop.sh vio logs)"; exit 3; }
+                echo "OpenVINS signalled; the launch respawns it in 2 s. It initialises at rest, then on the first motion (a head pan will do)"
+                exit 0 ;;
+            up) ;;
+            *) echo "usage: ros/laptop.sh vio [up|down|logs|kick]"; exit 2 ;;
+        esac
+        start_check
+        docker image inspect pepin-laptop:vio >/dev/null 2>&1 \
+            || { echo "no pepin-laptop:vio here: ros/laptop-build.sh vio first (10-20 min)"; exit 2; }
+        [ -f "$HERE/maps/vio/estimator_config.yaml" ] \
+            || { echo "no ros/maps/vio/estimator_config.yaml: uv run python ros/tools/vio_config.py first"; exit 2; }
+        pepin_remove_container pepin-vio
+        zrouter_up
+        # The image's OpenVINS overlay (/ws_vio) is sourced after the entrypoint's workspace, so
+        # the mounted pepin_bringup launch file finds ov_msckf.
+        docker run -d --name pepin-vio --network "$NET" --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
+            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
+            pepin-laptop:vio bash -c 'source /ws_vio/install/setup.bash && exec ros2 launch pepin_bringup vio.launch.py' >/dev/null
+        echo "vio up: OpenVINS in pepin-vio on $(docker run --rm --network none --entrypoint cat pepin-laptop:vio /opt/openvins/SHAS | head -2 | tr '\n' ' ')"
+        echo "the relay reads it under ros/laptop.sh vslam --vo-vio; ros/laptop.sh vio logs"
+        exit 0 ;;
     kick)
         # One node, not its container. SIGINT is what the launch itself sends at shutdown: the
         # node's main destroys the node and the context; the launch respawns the module from the
@@ -394,5 +429,5 @@ case "${1:-}" in
         echo "vslam up on $VSLAM_IMAGE (camera_only $CAMERA_ONLY, static camera tf $STATIC_CAMERA_TF): RTAB-Map's grid is /map and RTAB-Map here owns map -> odom; Foxglove ws://localhost:8765, ros/laptop.sh logs vslam"
         echo "foxglove: reconnect the app to $("$HERE/foxglove.sh" url) when you want it (nothing is opened for you)"
         exit 0 ;;
-    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav] | vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] | kick NODE]"; exit 2 ;;
+    *) echo "usage: ros/laptop.sh [nav [up|down|logs] | stop | logs [vslam|macnav|vio] | vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] [--vo-vio] | vio [up|down|logs|kick] | kick NODE]"; exit 2 ;;
 esac

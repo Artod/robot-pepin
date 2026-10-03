@@ -1,0 +1,80 @@
+diff --git a/ov_msckf/src/ros/ROS2Visualizer.cpp b/ov_msckf/src/ros/ROS2Visualizer.cpp
+index 48dd83a..3cce0a0 100644
+--- a/ov_msckf/src/ros/ROS2Visualizer.cpp
++++ b/ov_msckf/src/ros/ROS2Visualizer.cpp
+@@ -207,6 +207,15 @@ void ROS2Visualizer::setup_subscribers(std::shared_ptr<ov_core::YamlParser> pars
+                                                               std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
+   PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
+ 
++  // Per-frame masks of the left camera, matched to an image by its exact stamp (one camera
++  // node stamps the picture and the mask alike); no mask for a frame is a frame unmasked.
++  std::string topic_mask;
++  _node->declare_parameter<std::string>("topic_mask", "/camera/mask");
++  _node->get_parameter("topic_mask", topic_mask);
++  sub_mask = _node->create_subscription<sensor_msgs::msg::Image>(
++      topic_mask, 10, std::bind(&ROS2Visualizer::callback_mask, this, std::placeholders::_1));
++  PRINT_INFO("subscribing to per-frame masks: %s\n", topic_mask.c_str());
++
+   // Logic for sync stereo subscriber
+   // https://answers.ros.org/question/96346/subscribe-to-two-image_raws-with-one-function/?answer=96491#post-id-96491
+   if (_app->get_params().state_options.num_cameras == 2) {
+@@ -610,8 +619,8 @@ void ROS2Visualizer::callback_stereo(const sensor_msgs::msg::Image::ConstSharedP
+     message.masks.push_back(_app->get_params().masks.at(cam_id0));
+     message.masks.push_back(_app->get_params().masks.at(cam_id1));
+   } else {
+-    // message.masks.push_back(cv::Mat(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1, cv::Scalar(255)));
+-    message.masks.push_back(cv::Mat::zeros(cv_ptr0->image.rows, cv_ptr0->image.cols, CV_8UC1));
++    // The left camera's per-frame mask when one came with this stamp; the right stays unmasked.
++    message.masks.push_back(frame_mask(message.timestamp, cv_ptr0->image.rows, cv_ptr0->image.cols));
+     message.masks.push_back(cv::Mat::zeros(cv_ptr1->image.rows, cv_ptr1->image.cols, CV_8UC1));
+   }
+ 
+@@ -1030,3 +1039,29 @@ void ROS2Visualizer::publish_loopclosure_information() {
+     it_pub_loop_img_depth_color.publish(exl_msg2);
+   }
+ }
++
++void ROS2Visualizer::callback_mask(const sensor_msgs::msg::Image::SharedPtr msg) {
++  cv_bridge::CvImageConstPtr cv_ptr;
++  try {
++    cv_ptr = cv_bridge::toCvShare(msg, sensor_msgs::image_encodings::MONO8);
++  } catch (cv_bridge::Exception &e) {
++    PRINT_ERROR("cv_bridge exception (mask): %s", e.what());
++    return;
++  }
++  double timestamp = cv_ptr->header.stamp.sec + cv_ptr->header.stamp.nanosec * 1e-9;
++  std::lock_guard<std::mutex> lck(mask_mtx);
++  masks_by_time[timestamp] = cv_ptr->image.clone();
++  while (masks_by_time.size() > 30) {
++    masks_by_time.erase(masks_by_time.begin());
++  }
++}
++
++cv::Mat ROS2Visualizer::frame_mask(double timestamp, int rows, int cols) {
++  std::lock_guard<std::mutex> lck(mask_mtx);
++  auto it = masks_by_time.lower_bound(timestamp - 0.001);
++  if (it != masks_by_time.end() && std::abs(it->first - timestamp) <= 0.001 && it->second.rows == rows &&
++      it->second.cols == cols) {
++    return it->second;
++  }
++  return cv::Mat::zeros(rows, cols, CV_8UC1);
++}
+diff --git a/ov_msckf/src/ros/ROS2Visualizer.h b/ov_msckf/src/ros/ROS2Visualizer.h
+index 3086da2..d0941eb 100644
+--- a/ov_msckf/src/ros/ROS2Visualizer.h
++++ b/ov_msckf/src/ros/ROS2Visualizer.h
+@@ -180,6 +180,14 @@ protected:
+ 
+   // Our subscribers and camera synchronizers
+   rclcpp::Subscription<sensor_msgs::msg::Imu>::SharedPtr sub_imu;
++
++  /// Per-frame masks of the left camera (mono8, 255 = no features), by their image stamp: the
++  /// robot's own body in view (pepin_bringup.body_mask on /camera/mask).
++  rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr sub_mask;
++  std::mutex mask_mtx;
++  std::map<double, cv::Mat> masks_by_time;
++  void callback_mask(const sensor_msgs::msg::Image::SharedPtr msg);
++  cv::Mat frame_mask(double timestamp, int rows, int cols);
+   std::vector<rclcpp::Subscription<sensor_msgs::msg::Image>::SharedPtr> subs_cam;
+   typedef message_filters::sync_policies::ApproximateTime<sensor_msgs::msg::Image, sensor_msgs::msg::Image> sync_pol;
+   std::vector<std::shared_ptr<message_filters::Synchronizer<sync_pol>>> sync_cam;

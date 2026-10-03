@@ -34,7 +34,7 @@ docker run --rm --network none \
     -v "$REPO:/repo:ro" -v "$REC:/rec" \
     -v "$REPO/src/pepin:/ws/pepin_src/pepin:ro" \
     -v "$ROS_DIR/pepin_bringup/pepin_bringup:/ws/install/pepin_bringup/lib/python3.12/site-packages/pepin_bringup:ro" \
-    -e PYTHONDONTWRITEBYTECODE=1 -e ROS_DOMAIN_ID=232 -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+    -e PYTHONDONTWRITEBYTECODE=1 -e ROS_DOMAIN_ID=79 -e ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
     --entrypoint /bin/bash "$IMAGE" -c \
     'source /opt/ros/jazzy/setup.bash && [ -f /ws/install/setup.bash ] && source /ws/install/setup.bash; exec python3 /repo/ros/tools/clip_to_bag.py "$@"' \
     clip_to_bag "/rec/$clip" --config /repo/config/camera.json "$@"

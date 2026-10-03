@@ -1,0 +1,158 @@
+"""ros/tools/vio_config.py: OpenVINS's and Kalibr's files written from the repo's own numbers,
+the direction of every transform held by tests that would catch a flip (vio.md S7)."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+import cv2
+import numpy as np
+import pytest
+
+REPO = Path(__file__).resolve().parents[2]
+
+
+def _tool() -> Any:
+    spec = importlib.util.spec_from_file_location("vio_config", REPO / "ros/tools/vio_config.py")
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault("vio_config", module)
+    spec.loader.exec_module(module)
+    return module
+
+
+TOOL = _tool()
+
+
+def _asymmetric() -> np.ndarray:
+    """A 17 deg rotation about a skew axis and an offset: nothing about it is symmetric, so an
+    inverse taken the wrong way round cannot pass for the right one."""
+    axis = np.array([0.3, -0.5, 0.81])
+    axis /= np.linalg.norm(axis)
+    rotation, _ = cv2.Rodrigues(axis * math.radians(17.0))
+    matrix = np.eye(4)
+    matrix[:3, :3] = rotation
+    matrix[:3, 3] = (0.031, -0.012, 0.047)
+    return matrix
+
+
+def test_the_inverse_is_exact_and_round_trips_an_asymmetric_transform() -> None:
+    t = _asymmetric()
+    inverse = TOOL.invert(t)
+    assert np.allclose(inverse @ t, np.eye(4), atol=1e-12)
+    assert np.allclose(TOOL.invert(inverse), t, atol=1e-12)
+    assert not np.allclose(inverse, t), "an asymmetric transform is not its own inverse"
+    point_in_imu = np.array([0.1, 0.2, 0.3, 1.0])
+    in_camera = t @ point_in_imu  # T_cam_imu: IMU coordinates into the camera's
+    assert np.allclose(inverse @ in_camera, point_in_imu)
+
+
+def test_the_nominal_extrinsics_are_a_proper_rotation_from_the_axis_photo() -> None:
+    t = TOOL.nominal_t_cam_imu("x,-z,y", (0.0, 0.03, 0.04))
+    assert np.allclose(t[:3, 0], (1, 0, 0)) and np.allclose(t[:3, 1], (0, 0, -1))
+    assert np.allclose(t[:3, 3], (0.0, 0.03, 0.04))
+    with pytest.raises(ValueError, match="right-handed"):
+        TOOL.nominal_t_cam_imu("x,y,-z", (0, 0, 0))
+    with pytest.raises(ValueError, match="axis"):
+        TOOL.nominal_t_cam_imu("x,y,w", (0, 0, 0))
+
+
+def _config_with_imu(tmp_path: Path, t_cam_imu: np.ndarray | None) -> Path:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    for name in ("stereo_calibration.json", "head_imu.json"):
+        (tmp_path / name).write_text((REPO / "config" / name).read_text())
+    data = json.loads((REPO / "config/camera.json").read_text())
+    if t_cam_imu is not None:
+        data["stereo"]["head_imu"] = {
+            "T_cam_imu": t_cam_imu.tolist(),
+            "time_offset_s": 0.0042,
+        }
+    (tmp_path / "camera.json").write_text(json.dumps(data))
+    return tmp_path
+
+
+def _read(path: Path, *keys: str) -> Any:
+    """A value the way OpenVINS reads it: cv::FileStorage."""
+    storage = cv2.FileStorage(str(path), cv2.FILE_STORAGE_READ)
+    node = storage.root()
+    for key in keys:
+        node = node.getNode(key)
+    if node.isSeq():
+        values = [node.at(i) for i in range(node.size())]
+        if values and values[0].isSeq():
+            return np.array([[v.at(j).real() for j in range(v.size())] for v in values])
+        return [v.real() if v.isReal() or v.isInt() else v.string() for v in values]
+    return node.real() if node.isReal() or node.isInt() else node.string()
+
+
+def test_the_openvins_files_carry_the_rectified_pinhole_the_inverse_and_the_baseline(
+    tmp_path: Path,
+) -> None:
+    """The files parse with cv::FileStorage as OpenVINS reads them; the intrinsics are the
+    rectified P camera_stream publishes; cam0's T_imu_cam is inv(T_cam_imu); cam1 sits +baseline
+    along cam0's optical x; the time shift and the IMU's densities, topic and rate ride along."""
+    from pepin.stereo import Rectifier, StereoCalibration
+
+    t_cam_imu = _asymmetric()
+    config = _config_with_imu(tmp_path / "config", t_cam_imu)
+    out = tmp_path / "vio"
+    assert TOOL.main(["--config", str(config), "--out", str(out), "--tag-size", "0.0341"]) == 0
+    rectifier = Rectifier.from_calibration(
+        StereoCalibration.load(config / "stereo_calibration.json")
+    )
+    chain = out / "kalibr_imucam_chain.yaml"
+    intrinsics = _read(chain, "cam0", "intrinsics")
+    assert intrinsics == pytest.approx([rectifier.fx, rectifier.fy, rectifier.cx, rectifier.cy])
+    assert _read(chain, "cam0", "resolution") == [800, 600]
+    assert _read(chain, "cam0", "distortion_coeffs") == [0.0, 0.0, 0.0, 0.0]
+    t_imu_cam0 = _read(chain, "cam0", "T_imu_cam")
+    assert np.allclose(t_imu_cam0, np.linalg.inv(t_cam_imu), atol=1e-9)
+    t_imu_cam1 = _read(chain, "cam1", "T_imu_cam")
+    cam1_in_cam0 = np.linalg.inv(t_imu_cam0) @ t_imu_cam1
+    assert cam1_in_cam0[0, 3] == pytest.approx(rectifier.baseline_m, abs=1e-9), "right of cam0"
+    assert np.allclose(cam1_in_cam0[:3, :3], np.eye(3), atol=1e-9), "rectified: no rotation"
+    assert _read(chain, "cam0", "timeshift_cam_imu") == pytest.approx(0.0042)
+    assert _read(chain, "cam0", "rostopic") == "/camera/image"
+    assert _read(chain, "cam1", "rostopic") == "/camera/right/image"
+    imu = out / "kalibr_imu_chain.yaml"
+    assert _read(imu, "imu0", "rostopic") == "/head/imu"
+    assert _read(imu, "imu0", "update_rate") == 200.0
+    assert _read(imu, "imu0", "gyroscope_noise_density") == pytest.approx(1e-3)
+    estimator = out / "estimator_config.yaml"
+    # OpenVINS reads a bool as the first word of the scalar (a trailing comment is part of it)
+    assert str(_read(estimator, "try_zupt")).split()[0] == "false"
+    assert _read(estimator, "track_frequency") == 15.0
+    assert _read(estimator, "relative_config_imucam") == "kalibr_imucam_chain.yaml"
+    text = estimator.read_text()
+    assert "calib_cam_timeoffset: true" in text and "calib_cam_extrinsics: false" in text
+    camchain = (out / "camchain.yaml").read_text()
+    assert f"- [1, 0, 0, {-rectifier.baseline_m:.10g}]" in camchain, "Kalibr's T_cn_cnm1"
+    assert "tagSize: 0.0341" in (out / "april.yaml").read_text()
+
+
+def test_without_the_head_imu_block_only_kalibr_s_files_or_a_nominal_guess(tmp_path: Path) -> None:
+    config = _config_with_imu(tmp_path / "config", None)
+    with pytest.raises(SystemExit, match="head_imu"):
+        TOOL.main(["--config", str(config), "--out", str(tmp_path / "a")])
+    assert TOOL.main(["--config", str(config), "--out", str(tmp_path / "b"), "--kalibr-only"]) == 0
+    assert sorted(p.name for p in (tmp_path / "b").iterdir()) == ["camchain.yaml", "imu.yaml"]
+    args = [
+        "--config",
+        str(config),
+        "--out",
+        str(tmp_path / "c"),
+        "--nominal",
+        "x,-z,y",
+        "0",
+        "0.03",
+        "0.04",
+    ]
+    assert TOOL.main([*args, "--zupt-arm"]) == 0
+    chain = (tmp_path / "c" / "kalibr_imucam_chain.yaml").read_text()
+    assert "NOMINAL: axes x,-z,y" in chain
+    assert "zupt_max_disparity: 0.0" in (tmp_path / "c" / "estimator_config.yaml").read_text()

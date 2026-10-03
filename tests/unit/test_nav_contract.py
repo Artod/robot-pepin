@@ -859,7 +859,8 @@ def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
         c for c in sf.shell_commands(laptop) if "docker run -d --name " in c and "zrouter" not in c
     ]
     runs = [c for c in runs if "rmw_zenohd" not in c]
-    assert len(runs) == 2, "the navigation container, the SLAM container"
+    assert len(runs) == 3, "the navigation container, the SLAM container, the VIO container"
+    assert "pepin_remove_container pepin-vio" in laptop
     for command in runs:
         assert "--stop-signal SIGINT" in command, command
 

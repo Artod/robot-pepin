@@ -238,5 +238,6 @@ def test_the_vio_node_lives_in_its_own_container_and_the_head_imu_crosses_reliab
     bridge publishes on the board is read there with the base IMU's QoS."""
     from pepin.deployment import VIO_CONTAINER, bridged_qos
 
-    assert node_host("ov_msckf") == ("laptop", VIO_CONTAINER) == ("laptop", "pepin-vio")
+    assert node_host("/ov_msckf/run_subscribe_msckf") == ("laptop", VIO_CONTAINER)
+    assert VIO_CONTAINER == "pepin-vio"
     assert bridged_qos("/head/imu") == ("reliable", 10) == bridged_qos("/imu/data_raw")
