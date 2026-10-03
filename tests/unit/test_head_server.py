@@ -231,6 +231,9 @@ def test_a_status_that_names_another_config_or_face_is_corrected(table: FaceTabl
     assert len(head.sent("C")) == 2
     status = server.broadcasts[-1]
     assert status["esp"]["who_am_i"] == 0x72 and status["link"] == "up"
+    report = service.report(clock.now)
+    assert "face 49.5 fps (face), imu 1000 Hz interrupt (who 0x72)" in report
+    assert "ms, spread" in report and "showing neutral (nobody)" in report
     n = len(head.sent("E"))
     for _ in range(2):
         head.status(expression=5)

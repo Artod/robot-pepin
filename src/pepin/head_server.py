@@ -311,9 +311,9 @@ class ClockMap:
 
     def observe_rtt(self, rtt_s: float) -> None:
         """One ping's round trip, seconds, without the two frames' own bytes on the wire: twice
-        the remaining transit, at best."""
-        if rtt_s >= 0.0:
-            self._rtts.append(rtt_s)
+        the remaining transit, at best. Below zero (a port with no wire, a pseudo-terminal) it
+        counts as zero."""
+        self._rtts.append(max(rtt_s, 0.0))
 
     @property
     def min_rtt_s(self) -> float | None:
