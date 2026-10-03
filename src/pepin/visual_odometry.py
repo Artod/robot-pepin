@@ -241,6 +241,15 @@ class VoTrack:
     still: a restart costs one sample of motion instead of a teleport. The published pose is
     absolute, which is also what makes a rate cap (:class:`PublishCap`) lossless — the filter
     differences whatever two messages reached it, and a skipped one only lengthens the gap.
+
+    The steps are composed in SE(2), ``track = track * (from^-1 * pose)``: each step is taken in
+    the BODY frame of the pose it starts from and replayed from the track's own heading. The
+    filter differences ``prev.inverseTimes(cur)`` (robot_localization, ros_filter.cpp), i.e. a
+    body-frame step, so the track's heading must be the one that step was measured in. Summing
+    x and y in the source's axes (until 2026-10-03) told the EKF vy +0.200 m/s for a cart driving
+    straight at 0.2 m/s whenever the source's frame started at yaw 90 deg (a VIO's gravity frame
+    has an arbitrary yaw), and vx +0.173 / vy +0.100 m/s for the rest of the session after one
+    30 deg turn inside a gated interval (scratch/head_imu/votrack_frame.py).
     """
 
     def __init__(self) -> None:
@@ -253,8 +262,12 @@ class VoTrack:
         """Add an admitted pose's step to the running total; returns the pose to publish — the
         same stamp, the summed position and heading."""
         if self._from is not None:
-            self._x += pose.x - self._from.x
-            self._y += pose.y - self._from.y
+            dx, dy = pose.x - self._from.x, pose.y - self._from.y
+            c, s = math.cos(self._from.yaw), math.sin(self._from.yaw)
+            forward, left = c * dx + s * dy, -s * dx + c * dy  # the step in the body frame
+            c, s = math.cos(self._yaw), math.sin(self._yaw)
+            self._x += c * forward - s * left
+            self._y += s * forward + c * left
             self._yaw = _wrapped(self._yaw + _wrapped(pose.yaw - self._from.yaw))
         self._from = pose
         return VoPose(stamp=pose.stamp, x=self._x, y=self._y, yaw=self._yaw)

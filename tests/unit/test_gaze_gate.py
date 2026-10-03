@@ -275,7 +275,11 @@ def test_a_saccade_never_reaches_the_ekf_through_the_visual_odometry() -> None:
 
     node, gated = _drive(gate_on=True)
     last = gated[-1].pose.pose
-    assert last.position.x == pytest.approx(0.02), "the first step and the last, nothing between"
+    # The first step and the last, nothing between: 1 cm each. The last is composed in SE(2)
+    # (pepin.visual_odometry.VoTrack): the source moved 1 cm along its x while claiming yaw 0.3,
+    # which in its own body frame is cos(0.3) forward and sin(0.3) to the right.
+    assert last.position.x == pytest.approx(0.01 + 0.01 * math.cos(0.3))
+    assert last.position.y == pytest.approx(-0.01 * math.sin(0.3))
     assert 2 * math.atan2(last.orientation.z, last.orientation.w) == pytest.approx(0.0)
     assert len(gated) == 3, "0.0, 0.1 and 0.6 went to the EKF"
     counts = node._tally.take().counts

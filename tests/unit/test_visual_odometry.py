@@ -280,3 +280,66 @@ def test_the_dynamic_covariance_adds_the_scale_s_share_of_the_step() -> None:
     floored = scaled_covariance(1e-12, 0.0, yaw_sigma_deg=5.0)
     assert math.isclose(math.sqrt(floored[0]), SIGMA_FLOOR_M, rel_tol=1e-6)
     assert floored[35] > 0.0 and floored[14] > 1e3, "yaw measured, z and roll left to others"
+
+
+def _body_velocity(a: VoPose, b: VoPose) -> tuple[float, float]:
+    """What robot_localization's differential mode fuses from two published poses: the step
+    ``a^-1 * b`` in a's body frame, divided by the gap (ros_filter.cpp, prev.inverseTimes(cur))."""
+    dx, dy = b.x - a.x, b.y - a.y
+    c, s = math.cos(a.yaw), math.sin(a.yaw)
+    dt = b.stamp - a.stamp
+    return (c * dx + s * dy) / dt, (-s * dx + c * dy) / dt
+
+
+def _straight(t0: float, x0: float, y0: float, yaw: float, n: int) -> list[VoPose]:
+    """``n`` source poses 0.1 s apart driving 2 cm a step (0.2 m/s) along ``yaw``."""
+    return [
+        VoPose(t0 + 0.1 * i, x0 + 0.02 * i * math.cos(yaw), y0 + 0.02 * i * math.sin(yaw), yaw)
+        for i in range(n)
+    ]
+
+
+def test_a_source_frame_that_starts_turned_still_reads_as_driving_forward() -> None:
+    """A VIO's gravity frame has whatever yaw the chip and the pan gave it at init: a cart driving
+    straight ahead with the source at yaw 90 deg is forward motion to the EKF, not sideways
+    (the track summed in the source's axes said vy +0.200 m/s, 2026-10-02)."""
+    published = _gated(VoGate(), VoTrack(), _straight(0.0, 1.0, -2.0, math.pi / 2, 6))
+    for a, b in pairwise(published):
+        vx, vy = _body_velocity(a, b)
+        assert vx == pytest.approx(0.200, abs=1e-9)
+        assert vy == pytest.approx(0.000, abs=1e-9)
+
+
+def test_a_turn_inside_a_gated_interval_leaves_no_sideways_velocity_behind() -> None:
+    """A 30 deg body turn while the gaze gate withheld the poses: the track stands still across
+    it, and after it the cart drives along its new heading — the EKF must read forward motion,
+    not vx 0.173 / vy 0.100 for the rest of the session. The withheld turn reaches nobody, its
+    yaw included: the track's heading stays where it was (the gyro owns the turn) and the steps
+    after it are body steps, so the differenced velocity does not care."""
+    gate, track = VoGate(max_gap_s=1.0), VoTrack()
+    published = _gated(gate, track, _straight(0.0, 0.0, 0.0, 0.0, 4))
+    turn = [VoPose(0.4 + 0.1 * i, 0.06, 0.0, math.radians(10 * (i + 1))) for i in range(3)]
+    leg = _straight(0.7, 0.06, 0.0, math.radians(30.0), 5)
+    for pose in [*turn, leg[0]]:  # withheld: each only re-anchors, as visual_odometry._gated does
+        gate.reanchor(pose)
+        track.anchor(gate.anchor)
+    after = _gated(gate, track, leg[1:])
+    for a, b in pairwise(after):
+        vx, vy = _body_velocity(a, b)
+        assert vx == pytest.approx(0.200, abs=1e-9)
+        assert vy == pytest.approx(0.000, abs=1e-9)
+    assert track.pose[2] == pytest.approx(0.0, abs=1e-12), "the gated turn is not differenced"
+    assert published[-1].x == pytest.approx(0.06), "the leg before the turn is untouched"
+
+
+def test_the_track_replays_body_steps_from_its_own_heading() -> None:
+    """A source turned 90 deg against the track: a step to the source's +y (its forward) lands on
+    the track's +x; a turn then rotates every later step with the track."""
+    track = VoTrack()
+    track.advance(VoPose(0.0, 5.0, 5.0, math.pi / 2))
+    first = track.advance(VoPose(0.1, 5.0, 5.1, math.pi / 2))
+    assert (first.x, first.y) == pytest.approx((0.1, 0.0), abs=1e-12)
+    track.advance(VoPose(0.2, 5.0, 5.1, math.pi))  # a 90 deg left turn in place
+    second = track.advance(VoPose(0.3, 4.9, 5.1, math.pi))  # forward again along the source's -x
+    assert (second.x, second.y) == pytest.approx((0.1, 0.1), abs=1e-12)
+    assert second.yaw == pytest.approx(math.pi / 2)
