@@ -59,6 +59,7 @@ from pepin.head_link import (
     FIRMWARE_DEFAULTS,
     HEAD_PORT,
     IMU,
+    IMU_SAMPLE,
     INFO,
     MOUTH,
     OVERHEAD,
@@ -68,7 +69,6 @@ from pepin.head_link import (
     FrameDecoder,
     HeadStatus,
     ImuConfig,
-    decode_imu,
     decode_pong,
     decode_status,
     encode_config,
@@ -330,6 +330,15 @@ class ClockMap:
         bias = (self.min_rtt_s or 0.0) / 2.0
         return esp_s + offset + slope * (esp_s - ref) - bias
 
+    def linear(self) -> tuple[float, float]:
+        """:meth:`to_host` as ``(scale, shift)``: board seconds = ESP seconds * scale + shift
+        (what a batch of samples is mapped with in one go)."""
+        if self._fit is None:
+            raise RuntimeError("the clock map has seen no pair yet")
+        offset, slope, ref = self._fit
+        bias = (self.min_rtt_s or 0.0) / 2.0
+        return 1.0 + slope, offset - slope * ref - bias
+
     def state(self) -> dict[str, Any]:
         """Offset, skew (ppm the ESP32's crystal runs fast), smallest round trip, the kept
         envelope points' spread above the line: for the status line."""
@@ -527,6 +536,7 @@ class HeadService:
         self._brightness = settings.brightness
         self._sent_face: tuple[str, float] | None = None
         self._subscribers: set[Subscriber] = set()
+        self._line_heads: dict[int, str] = {}  # an IMU line's constant part, by config id
         self._pings: dict[int, float] = {}
         self._ping_id = 0
         self._next_ping = 0.0
@@ -654,37 +664,48 @@ class HeadService:
         return value
 
     def _on_imu(self, payload: bytes, received: float) -> None:
-        samples = decode_imu(payload)
-        if not samples:
+        # The hot path (200 frames a second): raw tuples, not ImuSample objects.
+        if len(payload) % IMU_SAMPLE.size:
+            raise ValueError(f"an IMU payload of {len(payload)} bytes is not n x 17")
+        rows = list(IMU_SAMPLE.iter_unpack(payload))
+        if not rows:
             return
-        times = [self._esp_time(s.esp_us) for s in samples]
+        times = [self._esp_time(row[0]) for row in rows]
         # The newest sample was stamped at its data-ready edge, then read over I2C, then its
         # frame went out byte by byte: both known, both taken off.
         known = I2C_READ_S + self._wire_s(len(payload) + OVERHEAD)
         self.clock_map.observe(times[-1], received, known)
-        config = self._configs.get(samples[-1].cfg, self._config)
+        config = self._configs.get(rows[-1][7], self._config)
         period_us = 1e6 / config.rate_hz
         if self._last_sample_us is not None and times[0] - self._last_sample_us > 1.5 * period_us:
             self.imu_gaps += 1
         self._last_sample_us = times[-1]
-        self.imu_samples += len(samples)
-        self._subscribers = {c for c in self._subscribers if c.alive}
+        self.imu_samples += len(rows)
         if not self._subscribers:
             return
-        delay = config.delay_s
-        line = {
-            "type": "imu",
-            "cfg": config.id,
-            "rate_hz": config.rate_hz,
-            "acc_scale": round(config.acc_scale, 9),
-            "gyro_scale": round(config.gyro_scale, 9),
-            "delay_s": delay,
-            "s": [
-                [round(self.clock_map.to_host(t) - delay, 6), t, *s.accel, *s.gyro]
-                for t, s in zip(times, samples, strict=True)
-            ],
-        }
-        encoded = (json.dumps(line, separators=(",", ":")) + "\n").encode()
+        self._subscribers = {c for c in self._subscribers if c.alive}
+        head = self._line_heads.get(config.id)
+        if head is None:  # the line's constant part, once per config
+            head = json.dumps(
+                {
+                    "type": "imu",
+                    "cfg": config.id,
+                    "rate_hz": config.rate_hz,
+                    "acc_scale": round(config.acc_scale, 9),
+                    "gyro_scale": round(config.gyro_scale, 9),
+                    "delay_s": config.delay_s,
+                },
+                separators=(",", ":"),
+            )[:-1]
+            self._line_heads[config.id] = head
+        # board time = esp seconds * scale + shift, from the clock map's line, less the delay
+        scale, shift = self.clock_map.linear()
+        shift -= config.delay_s
+        samples = ",".join(
+            f"[{t * 1e-6 * scale + shift:.6f},{t},{r[1]},{r[2]},{r[3]},{r[4]},{r[5]},{r[6]}]"
+            for t, r in zip(times, rows, strict=True)
+        )
+        encoded = f'{head},"s":[{samples}]}}\n'.encode()
         for client in self._subscribers:
             client.post(encoded)
         self.imu_lines += 1
