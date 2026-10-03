@@ -55,6 +55,9 @@ from pepin.tsdf import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from pepin.body import OrientedBox
     from pepin.mapping import OccupancyGrid
 
 Int8 = npt.NDArray[np.int8]
@@ -457,6 +460,45 @@ class WorldMap:
         np.copyto(self.volume.weight[:, :, lo:hi], keep_weight, where=owned)
         self._note(stamp, sensor, pose)
         return touched
+
+    def forget(self, boxes: Sequence[OrientedBox]) -> int:
+        """Every voxel whose centre lies inside one of ``boxes`` (in the volume's frame) back to
+        unobserved on every channel — field, weight, colour, the lidar's weight and the views —
+        as a newborn volume's voxel is; returns how many of them held any weight.
+
+        THE SPACE A PART OF THE ROBOT FILLS IS NOT THE ROOM (the arm, :mod:`pepin.arm`): the
+        camera's clip keeps a frame from writing on or past a ray's entry into it, but a surface
+        painted there before the part moved in, and whatever the lidar or a whisker returned off
+        the part itself, would otherwise stand inside it for good — no ray reaches it again to
+        carve it. Paid after every integration, so only the voxels that hold weight in the
+        boxes' common bounding box are tested — one that holds none is already unobserved, as
+        nothing writes a colour, a view or the lidar's weight without a weight: for an arm's 11
+        boxes on the live grid 0.13-0.20 ms an integration this way, 0.6-0.75 ms testing every
+        voxel of each box (scratch/arm_mask/cost.py)."""
+        if not boxes:
+            return 0
+        volume, s = self.volume, self.spec
+        corners = np.vstack([box.corners() for box in boxes])
+        index = volume.index_box(corners.min(axis=0), corners.max(axis=0))
+        if index is None:
+            return 0
+        held = np.flatnonzero(volume.weight[index])
+        if held.size == 0:
+            return 0
+        shape = tuple(sl.stop - sl.start for sl in index)
+        local = np.unravel_index(held, shape)
+        at_all = tuple(i + sl.start for i, sl in zip(local, index, strict=True))
+        centres = (np.stack(at_all, axis=-1) + 0.5) * s.voxel_m + np.array(s.origin)
+        inside = np.zeros(held.size, dtype=bool)
+        for box in boxes:
+            inside |= box.holds(centres)
+        at = (at_all[0][inside], at_all[1][inside], at_all[2][inside])
+        volume.sdf[at] = 1.0
+        volume.weight[at] = 0.0
+        volume.colour_weight[at] = 0.0
+        self.lidar_weight[at] = 0.0
+        self.views[at] = 0.0
+        return int(np.count_nonzero(inside))
 
     def recentre(self, at: tuple[float, float]) -> WindowShift:
         """Slide the window onto the cart at ``at`` (:meth:`pepin.tsdf.Tsdf.recentre`), carrying

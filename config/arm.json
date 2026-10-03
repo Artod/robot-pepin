@@ -1,0 +1,42 @@
+{
+  "frame": "mount is cart base_link <- the URDF's base_link (origin on the arm base's bottom face, 3.9 cm behind the shoulder_pan axis; +x is where the arm reaches at its zero pose); links are boxes in each link's own URDF frame, metres and degrees (rpy as URDF writes it)",
+  "mount": {
+    "x_m": -0.04,
+    "y_m": -0.13,
+    "z_m": 0.78,
+    "yaw_deg": 0.0,
+    "measured": false,
+    "note": "NOT MEASURED: a placeholder on the top shelf's front-right corner (the catalogue's 0.78 m, config/body.json's cart box) so the model has somewhere to stand; depth_fusion's arm_filter stays off until this is taped. Tape: the shoulder_pan axis (the first servo's horn centre, looking down) forward and left of base_link's origin (floor midway between the drive wheels' contact points), the floor to the base's bottom face, and which way the arm points at shoulder_pan 0. Then x_m/y_m = the axis less 0.0388 m along yaw_deg, z_m = the face's height, measured true."
+  },
+  "margin_m": 0.03,
+  "ray_stride_px": 4,
+  "joints": {
+    "source": "config",
+    "topic": "/arm/joint_states",
+    "max_age_s": 0.5,
+    "pose_deg": {
+      "shoulder_pan": -27.6,
+      "shoulder_lift": -102.6,
+      "elbow_flex": 96.8,
+      "wrist_flex": 72.1,
+      "wrist_roll": 10.2,
+      "gripper": 4.6
+    },
+    "note": "pose_deg is the arm as it stands parked, READ 2026-10-02 23:20 through the base server's registers request (scratch/arm_mask/read_arm.py; torque off on all six): the servos' EEPROM carries the lerobot calibration of 2026-08-30 to the tick (homing offsets and position limits = ~/.cache/huggingface/lerobot/calibration/robots/so_follower/pepin_follower.json), and the URDF's 'new calib' zero is the middle of each calibrated range, lerobot's DEGREES convention: angle = (ticks - (range_min + range_max) / 2) * 360 / 4096. The gripper is lerobot's linear 0-100 joint, here (ticks - range_min) * 360 / 4096 - 10 deg onto the URDF's -10..100. The signs are lerobot's = the URDF's, NOT verified by a move: with them the parked arm stands folded on its base (scratch/arm_mask/folded_pose.py; shoulder_lift and elbow_flex sit at a stop each, the URDF's limits), with shoulder_lift or elbow_flex flipped it would reach 11 cm under its own base. shoulder_pan's zero is the least sure: its calibrated range is 174 deg against the URDF's 220, so its middle may sit up to ~23 deg off. source topic reads /arm/joint_states (sensor_msgs/JointState, these joint names, radians, URDF convention, stamped at the encoder read) and falls back to pose_deg when no sample lies within max_age_s of a frame."
+  },
+  "links_source": "scripts/arm_boxes.py: the tightest box along each link's own axes (or its vertices' principal axes, whichever is smaller; never smaller here), cut in two across the longest side where that saves a quarter of the volume, fitted to the visual meshes of TheRobotStudio/SO-ARM100 at 5f6d2b8 (Apache-2.0), exact hulls; margin_m grows every box at run time. scripts/arm_boxes.py --check compares this block with the meshes.",
+  "note": "The robot's own arm for the camera's self-filter (pepin.arm; depth_fusion's arm_filter flag): its links posed by forward kinematics of the vendored URDF (pepin/vendor/so101), every box grown by margin_m; a depth pixel whose ray enters a grown box writes nothing on or past that point, and every voxel inside a grown box is forgotten after each integration. Read live: an edit of this file reaches the next frame. depth_fusion publishes the grown boxes on /fusion/arm (visualization_msgs/MarkerArray, base_link) whether or not the flag is on: the check is the arm's points inside them in Foxglove.",
+  "links": [
+    {"name": "base_link", "link": "base_link", "centre_m": [0.0168, 0.0, 0.0336], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0478, 0.0555, 0.036]},
+    {"name": "shoulder_link", "link": "shoulder_link", "centre_m": [-0.0192, 0.0012, -0.0091], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0314, 0.0275, 0.0553]},
+    {"name": "upper_arm_link_0", "link": "upper_arm_link", "centre_m": [-0.1101, -0.0131, 0.0182], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0201, 0.0251, 0.025]},
+    {"name": "upper_arm_link_1", "link": "upper_arm_link", "centre_m": [-0.0361, 0.0, 0.0202], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0481, 0.012, 0.0337]},
+    {"name": "lower_arm_link_0", "link": "lower_arm_link", "centre_m": [-0.1179, 0.0034, 0.02], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0272, 0.0184, 0.0282]},
+    {"name": "lower_arm_link_1", "link": "lower_arm_link", "centre_m": [-0.0318, 0.0, 0.0202], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0438, 0.012, 0.0322]},
+    {"name": "wrist_link", "link": "wrist_link", "centre_m": [-0.0022, -0.0269, 0.0222], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0178, 0.0389, 0.0312]},
+    {"name": "gripper_link_0", "link": "gripper_link", "centre_m": [-0.0215, -0.0002, -0.0728], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0137, 0.0133, 0.0316]},
+    {"name": "gripper_link_1", "link": "gripper_link", "centre_m": [-0.0024, -0.002, -0.0201], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0328, 0.026, 0.0211]},
+    {"name": "moving_jaw_so101_v1_link_0", "link": "moving_jaw_so101_v1_link", "centre_m": [-0.0029, -0.0569, 0.019], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.0094, 0.0251, 0.0095]},
+    {"name": "moving_jaw_so101_v1_link_1", "link": "moving_jaw_so101_v1_link", "centre_m": [0.0, -0.0099, 0.0189], "rpy_deg": [0.0, 0.0, 0.0], "half_m": [0.01, 0.0199, 0.024]}
+  ]
+}
