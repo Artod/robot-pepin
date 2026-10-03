@@ -140,10 +140,16 @@ void display_info(const InfoScreen& info) {
       g_lcd.setFont(&fonts::lgfxJapanGothic_16);
       g_lcd.setTextColor(face::kColorText);
       g_lcd.drawString(item.key, 8, y + 3);
-      const int bx = 110, bw = w - bx - 70, bh = 14;
-      g_lcd.drawRoundRect(bx, y + 3, bw, bh, 4, face::kColorAccent);
-      const int fill = (int)((bw - 4) * (item.frac / 255.0f));
-      if (fill > 0) g_lcd.fillRoundRect(bx + 2, y + 5, fill, bh - 4, 3, face::kColorLip);
+      // the bar between the label and the value (sim/sim.js: the same arithmetic)
+      const int label_w = g_lcd.textWidth(item.key);
+      const int bx = label_w + 16 > 110 ? label_w + 16 : 110;
+      const int bw = w - bx - g_lcd.textWidth(item.value) - 16;
+      const int bh = 14;
+      if (bw >= 30) {
+        g_lcd.drawRoundRect(bx, y + 3, bw, bh, 4, face::kColorAccent);
+        const int fill = (int)((bw - 4) * (item.frac / 255.0f));
+        if (fill > 0) g_lcd.fillRoundRect(bx + 2, y + 5, fill, bh - 4, 3, face::kColorLip);
+      }
       g_lcd.setTextDatum(lgfx::top_right);
       g_lcd.drawString(item.value, w - 8, y + 3);
       y += 22;
