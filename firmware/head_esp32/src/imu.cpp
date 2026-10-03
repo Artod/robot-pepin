@@ -22,7 +22,7 @@ constexpr uint8_t kAccelXoutH = 0x3B;
 constexpr uint8_t kPwrMgmt1 = 0x6B;
 constexpr uint8_t kWhoAmI = 0x75;
 constexpr uint32_t kI2cHz = 400000;  // the chip's own ceiling
-constexpr int kBatchMax = 8;
+constexpr int kBatchMax = 20;  // 20 ms at 1 kHz
 constexpr int kErrorsBeforeReset = 50;  // consecutive failed reads: the chip is set up again
 
 TaskHandle_t g_task = nullptr;
@@ -40,7 +40,7 @@ void IRAM_ATTR on_data_ready() {
   if (woken) portYIELD_FROM_ISR();
 }
 
-void on_poll(void*) { xTaskNotify(g_task, (uint32_t)micros(), eSetValueWithOverwrite); }
+[[maybe_unused]] void on_poll(void*) { xTaskNotify(g_task, (uint32_t)micros(), eSetValueWithOverwrite); }
 
 bool write_reg(uint8_t reg, uint8_t value) {
   Wire.beginTransmission(g_addr);
@@ -107,6 +107,13 @@ bool setup_chip(const ImuConfig& cfg) {
     return true;
   }
   detachInterrupt(digitalPinToInterrupt(pins::kImuInt));
+#if !HEAD_IMU_POLL_FALLBACK
+  // No data-ready edge: the INT wire is missing or broken. Nothing is streamed (a polled clock
+  // beats against the chip's own oscillator: repeated or missed samples, stamps a poll off);
+  // the status says why, and the chip is tried again every second.
+  g_stats.state = kImuNoInterrupt;
+  return false;
+#else
   if (!g_poll_timer) {
     esp_timer_create_args_t args = {};
     args.callback = on_poll;
@@ -116,12 +123,13 @@ bool setup_chip(const ImuConfig& cfg) {
   esp_timer_start_periodic(g_poll_timer, 500000u / rate);
   g_stats.state = kImuPolled;
   return true;
+#endif
 }
 
 void imu_task(void*) {
   Wire.begin(pins::kImuSda, pins::kImuScl, kI2cHz);
   Wire.setTimeOut(5);
-  pinMode(pins::kImuInt, INPUT_PULLDOWN);  // an unconnected INT stays low: no edges, polling
+  pinMode(pins::kImuInt, INPUT_PULLDOWN);  // an unconnected INT stays low: no edges
   ImuConfig cfg = kImuDefaults;
   bool running = false;
   ImuSample batch[kBatchMax];
@@ -150,7 +158,7 @@ void imu_task(void*) {
       }
       const uint16_t rate = cfg.rate_hz < 4 ? 4 : (cfg.rate_hz > 1000 ? 1000 : cfg.rate_hz);
       period_us = 1000000u / rate;
-      batch_n = rate / 200;  // about 200 frames a second: <= 5 ms of batching
+      batch_n = rate / 50;  // a frame every 20 ms: 4 samples at 200 Hz, 20 at 1 kHz
       batch_n = batch_n < 1 ? 1 : (batch_n > kBatchMax ? kBatchMax : batch_n);
     }
     uint32_t stamp = 0;
@@ -174,6 +182,7 @@ void imu_task(void*) {
         continue;
       }
     } else if (last_stamp && stamp - last_stamp > period_us + period_us / 2) {
+      ++g_stats.gaps;  // longer than 1.5 periods: edges the task did not read in time
       g_stats.missed += (stamp - last_stamp + period_us / 2) / period_us - 1;
     }
     memcpy(last_raw, raw, sizeof raw);
@@ -187,7 +196,10 @@ void imu_task(void*) {
     s.cfg = cfg.id;
     if (count >= batch_n) {
       if (g_sink) g_sink(batch, (size_t)count);
+      portENTER_CRITICAL(&g_lock);
       g_stats.samples += (uint32_t)count;
+      g_stats.last_stamp = batch[count - 1].t_us;
+      portEXIT_CRITICAL(&g_lock);
       count = 0;
     }
   }
@@ -197,7 +209,7 @@ void imu_task(void*) {
 
 void imu_start(ImuSink sink) {
   g_sink = sink;
-  xTaskCreatePinnedToCore(imu_task, "imu", 4096, nullptr, configMAX_PRIORITIES - 2, &g_task, 0);
+  xTaskCreatePinnedToCore(imu_task, "imu", 6144, nullptr, configMAX_PRIORITIES - 2, &g_task, 0);
 }
 
 void imu_configure(const ImuConfig& config) {

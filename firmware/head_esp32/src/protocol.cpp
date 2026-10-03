@@ -68,7 +68,7 @@ size_t pack_status(const Status& s, uint8_t* out) {
   uint8_t* p = out;
   p = put_u32(p, s.micros);
   p = put_u16(p, s.fps_x10);
-  p = put_u16(p, s.imu_rate_hz);
+  p = put_u16(p, s.imu_rate_x10);
   p = put_u32(p, s.i2c_errors);
   p = put_u32(p, s.dropped);
   p = put_u32(p, s.rx_errors);
@@ -80,7 +80,7 @@ size_t pack_status(const Status& s, uint8_t* out) {
   *p++ = s.config_id;
   *p++ = s.version;
   p = put_u16(p, s.free_heap_kb);
-  p = put_u32(p, s.duplicates);
+  p = put_u32(p, s.gaps);
   return (size_t)(p - out);
 }
 

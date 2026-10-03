@@ -35,16 +35,20 @@ THE HEAD SERVER'S DOOR (``pepin.head_server``, TCP 3340, JSON lines both ways). 
     {"cmd": "subscribe", "imu": true}          this client gets the IMU lines below
     {"cmd": "status"}
 
-and gets ``{"type": "ack", ...}`` / ``{"type": "error", "error": ...}`` for each, the status line
-once a second, and, subscribed, one line per serial 'I' frame::
+and gets ``{"type": "ack", ...}`` / ``{"type": "error", "error": ...}`` for each and the status
+line once a second. A subscriber gets (the schema of the VIO design, vio.md section 2) first::
 
-    {"type": "imu", "cfg": 1, "rate_hz": 1000, "acc_scale": 0.0011971, "gyro_scale": 0.00026646,
-     "delay_s": 0.0048, "s": [[t, esp_us, ax, ay, az, gx, gy, gz], ...]}
+    {"type": "imu_config", "cfg": 1, "rate_hz": 200, "dlpf": 3, "gyro_fs_dps": 500,
+     "accel_fs_g": 4, "filter_delay_s": 0.0048}
 
-``t`` is the sample's moment on the board's monotonic clock (``time.monotonic``): its data-ready
-edge mapped through the clock map, less the chip's filter delay (``delay_s``); ``esp_us`` the
-ESP32's own micros, unwrapped; the six values raw counts in the chip's axes, times ``acc_scale``
-m/s^2 or ``gyro_scale`` rad/s.
+(again whenever the config changes), then one line per serial 'I' frame (every 20 ms)::
+
+    {"type": "imu", "cfg": 1, "samples": [[t_mono_s, esp_us, gx, gy, gz, ax, ay, az], ...]}
+
+``t_mono_s`` is the sample's data-ready edge on the board's ``time.monotonic`` (the ESP32's micros
+fitted against CLOCK_MONOTONIC_RAW, carried to MONOTONIC when the line is written); the filter's
+delay is NOT taken off (the consumer does, from ``filter_delay_s``). ``esp_us`` is the ESP32's own
+micros, unwrapped; gyro in rad/s and accel in m/s^2, in the chip's axes, biases not removed.
 
 Standard library only: this module runs on the board.
 """
@@ -193,7 +197,7 @@ def encode_imu(samples: Iterable[ImuSample]) -> bytes:
     )
 
 
-IMU_STATES = {0: "absent", 1: "interrupt", 2: "polled"}
+IMU_STATES = {0: "absent", 1: "interrupt", 2: "polled", 3: "no_int"}  # 3: no data-ready edge
 MODES = {0: "face", 1: "info", 2: "asleep"}
 
 
@@ -203,7 +207,7 @@ class HeadStatus:
 
     esp_us: int
     fps: float
-    imu_rate_hz: int
+    imu_rate_hz: float  # the chip's output rate in its own stamps' time
     i2c_errors: int
     dropped: int
     rx_errors: int
@@ -215,7 +219,7 @@ class HeadStatus:
     config_id: int
     version: int
     free_heap_kb: int
-    duplicates: int
+    gaps: int  # stamps more than 1.5 periods apart
 
     def as_dict(self) -> dict[str, Any]:
         """The fields, for a JSON line."""
@@ -228,7 +232,7 @@ def decode_status(payload: bytes) -> HeadStatus:
     return HeadStatus(
         esp_us=f[0],
         fps=f[1] / 10.0,
-        imu_rate_hz=f[2],
+        imu_rate_hz=f[2] / 10.0,
         i2c_errors=f[3],
         dropped=f[4],
         rx_errors=f[5],
@@ -240,7 +244,7 @@ def decode_status(payload: bytes) -> HeadStatus:
         config_id=f[11],
         version=f[12],
         free_heap_kb=f[13],
-        duplicates=f[14],
+        gaps=f[14],
     )
 
 
@@ -251,7 +255,7 @@ def encode_status(status: HeadStatus) -> bytes:
     return STATUS_FIELDS.pack(
         status.esp_us & 0xFFFFFFFF,
         round(status.fps * 10),
-        status.imu_rate_hz,
+        round(status.imu_rate_hz * 10),
         status.i2c_errors,
         status.dropped,
         status.rx_errors,
@@ -263,7 +267,7 @@ def encode_status(status: HeadStatus) -> bytes:
         status.config_id,
         status.version,
         status.free_heap_kb,
-        status.duplicates,
+        status.gaps,
     )
 
 
@@ -537,13 +541,15 @@ def _print_imu(host: str, port: int, lines: int) -> int:
             *done, buffer = buffer.split(b"\n")
             for line in done:
                 message = json.loads(line) if line.strip() else {}
+                if message.get("type") == "imu_config":
+                    print(json.dumps(message))
                 if message.get("type") != "imu" or lines <= 0:
                     continue
-                t, esp_us, *raw = message["s"][0]
-                acc = [round(v * message["acc_scale"], 2) for v in raw[:3]]
-                gyro = [round(v * message["gyro_scale"], 3) for v in raw[3:]]
-                print(f"t {t:.6f} esp_us {esp_us} n {len(message['s'])} acc {acc} m/s2 gyro"
-                      f" {gyro} rad/s")  # fmt: skip
+                t, esp_us, *values = message["samples"][0]
+                gyro = [round(v, 3) for v in values[:3]]
+                acc = [round(v, 2) for v in values[3:]]
+                print(f"t {t:.6f} esp_us {esp_us} n {len(message['samples'])} gyro {gyro} rad/s"
+                      f" acc {acc} m/s2")  # fmt: skip
                 lines -= 1
     return 0
 

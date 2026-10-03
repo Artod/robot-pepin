@@ -135,12 +135,16 @@ type, length and payload). `src/protocol.h` and `src/pepin/head_link.py` documen
 | `Q` | host -> ESP32 | ping: id u32 |
 | `C` | host -> ESP32 | config: id u8, IMU rate u16, DLPF u8, accel FS u8, gyro FS u8, brightness u8 |
 
-The IMU samples at the configured output rate (default 1000 Hz, DLPF_CFG 3, +-4 g, +-500 deg/s)
-on its own core-0 task. With the INT wire each sample is stamped with `micros()` at its
-data-ready edge; without it the firmware polls at twice the rate, stamps half a poll period back
-and drops repeated samples (counted). Samples go out in batches of 5 (about 200 frames a second,
-18 KB/s of the link's 92 KB/s); a batch that does not fit the serial buffer is dropped and
-counted, never waited for.
+The IMU samples at the output rate the host's 'C' asks for (the head server asks 200 Hz,
+`config/head.json`; the firmware boots at 1000 Hz until then), DLPF_CFG 3, +-4 g, +-500 deg/s,
+CLKSEL 1 (the gyro's PLL), on its own core-0 task while the display runs on core 1. Each sample
+is stamped with `micros()` in the data-ready interrupt, so the INT wire is required: without
+edges the firmware streams nothing and reports `imu_state` 3 (a polled fallback beats against
+the chip's own oscillator and is compiled out, `HEAD_IMU_POLL_FALLBACK`). Samples go out every
+20 ms (4 at 200 Hz: 73 bytes, 4 % of the link; 20 at 1 kHz: 345 bytes, 19 %); a frame that does
+not fit the serial buffer is dropped and counted, never waited for. The status line carries the
+chip's rate measured in its own stamps (198-202 at a nominal 200 is the chip's oscillator, not a
+fault) and the gaps longer than 1.5 periods.
 
 ## Built on
 

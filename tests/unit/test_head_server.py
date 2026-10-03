@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import random
 from pathlib import Path
 from typing import Any
@@ -170,9 +171,10 @@ def test_mouth_show_and_config_go_straight_down(table: FaceTable) -> None:
 
 
 def test_subscribers_get_samples_on_the_board_clock_across_the_wrap(table: FaceTable) -> None:
-    """1 kHz in batches of 5, the ESP32's micros 1 s from wrapping and 40 ppm fast, 1 ms each
-    way: every line carries both clocks, the board time within 0.3 ms of the truth (less the
-    filter delay) once the map has a few seconds of pongs."""
+    """200 Hz in 20 ms frames, the ESP32's micros 1 s from wrapping and 40 ppm fast, 1 ms each
+    way: an imu_config line first, then every line carries both clocks and SI values (gyro, then
+    accel), the board time of each sample's data-ready edge within 0.3 ms of the truth once the
+    map has a few seconds of pongs; the filter delay is the consumer's to take off."""
     clock, head, server, service = make(
         table, offset_us=(1 << 32) - 1_000_000 - 100_000_000, fast_ppm=40.0
     )
@@ -181,32 +183,50 @@ def test_subscribers_get_samples_on_the_board_clock_across_the_wrap(table: FaceT
     service.step(0.0)
     truths: list[list[float]] = []
     next_batch = clock.now
-    end = clock.now + 4.0
+    end = clock.now + 5.0
     while clock.now < end:
-        clock.now += 0.001
-        if clock.now >= next_batch + 0.005:
-            times = [next_batch + 0.001 * (i + 1) for i in range(5)]
+        clock.now += 0.00025  # finer than the transit: a coarse grid biases the round trip
+        if clock.now >= next_batch + 0.02:
+            times = [next_batch + 0.005 * (i + 1) for i in range(4)]
             head.imu(times)
             truths.append(times)
             next_batch = times[-1]
         service.step(0.0)
     lines = [json.loads(line) for line in sub.posted]
+    assert lines[0] == {"type": "imu_config", "cfg": 1, "rate_hz": 200, "dlpf": 3,
+                        "gyro_fs_dps": 500, "accel_fs_g": 4, "filter_delay_s": 0.0048}  # fmt: skip
+    lines = lines[1:]
     assert len(lines) >= len(truths) - 2
     last = lines[-1]
-    assert last["type"] == "imu" and last["cfg"] == 1 and last["rate_hz"] == 1000
-    assert last["delay_s"] == 0.0048
-    stamps = [s[1] for line in lines for s in line["s"]]
+    assert set(last) == {"type", "cfg", "samples"} and last["type"] == "imu" and last["cfg"] == 1
+    _, _, gx, gy, gz, ax, ay, az = last["samples"][1]  # the fake's sample i has gyro i,-i,2i
+    assert (gx, gy, gz) == pytest.approx((math.radians(1 / 65.5), -math.radians(1 / 65.5),
+                                          2 * math.radians(1 / 65.5)), rel=1e-5)  # fmt: skip
+    assert (ax, ay, az) == pytest.approx((0.0, 0.0, 9.80665), rel=1e-5)  # 8192 counts at 4 g
+    stamps = [s[1] for line in lines for s in line["samples"]]
     assert stamps == sorted(stamps) and stamps[-1] > 1 << 32  # unwrapped, past the wrap
-    by_line = {round(line["s"][-1][1]): line for line in lines}
+    by_line = {round(line["samples"][-1][1]): line for line in lines}
     truth_of = {round(head.esp_us(t[-1])): t for t in truths}
     checked = 0
     for esp, line in by_line.items():
         if esp in truth_of and truth_of[esp][-1] > clock.now - 1.0:
-            for sample, t in zip(line["s"], truth_of[esp], strict=True):
-                assert sample[0] == pytest.approx(t - 0.0048, abs=3e-4)
+            for sample, truth in zip(line["samples"], truth_of[esp], strict=True):
+                assert sample[0] == pytest.approx(truth, abs=3e-4)
             checked += 1
-    assert checked > 50
+    assert checked > 40
     assert service.imu_gaps == 0
+    assert service.status(clock.now)["chip_rate_hz"] == pytest.approx(200.0 * (1 + 40e-6), rel=1e-3)
+
+
+def test_a_config_change_reaches_the_subscribers(table: FaceTable) -> None:
+    _, _, server, service = make(table)
+    sub = FakeClient()
+    server.inbox.append((sub, {"cmd": "subscribe", "imu": True}))
+    service.step(0.0)
+    ask(service, server, {"cmd": "config", "imu_rate_hz": 1000, "gyro_fs": 2})
+    change = json.loads(sub.posted[-1])
+    assert change["type"] == "imu_config" and change["cfg"] == 2
+    assert change["rate_hz"] == 1000 and change["gyro_fs_dps"] == 1000
 
 
 def test_a_reboot_resends_the_config_and_the_face(table: FaceTable) -> None:
@@ -232,7 +252,7 @@ def test_a_status_that_names_another_config_or_face_is_corrected(table: FaceTabl
     status = server.broadcasts[-1]
     assert status["esp"]["who_am_i"] == 0x72 and status["link"] == "up"
     report = service.report(clock.now)
-    assert "face 49.5 fps (face), imu 1000 Hz interrupt (who 0x72)" in report
+    assert "face 49.5 fps (face), imu 200.1 Hz interrupt (who 0x72)" in report
     assert "ms, spread" in report and "showing neutral (nobody)" in report
     n = len(head.sent("E"))
     for _ in range(2):

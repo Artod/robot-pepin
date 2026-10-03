@@ -124,7 +124,7 @@ class FakeHead:
         base = dict(
             esp_us=self.esp_us(now) & 0xFFFFFFFF,
             fps=49.5,
-            imu_rate_hz=1000,
+            imu_rate_hz=200.1,
             i2c_errors=0,
             dropped=0,
             rx_errors=0,
@@ -136,7 +136,7 @@ class FakeHead:
             config_id=self.config_id,
             version=1,
             free_heap_kb=150,
-            duplicates=0,
+            gaps=0,
         )
         base.update(fields)
         frame = encode_frame(STATUS, encode_status(HeadStatus(**base)))

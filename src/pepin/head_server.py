@@ -15,9 +15,12 @@ four things with it:
   as one JSON line, each sample with both clocks: the ESP32's micros, unwrapped, and its moment
   on this board's monotonic clock.
 - **The clock map.** ESP32 micros -> board time by the lower envelope of (receive time - ESP
-  micros) over the pongs and the samples: the smallest difference per half second of ESP time,
-  a line through the last 20 s of those (offset and skew; the ESP32's crystal drifts tens of
-  ppm), less half the smallest ping round trip (the envelope sits one transit above the truth).
+  micros - the frame's known wire and read time) over the pongs and the samples, against
+  CLOCK_MONOTONIC_RAW (chrony slews MONOTONIC by up to 2000 ppm; RAW leaves the crystal's ratio
+  alone): the smallest difference per second of ESP time, a line through the last 120 s of those
+  (offset and skew; the ESP32's crystal drifts tens of ppm), less half the smallest ping round
+  trip (the envelope sits one transit above the truth). A sample is carried to MONOTONIC when
+  its line is written, by reading both clocks back to back.
 - **The brain lease.** A laptop process (the goal server, with its face flag on) renews a lease
   every few seconds; once a lease was taken and every lease has lapsed, the laptop or the WiFi
   is gone and the face falls asleep (config/face.json's ``brain_lost``). The ESP32 falls asleep
@@ -80,6 +83,7 @@ from pepin.head_link import (
     show_items,
 )
 from pepin.streams import JsonLinesServer
+from pepin.streams import encode as encode_line
 
 logger = logging.getLogger(__name__)
 
@@ -269,7 +273,7 @@ class ClockMap:
     smallest ping round trip is taken off for it.
     """
 
-    def __init__(self, bucket_s: float = 0.5, window_s: float = 20.0) -> None:
+    def __init__(self, bucket_s: float = 1.0, window_s: float = 120.0) -> None:
         """The envelope's resolution and memory."""
         self.bucket_s = bucket_s
         self.window_buckets = max(3, round(window_s / bucket_s))
@@ -386,6 +390,38 @@ def _line(points: list[tuple[float, float]], ref: float) -> tuple[float, float]:
     return my - slope * mx, slope
 
 
+def monotonic_raw() -> float:
+    """CLOCK_MONOTONIC_RAW (never slewed by chrony) where the system has it, else monotonic."""
+    raw = getattr(time, "CLOCK_MONOTONIC_RAW", None)
+    return time.clock_gettime(raw) if raw is not None else time.monotonic()
+
+
+class ChipRate:
+    """The IMU's output rate in its stamps' own time (the chip runs on its own oscillator: 198-202
+    at a nominal 200 is normal), over about a second of samples."""
+
+    def __init__(self) -> None:
+        """No samples yet."""
+        self._start: int | None = None
+        self._n = 0
+        self.hz: float | None = None
+
+    def add(self, esp_us: list[int]) -> None:
+        """Consecutive samples' unwrapped stamps."""
+        for t in esp_us:
+            if self._start is None:
+                self._start, self._n = t, 0
+                continue
+            self._n += 1
+            if t - self._start >= 1_000_000:
+                self.hz = self._n * 1e6 / (t - self._start)
+                self._start, self._n = t, 0
+
+    def reset(self) -> None:
+        """The stamps started over."""
+        self._start, self._n, self.hz = None, 0, None
+
+
 # -- the face ---------------------------------------------------------------------------------
 
 
@@ -473,11 +509,11 @@ class HeadSettings:
     device: str = "/dev/pepin-head"
     baud: int = 921600
     port: int = HEAD_PORT
-    imu: ImuConfig = field(default_factory=lambda: replace(FIRMWARE_DEFAULTS, id=1))
+    imu: ImuConfig = field(default_factory=lambda: ImuConfig(id=1, rate_hz=200))
     brightness: int = 200
     ping_hz: float = 2.0
-    bucket_s: float = 0.5
-    window_s: float = 20.0
+    bucket_s: float = 1.0
+    window_s: float = 120.0
     brain_lease: bool = True
 
     @classmethod
@@ -491,15 +527,15 @@ class HeadSettings:
             port=int(data.get("port", HEAD_PORT)),
             imu=ImuConfig(
                 id=1,
-                rate_hz=int(imu.get("rate_hz", 1000)),
+                rate_hz=int(imu.get("rate_hz", 200)),
                 dlpf=int(imu.get("dlpf", 3)),
                 accel_fs=int(imu.get("accel_fs", 1)),
                 gyro_fs=int(imu.get("gyro_fs", 1)),
             ),
             brightness=int(data.get("brightness", 200)),
             ping_hz=float(data.get("ping_hz", 2.0)),
-            bucket_s=float(data.get("clock", {}).get("bucket_s", 0.5)),
-            window_s=float(data.get("clock", {}).get("window_s", 20.0)),
+            bucket_s=float(data.get("clock", {}).get("bucket_s", 1.0)),
+            window_s=float(data.get("clock", {}).get("window_s", 120.0)),
             brain_lease=bool(data.get("brain_lease", True)),
         )
 
@@ -516,13 +552,21 @@ class HeadService:
         settings: HeadSettings,
         *,
         clock: Callable[[], float] = time.monotonic,
+        raw_clock: Callable[[], float] | None = None,
     ) -> None:
-        """``open_link`` opens the port (``OSError`` while it is absent)."""
+        """``open_link`` opens the port (``OSError`` while it is absent). ``clock`` is what the
+        IMU lines are dated in (the board's monotonic, as base_server's ``t``); ``raw_clock`` what
+        the ESP32's micros are fitted against: CLOCK_MONOTONIC_RAW by default, because chrony
+        slews the monotonic clock (up to 2000 ppm) and a line through a slew is wrong at its
+        newest end; a sample is carried from one to the other by reading both back to back."""
         self._open_link = open_link
         self._server = server
         self._table = table
         self._settings = settings
         self._clock = clock
+        if raw_clock is None:
+            raw_clock = monotonic_raw if clock is time.monotonic else clock
+        self._raw_clock = raw_clock
         self._link: ByteLink | None = None
         self._link_error = "not opened yet"
         self._retry_at = 0.0
@@ -536,7 +580,7 @@ class HeadService:
         self._brightness = settings.brightness
         self._sent_face: tuple[str, float] | None = None
         self._subscribers: set[Subscriber] = set()
-        self._line_heads: dict[int, str] = {}  # an IMU line's constant part, by config id
+        self._rate = ChipRate()  # the IMU's rate in ESP32 time
         self._pings: dict[int, float] = {}
         self._ping_id = 0
         self._next_ping = 0.0
@@ -549,12 +593,13 @@ class HeadService:
         self.imu_samples = 0
         self.imu_gaps = 0
         self.imu_lines = 0
+        self.pongs = 0
         self.resyncs = 0
         self.connects = 0
 
     # -- the loop ---------------------------------------------------------------------------
 
-    def step(self, timeout_s: float = 0.005) -> None:
+    def step(self, timeout_s: float = 0.01) -> None:
         """One turn: read the port (up to ``timeout_s``), answer the clients, run the clocks."""
         now = self._clock()
         if self._link is None and now >= self._retry_at:
@@ -566,7 +611,7 @@ class HeadService:
                 self._drop(f"read failed: {error}")
                 data = b""
             if data:
-                received = self._clock()
+                received = self._raw_clock()
                 for kind, payload in self._decoder.feed(data):
                     self._on_frame(kind, payload, received)
         else:
@@ -634,6 +679,7 @@ class HeadService:
         self.clock_map.reset()
         self._pings.clear()
         self._last_sample_us = None
+        self._rate.reset()
         self._mismatches = 0
         self._sent_face = None
         self.resyncs += 1
@@ -676,39 +722,47 @@ class HeadService:
         known = I2C_READ_S + self._wire_s(len(payload) + OVERHEAD)
         self.clock_map.observe(times[-1], received, known)
         config = self._configs.get(rows[-1][7], self._config)
-        period_us = 1e6 / config.rate_hz
-        if self._last_sample_us is not None and times[0] - self._last_sample_us > 1.5 * period_us:
-            self.imu_gaps += 1
+        limit = 1.5e6 / config.rate_hz  # a gap: stamps more than 1.5 periods apart
+        previous = self._last_sample_us
+        for t in times:
+            if previous is not None and t - previous > limit:
+                self.imu_gaps += 1
+            previous = t
         self._last_sample_us = times[-1]
         self.imu_samples += len(rows)
+        self._rate.add(times)
         if not self._subscribers:
             return
         self._subscribers = {c for c in self._subscribers if c.alive}
-        head = self._line_heads.get(config.id)
-        if head is None:  # the line's constant part, once per config
-            head = json.dumps(
-                {
-                    "type": "imu",
-                    "cfg": config.id,
-                    "rate_hz": config.rate_hz,
-                    "acc_scale": round(config.acc_scale, 9),
-                    "gyro_scale": round(config.gyro_scale, 9),
-                    "delay_s": config.delay_s,
-                },
-                separators=(",", ":"),
-            )[:-1]
-            self._line_heads[config.id] = head
-        # board time = esp seconds * scale + shift, from the clock map's line, less the delay
+        # The data-ready moment on the board's monotonic clock: ESP seconds * scale + shift on
+        # the raw clock, carried to the monotonic one by reading both back to back. The filter's
+        # delay is NOT taken off here: the consumer does, from the imu_config line.
         scale, shift = self.clock_map.linear()
-        shift -= config.delay_s
+        shift += self._clock() - self._raw_clock()
+        gs, acs = config.gyro_scale, config.acc_scale
         samples = ",".join(
-            f"[{t * 1e-6 * scale + shift:.6f},{t},{r[1]},{r[2]},{r[3]},{r[4]},{r[5]},{r[6]}]"
+            f"[{t * 1e-6 * scale + shift:.6f},{t},{r[4] * gs:.6g},{r[5] * gs:.6g},"
+            f"{r[6] * gs:.6g},{r[1] * acs:.6g},{r[2] * acs:.6g},{r[3] * acs:.6g}]"
             for t, r in zip(times, rows, strict=True)
         )
-        encoded = f'{head},"s":[{samples}]}}\n'.encode()
+        encoded = f'{{"type":"imu","cfg":{config.id},"samples":[{samples}]}}\n'.encode()
         for client in self._subscribers:
             client.post(encoded)
         self.imu_lines += 1
+
+    def imu_config_line(self, config: ImuConfig | None = None) -> dict[str, Any]:
+        """What the IMU lines' samples were taken at: sent to a subscriber when it subscribes
+        and to every subscriber when the config changes."""
+        config = config or self._config
+        return {
+            "type": "imu_config",
+            "cfg": config.id,
+            "rate_hz": config.rate_hz,
+            "dlpf": config.dlpf,
+            "gyro_fs_dps": 250 << config.gyro_fs,
+            "accel_fs_g": 2 << config.accel_fs,
+            "filter_delay_s": config.delay_s,
+        }
 
     def _on_pong(self, payload: bytes, received: float) -> None:
         ping_id, raw = decode_pong(payload)
@@ -719,6 +773,7 @@ class HeadService:
         if sent is not None:
             self.clock_map.observe_rtt(received - sent - ping_wire - pong_wire)
         self.clock_map.observe(esp, received, pong_wire)
+        self.pongs += 1
 
     def _wire_s(self, frame_bytes: int) -> float:
         """How long a frame of that many bytes takes on the wire (8N1: 10 bits a byte)."""
@@ -803,6 +858,7 @@ class HeadService:
         if cmd == "subscribe":
             if message.get("imu", True):
                 self._subscribers.add(client)
+                client.post(encode_line(self.imu_config_line()))  # before the first sample
             else:
                 self._subscribers.discard(client)
             return {"type": "ack", "cmd": cmd, "imu": client in self._subscribers}
@@ -834,6 +890,9 @@ class HeadService:
         self._configs[config.id] = config
         self._mismatches = 0
         sent = self._send(CONFIG, encode_config(config, self._brightness))
+        line = encode_line(self.imu_config_line(config))
+        for subscriber in self._subscribers:
+            subscriber.post(line)
         return {"type": "ack", "cmd": "config", "config": asdict(config),
                 "brightness": self._brightness, "sent": sent}  # fmt: skip
 
@@ -842,8 +901,9 @@ class HeadService:
     def _tick(self, now: float) -> None:
         if self._link is not None and now >= self._next_ping:
             self._ping_id = (self._ping_id + 1) & 0xFFFFFFFF
-            self._pings = {k: v for k, v in self._pings.items() if now - v < 2.0}
-            self._pings[self._ping_id] = now
+            sent = self._raw_clock()
+            self._pings = {k: v for k, v in self._pings.items() if sent - v < 2.0}
+            self._pings[self._ping_id] = sent
             self._send(PING, encode_ping(self._ping_id))
             period = 1.0 / self._settings.ping_hz
             self._next_ping = now + period if self._next_ping == 0.0 else self._next_ping + period
@@ -898,6 +958,8 @@ class HeadService:
             "imu_samples": self.imu_samples,
             "imu_gaps": self.imu_gaps,
             "imu_lines": self.imu_lines,
+            "chip_rate_hz": None if self._rate.hz is None else round(self._rate.hz, 2),
+            "pongs": self.pongs,
             "clock": self.clock_map.state(),
             "config": asdict(self._config),
             "brightness": self._brightness,

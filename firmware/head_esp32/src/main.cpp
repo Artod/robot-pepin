@@ -43,10 +43,11 @@ face::FaceModel g_model;
 face::Layout g_layout;
 
 // One frame onto the wire. `droppable`: when the TX buffer cannot take it whole, it is counted
-// and dropped rather than waited for (the IMU must not stall on a slow reader).
-bool send(uint8_t type, const uint8_t* payload, size_t n, bool droppable) {
-  uint8_t frame[head::kOverhead + 8 * head::kImuSampleBytes + head::kStatusBytes];
-  if (n + head::kOverhead > sizeof frame) return false;
+// and dropped rather than waited for (the IMU must not stall on a slow reader). The frame is
+// built in the caller's `frame` (the UART event task's stack is small: a pong brings 13 bytes).
+bool send_in(uint8_t* frame, size_t room, uint8_t type, const uint8_t* payload, size_t n,
+             bool droppable) {
+  if (n + head::kOverhead > room) return false;
   const size_t size = head::encode(type, payload, n, frame);
   xSemaphoreTake(g_tx, portMAX_DELAY);
   bool sent = true;
@@ -59,8 +60,13 @@ bool send(uint8_t type, const uint8_t* payload, size_t n, bool droppable) {
   return sent;
 }
 
+bool send(uint8_t type, const uint8_t* payload, size_t n, bool droppable) {
+  uint8_t frame[head::kOverhead + 20 * head::kImuSampleBytes];
+  return send_in(frame, sizeof frame, type, payload, n, droppable);
+}
+
 void on_imu(const head::ImuSample* s, size_t n) {
-  uint8_t payload[8 * head::kImuSampleBytes];
+  uint8_t payload[20 * head::kImuSampleBytes];
   uint8_t* p = payload;
   for (size_t i = 0; i < n; ++i) {
     p = head::put_u32(p, s[i].t_us);
@@ -84,8 +90,9 @@ void dispatch(uint8_t type, const uint8_t* p, size_t n) {
     case head::kPing:
       if (n == 4) {
         uint8_t pong[8];
+        uint8_t frame[sizeof pong + head::kOverhead];
         head::put_u32(head::put_u32(pong, head::get_u32(p)), now_us);
-        send(head::kPong, pong, sizeof pong, false);
+        send_in(frame, sizeof frame, head::kPong, pong, sizeof pong, false);
       }
       return;
     case head::kExpression:
@@ -143,6 +150,7 @@ void loop() {
   static uint32_t next_status = millis() + kStatusPeriodMs;
   static uint32_t frames = 0;
   static uint32_t samples_at_status = 0;
+  static uint32_t stamp_at_status = 0;
   static uint16_t fps_x10 = 0;
   static Mode mode = kModeFace;
   static uint32_t info_until = 0;
@@ -203,10 +211,18 @@ void loop() {
     head::Status s = {};
     s.micros = micros();
     s.fps_x10 = fps_x10;
-    s.imu_rate_hz = (uint16_t)(g_sent_samples - samples_at_status);
-    samples_at_status = g_sent_samples;
+    // The chip's rate in its stamps' own time (its oscillator is not the ESP32's: 198-202 at a
+    // nominal 200 is normal), over the samples since the last status line.
+    const uint32_t span_us = imu.last_stamp - stamp_at_status;
+    const uint32_t n = imu.samples - samples_at_status;
+    s.imu_rate_x10 = (span_us > 0 && samples_at_status > 0)
+                         ? (uint16_t)((uint64_t)n * 10000000ull / span_us)
+                         : 0;
+    samples_at_status = imu.samples;
+    stamp_at_status = imu.last_stamp;
     s.i2c_errors = imu.i2c_errors;
-    s.dropped = g_dropped + imu.missed;
+    s.dropped = g_dropped;
+    s.gaps = imu.gaps;
     s.rx_errors = g_parser.crc_errors + g_parser.length_errors;
     s.rx_frames = g_parser.frames;
     s.expression = (uint8_t)g_model.expression();
@@ -216,7 +232,6 @@ void loop() {
     s.config_id = imu.config_id;
     s.version = head::kFirmwareVersion;
     s.free_heap_kb = (uint16_t)(ESP.getFreeHeap() / 1024);
-    s.duplicates = imu.duplicates;
     uint8_t payload[head::kStatusBytes];
     send(head::kStatus, payload, head::pack_status(s, payload), true);
   }

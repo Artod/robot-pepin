@@ -27,19 +27,28 @@ struct ImuSample {
   uint8_t cfg;
 };
 
-enum ImuState : uint8_t { kImuAbsent = 0, kImuInterrupt = 1, kImuPolled = 2 };
+// 3: the chip answers but no data-ready edge comes (the INT wire): nothing is streamed.
+enum ImuState : uint8_t { kImuAbsent = 0, kImuInterrupt = 1, kImuPolled = 2, kImuNoInterrupt = 3 };
+
+// Polling at twice the rate when the INT wire is missing: off. Polled stamps are a poll period
+// off and a timer beats against the chip's own oscillator; a missing wire is reported instead.
+#ifndef HEAD_IMU_POLL_FALLBACK
+#define HEAD_IMU_POLL_FALLBACK 0
+#endif
 
 struct ImuStats {
   uint32_t samples;     // sent to the sink since boot
+  uint32_t last_stamp;  // micros of the newest sample sent: the chip's rate in ESP32 time
   uint32_t i2c_errors;  // failed transactions
-  uint32_t missed;      // data-ready edges the task did not read in time (gaps in the stamps)
-  uint32_t duplicates;  // polled reads equal to the previous one (not sent)
+  uint32_t gaps;        // stamps more than 1.5 periods apart
+  uint32_t missed;      // data-ready edges inside those gaps
+  uint32_t duplicates;  // polled reads equal to the previous one (HEAD_IMU_POLL_FALLBACK only)
   uint8_t who_am_i;     // 0x68 a genuine MPU6050; this robot's spare answers 0x72
   uint8_t state;        // ImuState
   uint8_t config_id;    // the config in force
 };
 
-// Called on the IMU task with a batch of consecutive samples (at most 8).
+// Called on the IMU task with a batch of consecutive samples (20 ms of them, at most 20).
 using ImuSink = void (*)(const ImuSample* samples, size_t n);
 
 // Start the task (core 0); it finds the chip, retries every second while it is absent.

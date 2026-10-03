@@ -70,9 +70,9 @@ class Parser {
 struct Status {
   uint32_t micros;
   uint16_t fps_x10;       // face frames per second x 10
-  uint16_t imu_rate_hz;   // IMU samples sent in the last second
+  uint16_t imu_rate_x10;  // the chip's output rate measured in ESP32 micros, 0.1 Hz units
   uint32_t i2c_errors;
-  uint32_t dropped;       // IMU samples that did not fit the serial buffer, or were missed
+  uint32_t dropped;       // IMU samples that did not fit the serial buffer
   uint32_t rx_errors;     // host frames with a bad CRC or length
   uint32_t rx_frames;     // host frames accepted
   uint8_t expression;     // the expression shown
@@ -82,7 +82,7 @@ struct Status {
   uint8_t config_id;
   uint8_t version;
   uint16_t free_heap_kb;
-  uint32_t duplicates;    // polled reads that repeated the previous sample (dropped)
+  uint32_t gaps;          // IMU stamps more than 1.5 periods apart
 };
 
 size_t pack_status(const Status& s, uint8_t* out);  // kStatusBytes

@@ -124,15 +124,17 @@ uv run python -m pepin.head_link status       # link up, the face's fps, the IMU
 | `{"cmd":"show","text":"Temps\|left: 41/70 C","seconds":8}` | an info screen (`items` for the structured form) |
 | `{"cmd":"lease","name":"goal_server","seconds":6}` | a laptop process is here; once a lease was taken and all have lapsed, the face falls asleep |
 | `{"cmd":"config","imu_rate_hz":500,"dlpf":3,"accel_fs":1,"gyro_fs":1,"brightness":120}` | the head IMU's sampling and the screen's brightness, until a restart (`config/head.json` for good) |
-| `{"cmd":"subscribe","imu":true}` | this client gets one line per serial batch: `{"type":"imu","cfg":..,"rate_hz":..,"acc_scale":..,"gyro_scale":..,"delay_s":..,"s":[[t, esp_us, ax, ay, az, gx, gy, gz], ...]}`, `t` the sample's moment on the board's monotonic clock (its data-ready edge mapped, less the filter delay `delay_s`), the six values raw counts times the scales (m/s^2, rad/s) |
+| `{"cmd":"subscribe","imu":true}` | this client gets `{"type":"imu_config","cfg":1,"rate_hz":200,"dlpf":3,"gyro_fs_dps":500,"accel_fs_g":4,"filter_delay_s":0.0048}` first (and on every config change), then one line per serial frame (every 20 ms): `{"type":"imu","cfg":1,"samples":[[t_mono_s, esp_us, gx, gy, gz, ax, ay, az], ...]}`, `t_mono_s` the sample's data-ready edge on the board's `time.monotonic` (the filter delay NOT taken off), `esp_us` the ESP32's micros unwrapped, rad/s and m/s^2 in the chip's axes |
 | `{"cmd":"status"}` | the link, the ESP32's own status (fps, IMU rate and mode, I2C errors, drops), the clock map (offset, ppm, smallest ping round trip), what shows and who asked; also broadcast once a second |
 
-The clock map: every pong and every IMU batch gives (the moment its frame was read here, the
-ESP32's micros in it), less what is known of its way (the frame's own bytes on the wire, an IMU
-sample's I2C read); the smallest difference per half second of ESP time is the lower envelope, a
-line through the last 20 s of it carries the offset and the crystal's drift, and half the
-smallest ping round trip is taken off. The ESP32 rebooting (its micros going back, or a status
-naming another config) makes the server send the config and the face again.
+The clock map: every pong and every IMU frame gives (the moment its frame was read here on
+CLOCK_MONOTONIC_RAW, the ESP32's micros in it), less what is known of its way (the frame's own
+bytes on the wire, an IMU sample's I2C read); the smallest difference per second of ESP time is
+the lower envelope, a line through the last 120 s of it carries the offset and the crystal's
+drift (RAW is never slewed by chrony, so the skew is the crystal's alone), half the smallest ping
+round trip is taken off, and each line's samples are carried to `time.monotonic` by reading both
+clocks back to back. The ESP32 rebooting (its micros going back, or a status naming another
+config) makes the server send the config and the face again.
 
 ## The neck on the base server's port (:3336)
 

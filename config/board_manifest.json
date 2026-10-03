@@ -250,10 +250,10 @@
       ],
       "owner": "pepin-head.service (/opt/pepin, systemd), config/head.json, config/face.json",
       "budget": {
-        "cpu_percent": 12.0,
+        "cpu_percent": 8.0,
         "rss_mb": 30.0
       },
-      "note": "TO MEASURE on the board: an ESTIMATE until the head is plugged in. Bench on the Mac (2026-10-03, the real server against a byte-accurate virtual ESP32 on a pty, 1 kHz IMU in batches of 5 = 200 frames/s, one subscriber, 10 s): the loop thread 1.84 % of an M5 core, 85 us a step, 52 us an IMU frame (port reads 0.49 %, frames 1.12 %, commands and ticks 0.12 % each); RSS 28 MB. At the x4.4 laptop-to-board ratio base_server's note uses that is ~8 %, at x10 ~18 %: 12 % is the middle. Levers if the census says OVER: batches of 10 in imu.cpp (100 frames/s, 10 ms instead of 5 of batching), or imu rate_hz 500 in config/head.json. Outside Docker on purpose, like base_server: the face and the IMU must survive a container restart, and the face falls asleep on WiFi loss by the lease rather than by dying."
+      "note": "TO MEASURE on the board: an ESTIMATE until the head is plugged in. Bench on the Mac (2026-10-03, the real server against a byte-accurate virtual ESP32 on a pty, one subscriber, 10 s each): at the default 200 Hz in 20 ms frames (50 frames/s) the loop thread takes 0.65 % of an M5 core (port reads 0.20 %, frames 0.31 %, commands 0.08 %, ticks 0.06 %; 10 ms read timeout); at 1 kHz in 5-sample frames (200 frames/s, before the 20 ms frames) 1.84 %; RSS 28 MB. At the x4.4 laptop-to-board ratio base_server's note uses, 200 Hz is ~3 %, at x10 ~7 %: 8 % is the budget. Levers if the census says OVER: a longer read timeout, or longer frames in imu.cpp (batch_n). Outside Docker on purpose, like base_server: the face and the IMU must survive a container restart, and the face falls asleep on WiFi loss by the lease rather than by dying."
     },
     {
       "name": "ser2net",
