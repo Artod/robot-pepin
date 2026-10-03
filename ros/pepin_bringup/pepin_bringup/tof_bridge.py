@@ -58,6 +58,16 @@ shelf is.
 
 The sensor_msgs/Range is published beside each fan, unchanged: it is what the run recorder tapes
 and what Foxglove draws, and the three of them together cost less than one lidar revolution.
+
+A LINE IS DATED BY THE SERVER'S READ (2026-10-02), not by when this node drains it: the line's
+``t`` (the board's monotonic clock, taken before the three reads) is carried onto the ROS clock
+by its age when the reader thread takes the line, plus config/tof.json's ``timing.offset_s``
+(-19 ms: the middle of the ranging windows the three results cover, which end -1 / +6 / +14 ms
+around ``t``; the note there says how it was measured). Until then every line was stamped
+``now - 60 ms`` at this node's 15 Hz drain, which put the stamp p10 -31 / p50 +14 / p90 +30 ms
+off ``t`` with the drain's phase. The line reaches this node ~23 ms after ``t``, so a stamp
+leaves at least ~40 ms behind now, behind the newest odom -> base_link as the old one was. A line
+older than 0.5 s, or without ``t``, is dated on arrival, and the status line counts those.
 """
 
 from __future__ import annotations
@@ -75,6 +85,7 @@ from tf2_ros import StaticTransformBroadcaster
 
 from pepin.footprint import CONTACT_BAND_M
 from pepin.mounts import TOF_FRAME, Mount, Mounts
+from pepin.sensor_timing import measurement_lag_s, tof_timing_offset_s
 from pepin.tof_horizon import RangeHold, cone_beams, trusted_max_range
 from pepin_bringup.link import JsonLineLink
 from pepin_bringup.msgs import scan_from_ranges, transform_from_rpy
@@ -101,9 +112,6 @@ _HOLD_S = 1.2  # a real return is held this long after it stops: see pepin.tof_h
 _STATIC_TF_RESEND_S = 120.0  # how long the static mounts are re-sent after start, seconds
 _STATUS_REPORT_S = 15.0  # how often the run's log gets the raw sensor verdicts
 _QUEUE_MAX = 100
-# A reading is stamped this far behind "now": it is at least that old (sensor -> ToF server ->
-# TCP -> here), and a stamp behind the newest odom -> base_link never makes a costmap wait.
-_STAMP_LAG_S = 0.06
 
 
 def _status_key(item: tuple[int | None, int]) -> tuple[int, int]:
@@ -155,9 +163,15 @@ class TofBridge(Node):
             name: self.create_publisher(LaserScan, _SCAN_TOPIC.format(name=name), 10)
             for name in TOF_NAMES
         }
-        self._readings: queue.Queue[tuple[dict[str, float | None], dict[str, int | None]]] = (
+        self._readings: queue.Queue[tuple[Any, dict[str, float | None], dict[str, int | None]]] = (
             queue.Queue(maxsize=_QUEUE_MAX)
         )
+        # The ranging windows' middle against the server's t (config/tof.json timing.offset_s);
+        # a parameter may still nudge it. 0 dates a line at t itself.
+        self._timing_offset_s = float(
+            self.declare_parameter("timing_offset_s", self._configured_offset()).value
+        )
+        self._dated = {"read": 0, "arrival": 0}  # lines per stamp source, per status window
         # Each sensor is believed only as far as its cone stays off the floor: the two low ones
         # graze the carpet at 0.67 m, and the right sensor's steady 0.60-0.70 m returns (with
         # nothing there for the lidar) were being marked into the costmap as a wall, 2026-09-08.
@@ -202,6 +216,7 @@ class TofBridge(Node):
             + ", ".join(
                 f"{n} {self._ceiling[n]:.2f} m ({self._fan[n][2]} beams)" for n in TOF_NAMES
             )
+            + f"; a line is dated t {1000 * self._timing_offset_s:+.0f} ms (timing_offset_s)"
         )
 
         self._link = JsonLineLink(host, port, self._enqueue_ranges, name="tof server")
@@ -211,6 +226,15 @@ class TofBridge(Node):
     def close(self) -> None:
         """Close the link, on the way out."""
         self._link.stop()
+
+    def _configured_offset(self) -> float:
+        """config/tof.json's ``timing.offset_s``, or 0 (the line's ``t`` itself) with one line
+        saying why when the file has none."""
+        try:
+            return tof_timing_offset_s()
+        except (OSError, KeyError, ValueError) as exc:
+            self.get_logger().warning(f"no ToF timing offset in config/tof.json ({exc}): t itself")
+            return 0.0
 
     def _fan_for(self, name: str) -> tuple[float, float, int]:
         """Sensor ``name``'s cone as a fan: ``(angle_min_rad, angle_increment_rad, beams)``,
@@ -250,13 +274,23 @@ class TofBridge(Node):
         )
 
     def _enqueue_ranges(self, message: dict[str, Any]) -> None:
-        """Reader thread: hand one line of ranges to the ROS thread, dropping it if it is behind."""
+        """Reader thread: date one line of ranges and hand it to the ROS thread, dropping it if
+        it is behind.
+
+        Dated here, the moment it is taken: the ROS clock and the board's monotonic clock read
+        together carry the server's ``t`` across (its age on the board, less the offset), and
+        the drain's wait can no longer move the stamp.
+        """
+        arrival = self.get_clock().now()
+        lag = measurement_lag_s(time.monotonic(), message.get("t"), self._timing_offset_s)
+        stamp = arrival if lag is None else arrival - Duration(seconds=lag)
+        self._dated["arrival" if lag is None else "read"] += 1
         statuses = parse_tof_status(message)
         for name, status in statuses.items():
             counts = self._status_counts[name]
             counts[status] = counts.get(status, 0) + 1
         with contextlib.suppress(queue.Full):
-            self._readings.put_nowait((parse_tof(message), statuses))
+            self._readings.put_nowait((stamp, parse_tof(message), statuses))
 
     def _report_status(self) -> None:
         """Put the raw VL53L1X verdicts in the run's own log, so a dead sensor is visible there.
@@ -274,20 +308,26 @@ class TofBridge(Node):
             )
             report.append(f"{name} [{share}]")
             self._status_counts[name] = {}
-        self.get_logger().info("tof status " + "; ".join(report))
+        dated = (
+            f"; lines dated by the read {self._dated['read']}"
+            f" (t {1000 * self._timing_offset_s:+.0f} ms), on arrival {self._dated['arrival']}"
+        )
+        self._dated = {"read": 0, "arrival": 0}
+        self.get_logger().info("tof status " + "; ".join(report) + dated)
 
     def _publish_pending(self) -> None:
         """ROS thread: publish every reading the reader queued, then report link changes.
 
-        One stamp per line of readings: the three sensors are read together, and a consumer must
-        see every message of one line carrying the same moment.
+        One stamp per line of readings, the one the reader dated it with: the three sensors are
+        read together, and a consumer must see every message of one line carrying the same
+        moment.
         """
         while True:
             try:
-                ranges, statuses = self._readings.get_nowait()
+                dated, ranges, statuses = self._readings.get_nowait()
             except queue.Empty:
                 break
-            stamp = (self.get_clock().now() - Duration(seconds=_STAMP_LAG_S)).to_msg()
+            stamp = dated.to_msg()
             for name, distance_m in ranges.items():
                 self._publish_reading(name, distance_m, statuses.get(name), stamp)
                 self._warn_if_silent(name)

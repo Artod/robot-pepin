@@ -42,5 +42,9 @@
       }
     }
   },
+  "timing": {
+    "offset_s": -0.019,
+    "note": "Added to the ToF server's line time t (taken BEFORE its three reads) to date the line's readings, carried onto the ROS clock by tof_bridge (2026-10-02); 0 dates them at t. Each VL53L1X restarts ranging at our read's handshake (the interrupt clear + mode start; RESULT__STREAM_COUNT is 1 on every read) and its result is ready ~60.5 ms later, so in the server's 66.8 ms loop the three results became ready at t -1 / +6 / +14 ms (front / left / right; kernel i2c trace, scratch/sensor_stamps/). Each result covers the ranging window that ends there, tof_server.TIMING_BUDGET_MS 50 long, so its middle is 25 ms before ready: -26 / -19 / -11 ms against t, -19 ms the mean, one stamp per line. Re-measure (scratch/sensor_stamps/i2c_capture.sh) when the budget, the inter-measurement period or the server's loop changes."
+  },
   "notes": "mount: measured 2026-09-04 with a tape (+-1 cm). null would mean not measured: such a sensor feeds the reflex only. The VL53L1X sees a ~27 deg cone, so a level sensor at 0.16 m would reach the floor at ~0.67 m at the cone edge. 2026-09-08: left/right addresses swapped \u2014 0x31 is the sensor on the cart's left, verified by holding a hand in front of each."
 }

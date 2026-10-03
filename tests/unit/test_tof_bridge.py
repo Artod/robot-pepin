@@ -109,9 +109,7 @@ def test_the_static_mounts_are_re_sent_for_their_window_and_then_stop(monkeypatc
 
 def test_every_reading_leaves_and_the_whole_line_carries_one_stamp(monkeypatch: Any) -> None:
     """Nothing is withheld here. The three sensors are read together, so one line of readings
-    is stamped once and every message of it — Range and fan — carries that moment; the stamp
-    sits behind ``now`` because the reading is at least that old and a stamp behind the newest
-    odom -> base_link never makes a costmap wait."""
+    is stamped once and every message of it — Range and fan — carries that moment."""
     node = bridge(monkeypatch)
     feed(node)
     messages = published(node)
@@ -119,6 +117,45 @@ def test_every_reading_leaves_and_the_whole_line_carries_one_stamp(monkeypatch: 
     stamps = {(m.header.stamp.sec, m.header.stamp.nanosec) for m in messages}
     assert len(stamps) == 1, "one stamp per line of readings"
     assert {(s.header.stamp.sec, s.header.stamp.nanosec) for s in scans(node)} == stamps
+
+
+def stamp_s(message: Any) -> float:
+    """A message's header stamp in seconds."""
+    return float(message.header.stamp.sec + message.header.stamp.nanosec * 1e-9)
+
+
+def test_a_line_is_dated_by_the_servers_read_not_by_the_drain(monkeypatch: Any) -> None:
+    """The line's t (the board's monotonic clock, before the three reads) is carried onto the ROS
+    clock by its age when the reader takes it, plus config/tof.json's timing offset (-19 ms):
+    a line 25 ms old is stamped 44 ms before its arrival, and however late the drain timer runs
+    the stamp does not move. Until 2026-10-02 it was the drain's now - 60 ms, p10 -31 / p90 +30
+    ms off t with the timer's phase."""
+    monkeypatch.setattr(module.time, "monotonic", lambda: 500.025)
+    node = bridge(monkeypatch)
+    assert node._timing_offset_s == -0.019, "config/tof.json's timing.offset_s"
+    node.clock.seconds = 1000.0
+    node._enqueue_ranges({**READING, "t": 500.0})
+    node.clock.seconds = 1000.066  # the drain, one period later
+    node._publish_pending()
+    assert {round(stamp_s(m), 6) for m in published(node) + scans(node)} == {
+        round(1000.0 - 0.044, 6)
+    }
+    node._report_status()
+    assert "lines dated by the read 1 (t -19 ms), on arrival 0" in node.logger.texts("info")[-1]
+
+
+def test_a_line_without_a_believable_t_is_dated_on_arrival(monkeypatch: Any) -> None:
+    """No t, or one older than 0.5 s (a stalled reader, another machine's clock): the arrival,
+    counted in the status line."""
+    monkeypatch.setattr(module.time, "monotonic", lambda: 500.0)
+    node = bridge(monkeypatch, timing_offset_s=0.0)
+    node.clock.seconds = 1000.0
+    node._enqueue_ranges(dict(READING))
+    node._enqueue_ranges({**READING, "t": 499.4})
+    node._publish_pending()
+    assert {stamp_s(m) for m in published(node)} == {1000.0}
+    node._report_status()
+    assert "lines dated by the read 0 (t +0 ms), on arrival 2" in node.logger.texts("info")[-1]
 
 
 def test_the_report_line_carries_the_sensors_verdicts(monkeypatch: Any) -> None:

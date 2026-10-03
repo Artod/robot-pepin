@@ -16,6 +16,26 @@
 // Configuration written by init(): gyro +-500 dps (65.5 LSB/dps), accel +-4 g
 // (8192 LSB/g), DLPF ~44 Hz (which also fixes the internal sample rate at 1 kHz, from
 // which SMPLRT_DIV divides down), clock from the PLL with the X gyro as reference.
+//
+// THE OUTPUT RATE IS NOT THE READ RATE. A read returns whatever sample the output registers hold,
+// and SMPLRT_DIV sets how often they are refreshed, so a chip that updates at our own read rate
+// hands us a sample 0..one period old (at 100 Hz: 0-10 ms, and 4 % of the bridge's reads were the
+// previous read's sample again, 2026-10-02). The bridge asks for the chip's whole 1 kHz (divider
+// 0, `imu_output_rate_hz`): the sample read is at most 1 ms old. The register map says the divider
+// only decimates, but this clone's gyro noise falls with it, as averaging over its window would:
+// yaw-rate std 1.15 mrad/s at divider 0 and 1, 1.02 at 4, 0.91 at 9, accel unchanged (live A/B on
+// the parked cart, 2026-10-02). A quarter more gyro noise is the price of the fresh sample.
+//
+// THE FILTER DELAYS THE SAMPLE. The DLPF is a fixed group delay the stamp must subtract (the
+// bridge's `imu_filter_delay_s`, config/imu.json's timing block). MPU-6050 register map rev 4.2,
+// CONFIG (0x1A), by DLPF_CFG (the gyro's output is 8 kHz at 0 and 1 kHz otherwise):
+//   DLPF_CFG      0        1       2       3       4       5        6
+//   gyro BW       256 Hz   188 Hz  98 Hz   42 Hz   20 Hz   10 Hz    5 Hz
+//   gyro delay    0.98 ms  1.9 ms  2.8 ms  4.8 ms  8.3 ms  13.4 ms  18.6 ms
+//   accel delay   0 ms     2.0 ms  3.0 ms  4.9 ms  8.5 ms  13.8 ms  19.0 ms
+// One stamp carries both; the gyro's delay is the one subtracted (the EKF fuses its yaw rate).
+// The chip on this cart answers WHO_AM_I 0x72, a clone; if it follows the MPU-6500's table
+// instead, DLPF_CFG 3 is 41 Hz / 5.9 ms.
 
 #ifndef PEPIN_BASE_CPP__MPU6050_HPP_
 #define PEPIN_BASE_CPP__MPU6050_HPP_
@@ -60,6 +80,9 @@ constexpr std::uint8_t kPowerManagement1 = 0x6B;    ///< PWR_MGMT_1: sleep bit a
 constexpr std::uint8_t kWhoAmI = 0x75;              ///< WHO_AM_I: 0x68, or a clone's own value
 }  // namespace mpu6050_register
 
+/// DLPF_CFG written to CONFIG: ~42 Hz gyro bandwidth, 4.8 ms group delay (the table above).
+constexpr std::uint8_t kDlpfConfig = 0x03;
+
 /// Blocking reader for one MPU6050 on an i2c-dev bus; not thread-safe, one owner thread.
 class Mpu6050
 {
@@ -71,10 +94,12 @@ public:
   /// Close the bus.
   ~Mpu6050() {close_device();}
 
-  /// Open `device`, claim `address`, identify the chip and configure it for `rate_hz`.
+  /// Open `device`, claim `address`, identify the chip and configure its output for
+  /// `output_rate_hz` (how often the registers we read are refreshed, not how often we read).
   ///
   /// False (with `error` set) if any of that fails; the caller keeps working without a gyro.
-  bool open_device(const std::string & device, int address, double rate_hz, std::string & error)
+  bool open_device(
+    const std::string & device, int address, double output_rate_hz, std::string & error)
   {
     close_device();
     fd_ = ::open(device.c_str(), O_RDWR);
@@ -88,7 +113,7 @@ public:
       close_device();
       return false;
     }
-    return identify(error) && configure(rate_hz, error);
+    return identify(error) && configure(output_rate_hz, error);
   }
 
   /// One 14-byte burst from ACCEL_XOUT_H as accel, temperature and gyro; nullopt on a bus error.
@@ -111,6 +136,9 @@ public:
 
   /// The WHO_AM_I byte read at open time: 0x68 for an MPU6050, 0x70/0x71 for the clones.
   std::uint8_t who_am_i() const {return who_am_i_;}
+
+  /// SMPLRT_DIV as written at open time: the chip's output rate is 1 kHz / (1 + this).
+  std::uint8_t output_divider() const {return divider_;}
 
   /// Whether the bus is open.
   bool is_open() const {return fd_ >= 0;}
@@ -153,8 +181,8 @@ private:
     return true;
   }
 
-  /// Wake the chip and write the sample rate, the filter and both full-scale ranges.
-  bool configure(double rate_hz, std::string & error)
+  /// Wake the chip and write the output rate, the filter and both full-scale ranges.
+  bool configure(double output_rate_hz, std::string & error)
   {
     // PLL with the X gyro as the reference: steadier than the internal oscillator.
     if (!write_register(mpu6050_register::kPowerManagement1, 0x01, error)) {
@@ -162,10 +190,10 @@ private:
       return false;
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));  // the PLL needs a moment
-    const std::uint8_t divider = sample_rate_divider(rate_hz);
+    divider_ = sample_rate_divider(output_rate_hz);
     const bool written =
-      write_register(mpu6050_register::kSampleRateDivider, divider, error) &&
-      write_register(mpu6050_register::kConfig, 0x03, error) &&        // DLPF ~44 Hz
+      write_register(mpu6050_register::kSampleRateDivider, divider_, error) &&
+      write_register(mpu6050_register::kConfig, kDlpfConfig, error) &&  // DLPF ~42 Hz
       write_register(mpu6050_register::kGyroConfig, 0x08, error) &&    // +-500 dps
       write_register(mpu6050_register::kAccelConfig, 0x08, error);     // +-4 g
     if (!written) {
@@ -256,6 +284,7 @@ private:
 
   int fd_ = -1;
   std::uint8_t who_am_i_ = 0;
+  std::uint8_t divider_ = 0;
 };
 
 }  // namespace pepin

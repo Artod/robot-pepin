@@ -13,5 +13,10 @@
     "pitch_deg": 0.29,
     "gyro_bias_deg_s": [-0.001, -0.028, 0.074],
     "note": "30 s at rest on the level hard floor 2026-09-12; the lean estimator subtracts these"
+  },
+  "timing": {
+    "output_rate_hz": 1000.0,
+    "filter_delay_s": 0.0048,
+    "note": "How fresh /imu/data_raw's sample is and when it happened (2026-10-02); robot.launch.py passes both to the C++ bridge. output_rate_hz: the chip's own output rate (SMPLRT_DIV = 1000 / it - 1; the bridge still READS at pepin.deployment.IMU_RATE_HZ): at 1000 the sample read is at most 1 ms old; at the 100 it ran at before, it was 0-10 ms old and 4 % of reads repeated the previous sample. The price: this clone's yaw-rate noise is 1.15 mrad/s std at 1000 against 0.91 at 100 (accel unchanged; live A/B, 2026-10-02). filter_delay_s: subtracted from the stamp, the group delay of the chip's low-pass at DLPF_CFG 3 (mpu6050.hpp kDlpfConfig): 4.8 ms for the gyro in the MPU-6050 register map (0.98/1.9/2.8/4.8/8.3/13.4/18.6 ms for DLPF_CFG 0-6; the table is in mpu6050.hpp, pepin.sensor_timing holds the two equal). 0 stamps the read itself. The chip answers WHO_AM_I 0x72, a clone: if it follows the MPU-6500's table instead, the delay is 5.9 ms."
   }
 }

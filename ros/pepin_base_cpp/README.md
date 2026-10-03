@@ -49,9 +49,10 @@ Python process at 10 % and 66 MB.
 ## IMU
 
 `imu_enable` (false), `imu_device` (/dev/i2c-2), `imu_address` (0x68), `imu_rate_hz` (50),
-`imu_frame` (base_link), `imu_bias_s` (2.0), `imu_bias_tracking` (true): a thread samples an
-MPU6050 and publishes `imu/data_raw` without orientation; a missing chip is one warning and the
-wheels carry on. Registers PWR_MGMT_1 0x01, SMPLRT_DIV 1000/rate-1, CONFIG 0x03 (DLPF ~44 Hz),
+`imu_output_rate_hz` (1000), `imu_filter_delay_s` (0), `imu_frame` (base_link), `imu_bias_s`
+(2.0), `imu_bias_tracking` (true): a thread samples an MPU6050 at `imu_rate_hz` and publishes
+`imu/data_raw` without orientation; a missing chip is one warning and the wheels carry on.
+Registers PWR_MGMT_1 0x01, SMPLRT_DIV 1000/`imu_output_rate_hz`-1, CONFIG 0x03 (DLPF ~44 Hz),
 GYRO_CONFIG 0x08 (+-500 dps), ACCEL_CONFIG 0x08 (+-4 g), WHO_AM_I 0x68, 14 bytes from
 ACCEL_XOUT_H 0x3B. The EKF that fuses the yaw rate with /odom is robot_localization, configured
 outside this package.
@@ -63,6 +64,19 @@ the zero-velocity update's gyro threshold re-measured), which `configure()` does
 read is one 14-byte burst on the bus the three VL53L1X share; at the default 100 kHz (~1.6 ms a
 read) their transactions held the IMU at 53 Hz, and since 2026-10-02 the bus runs at 400 kHz
 (`board/i2c3-400k.dts`): 100.2 Hz with the ToF running.
+
+The stamp is the sample's (2026-10-02). The chip refreshes its output registers at
+`imu_output_rate_hz` and a read returns whatever they hold, so at the 100 Hz it ran at the sample
+was 0-10 ms old when read (4 % of reads were the previous sample again); at 1 kHz (SMPLRT_DIV 0,
+config/imu.json `timing.output_rate_hz`) it is at most 1 ms old. This clone's gyro noise grows as
+the divider shrinks (yaw-rate std 0.91 mrad/s at 9, 1.15 at 0; accel unchanged), as if it
+averaged over the divider's window: a quarter more noise for the fresh sample, still 4.3 sigma
+under the zero-velocity update's 5 mrad/s quiet line. The stamp is the end of the burst (~0.4 ms
+at 400 kHz) less
+`imu_filter_delay_s`, the DLPF's group delay: 4.8 ms at DLPF_CFG 3 (`timing.filter_delay_s`;
+mpu6050.hpp has the register map's table). Both come from config/imu.json through
+robot.launch.py; `filter_delay_s` 0 stamps the read itself, `output_rate_hz` 100 is the old
+divider.
 
 ### The gyro's zero is re-measured, not taken once
 

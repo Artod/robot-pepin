@@ -62,6 +62,7 @@ from pepin.deployment import (
 from pepin.footprint import hull_box
 from pepin.mounts import Mounts
 from pepin.neck import JOINT_NAMES, NeckConfig, bridge_parameters
+from pepin.sensor_timing import imu_timing
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
 # process: ros/board.sh kick <node>).
@@ -196,11 +197,23 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "publish_tf": not ekf_on,
                     "max_linear_m_s": BASE_MAX_LINEAR_M_S,
                     "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
+                    **imu_parameters(),
                     **neck_parameters(),
                 }
             ],
         )
     ]
+
+
+def imu_parameters() -> dict[str, float]:
+    """The MPU6050's output rate and filter delay from config/imu.json's timing block
+    (pepin.sensor_timing), read anew at every (re)spawn; without the block the bridge keeps its
+    own defaults, 1 kHz and a stamp at the read, and this says so."""
+    try:
+        return imu_timing().bridge_parameters()
+    except (OSError, KeyError, ValueError) as exc:
+        print(f"[robot.launch] no IMU timing ({exc}): /imu/data_raw is stamped at the read")
+        return {}
 
 
 def neck_parameters() -> dict[str, object]:

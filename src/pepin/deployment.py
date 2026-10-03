@@ -77,13 +77,15 @@ LASER_ODOM_TWIST_VARIANCE: dict[str, float] = {"vx": 0.0009, "vy": 0.01, "vyaw":
 BASE_MAX_LINEAR_M_S = 0.45  # raised 0.30 -> 0.45 on 2026-09-30, with config/base.json
 BASE_MAX_ANGULAR_RAD_S = 1.0
 
-# The MPU6050's rate in the C++ bridge (its imu_rate_hz: the chip's SMPLRT_DIV and the read loop),
-# fused by the board's EKF as imu0. 100 Hz since 2026-10-01, 50 before. The chip's low-pass stays
-# at the ~44 Hz it was (DLPF_CFG 3, mpu6050.hpp), the filter every gyro number of the bridge was
-# measured through (the zero-velocity update's quiet threshold is 7.9 sigma of THAT noise), and
+# The MPU6050's READ rate in the C++ bridge (its imu_rate_hz: the read loop and the bias tracker's
+# block), fused by the board's EKF as imu0. 100 Hz since 2026-10-01, 50 before. The chip's low-pass
+# stays at the ~44 Hz it was (DLPF_CFG 3, mpu6050.hpp), the filter every gyro number of the bridge
+# was measured through (the zero-velocity update's quiet threshold is 7.9 sigma of THAT noise), and
 # at 100 Hz it sits under the Nyquist limit where at 50 it did not: no new noise, no aliasing,
-# twice the samples. A read is one 14-byte burst, ~1.6 ms of the 100 kHz bus the three ToFs share
-# (i2c@5002c00 has no clock-frequency in the device tree: the mv64xxx default), 16 % of it.
+# twice the samples. The chip's own OUTPUT rate (SMPLRT_DIV) is config/imu.json's
+# timing.output_rate_hz, 1 kHz since 2026-10-02 (this rate before): the sample read is <= 1 ms
+# old. A read is one 14-byte burst, ~0.4 ms of the 400 kHz bus the three ToFs share
+# (board/i2c3-400k.dts since 2026-10-02; ~1.6 ms at the 100 kHz before), 4 % of it.
 IMU_RATE_HZ = 100.0
 
 

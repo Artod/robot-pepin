@@ -32,6 +32,11 @@
 // a gyro yaw rate fused with the wheels in an EKF, configured outside this node. The IMU
 // is optional in the strong sense: nothing about it can stop the wheels from working.
 //
+// /imu/data_raw is DATED BY THE CHIP'S SAMPLE: the moment the 14-byte burst came back, less the
+// chip's low-pass group delay (`imu_filter_delay_s`, 4.8 ms at DLPF_CFG 3: mpu6050.hpp has the
+// table), and the chip refreshes those registers at 1 kHz (`imu_output_rate_hz`), so the sample
+// read is at most 1 ms old where at the 100 Hz it ran until 2026-10-02 it was up to 10 ms.
+//
 // The gyro's ZERO is re-measured for as long as the node lives, from the rest the WHEELS witness:
 // the chip's bias moves with temperature, and a zero taken once at boot turned RTAB-Map's map
 // +27 deg in 40 min under a parked cart. See gyro_bias.hpp, witness_rest() and read_imu().
@@ -146,6 +151,11 @@ public:
     imu_device_ = declare_parameter<std::string>("imu_device", "/dev/i2c-2");
     imu_address_ = static_cast<int>(declare_parameter<int>("imu_address", 0x68));
     imu_rate_hz_ = declare_parameter<double>("imu_rate_hz", 50.0);
+    // The chip's own output rate and its filter's delay (config/imu.json's timing block, passed
+    // by robot.launch.py): how fresh the sample we read is, and how far before the read the
+    // motion it describes happened. A delay of 0 stamps the read itself.
+    imu_output_rate_hz_ = declare_parameter<double>("imu_output_rate_hz", 1000.0);
+    imu_filter_delay_s_ = declare_parameter<double>("imu_filter_delay_s", 0.0);
     // Published in the robot's own frame: the mounting rotation is applied here (see
     // to_base_axes), not left to a static transform the filter may or may not apply.
     imu_frame_ = declare_parameter<std::string>("imu_frame", "base_link");
@@ -928,13 +938,17 @@ private:
   void start_imu()
   {
     std::string error;
-    if (!imu_.open_device(imu_device_, imu_address_, imu_rate_hz_, error)) {
+    if (!imu_.open_device(imu_device_, imu_address_, imu_output_rate_hz_, error)) {
       RCLCPP_ERROR(get_logger(), "no IMU (%s): the bridge runs on wheel odometry", error.c_str());
       return;
     }
+    const unsigned divider = imu_.output_divider();
     RCLCPP_INFO(
-      get_logger(), "IMU on %s at %d Hz, WHO_AM_I 0x%02x, %c axis up, published in %s",
-      imu_device_.c_str(), static_cast<int>(imu_rate_hz_),
+      get_logger(),
+      "IMU on %s read at %d Hz, chip output %g Hz (SMPLRT_DIV %u, DLPF_CFG %u), stamped %.1f ms "
+      "before the read (imu_filter_delay_s), WHO_AM_I 0x%02x, %c axis up, published in %s",
+      imu_device_.c_str(), static_cast<int>(imu_rate_hz_), 1000.0 / (1.0 + divider), divider,
+      static_cast<unsigned>(kDlpfConfig), imu_filter_delay_s_ * 1000.0,
       static_cast<unsigned>(imu_.who_am_i()), imu_up_axis_, imu_frame_.c_str());
     imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", 10);
     gyro_bias_ = GyroBiasTracker(imu_bias_s_, imu_rate_hz_);
@@ -986,6 +1000,7 @@ private:
       }
       std::string error;
       const auto sample = imu_.read_sample(error);
+      const rclcpp::Time read_at = now();  // the burst is back: the sample is <= 1 output period old
       if (!sample.has_value()) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000, "IMU read failed: %s", error.c_str());
@@ -1028,7 +1043,7 @@ private:
       }
       const GyroBias bias = gyro_bias_.bias();
       witness_gyro(t, base_yaw_rate(*sample, bias));
-      publish_imu(*sample, bias);
+      publish_imu(*sample, bias, read_at);
     }
   }
 
@@ -1076,8 +1091,9 @@ private:
     }
   }
 
-  /// One sample as sensor_msgs/Imu, unless ``imu_publish`` is off — then nothing goes out.
-  void publish_imu(const ImuSample & sample, const GyroBias & bias)
+  /// One sample as sensor_msgs/Imu, unless ``imu_publish`` is off — then nothing goes out. Dated
+  /// by its read less the chip's filter delay: when the motion it describes happened.
+  void publish_imu(const ImuSample & sample, const GyroBias & bias, const rclcpp::Time & read_at)
   {
     const bool publish = get_parameter("imu_publish").as_bool();
     imu_publish_ = publish;
@@ -1085,7 +1101,7 @@ private:
       return;
     }
     sensor_msgs::msg::Imu message;
-    message.header.stamp = now();
+    message.header.stamp = read_at - rclcpp::Duration::from_seconds(imu_filter_delay_s_);
     message.header.frame_id = imu_frame_;
     message.orientation_covariance[0] = -1.0;  // the ROS way to say "no orientation here"
     double gyro[3];
@@ -1119,6 +1135,8 @@ private:
   char imu_up_axis_ = 'z';  // which chip axis points up: the mounting, in one letter
   int imu_address_ = 0x68;
   double imu_rate_hz_ = 50.0;
+  double imu_output_rate_hz_ = 1000.0;  // the chip's register refresh (SMPLRT_DIV), not our read
+  double imu_filter_delay_s_ = 0.0;     // the DLPF's group delay, subtracted from every stamp
   double imu_bias_s_ = 2.0;
   std::atomic<bool> twist_measured_{true};  // read by the status timer, written by the reader
   std::atomic<bool> imu_publish_{true};   // what the report line says; written by the IMU thread
