@@ -42,8 +42,19 @@ TOF_FRAME = "tof_{name}"
 
 def rpy_from_rotation(rotation: Array) -> tuple[float, float, float]:
     """``(roll, pitch, yaw)`` of a rotation matrix in ROS's fixed-axis convention
-    (yaw * pitch * roll), the inverse of :func:`rotation_from_rpy` away from pitch = +-90."""
-    pitch = math.asin(max(-1.0, min(1.0, -float(rotation[2, 0]))))
+    (yaw * pitch * roll), the inverse of :func:`rotation_from_rpy` — at pitch = +-90 too, where
+    roll and yaw turn about the same axis: yaw is then 0 and roll carries their difference (the
+    head IMU glued flat on the camera sits exactly there: chip x back, z up is pitch 90 in the
+    optical axes; the plain formulas gave roll 0 and lost a quarter turn, 2026-10-04)."""
+    s = -float(rotation[2, 0])
+    if abs(s) > 1.0 - 1e-9:  # gimbal lock: R20 = -+1
+        pitch = math.copysign(math.pi / 2.0, s)
+        roll = math.atan2(
+            math.copysign(1.0, s) * float(rotation[0, 1]),
+            math.copysign(1.0, s) * float(rotation[0, 2]),
+        )
+        return roll, pitch, 0.0
+    pitch = math.asin(max(-1.0, min(1.0, s)))
     roll = math.atan2(float(rotation[2, 1]), float(rotation[2, 2]))
     yaw = math.atan2(float(rotation[1, 0]), float(rotation[0, 0]))
     return roll, pitch, yaw

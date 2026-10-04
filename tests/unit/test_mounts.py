@@ -108,3 +108,18 @@ def test_a_sensor_without_a_measured_mount_is_left_out(tmp_path: Path) -> None:
     (tmp_path / "tof.json").write_text(json.dumps(tof))
     assert set(Mounts.load(tmp_path).tof) == {"front", "right"}
     assert config_file("tof.json") == CONFIG / "tof.json"
+
+
+def test_rpy_round_trips_at_pitch_plus_minus_90_where_roll_and_yaw_share_an_axis() -> None:
+    """The head IMU glued flat on the camera (chip x back, y right, z up) is pitch 90 in the
+    optical axes; the plain formulas answered roll 0 there and the head's tilt ring landed in yaw
+    (2026-10-04). Every rotation, gimbal lock included, comes back from its rpy."""
+    import itertools
+
+    from pepin.mounts import rotation_from_rpy, rpy_from_rotation
+
+    for r, p, y in itertools.product([0, 30, 90, -90, 180], [0, 45, 90, -90], [0, 60, -120]):
+        rotation = rotation_from_rpy(*map(math.radians, (r, p, y)))
+        assert np.allclose(rotation_from_rpy(*rpy_from_rotation(rotation)), rotation, atol=1e-12)
+    imu = np.array([[0.0, 1.0, 0.0], [0.0, 0.0, -1.0], [-1.0, 0.0, 0.0]])
+    assert np.allclose(rotation_from_rpy(*rpy_from_rotation(imu)), imu, atol=1e-12)
