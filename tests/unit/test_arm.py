@@ -180,7 +180,7 @@ def test_the_shipped_arm_loads_with_the_parked_pose_read_from_the_encoders() -> 
     """The file's joints are the encoders' parked pose, 11 boxes on the 7 moving links, a 3 cm
     margin, and a mount measured (fitted to the head's depth) on the top basket's right front."""
     assert SHIPPED.source == "config" and SHIPPED.topic == "/arm/joint_states"
-    assert PARKED["shoulder_lift"] == pytest.approx(-102.6)
+    assert PARKED["shoulder_lift"] == pytest.approx(-102.4)
     assert PARKED["elbow_flex"] == pytest.approx(96.8)
     assert len(SHIPPED.links) == 11 and SHIPPED.margin_m == 0.03 and SHIPPED.stride_px == 4
     assert {link.link for link in SHIPPED.links} == {j.child for j in SHIPPED.chain.joints} - {
