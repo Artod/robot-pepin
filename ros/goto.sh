@@ -30,9 +30,15 @@
 #   <stamp>_goto.nav2.log   Nav2's reasons as they happen ("nav2|": planner refusals, controller
 #                           failures, recoveries and why) and the behaviour tree's transitions
 #                           ("bt|", ros/tools/bt_watch.py), also printed here
-#   <stamp>_goto_cam.mkv    the head camera (ros/clip.sh), loud when there is no picture
 #   NNNN_<utc>Z_<place>.jsonl  the numbered tape the run recorder beside Nav2 wrote, named in the
 #                           log (a bag under PEPIN_RECORDER=bag, turned into the same tape here)
+#   NNNN_<utc>Z_<place>_cam.mjpeg  the head camera, filmed by that recorder for EVERY run, whoever
+#                           sent the goal (pepin_bringup.camera_clip: a byte copy with the capture
+#                           stamps, ros/clip_to_bag.sh's input); named at the end, loud when absent
+#   <stamp>_goto_cam.mkv    a second film by this script (ros/clip.sh), only with PEPIN_GOTO_CLIP=1
+# All of it in the directory the containers mount as /maps/rec (pepin-macnav's mount), whichever
+# checkout this script runs from: a goto.sh run from a worktree left its logs and films there
+# (2026-10-02..04, /private/tmp/.../voice-wt), beside nothing. PEPIN_REC_DIR overrides.
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 BOARD="${PEPIN_HOST:-10.0.0.187}"
@@ -124,7 +130,20 @@ case "${1:-}" in
     move) motion move.py "${@:2}" ;;
 esac
 
-REC="${PEPIN_REC_DIR:-$HERE/maps/rec}"  # the containers' /maps/rec
+# The containers' /maps/rec: where the recorder's tape and clip of this goal land.
+maps_mount() {
+    docker inspect -f '{{range .Mounts}}{{if eq .Destination "/maps"}}{{.Source}}{{end}}{{end}}' \
+        "$NAV" 2>/dev/null
+}
+if [ -n "${PEPIN_REC_DIR:-}" ]; then
+    REC="$PEPIN_REC_DIR"
+else
+    MOUNTED="$(maps_mount)"
+    REC="${MOUNTED:-$HERE/maps}/rec"
+    if [ -n "$MOUNTED" ] && [ "$MOUNTED/rec" != "$HERE/maps/rec" ]; then
+        echo "note: this checkout ($HERE) is not the one $NAV mounts; recording into $REC"
+    fi
+fi
 mkdir -p "$REC"
 STAMP=$(date +%Y%m%d_%H%M%S)
 LOG="$REC/${STAMP}_goto.log"
@@ -174,6 +193,16 @@ finish() {  # everything of this drive closed and named, always, once
                 echo "!! the bag is here but not converted: see the end of $LOG"
             fi ;;
     esac
+    # The run's own film, opened and closed by the recorder with its tape: named, or missed aloud.
+    if [ -n "$taped" ]; then
+        local film="${taped%.jsonl}"
+        film="$REC/$(basename "${film%/}")_cam.mjpeg"
+        if [ -s "$film" ]; then
+            echo "camera clip: $film ($(awk -v b="$(wc -c <"$film" | tr -d ' ')" 'BEGIN { printf "%.1f", b / 1048576 }') MB)"
+        else
+            echo "!! NO CAMERA CLIP for this run: $film is missing (docker logs $NAV | grep 'camera clip')"
+        fi
+    fi
     echo "recorded: ${REC#"$(dirname "$HERE")/"}/${STAMP}_goto.log, ${STAMP}_goto.nav2.log$([ -s "$CAM" ] && echo ", ${STAMP}_goto_cam.mkv")"
 }
 # Every way this script can end cancels the goal: Ctrl-C, a closed terminal (HUP), a kill (TERM).
@@ -188,8 +217,12 @@ trap finish EXIT
 # not a function: a function run with & is a subshell, and $! would be that subshell, not the
 # group. Both helpers end by themselves when this script is gone (SIGKILL included).
 OWN_GROUP=(python3 -c 'import os, sys; os.setpgrp(); os.execvp(sys.argv[1], sys.argv[1:])')
-"${OWN_GROUP[@]}" bash "$HERE/clip.sh" "$CAM" "${PEPIN_CAMERA_STREAM:-http://$BOARD:8080/stream}" &
-CLIP=$!
+# The run's film is the recorder's (pepin_bringup.camera_clip, every run, whoever sent it); this
+# script's own ffmpeg copy of the stream is a second reader on the board's WiFi, so only on ask.
+if [ "${PEPIN_GOTO_CLIP:-0}" = 1 ]; then
+    "${OWN_GROUP[@]}" bash "$HERE/clip.sh" "$CAM" "${PEPIN_CAMERA_STREAM:-http://$BOARD:8080/stream}" &
+    CLIP=$!
+fi
 # Nav2's own reasons beside the goal's events, as they happen: every planner refusal, controller
 # failure and recovery the behaviour tree runs (and why), prefixed "nav2|"; and the tree's own
 # transitions, prefixed "bt|", from the one watcher that runs as long as the container does.

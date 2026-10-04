@@ -98,9 +98,13 @@ recorders"). The behaviour-tree watcher (`ros/tools/bt_watch.py`) appends to
 
 Every goal of `ros/goto.sh` leaves, under `ros/maps/rec/`: `<stamp>_goto.log` (the goal's own
 lines), `<stamp>_goto.nav2.log` (Nav2's reasons as they happen, `nav2|`, and the tree's
-transitions, `bt|`, also printed in the terminal), `<stamp>_goto_cam.mkv` (the head camera
-through `ros/clip.sh`) and the numbered tape `NNNN_<utc>Z_<place>.jsonl`. A camera clip that has
-not started 4 s in is said aloud and started once more. Ctrl-C, a closed terminal and a kill each
+transitions, `bt|`, also printed in the terminal), the numbered tape `NNNN_<utc>Z_<place>.jsonl`
+and the run's camera clip `NNNN_<utc>Z_<place>_cam.mjpeg`. The clip belongs to the run's
+recorder, not to goto.sh: every run has one whoever sent the goal (the tray, the voice tools), it
+is named at the end of the drive and missed aloud; a clip that has not started 4 s in is said
+in the recorder's log and started once more. `PEPIN_GOTO_CLIP=1` adds goto.sh's own ffmpeg film
+(`<stamp>_goto_cam.mkv`, `ros/clip.sh`), a second reader on the board's WiFi. goto.sh records
+into the directory `pepin-macnav` mounts as `/maps`, whichever checkout it runs from. Ctrl-C, a closed terminal and a kill each
 cancel the goal. `round [NAME]` and `move NAME SEG...` are the two measured motions without the
 planner; they run on the board and go only while the goal server's `where` says `"navigating":
 false`.
@@ -776,9 +780,10 @@ and motion, no planner or controller run. The columns are in `ros/replay/score.p
 
 ### The camera of a drive (`ros/clip_to_bag.sh`)
 
-The drives record no image topics; the board-side clip `<run>_cam.mjpeg` beside each bag is the
+The drives record no image topics; the recorder's clip `<run>_cam.mjpeg` beside each bag is the
 camera's record (`pepin_bringup.camera_clip`, curl's raw copy, which keeps every part's headers;
-its URL asks for `?extra_headers=1`, so the V4L2 capture stamp rides along). `ros/clip_to_bag.sh`
+its URL is `config/camera.json`'s stream on `PEPIN_HOST` and asks for `?extra_headers=1`, so the
+V4L2 capture stamp rides along). `ros/clip_to_bag.sh`
 turns it into a camera bag of the four stereo topics, rectified exactly as `camera_stream` does
 (`pepin_bringup.stereo_frames`) and dated by the capture (`pepin.mjpeg.capture_time` grab):
 

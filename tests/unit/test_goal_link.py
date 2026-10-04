@@ -274,6 +274,7 @@ printf '%s %s\\n' "$(basename "$0")" "$*" >> "$FAKE_LOG"
 case "$(basename "$0") $*" in
     "docker logs"*) printf '%s\\n' "$FAKE_NAV2_LINE"; exec sleep "$FAKE_SLEEP" ;;
     *"docker exec -i pepin-ros"*) exec sleep "$FAKE_SLEEP" ;;  # a measured motion, turning
+    "docker inspect -f {{range .Mounts}}"*) printf '%s\\n' "${FAKE_MAPS_MOUNT:-}" ;;
     "docker inspect"*) printf '%s\\n' ros2 launch nav.launch.py map:=/maps/flat3.yaml ;;
 esac
 exit 0
@@ -382,11 +383,14 @@ def test_a_drive_writes_its_reasons_names_its_tape_and_says_it_has_no_picture(
 ) -> None:
     server = FakeGoalServer({"go": [DRIVE[0], DRIVE[-1]]})
     try:
-        code, output, sent = goto(tmp_path, server.port, "printer")
+        code, output, sent = goto(tmp_path, server.port, "printer", PEPIN_GOTO_CLIP="1")
     finally:
         server.close()
     assert code == 0, output
     assert server.asked == [{"cmd": "go", "place": "printer"}]
+    # the run's own film is the recorder's: missing here, and said so
+    assert "!! NO CAMERA CLIP for this run: " in output
+    assert "0481_20260925T080000Z_printer_cam.mjpeg is missing" in output
     logs = sorted((tmp_path / "rec").glob("*_goto.log"))
     assert len(logs) == 1 and "taped /maps/rec/0481_" in logs[0].read_text()
     reasons = logs[0].with_name(logs[0].name.replace(".log", ".nav2.log")).read_text()
@@ -395,6 +399,25 @@ def test_a_drive_writes_its_reasons_names_its_tape_and_says_it_has_no_picture(
     assert "!! the camera clip is NOT recording" in output, "a dead camera is said aloud"
     assert "!! no camera clip for this drive" in output
     assert any("logs -f --since 1s pepin-macnav" in line for line in sent), sent
+
+
+@pytest.mark.slow  # a drive with its streams: ~2 s
+def test_a_drive_records_where_the_containers_mount_maps_whichever_checkout_runs_it(
+    tmp_path: Path,
+) -> None:
+    """2026-10-02..04: goto.sh run from a worktree wrote its logs and films into that worktree's
+    ros/maps/rec, apart from the tapes; the records follow pepin-macnav's /maps mount now."""
+    server = FakeGoalServer({"go": [DRIVE[0], DRIVE[-1]]})
+    mounted = tmp_path / "canonical/ros/maps"
+    try:
+        code, output, _ = goto(
+            tmp_path, server.port, "printer", PEPIN_REC_DIR="", FAKE_MAPS_MOUNT=str(mounted)
+        )
+    finally:
+        server.close()
+    assert code == 0, output
+    assert f"recording into {mounted}/rec" in output
+    assert len(list((mounted / "rec").glob("*_goto.log"))) == 1
 
 
 def test_a_cancel_is_confirmed_by_any_navigator_that_answered_even_with_nothing_to_cancel() -> None:

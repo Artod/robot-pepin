@@ -144,7 +144,8 @@ class BagRecorderNode(Node):
         self.get_logger().info(
             f"bag recorder ready: {STORAGE} bags in {self._record_dir},"
             f" {len(BAG_TOPICS)} topics, qos overrides"
-            f" {self._qos_overrides or 'none'}; run recorder (jsonl) is not running"
+            f" {self._qos_overrides or 'none'}; camera clip from {self._clip.stream};"
+            " run recorder (jsonl) is not running"
         )
 
     def _say(self, status: RunStatus) -> None:
@@ -228,7 +229,8 @@ class BagRecorderNode(Node):
             process.kill()
 
     def _watch(self) -> None:
-        """Once a second: end a run that outlived the limit, and notice a recorder that died.
+        """Once a second: end a run that outlived the limit, notice a recorder that died, and let
+        the camera clip say it is not growing (:meth:`CameraClip.check`).
 
         A recorder nobody stops is a bug, not a feature (``pepin.tape.MAX_RUN_S``, the JSONL
         tape's own limit), and a bag process that exits on its own must not leave the goal server
@@ -236,6 +238,7 @@ class BagRecorderNode(Node):
         """
         if self._process is None:
             return
+        self._clip.check()
         if self._process.poll() is not None:
             self.get_logger().error(
                 f"`ros2 bag record` exited with {self._process.returncode} mid-run: {self._bag}"

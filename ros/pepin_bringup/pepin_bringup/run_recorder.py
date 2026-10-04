@@ -396,10 +396,12 @@ class RunRecorderNode(Node):
         )
         self._status_pub = self.create_publisher(String, RUN_STATUS_TOPIC, latched)
         self.create_subscription(String, RUN_COMMAND_TOPIC, self._on_command, 10)
+        self.create_timer(1.0, self._clip.check)  # a clip that is not growing is said aloud
         self._say(RunStatus(IDLE))
         self.get_logger().info(
             f"run recorder ready: tapes in {self._record_dir}"
-            f" (loc from {POSE_TOPIC}, the goal server's read of map -> base_link)"
+            f" (loc from {POSE_TOPIC}, the goal server's read of map -> base_link);"
+            f" camera clip from {self._clip.stream}"
         )
 
     def _say(self, status: RunStatus) -> None:

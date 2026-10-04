@@ -9,7 +9,8 @@ reads; the live map is RTAB-Map's database, `rtabmap.db`, whose places ride its 
 
 | File | Written by | Clock |
 | --- | --- | --- |
-| `<stamp>_goto.log`, `_goto.nav2.log`, `_goto_cam.mkv` | `ros/goto.sh`, on the laptop | the laptop's local time |
+| `<stamp>_goto.log`, `_goto.nav2.log` (and `_goto_cam.mkv` with `PEPIN_GOTO_CLIP=1`) | `ros/goto.sh`, on the laptop | the laptop's local time |
+| `0249_<stamp>Z_<place>_cam.mjpeg` | the run's recorder (`pepin_bringup.camera_clip`), every run | **UTC**: the run's stem |
 | `0249_<stamp>Z_<place>.jsonl` | `pepin_bringup.run_recorder`, in the laptop's Nav2 container (`pepin-macnav`) | **UTC**, marked by the `Z` |
 | `0249_<stamp>Z_<place>/` (an MCAP bag) and the `.jsonl` made from it | `ros2 bag record` under `pepin_bringup.bag_recorder` with `PEPIN_RECORDER=bag`, converted by `ros/tools/bag_to_tape.py` | **UTC** too: the same stem, from the same container clock |
 

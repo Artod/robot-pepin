@@ -21,6 +21,8 @@ RCLPY = ros_stubs.install()
 
 from pepin_bringup import bag_recorder  # noqa: E402
 
+REPO = Path(__file__).resolve().parents[2]
+
 
 class FakeBag:
     """``ros2 bag record`` as the recorder drives it: the signals it got, and whether it ended."""
@@ -124,8 +126,10 @@ def test_the_last_word_is_dropped_when_the_context_is_already_down(
 
 
 def test_the_camera_clip_asks_for_the_capture_stamps() -> None:
-    """The board-side clip is the replay's camera (ros/tools/clip_to_bag.py): its URL asks
-    ustreamer for the extra headers, the capture stamp beside the send stamp (pepin.mjpeg)."""
-    from pepin_bringup.camera_clip import CAMERA_STREAM
+    """The run's clip is the replay's camera (ros/tools/clip_to_bag.py): its URL asks ustreamer
+    for the extra headers, the capture stamp beside the send stamp (pepin.mjpeg), on the board's
+    address wherever the recorder runs."""
+    from pepin_bringup.camera_clip import camera_stream
 
-    assert CAMERA_STREAM.endswith("/stream?extra_headers=1")
+    url = camera_stream({"PEPIN_HOST": "10.0.0.187"}, REPO / "config/camera.json")
+    assert url == "http://10.0.0.187:8080/stream?extra_headers=1"
