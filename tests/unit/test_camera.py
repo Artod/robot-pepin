@@ -141,8 +141,9 @@ def test_the_stereo_mount_is_the_neck_s_link_and_the_eye_is_a_block_of_its_own()
     assert mount_transform(stereo) == mount_transform(mono)
     assert mono.eye == ()
     eye = dict(stereo.eye)
-    assert all(abs(eye[k]) < 1.0 for k in ("roll_deg", "pitch_deg", "yaw_deg")), (
-        "the rigid module is square to its bracket within a degree"
+    assert all(abs(eye[k]) < 2.0 for k in ("roll_deg", "pitch_deg", "yaw_deg")), (
+        "the rigid module is square to its bracket within two degrees (the rectified eye's"
+        " turn of the stereo calibration rides on the block)"
     )
 
 

@@ -63,10 +63,10 @@
       "x_m": 0.0,
       "y_m": 0.0305,
       "z_m": 0.0,
-      "roll_deg": -0.18,
-      "pitch_deg": 0.49,
-      "yaw_deg": 0.04,
-      "note": "RE-DERIVED 2026-10-04 from the head IMU hand-eye (camera_link <- chip, the neck sweep against the encoders, scratch/head_imu_handeye.py) and Kalibr's T_cam_imu (optical <- chip): eye = R(link<-chip) R(chip<-optical) OPTICAL^-1 = roll -0.18 pitch +0.49 yaw +0.04 deg; the 09-30 values (1.7, -2.3, 3.6) were the TAPED module's and went stale at the 10-02 rigid mount: with them the wall in front of the robot stood 3.5 deg pitched and -4.4 deg rolled in base_link (scratch/calib/body_wall.npz) and the head IMU's gravity 5.05 deg from the TF's. Old note: The rectified LEFT eye in camera_link's axes (x forward, y left, z up), composed into camera_link -> camera_optical. MEASURED 2026-09-30 at the sticker door (2.0 m by lidar), module re-taped flat on the webcam that day, with the eye-to-eye rotation refitted the same evening (config/stereo_calibration.json): two runs of scratch/stereo/mount_from_floor_and_door.py, floor height 1.197/1.210 m where the link says 1.203 (so z 0), pitch -2.44/-2.25, roll +1.9/+1.5, yaw by the door-plane solver -3.0/-1.3 but REFUTED by a pixelwise scan against the lidar at a room corner (2 m, six SGBM frames, 20 scans, the node's own frame composition): the error has its minimum at yaw +3.6 (5.6 %; -2 gives 9.8 %), the same sign the fan tool gave at the door (+4.1), so +3.6; door by stereo 2.025/1.974 m against the lidar's 2.009. Before (2026-09-21, a chip under the tape lifted one side): {\"x_m\": -0.011, \"y_m\": 0.0305, \"z_m\": 0.025, \"roll_deg\": -3.7, \"pitch_deg\": -5.6, \"yaw_deg\": 4.3}. The module is taped, so a knock changes these: the depth node's law line (a 1.00) is the alarm. y_m is NOT measured: half the calibrated 61 mm baseline to the left, assuming the module is centred on the webcam's lens."
+      "roll_deg": -0.311,
+      "pitch_deg": 1.123,
+      "yaw_deg": -0.009,
+      "note": "CARRIED 2026-10-04 through the Kalibr stereo recalibration (stereo_20261004_210647Z): the rectified left eye turned 0.648 deg ([ 0.633 -0.046  0.13 ] about x, y, z), the link-to-optical rotation became R_old shift^T; before: {\"roll_deg\": -0.18, \"pitch_deg\": 0.49, \"yaw_deg\": 0.04}. RE-DERIVED 2026-10-04 from the head IMU hand-eye (camera_link <- chip, the neck sweep against the encoders, scratch/head_imu_handeye.py) and Kalibr's T_cam_imu (optical <- chip): eye = R(link<-chip) R(chip<-optical) OPTICAL^-1 = roll -0.18 pitch +0.49 yaw +0.04 deg; the 09-30 values (1.7, -2.3, 3.6) were the TAPED module's and went stale at the 10-02 rigid mount: with them the wall in front of the robot stood 3.5 deg pitched and -4.4 deg rolled in base_link (scratch/calib/body_wall.npz) and the head IMU's gravity 5.05 deg from the TF's. Old note: The rectified LEFT eye in camera_link's axes (x forward, y left, z up), composed into camera_link -> camera_optical. MEASURED 2026-09-30 at the sticker door (2.0 m by lidar), module re-taped flat on the webcam that day, with the eye-to-eye rotation refitted the same evening (config/stereo_calibration.json): two runs of scratch/stereo/mount_from_floor_and_door.py, floor height 1.197/1.210 m where the link says 1.203 (so z 0), pitch -2.44/-2.25, roll +1.9/+1.5, yaw by the door-plane solver -3.0/-1.3 but REFUTED by a pixelwise scan against the lidar at a room corner (2 m, six SGBM frames, 20 scans, the node's own frame composition): the error has its minimum at yaw +3.6 (5.6 %; -2 gives 9.8 %), the same sign the fan tool gave at the door (+4.1), so +3.6; door by stereo 2.025/1.974 m against the lidar's 2.009. Before (2026-09-21, a chip under the tape lifted one side): {\"x_m\": -0.011, \"y_m\": 0.0305, \"z_m\": 0.025, \"roll_deg\": -3.7, \"pitch_deg\": -5.6, \"yaw_deg\": 4.3}. The module is taped, so a knock changes these: the depth node's law line (a 1.00) is the alarm. y_m is NOT measured: half the calibrated 61 mm baseline to the left, assuming the module is centred on the webcam's lens."
     },
     "frames": {
       "link": "camera_link",
@@ -89,22 +89,22 @@
     "head_imu": {
       "T_cam_imu": [
         [
-          0.0215931,
-          0.9997312,
-          -0.0084437,
-          0.028645
+          0.0223292,
+          0.9997318,
+          -0.0061435,
+          0.0287123
         ],
         [
-          0.0272487,
-          -0.009031,
-          -0.9995879,
-          -0.0192855
+          0.0383347,
+          -0.0069967,
+          -0.9992405,
+          -0.0188954
         ],
         [
-          -0.9993954,
-          0.0213541,
-          -0.0274364,
-          -0.0293185
+          -0.9990154,
+          0.0220767,
+          -0.0384807,
+          -0.0295061
         ],
         [
           0.0,
@@ -116,7 +116,7 @@
       "time_offset_s": -0.0028,
       "date": "2026-10-04",
       "method": "kalibr_calibrate_imu_camera (prehensile/kalibr:arm64@sha256:68d089b2c5514d2f143ce95dd015981bce22e73cfd97edf1ee3fd7ebe41840ef), procedure D (ros/calib_record.sh: the neck dance through the gaze arbiter, cart parked) x2: calib_20261004_195052Z, calib_20261004_195222Z (mean); T_cam_imu as Kalibr gives it (imu0 into the rectified left eye's optical frame), time_offset_s (t_imu = t_cam + shift) against camera_stream's stamps at camera_stamp grab with camera_stamp_lag_s at its default 0.09",
-      "note": "calib_20261004_195052Z: reprojection 0.674 px, shift -2.70 ms at camera_stamp_lag_s 0.09; calib_20261004_195222Z: reprojection 0.692 px, shift -2.90 ms at camera_stamp_lag_s 0.09; calib_20261004_195052Z vs calib_20261004_195222Z: 0.03 deg, 3.4 mm, +0.20 ms"
+      "note": "CARRIED 2026-10-04 through the Kalibr stereo recalibration (stereo_20261004_210647Z): the rectified left eye turned 0.648 deg ([ 0.633 -0.046  0.13 ] about x, y, z), the link-to-optical rotation became R_old shift^T ([shift 0; 0 1] T_cam_imu). calib_20261004_195052Z: reprojection 0.674 px, shift -2.70 ms at camera_stamp_lag_s 0.09; calib_20261004_195222Z: reprojection 0.692 px, shift -2.90 ms at camera_stamp_lag_s 0.09; calib_20261004_195052Z vs calib_20261004_195222Z: 0.03 deg, 3.4 mm, +0.20 ms"
     }
   },
   "notes": "The lens is measured: ros/calibrate.sh (45 views of a 9x6 checkerboard, rms 0.23 px, 2026-09-13) wrote the intrinsics block and set calibrated: true, and pepin.camera.optics answers from it. hfov_deg is the nominal pinhole that reader falls back to when calibrated is false \u2014 it is 82.94, the field of view the calibration measured, because the best known number is what a bad calibration must be switched off onto; it was 78.0, the lidar-beam fit of 2026-09-10, and 70 is the vendor number that put the image edges 8 deg wrong. The mount beside it is measured too: the pitch from the level frames and the encoder, the height from a tape (see the mount note). The 78 / 26 self-calibration is STALE and is not the source of any number in this file any more. WHICH camera the robot's head is, is the top-level \"active\" above: every node that reads this file asks pepin.camera for the active one, and PEPIN_CAMERA in a node's environment overrides it (ros/laptop.sh forwards it into the container). The board's own half of the switch is /etc/default/pepin-camera (board/pepin-camera.service): the device and the resolution ustreamer serves. The two must agree \u2014 \"active\": \"stereo\" beside a board still streaming 1280x720 mono is a node splitting a webcam picture down the middle."
