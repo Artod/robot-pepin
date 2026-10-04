@@ -130,16 +130,20 @@ def test_the_stereo_block_is_one_eye_beside_the_frame_that_carries_two() -> None
 
 
 def test_the_stereo_mount_is_the_neck_s_link_and_the_eye_is_a_block_of_its_own() -> None:
-    """The module is taped onto the webcam: its link IS the webcam's measured one, on the centre
-    line (the board publishes it from the neck). What the left eye adds — measured against the
-    floor, a door and the lidar — is the ``eye`` block."""
+    """The module sits on the webcam's bracket: its link IS the webcam's measured one, on the
+    centre line (the board publishes it from the neck). What the left eye adds is the ``eye``
+    block — since the rigid mount of 2026-10-02 within a degree of square (the taped module's
+    1.7/-2.3/3.6 of 09-30 went stale with the tape; re-derived 2026-10-04 from the head IMU's
+    hand-eye and Kalibr)."""
     mono = CameraConfig.load(CAMERA_JSON, name="overview")
     stereo = CameraConfig.load(CAMERA_JSON, name="stereo")
     assert stereo.rig is not None
     assert mount_transform(stereo) == mount_transform(mono)
     assert mono.eye == ()
     eye = dict(stereo.eye)
-    assert eye["pitch_deg"] < 0.0 < eye["yaw_deg"], "the module looks up and left of the webcam"
+    assert all(abs(eye[k]) < 1.0 for k in ("roll_deg", "pitch_deg", "yaw_deg")), (
+        "the rigid module is square to its bracket within a degree"
+    )
 
 
 def test_a_stereo_rig_is_calibrated_exactly_when_its_calibration_file_loads(

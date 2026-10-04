@@ -87,7 +87,8 @@ def test_a_head_taped_onto_the_neck_s_camera_says_its_own_eye_and_the_link_stays
 ):
     """The stereo module's ``eye`` block goes into camera_link -> camera_optical: the link is
     the webcam's measured one (the board publishes it from the neck), and the optical frame is
-    the eye's offset followed by the REP 103 turn — a lens looking up and left of the link."""
+    the eye's offset followed by the REP 103 turn — a lens looking within a degree of the link's
+    own x since the rigid mount of 2026-10-02 (the taped module looked up and left)."""
     mono = Mounts.load(CONFIG, "overview").camera
     stereo = Mounts.load(CONFIG, "stereo").camera
     assert stereo.link == mono.link, "the neck's frame means the same under every head"
@@ -95,7 +96,7 @@ def test_a_head_taped_onto_the_neck_s_camera_says_its_own_eye_and_the_link_stays
     assert stereo.optical == eye.then(OPTICAL_MOUNT)
     assert np.allclose(stereo.optical.translation(), eye.translation())
     axis = stereo.optical.rotation() @ [0.0, 0.0, 1.0]  # where the picture looks, in the link
-    assert axis[1] > 0.0 and axis[2] > 0.0, "left of and above the link's own x"
+    assert axis[0] > math.cos(math.radians(1.0)), "within a degree of the link's own x"
     assert Mount().then(OPTICAL_MOUNT).transform() == pytest.approx(OPTICAL_MOUNT.transform())
 
 
