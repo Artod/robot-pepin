@@ -255,6 +255,7 @@ def test_the_node_reads_only_the_two_files_whose_frames_it_publishes(
         ("base_link", "camera_link"),
         ("camera_link", "camera_optical"),
         ("base_link", "laser"),
+        ("camera_optical", "head_imu"),  # config/camera.json's stereo.head_imu (2026-10-04)
     ]
 
 
@@ -704,6 +705,7 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
         ("base_link", "camera_link"),
         ("camera_link", "camera_optical"),
         ("base_link", "laser"),
+        ("camera_optical", "head_imu"),  # config/camera.json's stereo.head_imu (2026-10-04)
     ]
     link = node._static.sent[0].transform.translation
     assert (link.x, link.y, link.z) == (0.0, 0.0, 1.203)

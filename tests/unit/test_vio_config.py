@@ -72,6 +72,8 @@ def _config_with_imu(tmp_path: Path, t_cam_imu: np.ndarray | None) -> Path:
             "T_cam_imu": t_cam_imu.tolist(),
             "time_offset_s": 0.0042,
         }
+    else:
+        data["stereo"].pop("head_imu", None)  # the shipped config may carry one
     (tmp_path / "camera.json").write_text(json.dumps(data))
     return tmp_path
 

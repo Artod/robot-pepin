@@ -286,7 +286,7 @@ class HeadImuConfig:
         """The C++ base bridge's head_imu_* and mast_* parameters. ``camera_from_imu`` is the
         row-major R(camera_link <- head_imu) (:func:`camera_from_imu`), or ``None`` while the
         IMU's extrinsics are unknown: the mast filter then stays off (an empty rotation)."""
-        return {
+        params: dict[str, Any] = {
             "head_imu_enable": enable,
             "head_imu_host": self.host,
             "head_imu_port": self.port,
@@ -296,7 +296,6 @@ class HeadImuConfig:
             "head_imu_max_age_s": self.max_age_s,
             "head_imu_gyro_var": self.gyro_var,
             "head_imu_accel_var": self.accel_var,
-            "head_imu_camera_rotation": [float(v) for v in camera_from_imu or ()],
             "mast_crossover_hz": self.mast["crossover_hz"],
             "mast_arm_window_s": self.mast["arm_window_s"],
             "mast_ring_hz": self.mast["ring_hz"],
@@ -305,6 +304,11 @@ class HeadImuConfig:
             "mast_publish_hz": self.mast["publish_hz"],
             "mast_bias_s": self.mast["bias_s"],
         }
+        # An empty list cannot be a launch parameter (ros2 launch refuses the empty tuple and the
+        # whole stack dies, 2026-10-04): unknown extrinsics leave the bridge's own empty default.
+        if camera_from_imu:
+            params["head_imu_camera_rotation"] = [float(v) for v in camera_from_imu]
+        return params
 
 
 def camera_from_imu(config_dir: str | Path, camera: str | None = None) -> list[float] | None:

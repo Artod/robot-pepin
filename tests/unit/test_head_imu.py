@@ -111,13 +111,17 @@ def test_the_bridge_parameters_are_the_ones_the_cpp_declares() -> None:
             assert match and float(match.group(1)) == pytest.approx(value), name
     assert config.noise["gyro_noise_density"] == 1e-3 and config.rate_hz == 200.0
     off = config.bridge_parameters(None, enable=False)
-    assert off["head_imu_camera_rotation"] == [] and off["head_imu_enable"] is False
+    # unknown extrinsics: no rotation parameter at all — an empty list kills ros2 launch
+    assert "head_imu_camera_rotation" not in off and off["head_imu_enable"] is False
+    assert all(not (isinstance(v, (list, tuple)) and not v) for v in off.values())
 
 
 def _camera_config_with_imu(tmp_path: Path, t_cam_imu: list[list[float]] | None) -> Path:
     data = json.loads((REPO / "config/camera.json").read_text())
     if t_cam_imu is not None:
         data["stereo"]["head_imu"] = {"T_cam_imu": t_cam_imu, "time_offset_s": 0.004}
+    else:
+        data["stereo"].pop("head_imu", None)  # the shipped config may carry one
     (tmp_path / "camera.json").write_text(json.dumps(data))
     return tmp_path
 
