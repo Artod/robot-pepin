@@ -320,6 +320,25 @@ def test_the_stamp_mode_picks_the_send_or_the_capture_and_the_report_prints_the_
     assert not node.set_parameters([Param("camera_stamp", "exposure")])[0].successful
 
 
+def test_the_stamp_lag_dates_a_grab_stamp_earlier_and_leaves_send_alone(build: Build) -> None:
+    """``camera_stamp_lag_s``, live, moves a grab stamp towards its exposure by that much and
+    is named in the report; the send stamp and a grab part's send fallback do not move."""
+    node, _ = build(grab_part(1_750_000_000.30, 0.048, jpeg(1280, 720)))
+    headers = {
+        "x-timestamp": "1750000001.300000",
+        "x-ustreamer-send-time": "5001.000000",
+        "x-ustreamer-grab-time": "5000.952000",
+    }
+    assert node.set_parameters([Param("camera_stamp_lag_s", 0.093)])[0].successful
+    assert node._frame_time(headers) == pytest.approx(1_750_000_001.300, abs=1e-6), "send"
+    assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
+    assert node._frame_time(headers) == pytest.approx(1_750_000_001.159, abs=1e-6)
+    assert node._frame_time({"x-timestamp": "7.0"}) == 7.0, "the send fallback is not moved"
+    node._report()
+    assert "stamp=grab, dated 93 ms earlier, send-grab" in node.logger.texts("info")[-1]
+    assert not node.set_parameters([Param("camera_stamp_lag_s", -0.01)])[0].successful
+
+
 # ---- the optics ------------------------------------------------------------------------------
 def calibrated_config(tmp_path: Path, calibrated: bool = True) -> str:
     """A copy of config/camera.json carrying a checkerboard calibration (and lidar.json beside
@@ -409,7 +428,8 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     node._report()
     line = node.logger.texts("info")[-1]
     assert (
-        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5" in line
+        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
+        " camera_stamp_lag_s=0.0" in line
     )
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
@@ -734,6 +754,7 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     line = node.logger.texts("info")[-1]
     assert line.endswith(
         "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
+        " camera_stamp_lag_s=0.0"
     )
 
 

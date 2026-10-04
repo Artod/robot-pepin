@@ -31,6 +31,12 @@ axis each chip axis points along, as the axis photo shows) and the tape's offset
 the optical frame; it is printed in every file it shapes. ``--calib-extrinsics`` lets OpenVINS
 refine the camera-IMU transform online (a dedicated well-excited session only, vio.md section 3);
 ``--zupt-arm`` writes the E' arm of the offline A/B (zupt on, disparity override off, 0.02 m/s).
+
+THE TIME SHIFT is head_imu's ``time_offset_s``, which is measured against the stamps camera_stream
+publishes with its ``camera_stamp_lag_s`` knob at the default of config/knobs.json. When the knob
+runs live at another value the stamps moved by the difference, and so does the shift:
+``--camera-stamp-lag S`` (ros/laptop.sh vio passes the live value it reads from camera_stream)
+writes ``time_offset_s + S - default``.
 """
 
 from __future__ import annotations
@@ -39,7 +45,7 @@ import argparse
 import json
 import sys
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -118,6 +124,32 @@ def nominal_block(axes: str, offset_m: Sequence[float]) -> dict[str, object]:
         "method": f"nominal: axis photo {axes}, tape {list(offset_m)} m (Kalibr pending)",
         "note": "chip axes against the rectified left eye's optical frame, from the photo",
     }
+
+
+def stamp_lag_default(config_dir: Path = CONFIG) -> float:
+    """camera_stream's ``camera_stamp_lag_s`` default (config/knobs.json); 0 without the knob."""
+    path = config_dir / "knobs.json"
+    if not path.is_file():
+        return 0.0
+    knobs = json.loads(path.read_text())
+    knob = knobs.get("camera_stream", {}).get("camera_stamp_lag_s")
+    return float(knob["default"]) if knob else 0.0
+
+
+def with_stamp_lag(rig: Rig, lag_s: float | None, config_dir: Path = CONFIG) -> Rig:
+    """The rig with its time shift moved by the live stamp lag's distance from the knob's
+    default (the stamps ``time_offset_s`` was measured against); ``None`` is the default."""
+    if lag_s is None:
+        return rig
+    shift = lag_s - stamp_lag_default(config_dir)
+    if shift == 0.0:
+        return rig
+    return replace(
+        rig,
+        time_offset_s=rig.time_offset_s + shift,
+        imu_source=f"{rig.imu_source}; time shift moved {shift * 1e3:+.1f} ms by the live"
+        f" camera_stamp_lag_s {lag_s:.4f} s",
+    )
 
 
 def invert(transform: Array) -> Array:
@@ -421,6 +453,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tag-size", type=float, default=None, help="metres, measured")
     parser.add_argument("--kalibr-only", action="store_true")
     parser.add_argument(
+        "--camera-stamp-lag",
+        type=float,
+        default=None,
+        metavar="S",
+        help="camera_stream's live camera_stamp_lag_s (default: the knob's default)",
+    )
+    parser.add_argument(
         "--print-block",
         action="store_true",
         help="print --nominal as config/camera.json's stereo.head_imu block (for the live TF)",
@@ -435,6 +474,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(nominal_block(*nominal), indent=2))
         return 0
     rig = load_rig(args.config, args.camera, nominal, need_imu=not args.kalibr_only)
+    rig = with_stamp_lag(rig, args.camera_stamp_lag, args.config)
     sys.path.insert(0, str(SRC))
     from pepin.head_imu import HeadImuConfig
 
@@ -454,7 +494,7 @@ def main(argv: list[str] | None = None) -> int:
             }
         )
     write_all(args.out, files)
-    print(f"IMU extrinsics: {rig.imu_source}")
+    print(f"IMU extrinsics: {rig.imu_source}; time shift {rig.time_offset_s * 1e3:+.1f} ms")
     return 0
 
 

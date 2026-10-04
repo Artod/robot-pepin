@@ -2,7 +2,9 @@
   "_note": "Config knobs: numbers each node reads at start and keeps as live ROS parameters (ros/flags.sh get|set NODE KNOB). Feature flags live in each node's FLAGS table; see ros/README.md, Feature flags.",
   "camera_stream": {
     "scale": {"default": 0.5, "range": [0.0, 1.0],
-      "note": "the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason"}
+      "note": "the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason"},
+    "camera_stamp_lag_s": {"default": 0.0, "range": [0.0, 0.3],
+      "note": "camera_stamp grab only: every grab stamp is dated this many seconds earlier, to the exposure the V4L2 capture stamp sits behind (a buffered frame, the readout, JPEG); the send fallback is left alone. Measure it with the head's gyro against the pictures' own motion (image flow vs /head/imu, scratch/vio_night/cam_imu_lag.py: 92-95 ms at night auto exposure, 2026-10-04). config/camera.json's head_imu.time_offset_s is measured against the stamps at this knob's default, and ros/laptop.sh vio reads the live value at its start: restart the VIO after a change"}
   },
   "contact_scan": {
     "max_range": {"default": 2.0, "range": [0.1, 10.0],
@@ -165,6 +167,14 @@
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
     "gate_sway_deg": {"default": 0.0, "range": [0.0, 10.0],
       "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
+  },
+  "vio_feed": {
+    "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],
+      "note": "half the exposure window a pair is judged by, as in the gated camera nodes (with gate_stamp_end 1: [stamp - 2 * this, stamp + 10 ms]); with a manual exposure set it to that exposure"},
+    "gate_stamp_end": {"default": 0, "range": [0, 1],
+      "note": "1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s. Set it to 1 together with camera_stamp grab, which the VIO always runs on"},
+    "head_rate_dps": {"default": 60.0, "range": [0.0, 1000.0],
+      "note": "a pair whose exposure window holds a /head/imu sample turning faster than this (deg/s, the gyro's norm) is held back from OpenVINS; 0 holds back nothing. 60 is three times the arbiter's slow sweep (20 deg/s, whose frames OpenVINS needs) and a fifth of a saccade (290 deg/s, whose frames threw it metres off on the run4 replay)"}
   },
   "visual_odometry": {
     "vo_sigma_m": {"default": 0.07, "range": [0.001, 1.0],

@@ -2190,10 +2190,11 @@ def test_one_node_can_be_kicked_without_a_container_restart() -> None:
         known[script] = {name for name, _ in rows}
     vslam, nav = _launch_processes("vslam.launch.py"), _launch_processes("nav.launch.py")
     robot = _launch_processes("robot.launch.py")
-    # Foxglove's bridge and rtabmap's two odometries are not ours to kick: the kick sends SIGINT
-    # to a "pepin_bringup.<module>" command line, and none of them is one.
-    not_ours = {"foxglove_bridge", "rgbd_odometry", "stereo_odometry"}
-    kickable = (_respawning(vslam) - not_ours) | _respawning(nav)
+    vio = _launch_processes("vio.launch.py")
+    # Foxglove's bridge, rtabmap's two odometries and OpenVINS are not ours to kick: the kick
+    # sends SIGINT to a "pepin_bringup.<module>" command line, and none of them is one.
+    not_ours = {"foxglove_bridge", "rgbd_odometry", "stereo_odometry", "run_subscribe_msckf"}
+    kickable = (_respawning(vslam) - not_ours) | _respawning(nav) | (_respawning(vio) - not_ours)
     assert known["laptop.sh"] == kickable
     # Everything of OURS the board respawns is kickable: the sensor launch's own nodes (a code
     # change on the board is one kicked process, never a restart). rf2o's binary is not ours and

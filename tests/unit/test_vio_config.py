@@ -170,3 +170,25 @@ def test_the_nominal_block_is_one_camera_json_accepts(tmp_path: Path) -> None:
     config = _config_with_imu(tmp_path / "config", np.asarray(block["T_cam_imu"], dtype=float))
     rig = TOOL.load_rig(config)
     assert np.allclose(rig.t_cam_imu, TOOL.nominal_t_cam_imu("x,-z,y", (0.0, 0.03, 0.04)))
+
+
+def test_a_live_stamp_lag_moves_the_time_shift_by_its_distance_from_the_knob_default(
+    tmp_path: Path,
+) -> None:
+    """time_offset_s is measured against camera_stream's stamps at camera_stamp_lag_s's default;
+    a live lag dates every frame earlier by the difference, and the time shift follows it."""
+    config = _config_with_imu(tmp_path / "config", _asymmetric())
+    knobs = json.loads((REPO / "config/knobs.json").read_text())
+    knobs["camera_stream"]["camera_stamp_lag_s"]["default"] = 0.02
+    (config / "knobs.json").write_text(json.dumps(knobs))
+    assert TOOL.stamp_lag_default(config) == pytest.approx(0.02)
+    out = tmp_path / "vio"
+    assert TOOL.main(["--config", str(config), "--out", str(out)]) == 0
+    chain = out / "kalibr_imucam_chain.yaml"
+    assert _read(chain, "cam0", "timeshift_cam_imu") == pytest.approx(0.0042), "the default"
+    args = ["--config", str(config), "--out", str(out), "--camera-stamp-lag", "0.093"]
+    assert TOOL.main(args) == 0
+    assert _read(chain, "cam0", "timeshift_cam_imu") == pytest.approx(0.0042 + 0.073)
+    assert _read(chain, "cam1", "timeshift_cam_imu") == pytest.approx(0.0042 + 0.073)
+    assert "camera_stamp_lag_s 0.0930" in chain.read_text()
+    assert TOOL.stamp_lag_default(tmp_path) == 0.0, "no knobs.json: no lag"

@@ -185,10 +185,11 @@ zrouter_up() {
     echo "laptop zenoh router up: $PEPIN_ZROUTER_LAPTOP, dialling tcp/$BOARD:$PEPIN_ZROUTER_PORT"
 }
 # The nodes a kick can reach here, the container each lives in and the line it prints once up
-# (the kick waits for that line): the Python modules of vslam.launch.py and of nav.launch.py. Only
+# (the kick waits for that line): the Python modules of vslam.launch.py, nav.launch.py and
+# vio.launch.py. Only
 # one of the two recorders runs (nav.launch.py's recorder argument); a kick of the other one finds
 # nothing and says so.
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder gaze"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder gaze vio_feed"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -204,6 +205,7 @@ kick_target() {  # node name -> "container|start-up line"
         run_recorder) echo "$NAV|run recorder ready" ;;
         bag_recorder) echo "$NAV|bag recorder ready" ;;
         gaze) echo "$NAV|gaze up: " ;;
+        vio_feed) echo "pepin-vio|vio feed up: " ;;
         *) return 1 ;;
     esac
 }
@@ -288,17 +290,27 @@ case "${1:-}" in
         # the image's 4.6, camera_stream's, against 495.08 under uv's 4.13, 2026-10-04).
         # PEPIN_VIO_CONFIG_ARGS passes vio_config.py's options (--calib-extrinsics for a check
         # session that lets OpenVINS refine the camera-IMU transform).
+        # The time shift follows camera_stream's LIVE camera_stamp_lag_s (the knob dates every
+        # grab stamp earlier; head_imu.time_offset_s was measured at its default): read once,
+        # here, so a later change of the knob needs a vio restart. PEPIN_VIO_STAMP_LAG overrides
+        # the reading; camera_stream down leaves the knob's default.
+        LAG="${PEPIN_VIO_STAMP_LAG:-$("$HERE/flags.sh" get camera_stream camera_stamp_lag_s 2>/dev/null | awk '/value is/ {print $NF}' || true)}"
+        LAG_ARGS=()
+        if [ -n "$LAG" ]; then LAG_ARGS=(--camera-stamp-lag "$LAG"); fi
+        echo "vio: camera_stream's camera_stamp_lag_s ${LAG:-not read (camera_stream down): the knob default}"
         # shellcheck disable=SC2086
         docker run --rm --network none "${MOUNTS[@]}" --entrypoint python3 pepin-laptop:vio \
-            /tools/vio_config.py ${PEPIN_VIO_CONFIG_ARGS:-} | tail -1 \
+            /tools/vio_config.py ${PEPIN_VIO_CONFIG_ARGS:-} ${LAG_ARGS[@]+"${LAG_ARGS[@]}"} | tail -1 \
             || { echo "ros/tools/vio_config.py failed in pepin-laptop:vio"; exit 2; }
         pepin_remove_container pepin-vio
         zrouter_up
         # The image's OpenVINS overlay (/ws_vio) is sourced after the entrypoint's workspace, so
-        # the mounted pepin_bringup launch file finds ov_msckf.
+        # the mounted pepin_bringup launch file finds ov_msckf. PEPIN_VIO_LAUNCH_ARGS passes the
+        # launch's arguments (feed:=true: pepin_bringup.vio_feed's rate-gated frames;
+        # executor:=multi: upstream's).
         docker run -d --name pepin-vio --network "$NET" --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" \
-            pepin-laptop:vio bash -c 'source /ws_vio/install/setup.bash && exec ros2 launch pepin_bringup vio.launch.py' >/dev/null
+            -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" -e "VIO_LAUNCH_ARGS=${PEPIN_VIO_LAUNCH_ARGS:-}" \
+            pepin-laptop:vio bash -c 'source /ws_vio/install/setup.bash && exec ros2 launch pepin_bringup vio.launch.py $VIO_LAUNCH_ARGS' >/dev/null
         echo "vio up: OpenVINS in pepin-vio on $(docker run --rm --network none --entrypoint cat pepin-laptop:vio /opt/openvins/SHAS | head -2 | tr '\n' ' ')"
         echo "the relay reads it under ros/laptop.sh vslam --vo-vio; ros/laptop.sh vio logs"
         exit 0 ;;

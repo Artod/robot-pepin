@@ -50,11 +50,12 @@ the base server, and this side must not publish the same edge.
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
-included); ``camera_stamp``, live (send or grab, above); ``undistort``, live (the picture is
-straightened by the calibration before it goes out, and its CameraInfo then carries no
-distortion); ``static_camera_tf``, read at start and not live — a static transform cannot be
-withdrawn once sent, so the other value needs a restart. All of them are printed in every report
-line.
+included); ``camera_stamp``, live (send or grab, above); ``camera_stamp_lag_s``, live (a grab stamp
+dated that much earlier, to the exposure the capture stamp sits behind); ``undistort``, live
+(the picture is straightened by the calibration before it goes out, and its CameraInfo then
+carries no distortion); ``static_camera_tf``, read at start and not live — a static transform
+cannot be withdrawn once sent, so the other value needs a restart. All of them are printed in
+every report line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -86,7 +87,7 @@ from tf2_ros import StaticTransformBroadcaster
 from pepin.calibration import undistort_optics
 from pepin.camera import CameraConfig, Optics, optics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.mjpeg import STAMP_MODES, capture_time, parts, send_lag_s
+from pepin.mjpeg import STAMP_MODES, capture_time, has_grab, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
@@ -687,14 +688,18 @@ class CameraStream(Node):
     def _frame_time(self, headers: dict[str, str]) -> float | None:
         """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
         that carries both goes into the period's samples, and a ``grab`` part without them is
-        counted (it falls back to the send time)."""
+        counted (it falls back to the send time). A grab stamp is dated ``camera_stamp_lag_s``
+        earlier, towards the exposure it sits behind; the send fallback is not."""
         mode = str(self._switches["camera_stamp"])
         lag = send_lag_s(headers)
         if lag is not None:
             self._tally.sample("send_lag_ms", lag * 1e3)
         elif mode == "grab":
             self._tally.count("no_grab")
-        return capture_time(headers, mode)
+        taken = capture_time(headers, mode)
+        if taken is not None and mode == "grab" and has_grab(headers):
+            taken -= float(self._switches["camera_stamp_lag_s"])
+        return taken
 
     def _stamp(self, taken_at: float | None) -> Any:
         """The moment a frame is published under: the board's capture time when ustreamer sent
@@ -737,7 +742,9 @@ class CameraStream(Node):
             )
         median = lags[len(lags) // 2]
         p90 = lags[min(len(lags) - 1, int(0.9 * len(lags)))]
-        return f"stamp={mode}, send-grab median/p90 {median:.0f}/{p90:.0f} ms"
+        earlier = float(self._switches["camera_stamp_lag_s"])
+        dated = f", dated {earlier * 1e3:.0f} ms earlier" if mode == "grab" and earlier else ""
+        return f"stamp={mode}{dated}, send-grab median/p90 {median:.0f}/{p90:.0f} ms"
 
     def _stereo_report(self, w: Window) -> str:
         """What a stereo rig adds to the report line — the head, the stages and whatever went
