@@ -17,6 +17,11 @@ The answer depends on the camera's pose on the cart and the optics alone, never 
 degree on the stereo eye: a centimetre at the body's distance, well inside the 5 cm margin). A box
 the camera stands in is skipped and named — a margin that grows a box around the lens would
 otherwise blind every pixel.
+
+PARTS THAT MOVE are :class:`OrientedBox` es — a box at any orientation, posed afresh whenever its
+joints move (the arm's links, :mod:`pepin.arm`) — under the same rule: :func:`oriented_ray_depth`
+answers the same :class:`RayDepth`, only for the rays whose cell the box's projected corners can
+reach, and :meth:`RayDepth.nearer` folds two answers into one clip.
 """
 
 from __future__ import annotations
@@ -82,6 +87,16 @@ class RayDepth:
     def share(self) -> float:
         """The fraction of the picture's rays that enter the body."""
         return float(np.count_nonzero(np.isfinite(self.z))) / max(self.z.size, 1)
+
+    def nearer(self, other: RayDepth) -> RayDepth:
+        """Both answers as one: per ray the nearer entry, the skipped names of both. The two
+        grids must be the same picture at the same stride (``ValueError`` otherwise)."""
+        if other.stride != self.stride or other.z.shape != self.z.shape:
+            raise ValueError(
+                f"ray grids differ: stride {self.stride} {self.z.shape} vs"
+                f" {other.stride} {other.z.shape}"
+            )
+        return RayDepth(np.minimum(self.z, other.z), self.stride, self.skipped + other.skipped)
 
 
 @dataclass(frozen=True)
@@ -157,7 +172,17 @@ def _slab_entry(
 ) -> npt.NDArray[np.float64]:
     """Each ray's parameter at its entry into ``box`` (the slab test), ``inf`` for a miss; the
     origin is outside the box."""
-    lo, hi = np.array(box.lo), np.array(box.hi)
+    return _slab_bounds_entry(origin, direction, np.array(box.lo), np.array(box.hi))
+
+
+def _slab_bounds_entry(
+    origin: npt.NDArray[np.float64],
+    direction: npt.NDArray[np.float64],
+    lo: npt.NDArray[np.float64],
+    hi: npt.NDArray[np.float64],
+) -> npt.NDArray[np.float64]:
+    """The slab test against the axis-aligned box ``lo``..``hi``: each ray's parameter at its
+    entry, ``inf`` for a miss; ``origin`` (3,) lies outside the box, ``direction`` is (n, 3)."""
     parallel = np.abs(direction) < 1e-12
     safe = np.where(parallel, 1.0, direction)
     t1, t2 = (lo - origin) / safe, (hi - origin) / safe
@@ -166,6 +191,112 @@ def _slab_entry(
     far = np.where(parallel, np.where(within, np.inf, -np.inf), np.maximum(t1, t2)).min(axis=1)
     hit = (far >= near) & (far > 0.0)
     return np.where(hit, np.maximum(near, 0.0), np.inf)
+
+
+@dataclass(frozen=True, eq=False)
+class OrientedBox:
+    """A box at any orientation: its centre and axes (the columns of ``rotation``) in the parent
+    frame, and its half sides along those axes, metres — a part that moves (an arm's link)."""
+
+    name: str
+    centre: npt.NDArray[np.float64]
+    rotation: npt.NDArray[np.float64]
+    half: npt.NDArray[np.float64]
+
+    def grown(self, margin_m: float) -> OrientedBox:
+        """The same box ``margin_m`` larger on every side."""
+        return replace(self, half=self.half + margin_m)
+
+    def placed(self, pose: RigidPose) -> OrientedBox:
+        """The same box in the frame ``pose`` is in (``pose``: that frame <- the box's frame)."""
+        return replace(
+            self,
+            centre=pose.rotation @ self.centre + pose.translation,
+            rotation=pose.rotation @ self.rotation,
+        )
+
+    def holds(self, points: npt.NDArray[np.floating[Any]]) -> npt.NDArray[np.bool_]:
+        """Which of the (n, 3) ``points`` lie inside the box, faces included."""
+        local = (np.asarray(points, dtype=float).reshape(-1, 3) - self.centre) @ self.rotation
+        inside: npt.NDArray[np.bool_] = np.all(np.abs(local) <= self.half + 1e-9, axis=1)
+        return inside
+
+    def corners(self) -> npt.NDArray[np.float64]:
+        """The eight corners, (8, 3) in the parent frame."""
+        signs = np.array([[i, j, k] for i in (-1, 1) for j in (-1, 1) for k in (-1, 1)], float)
+        out: npt.NDArray[np.float64] = (signs * self.half) @ self.rotation.T + self.centre
+        return out
+
+    def entry(
+        self, origin: npt.NDArray[np.float64], direction: npt.NDArray[np.float64]
+    ) -> npt.NDArray[np.float64]:
+        """Each ray's parameter at its entry into the box, ``inf`` for a miss: the slab test in
+        the box's own axes (a rigid change of frame keeps the parameter); ``origin`` outside."""
+        return _slab_bounds_entry(
+            (origin - self.centre) @ self.rotation, direction @ self.rotation, -self.half, self.half
+        )
+
+
+def oriented_ray_depth(
+    boxes: Sequence[OrientedBox], intr: Intrinsics, camera: RigidPose, stride_px: int
+) -> RayDepth:
+    """:meth:`BodyModel.ray_depth` for oriented boxes in the camera's parent frame (``camera``:
+    that frame <- camera_optical): per ray of a ``stride_px`` grid the optical depth of its entry
+    into the nearest box. Only the cells a box's projected corners can reach (one cell of slack)
+    are tested; a box straddling the lens plane is tested over the whole picture, one behind it
+    not at all, one holding the camera is skipped and named."""
+    s = stride_px
+    rows, cols = math.ceil(intr.height / s), math.ceil(intr.width / s)
+    z = np.full((rows, cols), np.inf)
+    origin = np.asarray(camera.translation, dtype=float)
+    rotation = np.asarray(camera.rotation, dtype=float)
+    skipped = []
+    for box in boxes:
+        if bool(box.holds(origin)[0]):
+            skipped.append(box.name)
+            continue
+        window = _cells_reached(box, intr, origin, rotation, s, rows, cols)
+        if window is None:
+            continue
+        r0, r1, c0, c1 = window
+        v = np.minimum(np.arange(r0, r1) * s + (s - 1) / 2.0, intr.height - 1)
+        u = np.minimum(np.arange(c0, c1) * s + (s - 1) / 2.0, intr.width - 1)
+        uu, vv = np.meshgrid(u, v)
+        rays = np.stack(
+            [(uu - intr.cx) / intr.fx, (vv - intr.cy) / intr.fy, np.ones_like(uu)], axis=-1
+        ).reshape(-1, 3)
+        t = box.entry(origin, rays @ rotation.T).reshape(r1 - r0, c1 - c0)
+        np.minimum(z[r0:r1, c0:c1], t, out=z[r0:r1, c0:c1])
+    return RayDepth(z.astype(np.float32), s, tuple(skipped))
+
+
+def _cells_reached(
+    box: OrientedBox,
+    intr: Intrinsics,
+    origin: npt.NDArray[np.float64],
+    rotation: npt.NDArray[np.float64],
+    stride: int,
+    rows: int,
+    cols: int,
+) -> tuple[int, int, int, int] | None:
+    """The ray-grid window (rows r0:r1, columns c0:c1) whose rays may enter ``box``: the bounding
+    rectangle of its projected corners grown by one cell; the whole grid when a corner is at or
+    behind the lens plane, ``None`` when every corner is behind it or the rectangle misses."""
+    local = (box.corners() - origin) @ rotation  # the corners in the optical frame
+    depth = local[:, 2]
+    if np.all(depth <= 0.0):
+        return None
+    if np.any(depth <= 1e-3):
+        return 0, rows, 0, cols
+    u = intr.fx * local[:, 0] / depth + intr.cx
+    v = intr.fy * local[:, 1] / depth + intr.cy
+    c0 = max(math.floor(float(u.min()) / stride) - 1, 0)
+    c1 = min(math.floor(float(u.max()) / stride) + 2, cols)
+    r0 = max(math.floor(float(v.min()) / stride) - 1, 0)
+    r1 = min(math.floor(float(v.max()) / stride) + 2, rows)
+    if c1 <= c0 or r1 <= r0:
+        return None
+    return r0, r1, c0, c1
 
 
 class BodyMask:
@@ -210,4 +341,12 @@ class BodyMask:
         return self._depth
 
 
-__all__ = ["BODY_FILE", "BodyBox", "BodyMask", "BodyModel", "RayDepth"]
+__all__ = [
+    "BODY_FILE",
+    "BodyBox",
+    "BodyMask",
+    "BodyModel",
+    "OrientedBox",
+    "RayDepth",
+    "oriented_ray_depth",
+]

@@ -73,14 +73,24 @@ The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set dep
 <value>``): ``enabled``, ``tof_rays``, ``imu_lean``, ``lean_gate_deg``, ``lean_min_quality``,
 ``min_weight``, ``marks_min_z``, ``marks_hz``, ``marks_clear``, ``grid_out``, ``grid_hz``,
 ``grid_size_m``, ``grid_resolution_m``, ``surface_hz``, ``band_half_z``, ``lidar_layer``,
-``no_depth_weight``, ``no_depth_reach_m``, ``self_filter``; their state is printed in every report
-line.
+``no_depth_weight``, ``no_depth_reach_m``, ``self_filter``, ``arm_filter``; their state is printed
+in every report line.
 
 THE CART'S OWN BODY (``self_filter``, :mod:`pepin.body`, config/body.json): a head that looks back
 or down to a side sees the cart's top shelf, wheels and mast, and would paint them into the volume
 — a wall where the robot stands. Under the flag every camera frame is clipped per ray at its entry
 into the body's boxes: what lies on or past it is not written, measured or carved. The frames of a
 head in motion never arrive here at all: depth_stream's gaze gate keeps them from the network.
+
+THE ROBOT'S OWN ARM (``arm_filter``, :mod:`pepin.arm`, config/arm.json): the SO-101 at the cart's
+front is in the picture whenever the head looks down ahead, and painted it is an obstacle at the
+bumper the stall look then stares at. Its links are boxes posed by its joints (the file's parked
+pose, or ``/arm/joint_states`` at each observation's stamp) through the vendored URDF; under the
+flag the camera's frames and the whiskers' fans are clipped at them as at the body, and after
+every integration — camera, revolution or fan — every voxel inside a grown link is forgotten, so
+no return off the arm and no surface painted before the arm moved in stays in the volume, the
+marks or a ``/fusion/column`` answer. ``/fusion/arm`` (visualization_msgs/MarkerArray, base_link,
+2 Hz) draws the grown links whether or not the flag is on.
 ``/fusion/reset`` (std_srvs/Trigger) empties the model, the pairing queues and the tallies.
 For the gaze arbiter: ``/fusion/frame`` (std_msgs/Header) is every fused camera frame at its own
 stamp, and ``/fusion/column`` (map_msgs/GetPointMapROI) the surface points of a box of the
@@ -110,11 +120,13 @@ from message_filters import Subscriber, TimeSynchronizer
 from nav_msgs.msg import OccupancyGrid
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2
-from std_msgs.msg import Header
+from sensor_msgs.msg import CameraInfo, Image, JointState, LaserScan, PointCloud2
+from std_msgs.msg import ColorRGBA, Header
 from std_srvs.srv import Trigger
+from visualization_msgs.msg import Marker, MarkerArray
 
-from pepin.body import BODY_FILE, BodyMask, BodyModel, RayDepth
+from pepin.arm import ARM_FILE, ARM_TOPIC, ArmMask, ArmModel, ArmPose, JointHistory, arm_pose
+from pepin.body import BODY_FILE, BodyMask, BodyModel, OrientedBox, RayDepth, oriented_ray_depth
 from pepin.camera_grid import (
     OCCUPIED,
     GridWindow,
@@ -123,7 +135,7 @@ from pepin.camera_grid import (
     grid_volume,
     to_map_xy,
 )
-from pepin.depth import Intrinsics
+from pepin.depth import Intrinsics, quaternion_from_matrix
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import BASE_FRAME, MAP_FRAME, ODOM_FRAME, FramePoser
 from pepin.lean import LeanGate
@@ -134,6 +146,7 @@ from pepin.tsdf import (
     DepthLaw,
     GridSpec,
     ObservedReach,
+    RayClip,
     RigidPose,
     band_half_z_m,
     window_recentre_m,
@@ -222,7 +235,13 @@ GEOMETRY_SETTLE_S = 1.0  # a new full grid reaches the layer before any update i
 TF_WAIT_S = 0.3
 BAND_TF_WAIT_S = 5.0  # the static base_link -> laser edge at start: the board publishes it once
 PAIR_QUEUE = 40  # depth arrives a fraction of a second after its image; pair by exact stamp
-STAGES = ("integrate", "body", "scan", "tof", "marks", "grid", "grid_map")
+STAGES = ("integrate", "body", "arm", "forget", "scan", "tof", "marks", "grid", "grid_map")
+# THE ARM'S BOXES FOR THE EYE (pepin.arm): the grown links in base_link, teal, whether or not
+# arm_filter is on — the arm's own points standing inside them in Foxglove is the check of the
+# mount and the joints before the flag is.
+ARM_MARKERS_TOPIC = "/fusion/arm"
+ARM_MARKERS_HZ = 2.0
+ARM_RGBA = (0.0, 0.6, 0.6, 0.35)
 # The three ToF fans, in their own frames (pepin_bringup.tof_bridge publishes both; the frame
 # names are pepin.mounts.TOF_FRAME, the topic its _SCAN_TOPIC under the root namespace).
 TOF_NAMES = ("front", "left", "right")
@@ -365,6 +384,32 @@ FLAGS = FlagSet(
         off_when="if the report line shows rays meeting the body at the working pose (a box too"
         " large), or an obstacle beside the cart disappears from the volume",
     ),
+    Flag(
+        "arm_filter",
+        False,
+        description="the robot's own arm (config/arm.json: the SO-101's links as boxes posed by"
+        " its joints through the vendored URDF, grown by margin_m) is cut out of every camera"
+        " frame and whisker fan as the body is, and every voxel inside a grown link is forgotten"
+        " after each integration, whoever painted it (pepin.arm, pepin.worldmap.WorldMap.forget);"
+        " off, the arm is painted like the room, as before",
+        why="OFF until the mount is taped: config/arm.json's mount is a placeholder, the joints"
+        " are the parked pose read from the encoders (source config: nothing drives the arm"
+        " yet). What is measured is the mechanism (tests/unit/test_arm.py: frames looking at the"
+        " arm in four poses paint 0 voxels inside it while the floor beside it is painted, a"
+        " surface painted before the arm moved in is forgotten, the column a stall look asks"
+        " holds no arm) and its cost (scratch/arm_mask/cost.py, the live 280x250x34 grid, the"
+        " 800x600 eye, two runs): with the arm in 20-48 % of the rays the ray grid is 2.1-5.4 ms"
+        " to rebuild (paid on every frame whose head or arm moved: 0.2 deg / 3 mm, as the"
+        " body's), 4-5 us cached, and the clip adds 0.8-2.4 ms to a 15-19 ms integration; the"
+        " parked arm out of the working look's picture costs 0.23 ms and nothing to integrate;"
+        " the forget is 0.13-0.20 ms an integration (camera, revolution or fan), FK 0.1 ms when"
+        " the joints move",
+        on_when="after the mount is taped and the boxes sit on the arm's own points in Foxglove"
+        " (/fusion/arm over /fusion/surface with the flag off): from then on whenever the arm is"
+        " on the cart",
+        off_when="if an obstacle in front of the cart disappears from the volume where the arm"
+        " is not (a wrong mount or joint sign), or the report line counts frames on a stale pose",
+    ),
 )
 
 
@@ -377,6 +422,35 @@ def band_z_m(plane_z_m: float, half_m: float) -> tuple[float, float]:
     the caller reads that plane from TF (:meth:`DepthFusion._plane_z_m`) rather than from the
     config this process happens to have."""
     return (plane_z_m - half_m, plane_z_m + half_m)
+
+
+def _on_cart(frame: RigidPose, base: RigidPose) -> RigidPose:
+    """``base_link <- frame`` from the two poses in the volume's frame at one stamp."""
+    rb = base.rotation.T
+    return RigidPose(rb @ frame.rotation, rb @ (frame.translation - base.translation))
+
+
+def arm_markers(boxes: tuple[OrientedBox, ...], stamp: Any, frame_id: str) -> Any:
+    """The boxes as one MarkerArray of CUBEs in ``frame_id`` (namespace ``arm``), the old ones
+    deleted first so a box that is gone does not linger."""
+    out = MarkerArray()
+    clear = Marker()
+    clear.header = Header(stamp=stamp, frame_id=frame_id)
+    clear.ns, clear.action = "arm", Marker.DELETEALL
+    out.markers.append(clear)
+    for i, box in enumerate(boxes):
+        marker = Marker()
+        marker.header = Header(stamp=stamp, frame_id=frame_id)
+        marker.ns, marker.id, marker.type, marker.action = "arm", i, Marker.CUBE, Marker.ADD
+        p = marker.pose.position
+        p.x, p.y, p.z = (float(v) for v in box.centre)
+        q = marker.pose.orientation
+        q.x, q.y, q.z, q.w = (float(v) for v in quaternion_from_matrix(box.rotation))
+        marker.scale.x, marker.scale.y, marker.scale.z = (float(2.0 * v) for v in box.half)
+        r, g, b, a = ARM_RGBA
+        marker.color = ColorRGBA(r=r, g=g, b=b, a=a)
+        out.markers.append(marker)
+    return out
 
 
 class DepthFusion(Node):
@@ -484,6 +558,21 @@ class DepthFusion(Node):
         self._body_data: dict[str, Any] = {}
         self._body_note = ""  # what the body is, for the log and the report line
         self._body = BodyMask(BodyModel(()))
+        # The robot's own arm (arm_filter): config/arm.json beside this node's config, read again
+        # whenever it changes; its joints from the file or from the topic it names (the topic is
+        # subscribed at start: a new name in the file takes a restart).
+        self._arm_file = LiveFile(config.parent / ARM_FILE)
+        self._arm_lock = threading.Lock()  # the file, the model and the mask's caches
+        self._arm_data: dict[str, Any] = {}
+        self._arm_note = ""  # what the arm is, for the log and the report line
+        self._arm = ArmMask(None)
+        self._joints = JointHistory()
+        self._read_arm()
+        model = self._arm.model
+        self._arm_topic = model.topic if model is not None else ARM_TOPIC
+        self.create_subscription(JointState, self._arm_topic, self._on_joints, reliable)
+        self._arm_pub = self.create_publisher(MarkerArray, ARM_MARKERS_TOPIC, reliable)
+        self.create_timer(1.0 / ARM_MARKERS_HZ, self._publish_arm)
         self._recentre_ms = 0.0  # the last slide's cost, a level the report line reads
         self._read_plane(BAND_TF_WAIT_S)
         # The scan's own answer to the lean: a frame can be placed leaning, a revolution taken
@@ -795,6 +884,7 @@ class DepthFusion(Node):
             touched = self._world.integrate_scan(
                 bearings_in_base(angles, yaw, mirrored), ranges, base, mount, stamp=at
             )
+            self._forget_arm(base, at)  # a beam's return off the arm is not the room
         self._tally.count("revolutions")
         self._tally.count("scan_voxels", touched)
         # ...and the costmap hears what the volume holds now, at the pose this revolution was
@@ -836,16 +926,20 @@ class DepthFusion(Node):
             return  # nothing to write: every beam says "I do not know"
         depth, intr = fan_image(ranges, msg.angle_min, msg.angle_increment)
         self._roll_window(base)
+        optical = optical_pose(sensor)
+        clip = self._fan_clip(intr, optical, base, at)
         with self._tally.measure("tof"), self._lock:
             touched = self._world.integrate_depth(
                 depth,
                 None,
                 intr,
-                optical_pose(sensor),
+                optical,
                 stamp=at,
                 law=tof_law(float(msg.range_max)),
                 sensor=TOF,
+                clip=clip,
             )
+            self._forget_arm(base, at)
         self._tally.count("tof_fans")
         self._tally.count("tof_voxels", touched)
         self._publish_marks(base, msg.header.stamp)
@@ -961,17 +1055,143 @@ class DepthFusion(Node):
             rgb = None
         self._roll_window(base)
         self._reach.saw(depth)  # the source's own reach, measured off the frames themselves
-        clip = self._body_clip(intr, camera, base) if self._switches.on("self_filter") else None
+        clip = self._clip(intr, camera, base, at)
         with self._tally.measure("integrate"), self._lock:
             touched = self._world.integrate_depth(
                 depth, rgb, intr, camera, stamp=at, law=self._depth_law(), clip=clip
             )
+            self._forget_arm(base, at)
             self._last_stamp = stamp
         self._frame_pub.publish(Header(stamp=stamp, frame_id=ODOM_FRAME))
         self._tally.count("frames")
         self._tally.count("voxels", touched)
         self._publish_marks(base, stamp)  # the camera's own turn to move the marks
         self._publish_grid(base, stamp)
+
+    def _clip(
+        self, intr: Intrinsics, camera: RigidPose, base: RigidPose, at: float
+    ) -> RayClip | None:
+        """The frame's self-filter: the cart's body (``self_filter``) and the arm
+        (``arm_filter``) folded into one ray grid, either alone, or ``None``."""
+        body = self._body_clip(intr, camera, base) if self._switches.on("self_filter") else None
+        if not self._switches.on("arm_filter"):
+            return body
+        arm = self._arm_clip(intr, camera, base, at, body.stride if body is not None else None)
+        if body is None or arm is None:
+            return body if arm is None else arm
+        return body.nearer(arm)
+
+    def _arm_clip(
+        self,
+        intr: Intrinsics,
+        camera: RigidPose,
+        base: RigidPose,
+        at: float,
+        stride_px: int | None = None,
+    ) -> RayDepth | None:
+        """Where each ray of this frame enters the arm's grown links, or ``None`` when no ray
+        does: config/arm.json as it stands, the joints at the frame's stamp, the camera's pose
+        on the cart then; the ray grid rebuilt only when one of them moved (:class:`ArmMask`)."""
+        pose = self._arm_pose(at)
+        if pose is None:
+            return None
+        with self._tally.measure("arm"), self._arm_lock:
+            clip = self._arm.for_frame(intr, _on_cart(camera, base), pose, stride_px)
+        if clip is not None:
+            self._tally.count("arm_frames")
+            self._tally.sample("arm_share", clip.share)
+        return clip
+
+    def _arm_pose(self, at: float, count: bool = False) -> ArmPose | None:
+        """The arm's joints for an observation stamped ``at`` (:func:`pepin.arm.arm_pose`);
+        ``None`` while config/arm.json gives no arm. ``count`` tallies where they came from —
+        once an observation, by the forget every integration ends with."""
+        self._read_arm()
+        with self._arm_lock:
+            model = self._arm.model
+        if model is None:
+            return None
+        pose = arm_pose(model, self._joints, at)
+        if pose is not None and count:
+            self._tally.count("arm_" + pose.source)
+        return pose
+
+    def _arm_boxes(self, at: float, count: bool = False) -> tuple[OrientedBox, ...]:
+        """The arm's grown links in base_link at ``at`` (none while there is no arm)."""
+        pose = self._arm_pose(at, count)
+        if pose is None:
+            return ()
+        with self._arm_lock:
+            return self._arm.boxes(pose)
+
+    def _forget_arm(self, base: RigidPose, at: float) -> None:
+        """Under the model's lock, after an integration: every voxel inside the arm's grown
+        links, as they stood at ``at``, back to unobserved (``arm_filter``;
+        :meth:`pepin.worldmap.WorldMap.forget`)."""
+        if not self._switches.on("arm_filter"):
+            return
+        with self._tally.measure("forget"):
+            boxes = [box.placed(base) for box in self._arm_boxes(at, count=True)]
+            forgotten = self._world.forget(boxes)
+        self._tally.count("arm_forgotten", forgotten)
+
+    def _fan_clip(
+        self, intr: Intrinsics, sensor: RigidPose, base: RigidPose, at: float
+    ) -> RayDepth | None:
+        """A whisker fan's arm clip (``arm_filter``): its few rays against the arm's links, each
+        ray its own (the fan is a handful of pixels: nothing worth a cache)."""
+        if not self._switches.on("arm_filter"):
+            return None
+        boxes = self._arm_boxes(at)
+        if not boxes:
+            return None
+        clip = oriented_ray_depth(boxes, intr, _on_cart(sensor, base), 1)
+        return clip if bool(np.isfinite(clip.z).any()) else None
+
+    def _on_joints(self, msg: JointState) -> None:
+        """``/arm/joint_states``: one sample of the arm's joints at its own stamp."""
+        if not self._up:
+            return  # the node is still being built (see __init__)
+        self._joints.add(stamp_seconds(msg.header.stamp), list(msg.name), list(msg.position))
+        self._tally.count("arm_joints_in")
+
+    def _read_arm(self) -> None:
+        """config/arm.json into the mask whenever the file changed (one ``stat``); a file that
+        is missing or broken gives no arm, and says so in the log and the report."""
+        with self._arm_lock:
+            data = self._arm_file.read()
+            if data == self._arm_data and self._arm_note:
+                return
+            self._arm_data = data
+            try:
+                model = ArmModel.from_dict(data)
+            except (ValueError, OSError) as exc:
+                self._arm.model = None
+                self._arm_note = f"{self._arm_file.path} unreadable ({exc}): no arm"
+                self.get_logger().error(f"arm filter: {self._arm_note}")
+                return
+            self._arm.model = model
+            mount = "" if model.mount_measured else ", the mount NOT measured"
+            self._arm_note = (
+                f"{len(model.links)} boxes grown {model.margin_m * 100:.0f} cm, joints from"
+                f" {model.source}{mount}"
+            )
+            self.get_logger().info(f"arm filter: the arm is {self._arm_note}")
+
+    def _publish_arm(self) -> None:
+        """``/fusion/arm``: the arm's grown links in base_link as they stand now, at the newest
+        joint sample's stamp (the file's pose: stamp zero, the newest transform)."""
+        if not self._up:
+            return
+        newest = self._joints.newest()
+        at = newest if newest is not None else 0.0
+        pose = self._arm_pose(at)
+        if pose is None:
+            return
+        with self._arm_lock:
+            boxes = self._arm.boxes(pose)
+        stamp = stamp_from_seconds(at if pose.source == "topic" else 0.0)
+        self._arm_pub.publish(arm_markers(boxes, stamp, BASE_FRAME))
 
     def _body_clip(self, intr: Intrinsics, camera: RigidPose, base: RigidPose) -> RayDepth | None:
         """Where each ray of this frame enters the cart's own body (``self_filter``), or ``None``
@@ -980,9 +1200,7 @@ class DepthFusion(Node):
         the ray grid rebuilt only when the head, the optics or the file moved."""
         self._read_body()
         with self._tally.measure("body"):
-            rb = base.rotation.T
-            on_cart = RigidPose(rb @ camera.rotation, rb @ (camera.translation - base.translation))
-            clip = self._body.for_frame(intr, on_cart)
+            clip = self._body.for_frame(intr, _on_cart(camera, base))
         if clip is not None:
             self._tally.count("body_frames")
             self._tally.sample("body_share", clip.share)
@@ -1241,6 +1459,7 @@ class DepthFusion(Node):
             f" no image {c['no_image']}; surface {self._surface_points} points;"
             f" {self._marks_line(w)}; {self._grid_line(w)}; {self._frame_line(w)};"
             f" {self._band_text()}; {self._carve_line()}; {self._body_line(w)};"
+            f" {self._arm_line(w)};"
             f" {self._tof_line(w)};"
             f" {self._world_line(w)};"
             f" {self._lean.report()};"
@@ -1266,6 +1485,30 @@ class DepthFusion(Node):
             f" frames{seen}, {w.ms_per('body', 'frames'):.2f} ms a frame,"
             f" {self._body.rebuilds} ray grids ({self._body.last_ms:.1f} ms the last);"
             f" {self._body_note or 'config/body.json not read yet'}{inside}"
+        )
+
+    def _arm_line(self, w: Window) -> str:
+        """The arm's half of the report: on how many frames it was in view and on what share of
+        their rays, what that cost, where the joints came from, what was forgotten."""
+        if not self._switches.on("arm_filter"):
+            return f"arm filter off ({self._arm_note or 'config/arm.json not read yet'})"
+        c = w.counts
+        shares = w.samples.get("arm_share", [])
+        seen = f" ({float(np.median(shares)) * 100:.1f} % of their rays)" if shares else ""
+        last = self._arm.last
+        inside = (
+            f"; the camera stands in {', '.join(last.skipped)}: skipped"
+            if last is not None and last.skipped
+            else ""
+        )
+        return (
+            f"arm filter: the arm met {int(c['arm_frames'])} of {int(c['frames'])} frames{seen},"
+            f" {w.ms_per('arm', 'frames'):.2f} ms a frame, {self._arm.rebuilds} ray grids"
+            f" ({self._arm.last_ms:.1f} ms the last); forgot {int(c['arm_forgotten'])} voxels"
+            f" ({w.ms_per('forget', 'frames'):.2f} ms a frame); joints config"
+            f" {int(c['arm_config'])}, topic {int(c['arm_topic'])}, stale {int(c['arm_stale'])}"
+            f" ({self._arm_topic} heard {self._joints.heard});"
+            f" {self._arm_note or 'config/arm.json not read yet'}{inside}"
         )
 
     def _tof_line(self, w: Window) -> str:

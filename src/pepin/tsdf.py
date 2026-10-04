@@ -523,6 +523,10 @@ class Tsdf:
         pts = np.vstack([pose.translation, corners @ pose.rotation.T + pose.translation])
         return self.index_box(pts.min(axis=0), pts.max(axis=0))
 
+    def centres(self, box: tuple[slice, slice, slice]) -> Float32:
+        """The map-frame centres (n, 3) of the voxels of ``box``, in its C order."""
+        return self._centres(box)
+
     def _centres(self, box: tuple[slice, slice, slice]) -> Float32:
         s = self.spec
         ix, iy, iz = np.mgrid[box[0], box[1], box[2]]
