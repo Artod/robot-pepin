@@ -541,7 +541,10 @@ class VioLost:
     Three rules, each counted (vio.md section 4): (a) the composed base speed disagrees with the
     wheels by more than ``lost_speed_m_s`` for ``lost_s`` while the board does not say rest; (b)
     it moves faster than ``rest_speed_m_s`` while ``/zupt`` (wheels, gyro and command witnessed)
-    says rest; (c) fewer than ``min_features`` tracked. Times are the receiving node's clock."""
+    says rest; (c) fewer than ``min_features`` features in OpenVINS's last update for ``lost_s``
+    while the base moves (``/zupt`` silent), never at rest: at rest no track ends, so the MSCKF
+    update has none (0 of 300 poses on 2026-10-04 with the head still), and a still cart is not
+    lost for seeing nothing new. Times are the receiving node's clock."""
 
     def __init__(
         self,
@@ -558,6 +561,7 @@ class VioLost:
         self._zupt: float | None = None
         self._features: tuple[float, int] | None = None
         self._disagree_since: float | None = None
+        self._few_since: float | None = None  # since when few features AND the base moving
         self.counts = {"wheels": 0, "rest": 0, "features": 0}
         self.last: str | None = None
         self._was_lost = False
@@ -571,8 +575,14 @@ class VioLost:
         self._zupt = now
 
     def features(self, now: float, count: int) -> None:
-        """How many features the VIO tracked in its last update."""
+        """How many features the VIO used in its last update (the node sums OpenVINS's MSCKF and
+        SLAM features)."""
         self._features = (now, count)
+
+    @property
+    def feature_count(self) -> int | None:
+        """The last count heard, for the report line."""
+        return None if self._features is None else self._features[1]
 
     def check(self, now: float, vio_speed_m_s: float) -> str | None:
         """Why the VIO is lost now, or ``None``; a new episode is counted under its rule."""
@@ -585,14 +595,26 @@ class VioLost:
 
     def _reason(self, now: float, speed: float) -> tuple[str | None, str | None]:
         features = self._features
-        if (
+        at_rest = self._zupt is not None and now - self._zupt <= ZUPT_FRESH_S
+        few = (
             self.min_features > 0
             and features is not None
             and now - features[0] <= WITNESS_FRESH_S
             and features[1] < self.min_features
-        ):
-            return f"{features[1]} features tracked (under {self.min_features})", "features"
-        if self._zupt is not None and now - self._zupt <= ZUPT_FRESH_S:
+        )
+        if few and not at_rest:
+            if self._few_since is None:
+                self._few_since = now
+            if now - self._few_since >= self.lost_s:
+                assert features is not None
+                return (
+                    f"{features[1]} features (under {self.min_features}) for"
+                    f" {now - self._few_since:.1f} s while moving",
+                    "features",
+                )
+        else:
+            self._few_since = None
+        if at_rest:
             self._disagree_since = None
             if speed > self.rest_speed_m_s:
                 return f"moving at {speed:.2f} m/s while /zupt says rest", "rest"

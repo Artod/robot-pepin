@@ -19,6 +19,7 @@ from pepin_bringup.visual_odometry import (  # noqa: E402
     VIO_POINTS_TOPIC,
     VIO_POSE_TOPIC,
     VIO_RESTART_SERVICE,
+    VIO_SLAM_POINTS_TOPIC,
     VO_TOPIC,
     WHEELS_TOPIC,
     ZUPT_TOPIC,
@@ -376,4 +377,34 @@ def test_the_report_says_latency_whether_the_ekf_reads_and_where_its_odom_stands
     assert "/vo read by ekf_filter_node: yes (2 subscriber nodes)" in line
     assert "EKF odom -> base_link (0.012, -0.003, 0.0 deg)" in line
     assert "0 rejected by the guard" in line and "covariance vio" in line
+    node.close()
+
+
+def _cloud(n: int) -> Any:
+    msg = ros_stubs.PointCloud2()
+    msg.width, msg.height = n, 1
+    return msg
+
+
+def test_a_still_cart_with_no_msckf_features_still_reaches_the_ekf(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The live static test of 2026-10-04: head still, /ov_msckf/points_msckf empty every update,
+    300 of 300 poses withheld as lost. Under /zupt nothing is lost for seeing no features; the
+    report sums the two clouds."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node()
+    assert VIO_SLAM_POINTS_TOPIC in node.subs
+    for i in range(30):  # 3 s at rest, 0 MSCKF features, a few SLAM ones
+        clock.now += 0.1
+        _wheels(node, 0.0)
+        node.subs[ZUPT_TOPIC][1](ros_stubs.Odometry())
+        node.subs[VIO_POINTS_TOPIC][1](_cloud(0))
+        node.subs[VIO_SLAM_POINTS_TOPIC][1](_cloud(7))
+        _feed(node, 0.1 * i, np.eye(4), 0.0)
+    assert len(node.pubs[VO_TOPIC].sent) == 30, "nothing withheld at rest"
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "features 7 (msckf 0 + slam 7)" in line and "features 0)" in line
     node.close()

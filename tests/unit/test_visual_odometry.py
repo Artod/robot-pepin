@@ -425,7 +425,8 @@ def test_the_vio_health_counts_a_step_of_its_covariance_as_a_reinit() -> None:
 
 def test_the_three_lost_rules() -> None:
     """(a) 0.25 m/s against wheels at 0.05 for a second, the board not at rest; (b) creeping at
-    0.05 m/s while /zupt says rest; (c) 12 features. Each episode is counted once."""
+    0.05 m/s while /zupt says rest; (c) 12 features for a second while moving. Each episode is
+    counted once."""
     from pepin.visual_odometry import VioLost
 
     lost = VioLost(lost_speed_m_s=0.1, lost_s=1.0, min_features=20)
@@ -446,8 +447,10 @@ def test_the_three_lost_rules() -> None:
     assert rest is not None and "/zupt" in rest
     assert lost.check(2.1, 0.01) is None, "still at rest, and the VIO agrees"
     lost.features(3.0, 12)
-    few = lost.check(3.0, 0.0)
-    assert few is not None and "12 features" in few
+    assert lost.check(3.0, 0.0) is None, "few features have to last, as a disagreement does"
+    lost.features(4.0, 12)
+    few = lost.check(4.0, 0.0)
+    assert few is not None and "12 features" in few and "while moving" in few
     assert lost.counts == {"wheels": 1, "rest": 1, "features": 1}
     assert "lost 3 (wheels 1, rest 1, features 1)" in lost.report()
     silent = VioLost()
@@ -526,3 +529,26 @@ def test_the_guard_restarts_only_after_a_run_of_rejections_at_rest_and_not_in_a_
         off.wheels(0.1 * i, 0.0, 0.0)
         off.check(0.1 * i, (4.0, 0.0))
     assert off.restart_due(10.0) is None, "0 never restarts"
+
+
+def test_no_features_at_rest_is_not_lost_and_the_shortage_counts_from_the_first_motion() -> None:
+    """2026-10-04 live: the head still, OpenVINS's MSCKF update had 0 features (no track ends at
+    rest) and rule (c) withheld 300 of 300 poses. Under /zupt a shortage is never lost; when the
+    base starts moving the second it must last starts then, not when the count fell."""
+    from pepin.visual_odometry import VioLost
+
+    lost = VioLost(lost_s=1.0, min_features=20)
+    for i in range(50):  # 5 s at rest, the count 0 throughout
+        t = 0.1 * i
+        lost.zupt(t)
+        lost.features(t, 0)
+        assert lost.check(t, 0.0) is None
+    assert lost.counts["features"] == 0
+    for i in range(1, 10):  # the base moves (/zupt silent), still 0: under a second of motion
+        t = 4.9 + 0.1 * i
+        lost.features(t, 0)
+        assert lost.check(t, 0.0) is None, f"{t:.1f}: the shortage under motion is younger than 1 s"
+    lost.features(6.5, 0)
+    assert lost.check(6.5, 0.0) is not None and lost.counts["features"] == 1
+    lost.features(6.6, 45)
+    assert lost.check(6.6, 0.0) is None, "features back"

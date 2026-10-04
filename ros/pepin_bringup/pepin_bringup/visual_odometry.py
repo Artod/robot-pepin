@@ -47,7 +47,8 @@ only grows: it is read as a health signal, re-inits counted); under ``vio`` the 
 Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
 a base velocity over ``vio_max_speed_m_s``, or ``vio_wheel_diff_m_s`` from the wheels', is not
 sent), then the three lost rules of :class:`pepin.visual_odometry.VioLost` (the wheels' speed over
-time, motion under ``/zupt``, the feature count of ``/ov_msckf/points_msckf``); a refused sample
+time, motion under ``/zupt``, the features of ``/ov_msckf/points_msckf`` + ``points_slam`` short
+for ``vio_lost_s`` while the base moves, never at rest); a refused sample
 only re-anchors. OpenVINS never resets itself: after ``vio_restart_rejects`` guard rejections in
 a row with the wheels at rest for 2 s this node calls ``/vio/restart`` (pepin_bringup.vio_keeper in
 pepin-vio), logged once; by hand it is ``ros/laptop.sh vio kick``, at rest. The report line adds
@@ -101,7 +102,11 @@ REPORT_S = 30.0
 # starts stereo_odometry or rgbd_odometry beside it); vio: OpenVINS in its own container.
 VO_INPUTS = ("stereo", "depth", "vio")
 VIO_POSE_TOPIC = "/ov_msckf/poseimu"  # the IMU's pose in G per image update (not odomimu)
-VIO_POINTS_TOPIC = "/ov_msckf/points_msckf"  # the features of the last update: the count
+# The features of OpenVINS's last update, summed for lost rule (c): the MSCKF ones (tracks that
+# ended, none at rest) and the SLAM ones in its state (kept at rest); both come from one call per
+# update (ROS2Visualizer::publish_features).
+VIO_POINTS_TOPIC = "/ov_msckf/points_msckf"
+VIO_SLAM_POINTS_TOPIC = "/ov_msckf/points_slam"
 ZUPT_TOPIC = "/zupt"  # the board's zero-velocity update: published only while it says rest
 IMU_FRAME = "head_imu"  # camera_stream's static camera_optical -> head_imu (config/camera.json)
 BASE_FRAME = "base_link"
@@ -246,6 +251,7 @@ class VisualOdometry(Node):
         self._tf: TfLookup | None = None
         self._tf_failure: str | None = None
         self._restart: Any = None  # the /vio/restart client, made with the VIO's subscriptions
+        self._points: dict[str, int] = {}  # the latest feature count of each cloud (msckf, slam)
         self._last_vio: VoPose | None = None  # the previous composed pose, for the VIO's speed
         self._last_vio_xy: tuple[float, float] | None = None  # the last published, for its step
         self._local = local
@@ -287,7 +293,12 @@ class VisualOdometry(Node):
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
         local = self._local
         self.create_subscription(PoseWithCovarianceStamped, VIO_POSE_TOPIC, self._on_vio, local)
-        self.create_subscription(PointCloud2, VIO_POINTS_TOPIC, self._on_points, local)
+        self.create_subscription(
+            PointCloud2, VIO_POINTS_TOPIC, lambda m: self._on_points("msckf", m), local
+        )
+        self.create_subscription(
+            PointCloud2, VIO_SLAM_POINTS_TOPIC, lambda m: self._on_points("slam", m), local
+        )
         self.create_subscription(
             Odometry,
             ZUPT_TOPIC,
@@ -550,9 +561,11 @@ class VisualOdometry(Node):
             self._track.anchor(None)
         self._rest.restart()
 
-    def _on_points(self, msg: PointCloud2) -> None:
-        """The features of OpenVINS's last update: their count is lost rule (c)."""
-        self._vio_lost.features(time.monotonic(), int(msg.width) * int(msg.height))
+    def _on_points(self, kind: str, msg: PointCloud2) -> None:
+        """One of OpenVINS's two feature clouds of its last update: the sum of the latest of
+        each is lost rule (c)'s count."""
+        self._points[kind] = int(msg.width) * int(msg.height)
+        self._vio_lost.features(time.monotonic(), sum(self._points.values()))
 
     def _on_zupt(self, _msg: Odometry) -> None:
         """The board says the cart is at rest (wheels, gyro and command witnessed)."""
@@ -628,9 +641,17 @@ class VisualOdometry(Node):
             f" vio: {counts['rejected']} rejected by the guard, {self._guard.report()};"
             f" covariance {self._covariance_mode()}; reinit {counts['vio_reinit']}"
             f" ({self._vio_health.reinits} since the start), {counts['vio_lost']} poses withheld"
-            f" as lost, {self._vio_lost.report()}, tf_miss {counts['tf_miss']}{tf}; kick at rest:"
+            f" as lost, {self._vio_lost.report()}, features {self._features_text()},"
+            f" tf_miss {counts['tf_miss']}{tf}; kick at rest:"
             " ros/laptop.sh vio kick;"
         )
+
+    def _features_text(self) -> str:
+        """The last feature counts: ``57 (msckf 0 + slam 57)``, or ``none heard``."""
+        if not self._points:
+            return "none heard"
+        parts = " + ".join(f"{k} {n}" for k, n in sorted(self._points.items()))
+        return f"{sum(self._points.values())} ({parts})"
 
     def _ekf_text(self) -> str:
         """Whether the board's EKF subscribes /vo, from the graph (rmw_zenoh carries the remote
