@@ -515,6 +515,7 @@ class HeadSettings:
     bucket_s: float = 1.0
     window_s: float = 120.0
     brain_lease: bool = True
+    resting: str = "neutral"
 
     @classmethod
     def from_json(cls, path: str | Path) -> HeadSettings:
@@ -537,6 +538,7 @@ class HeadSettings:
             bucket_s=float(data.get("clock", {}).get("bucket_s", 1.0)),
             window_s=float(data.get("clock", {}).get("window_s", 120.0)),
             brain_lease=bool(data.get("brain_lease", True)),
+            resting=str(data.get("resting_expression", "neutral")),
         )
 
 
@@ -782,7 +784,7 @@ class HeadService:
     def _on_status(self, status: HeadStatus, received: float) -> None:
         self._esp_status, self._esp_status_at = status, received
         showing = self.arbiter.showing(received)
-        wanted = self._table.id_of(showing.name if showing else "neutral")
+        wanted = self._table.id_of(showing.name if showing else self._settings.resting)
         # A config or a face the ESP32 does not show: a reboot the micros did not reveal (one
         # within a second of the last), or a frame lost while it booted. Asleep or on an info
         # screen it shows something else on purpose.
@@ -872,7 +874,7 @@ class HeadService:
         return {
             "type": "ack",
             "cmd": cmd,
-            "showing": showing.name if showing else "neutral",
+            "showing": showing.name if showing else self._settings.resting,
             "by": showing.source if showing else None,
         }
 
@@ -927,7 +929,7 @@ class HeadService:
 
     def _tick_face(self, now: float) -> None:
         showing = self.arbiter.showing(now)
-        name = showing.name if showing else "neutral"
+        name = showing.name if showing else self._settings.resting
         intensity = showing.intensity if showing else 1.0
         if (name, intensity) == self._sent_face or self._link is None:
             return
@@ -963,7 +965,7 @@ class HeadService:
             "clock": self.clock_map.state(),
             "config": asdict(self._config),
             "brightness": self._brightness,
-            "showing": showing.name if showing else "neutral",
+            "showing": showing.name if showing else self._settings.resting,
             "by": showing.source if showing else None,
             "sources": self.arbiter.sources(),
             "leases": self.leases.alive(now),

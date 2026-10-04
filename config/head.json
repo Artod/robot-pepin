@@ -20,5 +20,7 @@
     "window_s": 120.0,
     "note": "the clock map's lower envelope, against CLOCK_MONOTONIC_RAW (chrony does not slew it, so the skew is the crystal's alone): the smallest (receive time - ESP micros - the frame's known wire and read time) per bucket_s of ESP time, a line through the last window_s of them (offset and skew), less half the smallest ping round trip; samples are carried to CLOCK_MONOTONIC at output"
   },
-  "brain_lease": true
+  "brain_lease": true,
+  "resting_expression": "smile",
+  "resting_note": "what the face shows when nobody asks for anything: Pepin is a kind robot (Artem, 2026-10-04)"
 }
