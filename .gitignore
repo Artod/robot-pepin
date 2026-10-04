@@ -46,6 +46,8 @@ ros/maps/*.world.yaml
 ros/maps/world_*.npz.*
 ros/maps/*.world.npz.*
 ros/maps/depth_law.json.*
+# OpenVINS's and Kalibr's files, written by ros/tools/vio_config.py at every ros/laptop.sh vio
+ros/maps/vio/
 
 # The replay stand's engine build, prepared drives and snapshots (ros/replay.sh)
 ros/replay/.cache/

@@ -8,8 +8,9 @@ per image update), which pepin_bringup.visual_odometry reads under ``vo_input:=v
 (``ros/laptop.sh vslam --vo-vio``) and turns into ``/vo`` for the board's EKF. Nothing here talks
 to the EKF directly, and nothing here owns a transform.
 
-The config is generated, never edited: ``ros/tools/vio_config.py`` writes estimator_config.yaml
-and the two Kalibr chains into ros/maps/vio (``/maps/vio`` here) from
+The config is generated, never edited: ``ros/tools/vio_config.py`` (run by ``ros/laptop.sh vio``
+inside this image at every start) writes estimator_config.yaml and the two Kalibr chains into
+ros/maps/vio (``/maps/vio`` here) from
 config/stereo_calibration.json, config/camera.json's head_imu block and config/head_imu.json. The
 node is respawned when it dies; it does not reset itself when it diverges (the relay marks it
 lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: its static initialisation needs
@@ -33,9 +34,8 @@ def _describe(context):  # type: ignore[no-untyped-def]
     if not os.path.isfile(config):
         return [
             LogInfo(
-                msg=f"vio NOT started: {config} does not exist. Write it with"
-                " `uv run python ros/tools/vio_config.py` (needs config/camera.json's head_imu, or"
-                " --nominal from the axis photo) and run ros/laptop.sh vio again"
+                msg=f"vio NOT started: {config} does not exist. ros/laptop.sh vio writes it (with"
+                " ros/tools/vio_config.py, which needs config/camera.json's head_imu)"
             )
         ]
     shas = Path("/opt/openvins/SHAS")

@@ -29,7 +29,8 @@
 #                            container) instead of rtabmap's: no odometry node runs in pepin-vslam
 #   ros/laptop.sh vio        start (or restart) OpenVINS in pepin-vio on pepin-laptop:vio
 #                            (ros/laptop-build.sh vio): the head IMU (/head/imu) and the two eyes,
-#                            config generated into ros/maps/vio by ros/tools/vio_config.py;
+#                            config written into ros/maps/vio by ros/tools/vio_config.py inside
+#                            the image at every start (PEPIN_VIO_CONFIG_ARGS: its options);
 #                            vio down | logs | kick (kick only at rest: OpenVINS inits from stillness)
 #   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
 #                            config/camera.json: for a rig without neck servos. By default the board's
@@ -263,7 +264,7 @@ case "${1:-}" in
         # THE VISUAL-INERTIAL ODOMETRY (vio.md): OpenVINS in its own container, pepin-vio on
         # pepin-laptop:vio (ros/laptop-build.sh vio), behind this side's router like vslam; the
         # relay reads it under ros/laptop.sh vslam --vo-vio. Its config is generated into
-        # ros/maps/vio by ros/tools/vio_config.py and never edited.
+        # ros/maps/vio by ros/tools/vio_config.py (below, at every start) and never edited.
         #   ros/laptop.sh vio [up]   start (or restart) it
         #   ros/laptop.sh vio down   stop it; vio logs follows it
         #   ros/laptop.sh vio kick   restart the node inside (the launch respawns it): AT REST
@@ -282,8 +283,15 @@ case "${1:-}" in
         start_check
         docker image inspect pepin-laptop:vio >/dev/null 2>&1 \
             || { echo "no pepin-laptop:vio here: ros/laptop-build.sh vio first (10-20 min)"; exit 2; }
-        [ -f "$HERE/maps/vio/estimator_config.yaml" ] \
-            || { echo "no ros/maps/vio/estimator_config.yaml: uv run python ros/tools/vio_config.py first"; exit 2; }
+        # The config is written from the repo's numbers at every start, INSIDE the image: the
+        # rectified focal is OpenCV's stereoRectify's and moves with its version (494.22 px under
+        # the image's 4.6, camera_stream's, against 495.08 under uv's 4.13, 2026-10-04).
+        # PEPIN_VIO_CONFIG_ARGS passes vio_config.py's options (--calib-extrinsics for a check
+        # session that lets OpenVINS refine the camera-IMU transform).
+        # shellcheck disable=SC2086
+        docker run --rm --network none "${MOUNTS[@]}" --entrypoint python3 pepin-laptop:vio \
+            /tools/vio_config.py ${PEPIN_VIO_CONFIG_ARGS:-} | tail -1 \
+            || { echo "ros/tools/vio_config.py failed in pepin-laptop:vio"; exit 2; }
         pepin_remove_container pepin-vio
         zrouter_up
         # The image's OpenVINS overlay (/ws_vio) is sourced after the entrypoint's workspace, so

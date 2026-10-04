@@ -7,7 +7,11 @@ from there and never edited by hand:
 
 * config/stereo_calibration.json -> the RECTIFIED pinhole both eyes share (the pictures every
   consumer of /camera/image sees: fx, fy, cx, cy of the rectified P, no distortion, 800x600) and
-  the baseline (cam1 sits +baseline along cam0's optical x);
+  the baseline (cam1 sits +baseline along cam0's optical x). That P is OpenCV's stereoRectify at
+  alpha 0, whose focal moves with OpenCV's version: 494.22 px under the laptop image's 4.6 (where
+  camera_stream rectifies the pictures) and 495.08 under uv's 4.13 (2026-10-04), so
+  ``ros/laptop.sh vio`` writes the files inside its container, with camera_stream's OpenCV, at
+  every start; the version is printed into the files;
 * config/camera.json's stereo.head_imu -> Kalibr's T_cam_imu (a point in the IMU's axes into the
   rectified LEFT eye's optical frame) and the time shift; OpenVINS wants T_imu_cam, its INVERSE;
 * config/head_imu.json -> the IMU's rate on /head/imu and its noise densities.
@@ -42,9 +46,15 @@ import numpy as np
 import numpy.typing as npt
 
 Array = npt.NDArray[np.float64]
-REPO = Path(__file__).resolve().parents[2]
+HERE = Path(__file__).resolve()
+# The same file runs in a laptop container (ros/laptop.sh vio does), where ros/tools is /tools and
+# the repo's pieces sit at ros/laptop.sh's mounts: config/ at /ws/config, src/pepin at
+# /ws/pepin_src/pepin, ros/maps at /maps.
+IN_CONTAINER = HERE.parent == Path("/tools")
+REPO = Path("/ws") if IN_CONTAINER else HERE.parents[2]
+SRC = REPO / "pepin_src" if IN_CONTAINER else REPO / "src"
 CONFIG = REPO / "config"
-DEFAULT_OUT = REPO / "ros/maps/vio"
+DEFAULT_OUT = Path("/maps/vio") if IN_CONTAINER else REPO / "ros/maps/vio"
 LEFT_TOPIC = "/camera/image"
 RIGHT_TOPIC = "/camera/right/image"
 IMU_TOPIC = "/head/imu"
@@ -127,7 +137,7 @@ def load_rig(
 ) -> Rig:
     """The rig from the repo's config files; ``nominal`` replaces a missing head_imu block, and
     without ``need_imu`` (Kalibr's inputs, which are what measures it) none is needed."""
-    sys.path.insert(0, str(REPO / "src"))
+    sys.path.insert(0, str(SRC))
     from pepin.camera import CameraConfig
     from pepin.stereo import Rectifier, StereoCalibration
 
@@ -164,9 +174,15 @@ def load_rig(
         imu_source=source,
         calibration_source=(
             f"config/stereo_calibration.json: {calibration.method} {calibration.date}, rms"
-            f" {calibration.rms_px:.3f} px, rectified"
+            f" {calibration.rms_px:.3f} px, rectified by OpenCV {_opencv_version()}"
         ),
     )
+
+
+def _opencv_version() -> str:
+    import cv2
+
+    return str(cv2.__version__)
 
 
 def _matrix(rows: Array, indent: str = "    ") -> str:
@@ -419,7 +435,7 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(nominal_block(*nominal), indent=2))
         return 0
     rig = load_rig(args.config, args.camera, nominal, need_imu=not args.kalibr_only)
-    sys.path.insert(0, str(REPO / "src"))
+    sys.path.insert(0, str(SRC))
     from pepin.head_imu import HeadImuConfig
 
     head = HeadImuConfig.load(args.config / "head_imu.json")
