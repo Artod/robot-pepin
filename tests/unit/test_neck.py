@@ -248,12 +248,12 @@ def test_the_reference_pose_commands_the_reference_ticks() -> None:
 
 def test_the_head_s_reach_is_its_tick_limits_in_angles() -> None:
     """The file's limits through the model: about 156 deg either way, 20 up to 92 down (the
-    'pan about +-156, tilt 22 up .. 63 down since head.max 2760' of the brain plan)."""
+    'pan about +-156, tilt 22 up .. 65.6 down since head.max 2787' of the brain plan)."""
     (pan_lo, pan_hi), (pitch_lo, pitch_hi) = angle_limits(NeckConfig.from_json(NECK))
     assert math.degrees(pan_lo) == pytest.approx(-156.7, abs=0.5)
     assert math.degrees(pan_hi) == pytest.approx(155.7, abs=0.5)
     assert math.degrees(pitch_lo) == pytest.approx(-19.9, abs=0.5)
-    assert math.degrees(pitch_hi) == pytest.approx(63.3, abs=0.5)  # head.max 2760 since 2026-09-30
+    assert math.degrees(pitch_hi) == pytest.approx(65.6, abs=0.5)  # head.max 2787 since 2026-10-04
 
 
 def test_no_angle_is_commanded_while_the_reference_is_unread() -> None:

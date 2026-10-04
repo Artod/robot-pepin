@@ -746,7 +746,7 @@ def test_the_tilt_ramps_under_its_own_ceiling_the_pan_at_the_full_one() -> None:
     ("message", "words"),
     [
         ({"pan_rad": 3.0, "tilt_rad": 0.4}, "outside its limits 257..3812"),  # 172 deg
-        ({"pan_rad": 0.0, "tilt_rad": -1.0}, "outside its limits 1814..2760"),  # 57 deg up
+        ({"pan_rad": 0.0, "tilt_rad": -1.0}, "outside its limits 1814..2787"),  # 57 deg up
         ({"pan_rad": 0.0}, "bad target: tilt_rad is required"),
         ({"pan_rad": "left", "tilt_rad": 0.4}, "bad target: pan_rad must be a number"),
         ({"pan_rad": True, "tilt_rad": 0.4}, "bad target: pan_rad must be a number"),
@@ -892,7 +892,7 @@ def test_a_move_target_outside_the_configured_limits_is_refused_not_clamped() ->
     assert reply is not None and reply["reached"] is False
     assert "257..3812" in reply["error"] and "4000" in reply["error"]
     low = core.command({"cmd": "neck_goto", "tilt_ticks": 1000}, now=1.1)
-    assert low is not None and "1814..2760" in low["error"]
+    assert low is not None and "1814..2787" in low["error"]
     assert core.command({"cmd": "neck_goto"}, now=1.2) == {
         "type": "neck_goto",
         "reached": False,
@@ -1116,11 +1116,11 @@ def test_shift_makes_the_jog_slow_and_the_rate_changes_live() -> None:
 
 
 def test_the_goal_never_passes_the_configured_limits() -> None:
-    """Tilting down for ten seconds would be 5920 ticks; the head stops at head.max — 2760 since
-    2026-09-30, the camera's own stop is at 2783."""
+    """Tilting down for ten seconds would be 5920 ticks; the head stops at head.max — 2787 since
+    2026-10-04, the head's own stop with the IMU and the display on it."""
     core, bus = make_neck_core()
     run_jog(core, bus, seconds=10.0, tilt=1)
-    assert goals(bus)["head"] == NECK_CFG.tilt.max_ticks == 2760
+    assert goals(bus)["head"] == NECK_CFG.tilt.max_ticks == 2787
     end = run_jog(core, bus, seconds=10.0, tilt=-1, start=11.0)
     assert goals(bus)["head"] == NECK_CFG.tilt.min_ticks == 1814
     run_jog(core, bus, seconds=10.0, pan=-1, start=end)  # right: ticks rise towards pan max
