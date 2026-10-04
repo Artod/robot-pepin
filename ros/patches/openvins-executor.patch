@@ -1,0 +1,59 @@
+diff --git a/ov_msckf/src/ros/ROS2Visualizer.cpp b/ov_msckf/src/ros/ROS2Visualizer.cpp
+index 48dd83a..292e7b7 100644
+--- a/ov_msckf/src/ros/ROS2Visualizer.cpp
++++ b/ov_msckf/src/ros/ROS2Visualizer.cpp
+@@ -486,7 +486,9 @@ void ROS2Visualizer::callback_inertial(const sensor_msgs::msg::Imu::SharedPtr ms
+   if (thread_update_running)
+     return;
+   thread_update_running = true;
+-  std::thread thread([&] {
++  // The IMU message by value: by reference, a detached update thread read this callback's stack
++  // after it had returned.
++  std::thread thread([this, message] {
+     // Lock on the queue (prevents new images from appending)
+     std::lock_guard<std::mutex> lck(camera_queue_mtx);
+ 
+diff --git a/ov_msckf/src/run_subscribe_msckf.cpp b/ov_msckf/src/run_subscribe_msckf.cpp
+index 3d5f4b9..21c7786 100644
+--- a/ov_msckf/src/run_subscribe_msckf.cpp
++++ b/ov_msckf/src/run_subscribe_msckf.cpp
+@@ -83,6 +83,20 @@ int main(int argc, char **argv) {
+   VioManagerOptions params;
+   params.print_and_load(parser);
+   params.use_multi_threading_subs = true;
++#if ROS_AVAILABLE == 2
++  // The update thread and the executor are parameters: upstream (multi_threading_subs true, executor
++  // "multi") detaches an update thread per IMU message and spins a MultiThreadedExecutor.
++  bool multi_threading_subs = true;
++  node->get_parameter_or<bool>("multi_threading_subs", multi_threading_subs, true);
++  params.use_multi_threading_subs = multi_threading_subs;
++  std::string executor_kind = "multi";
++  node->get_parameter_or<std::string>("executor", executor_kind, std::string("multi"));
++  if (executor_kind != "multi" && executor_kind != "single") {
++    PRINT_ERROR(RED "executor must be multi or single, not %s\n" RESET, executor_kind.c_str());
++    std::exit(EXIT_FAILURE);
++  }
++  PRINT_INFO("executor %s, update thread %s\n", executor_kind.c_str(), multi_threading_subs ? "detached" : "joined");
++#endif
+   sys = std::make_shared<VioManager>(params);
+ #if ROS_AVAILABLE == 1
+   viz = std::make_shared<ROS1Visualizer>(nh, sys);
+@@ -107,9 +121,15 @@ int main(int argc, char **argv) {
+   ros::waitForShutdown();
+ #elif ROS_AVAILABLE == 2
+   // rclcpp::spin(node);
+-  rclcpp::executors::MultiThreadedExecutor executor;
+-  executor.add_node(node);
+-  executor.spin();
++  if (executor_kind == "single") {
++    rclcpp::executors::SingleThreadedExecutor executor;
++    executor.add_node(node);
++    executor.spin();
++  } else {
++    rclcpp::executors::MultiThreadedExecutor executor;
++    executor.add_node(node);
++    executor.spin();
++  }
+ #endif
+ 
+   // Final visualization

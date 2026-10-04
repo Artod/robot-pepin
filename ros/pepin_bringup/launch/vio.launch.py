@@ -15,6 +15,10 @@ config/stereo_calibration.json, config/camera.json's head_imu block and config/h
 node is respawned when it dies; it does not reset itself when it diverges (the relay marks it
 lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: its static initialisation needs
 stillness, then motion.
+
+``executor`` (default single) is run_subscribe_msckf's executor
+(ros/patches/openvins-executor.patch, built in by Dockerfile.vio's EXECUTOR=1): upstream's multi
+froze for good seconds after init on rmw_zenoh (2026-10-04); an EXECUTOR=0 image ignores it.
 """
 
 import os
@@ -27,6 +31,7 @@ from launch_ros.actions import Node
 
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
 DEFAULT_CONFIG = "/maps/vio/estimator_config.yaml"
+EXECUTORS = ("single", "multi")
 
 
 def _describe(context):  # type: ignore[no-untyped-def]
@@ -40,6 +45,9 @@ def _describe(context):  # type: ignore[no-untyped-def]
         ]
     shas = Path("/opt/openvins/SHAS")
     pinned = shas.read_text().strip().replace("\n", "; ") if shas.is_file() else "unknown"
+    executor = LaunchConfiguration("executor").perform(context).strip()
+    if executor not in EXECUTORS:
+        raise ValueError(f"executor {executor!r}: one of {', '.join(EXECUTORS)}")
     node = Node(
         package="ov_msckf",
         executable="run_subscribe_msckf",
@@ -60,13 +68,16 @@ def _describe(context):  # type: ignore[no-untyped-def]
                 # board's included: off, so nothing here owns a transform
                 "publish_global_to_imu_tf": False,
                 "publish_calibration_tf": False,
+                "executor": executor,
+                "multi_threading_subs": True,
             }
         ],
         **RESPAWN,
     )
     return [
         LogInfo(
-            msg=f"vio up: OpenVINS ({pinned}) on {config}: /camera/image + /camera/right/image +"
+            msg=f"vio up: OpenVINS ({pinned}, executor {executor}) on {config}: /camera/image +"
+            " /camera/right/image +"
             " /head/imu -> /ov_msckf/poseimu for visual_odometry (vo_input vio)"
         ),
         node,
@@ -78,6 +89,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("config", default_value=DEFAULT_CONFIG),
             DeclareLaunchArgument("verbosity", default_value="INFO"),
+            DeclareLaunchArgument("executor", default_value="single"),
             OpaqueFunction(function=_describe),
         ]
     )

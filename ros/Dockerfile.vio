@@ -18,23 +18,39 @@
 # MASK=1 applies patches/openvins-frame-mask.patch (the left camera's per-frame mask from
 # /camera/mask, pepin_bringup.body_mask): off by default until the share of frames with the body
 # in view is measured (vio.md M4).
+#
+# EXECUTOR=1 (default) applies patches/openvins-executor.patch: run_subscribe_msckf's executor and
+# update thread become the parameters executor (multi|single) and multi_threading_subs (upstream:
+# multi, true), and the IMU callback hands its message to the update thread by value (upstream
+# captured the stack variable by reference into a detached thread). vio.launch.py picks single:
+# upstream froze for good 4 of 4 runs live and 2 of 5 on the recorded run4 replayed through a
+# zenoh router (2026-10-04), every executor thread idle and one asleep in rmw_wait with no
+# timeout while the data kept arriving. The suspected race (from the sources, not isolated):
+# rclcpp 28 leaves a busy callback group's subscriptions out of the wait set it rebuilds, and
+# rmw_zenoh 0.2.10's rmw_wait clears its trigger flag without the lock after attaching the guard
+# conditions, so the one wake-up that could bring them back can be lost. A single thread never
+# rebuilds while a callback runs. EXECUTOR=0 builds upstream's code.
 ARG BASE=pepin-laptop:xfeat
 FROM ${BASE}
 ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b
 ARG OV_PR500=0bd027a997f3ca911b3df504d20b00b60f371b31
 ARG MASK=0
+ARG EXECUTOR=1
 # Few jobs on purpose: the Docker VM also runs the live stack (Dockerfile.xfeat's reasoning).
 ARG JOBS=2
 COPY patches/openvins-frame-mask.patch /opt/openvins/patches/openvins-frame-mask.patch
+COPY patches/openvins-executor.patch /opt/openvins/patches/openvins-executor.patch
 RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
     && cd /ws_vio/src/open_vins \
     && git fetch -q origin pull/500/head \
     && git checkout -q "$OV_PR500" \
     && git merge-base --is-ancestor "$OV_MASTER" HEAD \
     && if [ "$MASK" = 1 ]; then git apply /opt/openvins/patches/openvins-frame-mask.patch; fi \
+    && if [ "$EXECUTOR" = 1 ]; then git apply /opt/openvins/patches/openvins-executor.patch; fi \
     && { echo "open_vins master $OV_MASTER (2025-11-30)"; \
          echo "PR #500 head $OV_PR500 (Jazzy/24.04, Ceres 2.2 fix)"; \
          echo "frame mask patch: $MASK"; \
+         echo "executor patch: $EXECUTOR"; \
          echo "built tree $(git rev-parse HEAD)$(git diff --quiet || echo ' + patch')"; } \
        > /opt/openvins/SHAS \
     && rm -rf .git
