@@ -493,6 +493,22 @@ def write_calibration(path: str | Path, result: Calibration, camera: str = "over
     tmp.replace(file)
 
 
+def write_head_imu(path: str | Path, block: dict[str, Any], camera: str = "stereo") -> None:
+    """Put ``block`` into ``config/camera.json`` as ``<camera>.head_imu`` (refused unless
+    :func:`head_imu_transform` accepts it); every other byte of the file stays as it was: the
+    file is written as it is kept, two-space indent and non-ASCII as ``\\u`` escapes, through a
+    temporary file next to it."""
+    head_imu_transform(block)
+    file = Path(path)
+    data = json.loads(file.read_text())
+    if camera not in data or "rig" not in data[camera]:
+        raise ValueError(f"{camera} is not a stereo block of {file}")
+    data[camera]["head_imu"] = block
+    tmp = file.with_suffix(file.suffix + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=True) + "\n")
+    tmp.replace(file)
+
+
 def mount_transform(cfg: CameraConfig) -> tuple[float, float, float, float, float, float]:
     """``base_link -> camera_link`` as (x, y, z, roll, pitch, yaw), metres and radians; the link
     frame looks along +x, so a downward tilt of the neck is a positive pitch."""

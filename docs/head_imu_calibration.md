@@ -59,7 +59,7 @@ Print one of the AprilGrids at **100 % scale** ("actual size", no fit-to-page):
 | File | Paper | Tag size as drawn |
 | --- | --- | --- |
 | `docs/aprilgrid/aprilgrid_6x6_34mm_A3.pdf` | A3 | 34 mm |
-| `docs/aprilgrid/aprilgrid_6x6_24mm_A4.pdf` | A4 (hand-held at 0.4-0.7 m) | 24 mm |
+| `docs/aprilgrid/aprilgrid_6x6_24mm_A4.pdf` | A4 (on a wall 0.25-0.30 m from the lens) | 24 mm |
 
 Both are Kalibr's own `kalibr_create_target_pdf --type apriltag --nx 6 --ny 6 --tspace 0.3`
 output (tag family 36h11). Glue the print flat on foam board, then **measure one tag's black square
@@ -76,20 +76,40 @@ Both procedures need the capture stamps and a short exposure, or the time offset
 ```bash
 ros/flags.sh set camera_stream camera_stamp grab      # ustreamer's capture stamp, not its send time
 ros/exposure.sh capped 8                               # on the board; ros/exposure.sh auto afterwards
-ros2 bag record /camera/image /camera/right/image /head/imu    # 60-90 s per run
 ```
 
-**Procedure D (first, twice), on the robot.** The grid on a chair 0.8-1.0 m ahead, its centre about
-0.8 m up (the lens looks 23.8 deg down from 1.2 m), good light, nothing else moving in view. Then:
+**Procedure D (first, twice), on the robot.** The grid taped flat to a wall at camera height
+(about 1.2 m), the cart facing it with the lens 0.25-0.30 m away (the A4 print's 25 mm tags are
+then 40-50 px, the grid 35-40 deg of the 78 x 62 deg picture), good light, nothing else moving in
+view. Then:
 
 ```bash
-uv run python ros/tools/neck_dance.py                # the views, nothing moves
-uv run python ros/tools/neck_dance.py --move         # the gaze arbiter: pans +-45, tilts 20 up..60 down
+ros/calib_record.sh --check            # one snapshot through Kalibr's own detector (pepin-kalibr):
+                                       # tags found of 36, tag side in px, the --centre/--distance
+ros/calib_record.sh --dry-run --centre 0.1 -3.9 --distance 0.28   # the checks and the plan
+ros/calib_record.sh --centre 0.1 -3.9 --distance 0.28             # the bag and the dance (60-90 s)
 ```
 
-followed by four +-0.3 m shuttles at 0.1 m/s and four +-30 deg pivots at 0.3 rad/s (teleop or
-`ros/goto.sh`). The two runs must agree within 0.5 deg of rotation, 5 mm of translation and 2 ms of
-time offset.
+`--check` cuts and rectifies one ustreamer snapshot as camera_stream does and runs Kalibr's
+AprilGrid detector on it (`ros/tools/kalibr_detect.py`, about 3 s of docker): ready when Kalibr
+accepts it with at least 30 of 36 tags whole and tags of 20 px or more. It prints the head pose
+that puts the grid at the picture's centre (`--centre PAN TILT`; with the board at camera height
+the head looks about 4 deg up) and the lens-to-grid distance. Kalibr draws its tags with a 2-bit
+black border, so apriltag3 detectors (pupil-apriltags, cv2.aruco with its defaults) find none of
+them; cv2.aruco does with `markerBorderBits = 2`.
+
+`ros/calib_record.sh` refuses unless `camera_stamp` is `grab` and warns when the exposure is not
+capped. It records `/camera/image`, `/camera/right/image` and `/head/imu` in `pepin-vslam` (MCAP,
+reliable QoS from `ros/params/calib_qos.yaml`) into `ros/maps/rec/calib_<UTC>Z/`, and drives the
+head through `ros/tools/neck_dance.py`: around the centre, the largest pans and tilts (at most
++-20 and +-15 deg) at which the whole grid stays in the picture with a degree to spare (0.28 m:
+about +-17 deg of pan and +-10 of tilt), the centre, pan alone, tilt alone, the diagonals and the
+rim both ways round, each held 1 s, at the arbiter's `slow` speed. Beside the bag: `dance.jsonl`
+(every look's answer), `calib_meta.json` (the stamp mode and the live `camera_stamp_lag_s`, the
+exposure, the arbiter's speed, the grid, the commit) and `record.log`; at the end it prints each
+topic's count, rate and worst gap. The wheels are never asked for: four +-0.3 m shuttles at
+0.1 m/s and four +-30 deg pivots at 0.3 rad/s (teleop or `ros/goto.sh`) are a separate step. The
+two runs must agree within 0.5 deg of rotation, 5 mm of translation and 2 ms of time offset.
 
 **Procedure C (only if D's two runs disagree by more than 0.5 deg), hand-held.** The head off its
 bracket with both USB leads attached, moved in front of the grid at 0.4-0.8 m: slow rotations about
@@ -100,15 +120,17 @@ half the usual speed. Taking the head off risks shifting the taped module (then 
 
 ## 4. Kalibr
 
-Kalibr is ROS 1. Convert the bag and run it in Kalibr's Docker image (built for arm64 from
-ethz-asl/kalibr's `Dockerfile_ros1_20_04` with `--platform linux/arm64`):
-
 ```bash
-uv run --with rosbags rosbags-convert --src calib_d1 --dst calib_d1.bag      # ROS 2 -> ROS 1
-docker run --rm -it -v "$PWD:/data" -v "$PWD/ros/maps/vio:/cfg:ro" kalibr \
-    rosrun kalibr kalibr_calibrate_imu_camera --bag /data/calib_d1.bag \
-        --cam /cfg/camchain.yaml --imu /cfg/imu.yaml --target /cfg/april.yaml
+ros/calib_run.sh ros/maps/rec/calib_<first> 0.025                      # the measured tag, metres
+ros/calib_run.sh ros/maps/rec/calib_<second> 0.025 --against ros/maps/rec/calib_<first>
 ```
+
+`ros/calib_run.sh` converts the ROS 2 bag to ROS 1 (`rosbags`, through uv), writes Kalibr's
+`camchain.yaml`, `imu.yaml` and `april.yaml` with `ros/tools/vio_config.py --kalibr-only` inside
+`pepin-laptop:latest` (the rectified focal is OpenCV's and must be camera_stream's), runs
+`kalibr_calibrate_imu_camera` (time calibration on) in `pepin-kalibr` (prehensile/kalibr:arm64,
+pinned by digest, pulled when missing), all into `BAG/kalibr/`, and prints each eye's mean
+reprojection error, `T_cam_imu`, `timeshift_cam_imu` and the two runs' agreement.
 
 `camchain.yaml` describes the rectified, upright eyes exactly as `/camera/image` and
 `/camera/right/image` carry them (the rectified pinhole of `config/stereo_calibration.json`, no
@@ -116,27 +138,37 @@ distortion, cam1 +baseline along cam0's x), so no new intrinsic calibration is n
 first run of `kalibr_calibrate_cameras` on the same recording must return near-zero distortion and a
 61 mm baseline: a free check of the rectification.
 
-Accept when the mean reprojection error is under 0.5 px, the gyro and accelerometer error plots look
-white, and the two runs agree as above. With capture stamps expect a time shift of a few
-milliseconds plus half the exposure.
+Accept when the mean reprojection error is under 0.5 px, the gyro and accelerometer error plots of
+`BAG/kalibr/calib-report-imucam.pdf` look white, and the two runs agree as above. With capture stamps
+and `camera_stamp_lag_s` at its default the time shift is expected within a few milliseconds of 0.
 
 ## 5. Writing it down
 
 Kalibr's result is `T_cam_imu` (a point in the IMU's axes into cam0's optical frame, the rectified
-left eye) and `timeshift_cam_imu`. Store it as Kalibr gives it, relative to the eye (the IMU is
+left eye) and `timeshift_cam_imu`. It is stored as Kalibr gives it, relative to the eye (the IMU is
 glued to the module and moves with the eyes when the module is re-taped):
+
+```bash
+ros/calib_run.sh ros/maps/rec/calib_<second> 0.025 --against ros/maps/rec/calib_<first> --apply
+```
+
+writes the two runs' mean into `config/camera.json`'s `stereo` block through
+`pepin.camera.write_head_imu` (nothing else in the file changes), refused when a check fails
+(`--force` writes it anyway):
 
 ```json
 "head_imu": {
   "T_cam_imu": [[...], [...], [...], [0.0, 0.0, 0.0, 1.0]],
   "time_offset_s": 0.0041,
   "date": "YYYY-MM-DD",
-  "method": "kalibr_calibrate_imu_camera, procedure D x2",
-  "note": "..."
+  "method": "kalibr_calibrate_imu_camera (...), procedure D x2: ...",
+  "note": "each run's reprojection and shift; the runs' agreement"
 }
 ```
 
-in `config/camera.json`'s `stereo` block, then:
+`time_offset_s` is defined against camera_stream's stamps with `camera_stamp_lag_s` at its default
+(config/knobs.json): a recording made at another live value is taken back by the difference
+(`calib_meta.json` keeps the value). Then:
 
 ```bash
 uv run python ros/tools/vio_config.py          # OpenVINS's files into ros/maps/vio

@@ -1,0 +1,20 @@
+# QoS `ros2 bag record` asks for on the head calibration's three topics (ros/calib_record.sh,
+# --qos-profile-overrides-path). Both publishers are reliable (camera_stream's eyes, the base
+# bridge's /head/imu); a reliable subscription with room to queue is what keeps a frame or an IMU
+# sample from being dropped while the MCAP writer flushes: Kalibr's time offset and the spline
+# between the views are only as good as the gaps.
+/camera/image:
+  history: keep_last
+  depth: 30
+  reliability: reliable
+  durability: volatile
+/camera/right/image:
+  history: keep_last
+  depth: 30
+  reliability: reliable
+  durability: volatile
+/head/imu:
+  history: keep_last
+  depth: 400
+  reliability: reliable
+  durability: volatile
