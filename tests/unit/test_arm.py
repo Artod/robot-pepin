@@ -178,7 +178,7 @@ def test_forward_kinematics_is_the_product_of_the_urdf_s_transforms() -> None:
 
 def test_the_shipped_arm_loads_with_the_parked_pose_read_from_the_encoders() -> None:
     """The file's joints are the encoders' parked pose, 11 boxes on the 7 moving links, a 3 cm
-    margin, and a mount that says it is not measured yet."""
+    margin, and a mount measured (fitted to the head's depth) on the top basket's right front."""
     assert SHIPPED.source == "config" and SHIPPED.topic == "/arm/joint_states"
     assert PARKED["shoulder_lift"] == pytest.approx(-102.6)
     assert PARKED["elbow_flex"] == pytest.approx(96.8)
@@ -186,7 +186,9 @@ def test_the_shipped_arm_loads_with_the_parked_pose_read_from_the_encoders() -> 
     assert {link.link for link in SHIPPED.links} == {j.child for j in SHIPPED.chain.joints} - {
         "gripper_frame_link"
     } | {"base_link"}
-    assert not SHIPPED.mount_measured
+    assert SHIPPED.mount_measured
+    x, y, z = SHIPPED.mount.translation
+    assert -0.30 < x < 0.027 and y < 0.0 and 0.70 < z < 0.85
 
 
 def test_the_parked_arm_stands_folded_on_its_base() -> None:
