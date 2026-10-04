@@ -365,12 +365,20 @@ uv run python ros/tools/vio_config.py          # OpenVINS's files from the repo'
 ros/laptop-build.sh vio                        # once: 16 min of build, 34 s of gate
 ros/laptop.sh vio                              # OpenVINS in pepin-vio; vio logs | down | kick (at rest)
 ros/laptop.sh vslam --vo-vio                   # the relay reads /ov_msckf/poseimu instead of rtabmap
+ros/flags.sh set visual_odometry vo_input vio  # the same, live, with stereo_odometry left running
+ros/flags.sh set visual_odometry vo_input stereo  # back to the eyes' odometry, live
 ```
 
 The relay composes base_link's pose through TF (`head_imu <- base_link`: camera_stream's static
 edge from the extrinsics, the neck chain from the board), gives it the per-step `vio` covariance
 (`vio_step_fraction` of the step, floored at `vo_sigma_m`), counts OpenVINS's re-inits and withholds
-a lost VIO (`vio_lost_*` knobs). Calibration: docs/head_imu_calibration.md. The offline A/B: the
+a lost VIO (`vio_lost_*` knobs). Every sample first passes a plausibility guard on the composed
+base velocity (`vio_max_speed_m_s` 1.0, `vio_wheel_diff_m_s` 0.5 against the wheels); after
+`vio_restart_rejects` (20) refusals in a row with the wheels at rest for 2 s the relay restarts
+OpenVINS through `/vio/restart` (pepin_bringup.vio_keeper in pepin-vio), at most once in 10 s.
+Its report line (`docker logs pepin-vslam 2>&1 | grep -a "vo: " | tail -1`) carries the samples in
+and out, the guard, the stamp-to-receipt latency, whether `ekf_filter_node` subscribes `/vo`, and
+the EKF's own odom -> base_link. Calibration: docs/head_imu_calibration.md. The offline A/B: the
 "Replay" section.
 
 ## Camera calibration
@@ -584,6 +592,7 @@ minute, and every live flag on it back to its default.
 | `sensor_pack` | `place_descriptor` | bool | on | yes | a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked |
 | `sensor_pack` | `gaze_gate` | bool | on | yes | frames whose exposure window (stamp +- gate_exposure_s) overlaps a head saccade (/gaze/state's blind intervals, + gate_settle_s after settling) or holds a body yaw faster than gate_yaw_dps (/imu/data_raw; 0 is off) are dropped here and counted; off, every frame passes as before |
 | `vio_feed` | `rate_gate` | bool | on | yes | a pair whose exposure window (gate_exposure_s, gate_stamp_end) holds a /head/imu sample turning faster than head_rate_dps (the gyro's norm) is held back from OpenVINS, once OpenVINS has initialised; off, every pair passes (a plain relay) |
+| `visual_odometry` | `vo_input` | choice: stereo, depth, vio | stereo | yes | what the relay reads: `stereo` or `depth`, rtabmap's /vo/raw from the odometry node vslam.launch.py started (its own vo_input argument); `vio`, OpenVINS's /ov_msckf/poseimu (ros/laptop.sh vio) composed into base_link through the neck's TF, every sample past the plausibility guard (vio_max_speed_m_s, vio_wheel_diff_m_s) and OpenVINS restarted at rest after vio_restart_rejects rejections in a row. Live between the launched rtabmap input and vio: the gate and the track's anchor restart, the published track carries on |
 | `visual_odometry` | `vo_publish` | bool | on | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
 | `visual_odometry` | `vo_covariance` | choice: dynamic, constant, rtabmap, vio | dynamic | yes | whose covariance rides on the published pose: `dynamic`, the registration's own sigma and the depth scale's share of the step just taken added in quadrature (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m, vo_yaw_sigma_deg); the one rtabmap's registration computed, untouched; or `vio`, a per-step model for the visual-inertial input (vio_step_fraction of the step, floored at vo_sigma_m = one wheel sample; vo_input vio pins it, since OpenVINS's own covariance is the MARGINAL of an unobservable global pose and only grows) |
 | `visual_odometry` | `gaze_gate` | bool | on | yes | frames whose exposure window (stamp +- gate_exposure_s) overlaps a head saccade (/gaze/state's blind intervals, + gate_settle_s after settling) or holds a body yaw faster than gate_yaw_dps (/imu/data_raw; 0 is off) are dropped here and counted; off, every frame passes as before |
@@ -688,6 +697,9 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `visual_odometry` | `vio_lost_speed_m_s` | number 0.01..1 | 0.1 | vo_input vio: the composed base speed disagreeing with the wheels' by more than this (m/s) for vio_lost_s while /zupt is silent marks the VIO lost (it never resets itself; a drift at 0.5 m/s would pass vo_max_speed) |
 | `visual_odometry` | `vio_lost_s` | number 0.1..10 | 1.0 | vo_input vio: how long the wheel disagreement must last before the VIO is lost, seconds |
 | `visual_odometry` | `vio_min_features` | integer 0..500 | 20 | vo_input vio: fewer features than this in OpenVINS's last update (/ov_msckf/points_msckf) marks the VIO lost; 0 turns the rule off |
+| `visual_odometry` | `vio_max_speed_m_s` | number 0.1..10 | 1.0 | vo_input vio, the guard: a composed base velocity between two OpenVINS samples faster than this (m/s) is not sent (the wheels top out at 0.32; a diverged OpenVINS runs at metres per second) |
+| `visual_odometry` | `vio_wheel_diff_m_s` | number 0.05..5 | 0.5 | vo_input vio, the guard: a composed base velocity farther than this (m/s) from the wheels' (forward speed, no sideways motion) is not sent; judged per sample, no duration (vio_lost_speed_m_s is the slow rule) |
+| `visual_odometry` | `vio_restart_rejects` | integer 0..1000 | 20 | vo_input vio: this many guard rejections in a row (2 s at 10 Hz) with the wheels at rest for 2 s restart OpenVINS through /vio/restart (pepin_bringup.vio_keeper), at most once in 10 s; 0 never restarts |
 | `visual_odometry` | `gate_exposure_s` | number 0..0.2 | 0.035 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `visual_odometry` | `gate_settle_s` | number 0..1 | 0.1 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade |
 | `visual_odometry` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |

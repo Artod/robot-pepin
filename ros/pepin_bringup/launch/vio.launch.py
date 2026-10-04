@@ -4,9 +4,9 @@
 beside ``pepin-vslam`` and behind the same zenoh router: OpenVINS reads the two rectified eyes
 (``/camera/image``, ``/camera/right/image``, camera_stream's) and the head IMU (``/head/imu``, the
 board's base bridge), and publishes ``/ov_msckf/poseimu`` (the IMU's pose in its gravity frame,
-per image update), which pepin_bringup.visual_odometry reads under ``vo_input:=vio``
-(``ros/laptop.sh vslam --vo-vio``) and turns into ``/vo`` for the board's EKF. Nothing here talks
-to the EKF directly, and nothing here owns a transform.
+per image update), which pepin_bringup.visual_odometry reads under ``vo_input vio`` (live:
+``ros/flags.sh set visual_odometry vo_input vio``) and turns into ``/vo`` for the board's EKF.
+Nothing here talks to the EKF directly, and nothing here owns a transform.
 
 The config is generated, never edited: ``ros/tools/vio_config.py`` (run by ``ros/laptop.sh vio``
 inside this image at every start) writes estimator_config.yaml and the two Kalibr chains into
@@ -14,7 +14,8 @@ ros/maps/vio (``/maps/vio`` here) from
 config/stereo_calibration.json, config/camera.json's head_imu block and config/head_imu.json. The
 node is respawned when it dies; it does not reset itself when it diverges (the relay marks it
 lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: its static initialisation needs
-stillness, then motion.
+stillness, then motion. pepin_bringup.vio_keeper (always started) does the same on
+``/vio/restart``, which the relay's guard calls after a run of implausible samples at rest.
 
 ``feed`` (default false: OpenVINS reads camera_stream's topics, every frame) true puts
 pepin_bringup.vio_feed between them: the eye pairs a fast head did not smear reach it on
@@ -100,6 +101,13 @@ def _describe(context):  # type: ignore[no-untyped-def]
                 cmd=["python3", "-m", "pepin_bringup.vio_feed"], output="screen", **RESPAWN
             )
         )
+    # /vio/restart: the relay's guard restarts a diverged OpenVINS at rest through it (SIGINT,
+    # the respawn above brings it back)
+    actions.append(
+        ExecuteProcess(
+            cmd=["python3", "-m", "pepin_bringup.vio_keeper"], output="screen", **RESPAWN
+        )
+    )
     return actions
 
 

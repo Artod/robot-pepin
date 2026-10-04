@@ -31,6 +31,7 @@ from pepin.stall_look import AHEAD_M as STALL_AHEAD_M
 from pepin.stall_look import CLUSTER_M as STALL_CLUSTER_M
 from pepin.stall_look import MARGIN_M as STALL_MARGIN_M
 from pepin.tsdf import band_half_z_m
+from pepin.visual_odometry import VIO_MAX_SPEED_M_S, VIO_RESTART_REJECTS, VIO_WHEEL_DIFF_M_S
 from pepin.volume_scan import MARKS_MAX_Z_M, MARKS_MIN_Z_M
 
 REPO = Path(__file__).resolve().parents[2]
@@ -63,6 +64,10 @@ NAMED = {
         for node in ("depth_stream", "sensor_pack", "visual_odometry")
         for name, value in zip(GATE_KNOBS, GATE_DEFAULTS, strict=True)
     },
+    # the VIO's guard: pepin.visual_odometry.VioGuard's defaults
+    ("visual_odometry", "vio_max_speed_m_s"): VIO_MAX_SPEED_M_S,
+    ("visual_odometry", "vio_wheel_diff_m_s"): VIO_WHEEL_DIFF_M_S,
+    ("visual_odometry", "vio_restart_rejects"): VIO_RESTART_REJECTS,
     # the VIO's feed: the gate's window as every gated node shapes it
     ("vio_feed", "gate_exposure_s"): EXPOSURE_S,
     ("vio_feed", "gate_stamp_end"): STAMP_END,

@@ -735,6 +735,7 @@ class Node:
         self.service_clients: dict[str, Client] = {}  # name -> the client this node created
         self.destroyed_clients: list[str] = []  # the names of the clients it destroyed
         self.publisher_counts: dict[str, int] = {}  # topic -> publishers, where not one
+        self.subscriber_nodes: dict[str, list[str]] = {}  # topic -> the nodes reading it
         self.timers: list[tuple[float, Any]] = []
         self.parameter_callbacks: list[Any] = []
         self.clock = Clock()
@@ -802,6 +803,10 @@ class Node:
         """How many publishers the graph shows on ``topic``: one, unless a test set
         ``publisher_counts`` (0 is a node on the other end gone)."""
         return self.publisher_counts.get(topic, 1)
+
+    def get_subscriptions_info_by_topic(self, topic: str) -> list[Any]:
+        """rclpy's graph query: one endpoint per node a test put in ``subscriber_nodes``."""
+        return [types.SimpleNamespace(node_name=n) for n in self.subscriber_nodes.get(topic, [])]
 
     def get_clock(self) -> Clock:
         return self.clock

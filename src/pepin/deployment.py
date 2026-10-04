@@ -153,7 +153,7 @@ LAPTOP_SLAM_NODES = (
 # subscriber node, kept apart from pepin-vslam so it can be kicked and its memory counted alone.
 VIO_CONTAINER = "pepin-vio"
 # vio.launch.py's nodes: OpenVINS in its namespace ov_msckf, and the gated feed in front of it
-LAPTOP_VIO_NODES = ("/ov_msckf/run_subscribe_msckf", "/vio_feed")
+LAPTOP_VIO_NODES = ("/ov_msckf/run_subscribe_msckf", "/vio_feed", "/vio_keeper")
 
 
 # Fully qualified names of the ROS nodes of the Mac's navigation container

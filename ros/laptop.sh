@@ -26,7 +26,8 @@
 #                            at the depth's rate; the default reads the two eyes (stereo_odometry) at
 #                            the camera's: 8 poses/s, 0.15-0.2 s behind, measured at rest 2026-10-02
 #   ros/laptop.sh vslam --vo-vio   the visual odometry relay reads OpenVINS (ros/laptop.sh vio, its own
-#                            container) instead of rtabmap's: no odometry node runs in pepin-vslam
+#                            container) instead of rtabmap's: no odometry node runs in pepin-vslam;
+#                            live instead: ros/flags.sh set visual_odometry vo_input vio|stereo
 #   ros/laptop.sh vio        start (or restart) OpenVINS in pepin-vio on pepin-laptop:vio
 #                            (ros/laptop-build.sh vio): the head IMU (/head/imu) and the two eyes,
 #                            config written into ros/maps/vio by ros/tools/vio_config.py inside
@@ -189,7 +190,7 @@ zrouter_up() {
 # vio.launch.py. Only
 # one of the two recorders runs (nav.launch.py's recorder argument); a kick of the other one finds
 # nothing and says so.
-KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder gaze vio_feed"
+KICKABLE="camera_stream depth_stream contact_scan depth_fusion rtabmap_frame sensor_pack places marks_audit visual_odometry goal_server run_recorder bag_recorder gaze vio_feed vio_keeper"
 kick_target() {  # node name -> "container|start-up line"
     case "$1" in
         camera_stream) echo "pepin-vslam|camera stream from " ;;
@@ -206,6 +207,7 @@ kick_target() {  # node name -> "container|start-up line"
         bag_recorder) echo "$NAV|bag recorder ready" ;;
         gaze) echo "$NAV|gaze up: " ;;
         vio_feed) echo "pepin-vio|vio feed up: " ;;
+        vio_keeper) echo "pepin-vio|vio keeper up: " ;;
         *) return 1 ;;
     esac
 }
@@ -312,7 +314,7 @@ case "${1:-}" in
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" -e "VIO_LAUNCH_ARGS=${PEPIN_VIO_LAUNCH_ARGS:-}" \
             pepin-laptop:vio bash -c 'source /ws_vio/install/setup.bash && exec ros2 launch pepin_bringup vio.launch.py $VIO_LAUNCH_ARGS' >/dev/null
         echo "vio up: OpenVINS in pepin-vio on $(docker run --rm --network none --entrypoint cat pepin-laptop:vio /opt/openvins/SHAS | head -2 | tr '\n' ' ')"
-        echo "the relay reads it under ros/laptop.sh vslam --vo-vio; ros/laptop.sh vio logs"
+        echo "the relay reads it under ros/flags.sh set visual_odometry vo_input vio (or vslam --vo-vio); ros/laptop.sh vio logs"
         exit 0 ;;
     kick)
         # One node, not its container. SIGINT is what the launch itself sends at shutdown: the

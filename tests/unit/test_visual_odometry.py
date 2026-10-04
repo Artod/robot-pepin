@@ -452,3 +452,77 @@ def test_the_three_lost_rules() -> None:
     assert "lost 3 (wheels 1, rest 1, features 1)" in lost.report()
     silent = VioLost()
     assert silent.check(10.0, 0.5) is None, "no witness heard: no verdict"
+
+
+def test_body_velocity_is_the_step_in_the_heading_it_starts_from() -> None:
+    from pepin.visual_odometry import body_velocity
+
+    a = VoPose(stamp=0.0, x=1.0, y=1.0, yaw=math.pi / 2)
+    b = VoPose(stamp=0.5, x=1.0, y=1.1, yaw=math.pi / 2)  # 10 cm along G's y = straight ahead
+    forward, left = body_velocity(a, b) or (math.nan, math.nan)
+    assert forward == pytest.approx(0.2) and left == pytest.approx(0.0, abs=1e-12)
+    assert body_velocity(b, a) is None, "a stamp that does not advance says nothing"
+
+
+def test_the_guard_refuses_what_no_cart_makes_and_what_the_wheels_deny() -> None:
+    """Over 1 m/s is refused whatever the wheels say; 0.6 m/s sideways against still wheels is
+    refused by the wheel rule; 0.3 m/s forward with the wheels at 0.3 passes and ends the run."""
+    from pepin.visual_odometry import VioGuard
+
+    guard = VioGuard(max_speed_m_s=1.0, wheel_diff_m_s=0.5)
+    assert guard.check(0.0, None) is None and guard.consecutive == 0, "the first: not judged"
+    fast = guard.check(0.0, (3.0, 0.0))
+    assert fast is not None and "3.00 m/s" in fast, "no wheels heard: the speed rule alone"
+    assert guard.check(0.0, (0.0, 0.6)) is None, "no wheels heard: nothing to disagree with"
+    guard.wheels(1.0, 0.0, 0.0)
+    sideways = guard.check(1.0, (0.0, 0.6))
+    assert sideways is not None and "wheels" in sideways
+    assert guard.consecutive == 1, "the pass between them ended the first run"
+    guard.wheels(1.1, 0.3, 0.0)
+    assert guard.check(1.1, (0.3, 0.02)) is None and guard.consecutive == 0
+    assert guard.counts == {"speed": 1, "wheels": 1}
+    guard.wheels(5.0, 0.3, 0.0)
+    assert guard.check(7.0, (0.0, 0.6)) is None, "wheels heard 2 s ago say nothing"
+    assert "guard rejected 2 (speed 1, wheels 1)" in guard.report()
+
+
+def test_the_guard_restarts_only_after_a_run_of_rejections_at_rest_and_not_in_a_loop() -> None:
+    """20 implausible samples in a row restart the VIO once the wheels have said rest for 2 s;
+    moving wheels, a run cut short or a restart less than 10 s ago do not."""
+    from pepin.visual_odometry import VioGuard
+
+    guard = VioGuard(restart_rejects=20, rest_s=2.0, restart_gap_s=10.0)
+    t = 0.0
+    for _ in range(25):  # diverged while the cart drives: refused, never restarted
+        guard.wheels(t, 0.2, 0.0)
+        assert guard.check(t, (4.0, 0.0)) is not None
+        assert guard.restart_due(t) is None
+        t += 0.1
+    for _ in range(19):  # stopped, still diverged; rest under 2 s
+        guard.wheels(t, 0.0, 0.0)
+        guard.check(t, (4.0, 0.0))
+        assert guard.restart_due(t) is None
+        t += 0.1
+    while guard.at_rest_s(t) < 2.0:
+        guard.wheels(t, 0.0, 0.0)
+        guard.check(t, (4.0, 0.0))
+        assert guard.restart_due(t) is None
+        t += 0.1
+    guard.wheels(t, 0.0, 0.0)
+    guard.check(t, (4.0, 0.0))
+    due = guard.restart_due(t)
+    assert due is not None and "in a row" in due and guard.restarts == 1
+    assert guard.consecutive == 0
+    restarted = t
+    for _ in range(30):  # diverged again at once: the gap holds it
+        t += 0.1
+        guard.wheels(t, 0.0, 0.0)
+        guard.check(t, (4.0, 0.0))
+        assert guard.restart_due(t) is None or t - restarted >= 10.0
+    assert guard.restarts == 1
+    off = VioGuard(restart_rejects=0)
+    off.wheels(0.0, 0.0, 0.0)
+    for i in range(100):
+        off.wheels(0.1 * i, 0.0, 0.0)
+        off.check(0.1 * i, (4.0, 0.0))
+    assert off.restart_due(10.0) is None, "0 never restarts"

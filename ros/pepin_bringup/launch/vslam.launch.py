@@ -533,7 +533,9 @@ TF_DELAY_S = float(PUBLISH_MAP_TO_ODOM["tf_delay"])  # for the report line, from
 VO_RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output; /vo is what the gate publishes for the EKF
 # The vo_input launch argument: what the visual odometry reads. "vio" starts NO odometry node in
 # this container: OpenVINS runs in its own (pepin-vio, ros/laptop.sh vio, vio.launch.py) and the
-# relay reads its /ov_msckf/poseimu, composing base_link through TF (vio.md).
+# relay reads its /ov_msckf/poseimu, composing base_link through TF (vio.md). The relay's own
+# vo_input flag starts at this value and is live between it and vio
+# (ros/flags.sh set visual_odometry vo_input vio), the odometry node started here running on.
 VO_INPUTS = ("depth", "stereo", "vio")
 VISUAL_ODOMETRY = {
     # The EKF owns odom -> base_link. This node names its frame "odom" because that is the frame

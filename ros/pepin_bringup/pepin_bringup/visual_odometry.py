@@ -31,30 +31,44 @@ same way: a pose of a frame taken during a head saccade (``/gaze/state``) or a b
 ``gate_yaw_dps``, and the first pose after one, only re-anchor — the EKF coasts on the wheels and
 the gyro across them.
 
-THE INPUT is the ``vo_input`` parameter, read at start and passed by vslam.launch.py: ``stereo``
-or ``depth`` read rtabmap's ``/vo/raw`` as above; ``vio`` reads OpenVINS's ``/ov_msckf/poseimu``
-(the head IMU's pose in its own gravity frame, per image update, stamped camera time + t_d; it
-runs in its own container, ros/laptop.sh vio) and composes base_link's pose through TF at the
-pose's own stamp (``head_imu <- base_link``: camera_stream's static head_imu edge, the board's
-neck chain; :func:`pepin.visual_odometry.compose_base_pose`). Then the same gate, track, cap and
-EKF slot. Its covariance is the ``vio`` mode, a per-step model floored at ``vo_sigma_m``
-(OpenVINS's own marginal covariance only grows: it is read as a health signal, re-inits counted);
-it is marked lost on the three rules of :class:`pepin.visual_odometry.VioLost` (the wheels'
-speed, motion under ``/zupt``, the feature count of ``/ov_msckf/points_msckf``), and a lost pose
-only re-anchors. OpenVINS never resets itself: ``ros/laptop.sh vio kick`` at rest.
+THE INPUT is the ``vo_input`` flag, passed at start by vslam.launch.py and live between the
+launched rtabmap input and ``vio`` (``ros/flags.sh set visual_odometry vo_input vio``; back with
+``stereo``): ``stereo`` or ``depth`` read rtabmap's ``/vo/raw`` as above; ``vio`` reads OpenVINS's
+``/ov_msckf/poseimu`` (the head IMU's pose in its own gravity frame, per image update, stamped
+camera time + t_d; it runs in its own container, ros/laptop.sh vio) and composes base_link's pose
+through TF at the pose's own stamp (``head_imu <- base_link``: camera_stream's static head_imu
+edge, the board's neck chain; :func:`pepin.visual_odometry.compose_base_pose`). Then the same
+gate, track, cap and EKF slot. A switch restarts the gate and the track's anchor; the published
+track carries on from where it stood, so the EKF differences no jump across it. Its covariance is
+the ``vio`` mode, a per-step model floored at ``vo_sigma_m`` (OpenVINS's own marginal covariance
+only grows: it is read as a health signal, re-inits counted); under ``vio`` the ``dynamic`` and
+``rtabmap`` choices read as ``vio``.
+
+Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
+a base velocity over ``vio_max_speed_m_s``, or ``vio_wheel_diff_m_s`` from the wheels', is not
+sent), then the three lost rules of :class:`pepin.visual_odometry.VioLost` (the wheels' speed over
+time, motion under ``/zupt``, the feature count of ``/ov_msckf/points_msckf``); a refused sample
+only re-anchors. OpenVINS never resets itself: after ``vio_restart_rejects`` guard rejections in
+a row with the wheels at rest for 2 s this node calls ``/vio/restart`` (pepin_bringup.vio_keeper in
+pepin-vio), logged once; by hand it is ``ros/laptop.sh vio kick``, at rest. The report line adds
+the samples in, out and refused, the stamp-to-receipt latency, whether the board's EKF subscribes
+``/vo``, and the EKF's own odom -> base_link (once the VIO input has been on: the TF listener).
 """
 
 from __future__ import annotations
 
 import math
+import statistics
 import time
 from collections import Counter
+from typing import Any
 
 from geometry_msgs.msg import PoseWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
+from std_srvs.srv import Trigger
 
 from pepin.depth import rotation_matrix
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
@@ -62,11 +76,13 @@ from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
 from pepin.visual_odometry import (
     PublishCap,
     RestWatch,
+    VioGuard,
     VioHealth,
     VioLost,
     VoGate,
     VoPose,
     VoTrack,
+    body_velocity,
     compose_base_pose,
     homogeneous,
     is_lost,
@@ -91,8 +107,32 @@ IMU_FRAME = "head_imu"  # camera_stream's static camera_optical -> head_imu (con
 BASE_FRAME = "base_link"
 ODOM_FRAME = "odom"  # the frame rtabmap's /vo/raw carries (odom_frame_id), kept for the EKF
 TF_TIMEOUT_S = 0.05  # how long a pose waits for the neck chain at its stamp
+VIO_RESTART_SERVICE = "/vio/restart"  # pepin_bringup.vio_keeper, in pepin-vio beside OpenVINS
+EKF_NODE = "ekf_filter_node"  # the board's robot_localization (robot.launch.py), /vo's reader
 
 FLAGS = FlagSet(
+    Flag(
+        "vo_input",
+        "stereo",
+        choices=VO_INPUTS,
+        description="what the relay reads: `stereo` or `depth`, rtabmap's /vo/raw from the"
+        " odometry node vslam.launch.py started (its own vo_input argument); `vio`, OpenVINS's"
+        " /ov_msckf/poseimu (ros/laptop.sh vio) composed into base_link through the neck's TF,"
+        " every sample past the plausibility guard (vio_max_speed_m_s, vio_wheel_diff_m_s) and"
+        " OpenVINS restarted at rest after vio_restart_rejects rejections in a row. Live between"
+        " the launched rtabmap input and vio: the gate and the track's anchor restart, the"
+        " published track carries on",
+        why="stereo since 2026-10-02 (the night deploy). vio is measured head-only on the parked"
+        " cart (2026-10-04, scratch/vio_day/live1, live2): orientation inside slow head moves"
+        " 0.8-1.6 deg, translation error 1.0-1.4 cm p50, rest drift 0.15 cm/min and 0.064"
+        " deg/min; the first fast pan diverged it (7.7 m, then km) and it never re-initialised,"
+        " which the guard and the restart exist for. Never in motion, never into the EKF before"
+        " this flag",
+        on_when="a static test or a drive whose point is the VIO: ros/laptop.sh vio up and"
+        " initialised (one head pan), the guard's line in the report reading 0 rejected at rest",
+        off_when="stereo whenever odom -> base_link must be today's: a drive that measures"
+        " something else, a VIO whose guard keeps rejecting, OpenVINS down",
+    ),
     Flag(
         "vo_publish",
         True,
@@ -162,23 +202,13 @@ class VisualOdometry(Node):
 
     def __init__(self) -> None:
         super().__init__("visual_odometry")
-        # Read at start, before the switches (whose callback refuses anything that is not a flag).
-        self._input = str(self.declare_parameter("vo_input", "stereo").value).strip()
-        if self._input not in VO_INPUTS:
-            raise ValueError(f"vo_input {self._input!r}: one of {', '.join(VO_INPUTS)}")
         self._switches = Switches(
             self, with_knobs(FLAGS, load_knobs("visual_odometry")), on_change=self._on_switch
         )
-        if self._input == "vio" and self._switches["vo_covariance"] in ("dynamic", "rtabmap"):
-            # OpenVINS's own covariance is the marginal of an unobservable pose (vio.md M3) and
-            # there is no registration variance: the per-step model is the only honest one.
-            self._switches.set("vo_covariance", "vio")
-        self._gate = VoGate(
-            max_speed_m_s=float(self._switches["vo_max_speed"]),
-            max_turn_deg_s=float(self._switches["vo_max_turn"]),
-            max_gap_s=float(self._switches["vo_max_gap_s"]),
-            reset_radius_m=float(self._switches["vo_reset_radius_m"]),
-        )
+        # The rtabmap input the launch started an odometry node for (none under vio): the one
+        # a live switch away from vio may go back to.
+        self._launched = str(self._switches["vo_input"])
+        self._gate = self._new_gate()
         self._track = VoTrack()
         self._cap = PublishCap(float(self._switches["vo_publish_hz"]))
         self._rest = RestWatch()
@@ -208,33 +238,63 @@ class VisualOdometry(Node):
             lost_s=float(self._switches["vio_lost_s"]),
             min_features=int(self._switches["vio_min_features"]),
         )
+        self._guard = VioGuard(
+            max_speed_m_s=float(self._switches["vio_max_speed_m_s"]),
+            wheel_diff_m_s=float(self._switches["vio_wheel_diff_m_s"]),
+            restart_rejects=int(self._switches["vio_restart_rejects"]),
+        )
         self._tf: TfLookup | None = None
         self._tf_failure: str | None = None
+        self._restart: Any = None  # the /vio/restart client, made with the VIO's subscriptions
         self._last_vio: VoPose | None = None  # the previous composed pose, for the VIO's speed
         self._last_vio_xy: tuple[float, float] | None = None  # the last published, for its step
-        source = RAW_TOPIC
-        if self._input == "vio":
-            source = VIO_POSE_TOPIC
-            self._tf = TfLookup(self, on_failure=self._on_tf_failure)
-            self.create_subscription(PoseWithCovarianceStamped, VIO_POSE_TOPIC, self._on_vio, local)
-            self.create_subscription(PointCloud2, VIO_POINTS_TOPIC, self._on_points, local)
-            self.create_subscription(
-                Odometry,
-                ZUPT_TOPIC,
-                self._on_zupt,
-                QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
-            )
-        else:
+        self._local = local
+        if self._launched != "vio":
             self.create_subscription(Odometry, RAW_TOPIC, self._on_vo, local)
+        if self._input == "vio":
+            self._vio_up()
         self.create_subscription(
             Odometry, WHEELS_TOPIC, self._on_wheels, bridged_qos_profile(WHEELS_TOPIC)
         )
         self.create_timer(REPORT_S, self._report)
         self.get_logger().info(
-            f"visual odometry up: vo_input {self._input}, {source} -> {VO_TOPIC} for the board's"
-            f" EKF (x, y and yaw, differentially), rest drift measured against"
+            f"visual odometry up: vo_input {self._input}, {self._source()} -> {VO_TOPIC} for the"
+            f" board's EKF (x, y and yaw, differentially), rest drift measured against"
             f" {WHEELS_TOPIC}; flags: {self._switches.state()}"
         )
+
+    @property
+    def _input(self) -> str:
+        """What the relay reads now: the live ``vo_input`` flag."""
+        return str(self._switches["vo_input"])
+
+    def _source(self) -> str:
+        return VIO_POSE_TOPIC if self._input == "vio" else RAW_TOPIC
+
+    def _new_gate(self) -> VoGate:
+        return VoGate(
+            max_speed_m_s=float(self._switches["vo_max_speed"]),
+            max_turn_deg_s=float(self._switches["vo_max_turn"]),
+            max_gap_s=float(self._switches["vo_max_gap_s"]),
+            reset_radius_m=float(self._switches["vo_reset_radius_m"]),
+        )
+
+    def _vio_up(self) -> None:
+        """The VIO input's TF listener, subscriptions and restart client, made the first time it
+        is selected and kept (their callbacks read nothing while another input is)."""
+        if self._tf is not None:
+            return
+        self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        local = self._local
+        self.create_subscription(PoseWithCovarianceStamped, VIO_POSE_TOPIC, self._on_vio, local)
+        self.create_subscription(PointCloud2, VIO_POINTS_TOPIC, self._on_points, local)
+        self.create_subscription(
+            Odometry,
+            ZUPT_TOPIC,
+            self._on_zupt,
+            QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
+        )
+        self._restart = self.create_client(Trigger, VIO_RESTART_SERVICE)
 
     def close(self) -> None:
         """Stop the TF listener's thread (vo_input vio) before the node is destroyed."""
@@ -242,9 +302,11 @@ class VisualOdometry(Node):
             self._tf.close()
 
     # ---- inputs ------------------------------------------------------------------------------
-    def _on_switch(self, name: str, _old: object, new: object) -> None:
+    def _on_switch(self, name: str, old: object, new: object) -> None:
         """A flag changed: the three ceilings are the gate's, the rest are read where they act."""
-        if name == "vo_max_speed":
+        if name == "vo_input":
+            self._switch_input(str(old), str(new))
+        elif name == "vo_max_speed":
             self._gate.max_speed_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vo_max_turn":
             self._gate.max_turn_deg_s = float(new)  # type: ignore[arg-type]
@@ -254,11 +316,12 @@ class VisualOdometry(Node):
             self._gate.reset_radius_m = float(new)  # type: ignore[arg-type]
         elif name == "vo_publish_hz":
             self._cap.hz = float(new)  # type: ignore[arg-type]
-        elif name == "vo_covariance" and self._input == "vio" and new in ("dynamic", "rtabmap"):
-            raise ValueError(
-                f"vo_input vio has no registration variance and OpenVINS's own covariance is the"
-                f" marginal of an unobservable pose: {new} is refused, vio or constant"
-            )
+        elif name == "vio_max_speed_m_s":
+            self._guard.max_speed_m_s = float(new)  # type: ignore[arg-type]
+        elif name == "vio_wheel_diff_m_s":
+            self._guard.wheel_diff_m_s = float(new)  # type: ignore[arg-type]
+        elif name == "vio_restart_rejects":
+            self._guard.restart_rejects = int(new)  # type: ignore[call-overload]
         elif name == "vio_lost_speed_m_s":
             self._vio_lost.lost_speed_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_lost_s":
@@ -270,6 +333,41 @@ class VisualOdometry(Node):
         elif name == "gaze_gate":
             self._after_gate = False
 
+    def _switch_input(self, old: str, new: str) -> None:
+        """A live ``vo_input`` change: vio, or back to the rtabmap input the launch started (no
+        other rtabmap odometry runs). The gate starts afresh and the track's next step is measured
+        from the new source's first pose; the published total stands where it stood."""
+        if new != "vio" and new != self._launched:
+            started = (
+                "none (launched with vio)" if self._launched == "vio" else f"{self._launched}'s"
+            )
+            raise ValueError(
+                f"vo_input {new}: the rtabmap odometry running is {started}; another needs a"
+                " vslam restart (ros/laptop.sh vslam, or vslam --vo-depth)"
+            )
+        if new == "vio":
+            self._vio_up()
+        self._gate = self._new_gate()
+        self._track.anchor(None)
+        self._rest.restart()
+        self._last_xy = None
+        self._last_vio = None
+        self._last_vio_xy = None
+        self._after_gate = False
+        self.get_logger().info(
+            f"vo_input {old} -> {new}: {self._source()} -> {VO_TOPIC}, the gate restarted, the"
+            f" track carries on from ({self._track.pose[0]:.2f}, {self._track.pose[1]:.2f})"
+        )
+
+    def _covariance_mode(self) -> str:
+        """The covariance the published pose carries: the flag's, except that under vio the
+        registration's modes read as ``vio`` — OpenVINS has no registration variance and its
+        own covariance is the marginal of an unobservable pose (vio.md M3)."""
+        mode = str(self._switches["vo_covariance"])
+        if self._input == "vio" and mode in ("dynamic", "rtabmap"):
+            return "vio"
+        return mode
+
     def _on_wheels(self, msg: Odometry) -> None:
         """The board's wheel odometry: only its twist is read, and only to know whether the cart
         is standing still (the drift at rest is what says this source may be fused at all).
@@ -278,15 +376,21 @@ class VisualOdometry(Node):
         the visual poses are the laptop's (:class:`pepin.visual_odometry.RestWatch`).
         """
         now = time.monotonic()
-        self._rest.wheels(now, float(msg.twist.twist.linear.x), float(msg.twist.twist.angular.z))
-        self._vio_lost.wheels(now, float(msg.twist.twist.linear.x))
+        linear, yaw_rate = float(msg.twist.twist.linear.x), float(msg.twist.twist.angular.z)
+        self._rest.wheels(now, linear, yaw_rate)
+        self._vio_lost.wheels(now, linear)
+        self._guard.wheels(now, linear, yaw_rate)
 
     def _on_vo(self, msg: Odometry) -> None:
         """One pose from rgbd_odometry: gated, measured at rest, and published with the
-        covariance the flags chose."""
+        covariance the flags chose. Nothing is read while the input is vio."""
+        if self._input == "vio":
+            return
         self._tally.count("in")
+        stamp = stamp_seconds(msg.header.stamp)
+        self._tally.sample("latency_ms", (time.time() - stamp) * 1000.0)
         pose = VoPose(
-            stamp=stamp_seconds(msg.header.stamp),
+            stamp=stamp,
             x=float(msg.pose.pose.position.x),
             y=float(msg.pose.pose.position.y),
             yaw=yaw_of(msg.pose.pose.orientation),
@@ -296,7 +400,7 @@ class VisualOdometry(Node):
         if published is None:
             return
         _write_planar_pose(msg, published)
-        mode = self._switches["vo_covariance"]
+        mode = self._covariance_mode()
         if mode == "constant":
             msg.pose.covariance = planar_covariance(
                 float(self._switches["vo_sigma_m"]), float(self._switches["vo_yaw_sigma_deg"])
@@ -350,10 +454,14 @@ class VisualOdometry(Node):
 
     # ---- the visual-inertial input -------------------------------------------------------------
     def _on_vio(self, msg: PoseWithCovarianceStamped) -> None:
-        """One OpenVINS pose: health, base_link composed through TF at its stamp, lost rules,
-        then the shared gate and track; published as an Odometry in rtabmap's frames."""
+        """One OpenVINS pose: health, base_link composed through TF at its stamp, the guard,
+        the lost rules, then the shared gate and track; published as an Odometry in rtabmap's
+        frames. Nothing is read while the input is rtabmap's."""
+        if self._input != "vio":
+            return
         self._tally.count("in")
         stamp = stamp_seconds(msg.header.stamp)
+        self._tally.sample("latency_ms", (time.time() - stamp) * 1000.0)
         if self._vio_health.observe(msg.pose.covariance):
             self._tally.count("vio_reinit")
             self._last_vio = None
@@ -369,8 +477,16 @@ class VisualOdometry(Node):
         q, v = msg.pose.pose.orientation, msg.pose.pose.position
         t_g_i = homogeneous(rotation_matrix(q.x, q.y, q.z, q.w), (v.x, v.y, v.z))
         pose = compose_base_pose(t_g_i, homogeneous(t_i_b.rotation, t_i_b.translation), stamp)
-        speed = self._vio_speed(pose)
-        if self._vio_lost.check(time.monotonic(), speed) is not None:
+        last, self._last_vio = self._last_vio, pose
+        velocity = None if last is None else body_velocity(last, pose)
+        now = time.monotonic()
+        if self._guard.check(now, velocity) is not None:
+            self._tally.count("rejected")
+            self._reanchor(pose)
+            self._maybe_restart(now)
+            return
+        speed = 0.0 if velocity is None else math.hypot(*velocity)
+        if self._vio_lost.check(now, speed) is not None:
             self._tally.count("vio_lost")
             self._reanchor(pose)
             return
@@ -385,7 +501,7 @@ class VisualOdometry(Node):
         here = (pose.x, pose.y)
         there, self._last_vio_xy = self._last_vio_xy, here
         step = 0.0 if there is None else math.hypot(here[0] - there[0], here[1] - there[1])
-        if self._switches["vo_covariance"] == "constant":
+        if self._covariance_mode() == "constant":
             out.pose.covariance = planar_covariance(
                 float(self._switches["vo_sigma_m"]), float(self._switches["vo_yaw_sigma_deg"])
             )
@@ -394,12 +510,35 @@ class VisualOdometry(Node):
         self._pub.publish(out)
         self._tally.count("out")
 
-    def _vio_speed(self, pose: VoPose) -> float:
-        """The composed base speed since the previous composed pose (m/s); 0 for the first."""
-        last, self._last_vio = self._last_vio, pose
-        if last is None or pose.stamp <= last.stamp:
-            return 0.0
-        return math.hypot(pose.x - last.x, pose.y - last.y) / (pose.stamp - last.stamp)
+    def _maybe_restart(self, now: float) -> None:
+        """Restart OpenVINS when the guard says so (rejections in a row, the wheels at rest):
+        ``/vio/restart`` signals it in its container and the launch respawns it. Logged once per
+        restart; the VIO's state starts again from the first pose of the new gravity frame."""
+        reason = self._guard.restart_due(now)
+        if reason is None:
+            return
+        self._tally.count("vio_restart")
+        client = self._restart
+        if client is None or not client.service_is_ready():
+            self.get_logger().warning(
+                f"OpenVINS restart due ({reason}) but {VIO_RESTART_SERVICE} is not served"
+                " (pepin_bringup.vio_keeper in pepin-vio): ros/laptop.sh vio kick, at rest"
+            )
+            return
+        self.get_logger().warning(
+            f"restarting OpenVINS through {VIO_RESTART_SERVICE}: {reason}; it initialises again"
+            " at rest, on the next motion (a head pan)"
+        )
+        client.call_async(Trigger.Request()).add_done_callback(self._on_restarted)
+        self._last_vio = None
+        self._reanchor(None)
+
+    def _on_restarted(self, future: Any) -> None:
+        """The keeper's answer: said only when it could not signal OpenVINS."""
+        response = future.result()
+        if response is None or not response.success:
+            text = "no answer" if response is None else response.message
+            self.get_logger().warning(f"{VIO_RESTART_SERVICE} failed: {text}")
 
     def _reanchor(self, pose: VoPose | None) -> None:
         """A pose nothing may be differenced across (a lost VIO, a re-init): the gate and the
@@ -458,11 +597,14 @@ class VisualOdometry(Node):
         hold = f" (last: {self._hold})" if self._hold else ""
         x, y, _ = self._track.pose
         source = "OpenVINS" if self._input == "vio" else "rtabmap"
+        latency = w.samples.get("latency_ms", [])
+        late = f"{statistics.median(latency):.0f} ms" if latency else "n/a"
         self.get_logger().info(
-            f"vo: {w.rate('in'):.1f} poses/s from {source}, {w.rate('out'):.1f} published,"
+            f"vo: {w.rate('in'):.1f} poses/s from {source} ({c['in']} in, {c['out']} out),"
+            f" {w.rate('out'):.1f} published, stamp to receipt p50 {late}; {self._ekf_text()};"
             f" {c['dropped']} dropped{drop}, {c['skipped']} skipped{hold},"
             f" {c['withheld']} withheld from the EKF; track at ({x:.2f}, {y:.2f});"
-            f" {self._rest.report()}; {self._gate_text(c)};{self._vio_text(c)}"
+            f"{self._odom_text()} {self._rest.report()}; {self._gate_text(c)};{self._vio_text(c)}"
             f" flags: {self._switches.state()}"
         )
         if c["in"] == 0 and self._input == "vio":
@@ -483,10 +625,31 @@ class VisualOdometry(Node):
             return ""
         tf = f" (last: {self._tf_failure})" if counts["tf_miss"] and self._tf_failure else ""
         return (
-            f" vio: reinit {counts['vio_reinit']} ({self._vio_health.reinits} since the start),"
-            f" {counts['vio_lost']} poses withheld as lost, {self._vio_lost.report()},"
-            f" tf_miss {counts['tf_miss']}{tf}; kick at rest: ros/laptop.sh vio kick;"
+            f" vio: {counts['rejected']} rejected by the guard, {self._guard.report()};"
+            f" covariance {self._covariance_mode()}; reinit {counts['vio_reinit']}"
+            f" ({self._vio_health.reinits} since the start), {counts['vio_lost']} poses withheld"
+            f" as lost, {self._vio_lost.report()}, tf_miss {counts['tf_miss']}{tf}; kick at rest:"
+            " ros/laptop.sh vio kick;"
         )
+
+    def _ekf_text(self) -> str:
+        """Whether the board's EKF subscribes /vo, from the graph (rmw_zenoh carries the remote
+        node's name): the nearest thing to an ack the filter gives."""
+        nodes = sorted({info.node_name for info in self.get_subscriptions_info_by_topic(VO_TOPIC)})
+        ekf = "yes" if EKF_NODE in nodes else "NO"
+        return f"{VO_TOPIC} read by {EKF_NODE}: {ekf} ({len(nodes)} subscriber nodes)"
+
+    def _odom_text(self) -> str:
+        """The EKF's own odom -> base_link now, for a drift read off two report lines; nothing
+        before the TF listener exists (it comes with the VIO input)."""
+        if self._tf is None:
+            return ""
+        pose = self._tf.pose(ODOM_FRAME, BASE_FRAME)
+        if pose is None:
+            return " EKF odom -> base_link not in TF;"
+        yaw = math.degrees(math.atan2(float(pose.rotation[1, 0]), float(pose.rotation[0, 0])))
+        tx, ty = float(pose.translation[0]), float(pose.translation[1])
+        return f" EKF odom -> base_link ({tx:.3f}, {ty:.3f}, {yaw:.1f} deg);"
 
     def _gate_text(self, counts: Counter[str]) -> str:
         """The poses the gaze gate withheld this window (and the ones after them), the head."""

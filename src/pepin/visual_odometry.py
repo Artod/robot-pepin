@@ -23,7 +23,8 @@ A VISUAL-INERTIAL source (OpenVINS on the head IMU and the two eyes, vio.md) ent
 same gate and track: :func:`compose_base_pose` turns its IMU pose in its own gravity frame into
 base_link's through the neck's TF chain, :data:`VIO_STEP_FRACTION` is its per-step covariance
 model (its own marginal covariance only grows and is read as a health signal, :class:`VioHealth`),
-and :class:`VioLost` says when it has diverged (it never resets itself).
+and :class:`VioLost` says when it has diverged (it never resets itself); :class:`VioGuard` refuses
+every single sample no cart of this speed could have made and says when to restart it.
 
 Nothing here is ROS: poses and wheel speeds in, verdicts and a report line out
 (:mod:`pepin_bringup.visual_odometry` is the node around it).
@@ -46,18 +47,25 @@ __all__ = [
     "SIGMA_FLOOR_M",
     "VIO_LOST_S",
     "VIO_LOST_SPEED_M_S",
+    "VIO_MAX_SPEED_M_S",
     "VIO_MIN_FEATURES",
     "VIO_REINIT_RATIO",
+    "VIO_RESTART_GAP_S",
+    "VIO_RESTART_REJECTS",
+    "VIO_RESTART_REST_S",
     "VIO_REST_SPEED_M_S",
     "VIO_STEP_FRACTION",
+    "VIO_WHEEL_DIFF_M_S",
     "PublishCap",
     "RestDrift",
     "RestWatch",
+    "VioGuard",
     "VioHealth",
     "VioLost",
     "VoGate",
     "VoPose",
     "VoTrack",
+    "body_velocity",
     "compose_base_pose",
     "homogeneous",
     "is_lost",
@@ -109,6 +117,19 @@ VIO_REST_SPEED_M_S = 0.03
 ZUPT_FRESH_S = 0.5
 # A wheel speed or a feature count older than this says nothing any more.
 WITNESS_FRESH_S = 1.0
+# The plausibility guard on the VIO's OUTPUT (:class:`VioGuard`): a composed base velocity this
+# cart cannot make (the wheels top out at 0.32 m/s, the base cap is 0.30), or one this far from
+# the wheels', is a diverged filter, not a measurement. OpenVINS diverged on the first fast head
+# pan of 2026-10-04's live run (7.7 m inside the move, then km) and never re-initialised.
+VIO_MAX_SPEED_M_S = 1.0
+VIO_WHEEL_DIFF_M_S = 0.5
+# That many implausible samples in a row (2 s at the camera's 10 Hz) with the wheels at rest for
+# VIO_RESTART_REST_S restarts it: its static initialisation needs stillness, then a motion.
+VIO_RESTART_REJECTS = 20
+VIO_RESTART_REST_S = 2.0
+# Not sooner than this after the previous restart: the respawn takes 2 s and the initialisation
+# waits for the next motion, and a loop of restarts would starve it of both.
+VIO_RESTART_GAP_S = 10.0
 
 
 @dataclass(frozen=True)
@@ -600,6 +621,126 @@ class VioLost:
         return (
             f"lost {total} (wheels {self.counts['wheels']}, rest {self.counts['rest']},"
             f" features {self.counts['features']}){last}"
+        )
+
+
+def body_velocity(previous: VoPose, pose: VoPose) -> tuple[float, float] | None:
+    """The step from ``previous`` to ``pose`` as a body-frame velocity (forward, left), m/s, in
+    the heading of ``previous``; ``None`` when the stamps do not advance."""
+    dt = pose.stamp - previous.stamp
+    if dt <= 0.0:
+        return None
+    dx, dy = pose.x - previous.x, pose.y - previous.y
+    c, s = math.cos(previous.yaw), math.sin(previous.yaw)
+    return (c * dx + s * dy) / dt, (-s * dx + c * dy) / dt
+
+
+class VioGuard:
+    """The plausibility guard on the VIO's output: a composed base velocity faster than
+    ``max_speed_m_s``, or farther than ``wheel_diff_m_s`` from the wheels' (forward speed, no
+    sideways motion), is a diverged filter and the sample is not sent. Unlike :class:`VioLost`
+    it judges every sample on its own, without a duration, so a divergence of metres per second
+    never reaches the gate.
+
+    It also says when to restart the VIO: ``restart_rejects`` implausible samples in a row while
+    the wheels have said rest for ``rest_s`` (OpenVINS never resets itself, and its static
+    initialisation needs stillness), not sooner than ``restart_gap_s`` after the last restart;
+    ``restart_rejects`` 0 never restarts. Times are the receiving node's clock."""
+
+    def __init__(
+        self,
+        max_speed_m_s: float = VIO_MAX_SPEED_M_S,
+        wheel_diff_m_s: float = VIO_WHEEL_DIFF_M_S,
+        restart_rejects: int = VIO_RESTART_REJECTS,
+        rest_s: float = VIO_RESTART_REST_S,
+        restart_gap_s: float = VIO_RESTART_GAP_S,
+    ) -> None:
+        self.max_speed_m_s = max_speed_m_s  # live: vio_max_speed_m_s
+        self.wheel_diff_m_s = wheel_diff_m_s  # live: vio_wheel_diff_m_s
+        self.restart_rejects = restart_rejects  # live: vio_restart_rejects
+        self.rest_s = rest_s
+        self.restart_gap_s = restart_gap_s
+        self._wheels: tuple[float, float] | None = None  # (now, forward m/s)
+        self._rest_since: float | None = None
+        self._restart_at: float | None = None
+        self.consecutive = 0
+        self.counts = {"speed": 0, "wheels": 0}
+        self.restarts = 0
+        self.last: str | None = None
+        self.last_restart: str | None = None
+
+    def wheels(self, now: float, linear_m_s: float, yaw_rad_s: float) -> None:
+        """One /odom twist: the wheels' forward speed and whether the cart stands still."""
+        self._wheels = (now, linear_m_s)
+        if abs(linear_m_s) >= REST_LINEAR_M_S or abs(yaw_rad_s) >= REST_YAW_RAD_S:
+            self._rest_since = None
+        elif self._rest_since is None:
+            self._rest_since = now
+
+    def at_rest_s(self, now: float) -> float:
+        """How long the wheels have said rest, seconds; 0 while they move or are silent."""
+        wheels = self._wheels
+        if self._rest_since is None or wheels is None or now - wheels[0] > WITNESS_FRESH_S:
+            return 0.0
+        return now - self._rest_since
+
+    def check(self, now: float, velocity: tuple[float, float] | None) -> str | None:
+        """Why this sample is implausible, or ``None``; a rejection is counted under its rule
+        and lengthens the run of rejections in a row, a pass ends it. ``None`` velocity (the
+        first sample, a stamp that did not advance) is not judged and changes nothing."""
+        if velocity is None:
+            return None
+        forward, left = velocity
+        speed = math.hypot(forward, left)
+        reason: str | None = None
+        rule = ""
+        wheels = self._wheels
+        if speed > self.max_speed_m_s:
+            reason, rule = f"{speed:.2f} m/s (over {self.max_speed_m_s:.2f})", "speed"
+        elif wheels is not None and now - wheels[0] <= WITNESS_FRESH_S:
+            diff = math.hypot(forward - wheels[1], left)
+            if diff > self.wheel_diff_m_s:
+                reason = (
+                    f"{forward:+.2f}/{left:+.2f} m/s against the wheels' {wheels[1]:+.2f}"
+                    f" (over {self.wheel_diff_m_s:.2f})"
+                )
+                rule = "wheels"
+        if reason is None:
+            self.consecutive = 0
+            return None
+        self.consecutive += 1
+        self.counts[rule] += 1
+        self.last = reason
+        return reason
+
+    def restart_due(self, now: float) -> str | None:
+        """The reason to restart the VIO now, or ``None``; a restart it answers is counted, and
+        the run of rejections starts again from zero."""
+        if self.restart_rejects <= 0 or self.consecutive < self.restart_rejects:
+            return None
+        rest = self.at_rest_s(now)
+        if rest < self.rest_s:
+            return None
+        if self._restart_at is not None and now - self._restart_at < self.restart_gap_s:
+            return None
+        reason = (
+            f"{self.consecutive} implausible samples in a row (last: {self.last}), the wheels at"
+            f" rest {rest:.1f} s"
+        )
+        self._restart_at = now
+        self.restarts += 1
+        self.consecutive = 0
+        self.last_restart = reason
+        return reason
+
+    def report(self) -> str:
+        """The rejections by rule, the run in a row and the restarts, for the report line."""
+        last = f" (last: {self.last})" if self.last else ""
+        restart = f" (last: {self.last_restart})" if self.last_restart else ""
+        return (
+            f"guard rejected {sum(self.counts.values())} (speed {self.counts['speed']}, wheels"
+            f" {self.counts['wheels']}){last}, {self.consecutive} in a row, restarts"
+            f" {self.restarts}{restart}"
         )
 
 
