@@ -19,7 +19,10 @@ was read in: nothing drives the arm today (torque off, parked where it was folde
 ``source: topic`` is ``/arm/joint_states`` (sensor_msgs/JointState: the URDF's joint names,
 radians in the URDF's convention, stamped at the encoder read), the sample nearest each
 observation's stamp; with no sample within ``max_age_s`` of it the pose falls back to
-``pose_deg`` and the answer says so (:class:`ArmPose`).
+``pose_deg`` and the answer says so (:class:`ArmPose`). ``zero_offset_deg`` (joint -> degrees)
+is added to whatever angles arrive, from either source, before the forward kinematics: a
+calibration whose zero is not the URDF's (``shoulder_pan``'s, fitted to the head's depth) is
+corrected in this one place, and the readings stay readings.
 
 THE RULE is the body's (:meth:`pepin.tsdf.Tsdf.integrate`'s clip): a ray that enters a grown
 link writes nothing on or past that entry — a pixel on the arm measures no room, and a depthless
@@ -198,6 +201,7 @@ class ArmModel:
     max_age_s: float = 0.5
     pose: Mapping[str, float] | None = None  # radians, every movable joint; ``pose_deg``
     mount_measured: bool = False
+    zero_offset: Mapping[str, float] | None = None  # radians added to the angles before the FK
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any], urdf_text: str | None = None) -> ArmModel:
@@ -230,6 +234,8 @@ class ArmModel:
                 if pose_deg is not None
                 else None
             )
+            offsets_deg = joints.get("zero_offset_deg") or {}
+            offsets = {str(name): math.radians(float(v)) for name, v in offsets_deg.items()}
             model = cls(
                 chain,
                 pose,
@@ -241,6 +247,7 @@ class ArmModel:
                 max_age_s=float(joints.get("max_age_s", cls.max_age_s)),
                 pose=angles,
                 mount_measured=bool(mount.get("measured", False)),
+                zero_offset=offsets or None,
             )
         except (KeyError, TypeError, IndexError, AttributeError) as exc:
             raise ValueError(
@@ -251,6 +258,9 @@ class ArmModel:
                 raise ValueError(f"arm: link {link.link!r} is not in the URDF ({sorted(known)})")
             if np.any(link.box.half <= 0.0) or link.box.half.shape != (3,):
                 raise ValueError(f"arm: box {link.box.name!r} needs three positive half sides")
+        unknown = sorted(set(model.zero_offset or {}) - set(chain.movable))
+        if unknown:
+            raise ValueError(f"arm: joints.zero_offset_deg names {unknown}, not joints of the URDF")
         if model.source not in SOURCES:
             raise ValueError(f"arm: joints.source {model.source!r} is none of {SOURCES}")
         if model.source == "config" and model.pose is None:
@@ -279,7 +289,10 @@ class ArmModel:
         return self.chain.movable
 
     def link_poses(self, angles: Mapping[str, float]) -> dict[str, RigidPose]:
-        """cart base_link <- link for every link of the arm at ``angles`` (radians)."""
+        """cart base_link <- link for every link of the arm at ``angles`` (radians, as read:
+        :attr:`zero_offset` is added here)."""
+        if self.zero_offset:
+            angles = {name: q + self.zero_offset.get(name, 0.0) for name, q in angles.items()}
         return {
             name: compose(self.mount, pose) for name, pose in self.chain.link_poses(angles).items()
         }

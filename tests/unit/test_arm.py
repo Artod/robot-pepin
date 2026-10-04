@@ -44,7 +44,10 @@ SHIPPED = ArmModel.from_dict(SHIPPED_DATA)
 # The arm of these tests stands where it can be seen and is never the placeholder of the file:
 # the top shelf's front, 10 cm right of centre, pointing forward.
 MOUNT = {"x_m": 0.0, "y_m": -0.10, "z_m": 0.78, "yaw_deg": 0.0, "measured": True}
-MODEL = ArmModel.from_dict({**SHIPPED_DATA, "mount": MOUNT})
+# ... and its joints are the URDF's own angles: no calibration offset between them and the chain.
+MODEL = ArmModel.from_dict(
+    {**SHIPPED_DATA, "mount": MOUNT, "joints": {**SHIPPED_DATA["joints"], "zero_offset_deg": {}}}
+)
 SOLID = dataclasses.replace(MODEL, margin_m=0.0)  # the links as fitted: the scene's geometry
 INTR = Intrinsics(fx=40.0, fy=40.0, cx=39.5, cy=29.5, width=80, height=60)  # ~90 deg, small
 EYE = Intrinsics(fx=494.6, fy=494.6, cx=399.5, cy=299.5, width=800, height=600)
@@ -176,11 +179,31 @@ def test_forward_kinematics_is_the_product_of_the_urdf_s_transforms() -> None:
     assert np.allclose(wrist.rotation, expected[:3, :3], atol=1e-4)
 
 
+def test_a_zero_offset_turns_the_joint_as_if_the_reading_were_that_much_larger() -> None:
+    """joints.zero_offset_deg is added to the angles from either source before the FK, in one
+    place; the readings themselves are left as read, and an offset for no joint is refused."""
+    data = {**SHIPPED_DATA, "mount": MOUNT}
+    plain = ArmModel.from_dict({**data, "joints": {**data["joints"], "zero_offset_deg": {}}})
+    shifted = ArmModel.from_dict(
+        {**data, "joints": {**data["joints"], "zero_offset_deg": {"shoulder_pan": 31.0}}}
+    )
+    angles = {**dict.fromkeys(plain.joint_names, 0.0), "shoulder_pan": math.radians(-34.2)}
+    turned = {**angles, "shoulder_pan": math.radians(-34.2 + 31.0)}
+    for name, pose in shifted.link_poses(angles).items():
+        assert np.allclose(pose.translation, plain.link_poses(turned)[name].translation)
+        assert np.allclose(pose.rotation, plain.link_poses(turned)[name].rotation)
+    assert shifted.pose == plain.pose
+    with pytest.raises(ValueError, match="zero_offset_deg"):
+        ArmModel.from_dict({**data, "joints": {**data["joints"], "zero_offset_deg": {"elbow": 1}}})
+
+
 def test_the_shipped_arm_loads_with_the_parked_pose_read_from_the_encoders() -> None:
     """The file's joints are the encoders' parked pose, 11 boxes on the 7 moving links, a 3 cm
-    margin, and a mount measured (fitted to the head's depth) on the top basket's right front."""
+    margin, a mount measured (fitted to the head's depth) on the top basket's right front, square
+    to the cart, and shoulder_pan's zero offset."""
     assert SHIPPED.source == "config" and SHIPPED.topic == "/arm/joint_states"
     assert PARKED["shoulder_lift"] == pytest.approx(-102.4)
+    assert SHIPPED.zero_offset is not None and set(SHIPPED.zero_offset) == {"shoulder_pan"}
     assert PARKED["elbow_flex"] == pytest.approx(96.8)
     assert len(SHIPPED.links) == 11 and SHIPPED.margin_m == 0.03 and SHIPPED.stride_px == 4
     assert {link.link for link in SHIPPED.links} == {j.child for j in SHIPPED.chain.joints} - {
