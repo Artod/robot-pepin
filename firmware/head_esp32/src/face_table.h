@@ -66,7 +66,7 @@ constexpr int kSleepy = 11;
 // screen
 constexpr int kScreenWidth = 320;
 constexpr int kScreenHeight = 170;
-constexpr int kScreenRotation = 1;
+constexpr int kScreenRotation = 3;
 
 // geometry: what each parameter at 1.0 means
 constexpr float kMaxOpenPx = 112.0f;

@@ -474,7 +474,7 @@ const FACE_TABLE = {
  "screen": {
   "width": 320,
   "height": 170,
-  "rotation": 1
+  "rotation": 3
  },
  "geometry": {
   "max_open_px": 112.0,

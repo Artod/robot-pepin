@@ -1,6 +1,6 @@
 {
   "_note": "The head's mouth (firmware/head_esp32, its simulator, pepin.head_server, the face tools): one table. Every expression is a full set of the parameters below, and the renderer tweens each parameter on its own, so any expression turns into any other. An expression's id on the wire ('E' frames) is its index in `expressions`, so append, never reorder. After an edit: uv run python -m pepin.face --write (regenerates firmware/head_esp32/src/face_table.h and firmware/head_esp32/sim/face_table.js; the unit tests refuse stale copies).",
-  "screen": {"width": 320, "height": 170, "rotation": 1,
+  "screen": {"width": 320, "height": 170, "rotation": 3,
     "note": "landscape, the mouth under the stereo camera; rotation is LovyanGFX's setRotation (1 or 3 turns it upside down)"},
   "geometry": {
     "max_open_px": 112,
