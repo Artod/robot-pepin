@@ -11,7 +11,9 @@ from pathlib import Path
 import pytest
 
 ROS_PYTHON = sorted(
-    (Path(__file__).resolve().parents[2] / "ros").rglob("*.py"),
+    path
+    for path in (Path(__file__).resolve().parents[2] / "ros").rglob("*.py")
+    if "pepin_src" not in path.parts  # build-image.sh's copy of src/pepin, not ROS code
 )
 
 
@@ -29,6 +31,11 @@ def _self_names(tree: ast.Module) -> dict[str, tuple[set[str], set[str]]]:
             continue
         defined = {
             f.name for f in node.body if isinstance(f, (ast.FunctionDef, ast.AsyncFunctionDef))
+        }
+        defined |= {  # class-level annotations: a dataclass's fields are its members
+            f.target.id
+            for f in node.body
+            if isinstance(f, ast.AnnAssign) and isinstance(f.target, ast.Name)
         }
         used: set[str] = set()
         for inner in ast.walk(node):
