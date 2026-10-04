@@ -177,8 +177,16 @@ class TapeBuilder:
         return []
 
     def _on_tf(self, msg: Any, received_s: float) -> list[dict[str, Any]]:
-        """Keep the two edges a pose is made of, and write a ``loc`` row at 5 Hz from them."""
-        newest = 0.0
+        """Keep the two edges a pose is made of, and write a ``loc`` row at 5 Hz from them.
+
+        A row is written when an odom -> base_link edge arrives and is dated by THAT edge's
+        stamp: the moment the composed pose describes, which is also the time tf2 answers the
+        live recorder's map -> base_link lookup at. map -> odom is the slow correction applied
+        as last heard; RTAB-Map dates it in the future by its TF tolerance (+0.5 s on
+        2026-10-04), and dating rows by it put every loc row half a second after the pose it
+        held (runs 0301-0303: a turning cart's map->odom read as 20-50 cm jumps).
+        """
+        when: float | None = None
         for transform in msg.transforms:
             parent, child = transform.header.frame_id.lstrip("/"), transform.child_frame_id
             edge = (
@@ -190,12 +198,9 @@ class TapeBuilder:
                 self._map_odom = edge
             elif (parent, child.lstrip("/")) == ("odom", "base_link"):
                 self._odom_base = edge
-            else:
-                continue
-            newest = max(newest, stamp(transform.header, received_s))
-        if self._map_odom is None or self._odom_base is None:
+                when = stamp(transform.header, received_s)
+        if when is None or self._map_odom is None or self._odom_base is None:
             return []
-        when = newest or received_s
         if when - self._last_loc < LOC_PERIOD_S:
             return []
         self._last_loc = when

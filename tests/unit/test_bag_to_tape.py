@@ -283,6 +283,22 @@ def test_the_loc_rows_are_composed_from_tf() -> None:
     assert len(builder.feed("/tf", later, 1000.4)) == 1
 
 
+def test_a_loc_row_is_dated_by_the_odometry_edge_not_by_a_future_dated_correction() -> None:
+    """RTAB-Map stamps map -> odom ahead of its time (+0.5 s on runs 0301-0303): a row must
+    carry the odom -> base_link stamp of the pose it holds, and the correction's future stamp
+    must not hold back the next rows."""
+    builder = TOOL.TapeBuilder()
+    builder.feed("/tf", transforms(1000.0, [("odom", "base_link", 0.0, 0.0, 0.0)]), 1000.0)
+    assert builder.feed("/tf", transforms(1000.55, [("map", "odom", 1.0, 2.0, 0.0)]), 1000.05) == []
+    rows = []
+    for k in range(1, 6):
+        t = 1000.0 + 0.25 * k
+        rows += builder.feed("/tf", transforms(t, [("odom", "base_link", 0.1 * k, 0.0, 0.0)]), t)
+        builder.feed("/tf", transforms(t + 0.55, [("map", "odom", 1.0, 2.0, 0.0)]), t + 0.05)
+    assert [r["t"] for r in rows] == pytest.approx([1000.25, 1000.5, 1000.75, 1001.0, 1001.25])
+    assert [r["x"] for r in rows] == pytest.approx([1.1, 1.2, 1.3, 1.4, 1.5])
+
+
 def test_the_bag_records_every_topic_the_jsonl_recorder_subscribes_to(tmp_path: Path) -> None:
     """The two recorders must see the same drive: a topic subscribed by one and missing from the
     other's list is a record that silently disappears when the switch is flipped."""
