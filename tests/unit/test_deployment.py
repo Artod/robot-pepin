@@ -62,7 +62,7 @@ def test_a_cross_machine_topic_carries_one_qos_on_both_sides() -> None:
 
     assert bridged_qos("/imu/data_raw") == ("reliable", 10) == bridged_qos("imu/data_raw")
     assert bridged_qos("/scan") is None
-    assert set(BRIDGED_QOS) == {"/imu/data_raw", "/vo", "/odom"}
+    assert set(BRIDGED_QOS) == {"/imu/data_raw", "/vo", "/odom", "/head/imu"}
     for topic, (reliability, depth) in BRIDGED_QOS.items():
         assert reliability in ("reliable", "best_effort") and depth > 0, topic
 
@@ -231,3 +231,13 @@ def test_every_laptop_container_removal_keeps_the_log_first(tmp_path: Path) -> N
     env["PEPIN_LOG_DIR"] = str(tmp_path / "archive_off")
     subprocess.run(["bash", "-c", script], cwd=REPO, env=env, check=True, timeout=20)
     assert not (tmp_path / "archive_off").exists(), "PEPIN_LOG_ARCHIVE=off keeps nothing"
+
+
+def test_the_vio_node_lives_in_its_own_container_and_the_head_imu_crosses_reliable() -> None:
+    """OpenVINS runs in pepin-vio (ros/laptop.sh vio), apart from pepin-vslam; the head IMU the
+    bridge publishes on the board is read there with the base IMU's QoS."""
+    from pepin.deployment import VIO_CONTAINER, bridged_qos
+
+    assert node_host("/ov_msckf/run_subscribe_msckf") == ("laptop", VIO_CONTAINER)
+    assert VIO_CONTAINER == "pepin-vio"
+    assert bridged_qos("/head/imu") == ("reliable", 10) == bridged_qos("/imu/data_raw")

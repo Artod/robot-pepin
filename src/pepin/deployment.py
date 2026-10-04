@@ -118,6 +118,9 @@ BRIDGED_QOS: dict[str, tuple[str, int]] = {
     f"/{VO_TOPIC}": ("reliable", 10),
     # base_bridge.cpp publishes /odom with create_publisher(..., 10): RELIABLE, KEEP_LAST 10.
     "/odom": ("reliable", 10),
+    # The head IMU (base_bridge.cpp from head_server's 3340 stream, 200 Hz), read by the
+    # laptop's VIO (pepin-vio): RELIABLE, KEEP_LAST 10 like the base IMU.
+    "/head/imu": ("reliable", 10),
 }
 
 
@@ -146,6 +149,12 @@ LAPTOP_SLAM_NODES = (
 )
 
 
+# The visual-inertial odometry's own container (ros/laptop.sh vio, vio.launch.py): OpenVINS's
+# subscriber node, kept apart from pepin-vslam so it can be kicked and its memory counted alone.
+VIO_CONTAINER = "pepin-vio"
+LAPTOP_VIO_NODES = ("/ov_msckf/run_subscribe_msckf",)  # vio.launch.py's namespace ov_msckf
+
+
 # Fully qualified names of the ROS nodes of the Mac's navigation container
 # (ros/pepin_bringup/launch/nav.launch.py): the composed container, its lifecycle nodes and the
 # costmaps they create, the navigation manager, and the processes beside them.
@@ -172,4 +181,6 @@ def node_host(node: str) -> tuple[str, str]:
         return "laptop", "pepin-vslam"
     if name in LAPTOP_NAV_NODES:
         return "laptop", NAV_CONTAINER
+    if name in LAPTOP_VIO_NODES:
+        return "laptop", VIO_CONTAINER
     return "board", "pepin-ros"

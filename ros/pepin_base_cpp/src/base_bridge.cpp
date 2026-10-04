@@ -57,6 +57,17 @@
 // no transform is published; a line without the ticks (a silent neck) publishes nothing, and
 // a stale edge is never republished. This replaced pepin_bringup.neck_state (a Python process
 // polling the base server at 2-20 Hz, git history before 2026-10-02).
+//
+// THE HEAD IMU (head_imu_enable, off until the head exists): a second JsonLineLink to head_server
+// (TCP 3340, pepin.head_server owns the head ESP32's serial port) subscribes to its IMU lines and
+// publishes every sample (under `head_imu_publish_hz`, every n-th) as /head/imu in the chip's
+// axes, dated by the sample's own moment on the board's monotonic clock as head_server's clock
+// map gives it, less the imu_config's filter delay (head_imu.hpp has the wire), carried onto the
+// ROS clock like the neck's encoder stamp. The same samples feed THE MAST-SWAY FILTER (mast.hpp, vio.md section 5) once the head
+// IMU's extrinsics are known (head_imu_camera_rotation): /mast/state (the sway's angles and rates,
+// NaN while held) for the gaze gate always, and the sway composed INTO base_link -> camera_link
+// as a rotation about the mast's hinge only under the live `mast_sway` flag (off until the sign
+// check). This node stays the ONE publisher of the robot's real-time state.
 
 #include <algorithm>
 #include <array>
@@ -66,6 +77,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -86,7 +98,10 @@
 #include <tf2_ros/transform_broadcaster.h>
 
 #include "pepin_base_cpp/gyro_bias.hpp"
+#include "pepin_base_cpp/head_imu.hpp"
+#include "pepin_base_cpp/head_line.hpp"
 #include "pepin_base_cpp/link.hpp"
+#include "pepin_base_cpp/mast.hpp"
 #include "pepin_base_cpp/mpu6050.hpp"
 #include "pepin_base_cpp/neck.hpp"
 #include "pepin_base_cpp/protocol.hpp"
@@ -108,6 +123,12 @@ constexpr double kRadToDeg = 57.29577951308232;
 // state stream with a gap this long is not a measurement, so the estimator re-primes AND the rest
 // the wheels were witnessing is over (witness_rest, still_witness). One number, two users.
 constexpr double kStateGapMaxS = 1.0;
+
+// The mast filter holds when the neck's last line or the base gyro's last sample is older than
+// this (both arrive at 50 Hz): a sway that cannot be told from the cart's or the neck's own motion
+// is not estimated. And the sway goes into the camera edge only while its last word is this fresh.
+constexpr double kMastStaleS = 0.1;
+constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 
 // The wheels' word crosses to the IMU thread through plain atomic doubles, so the 50 Hz loop
 // never waits on the reader thread's lock. On anything ROS 2 runs on these are single
@@ -235,6 +256,7 @@ public:
       "which the bridge keeps re-sending a command)");
 
     declare_neck();
+    declare_head();
 
     pose_covariance_ = odometry_pose_covariance();
     twist_covariance_ = odometry_twist_covariance();
@@ -277,6 +299,9 @@ public:
     if (imu_enable) {
       start_imu();
     }
+    if (head_enable_) {
+      start_head();
+    }
     RCLCPP_INFO(
       get_logger(), "base_bridge: odom twist %s, publish_tf=%s, %s", twist_source.c_str(),
       publish_tf_ ? "on" : "off", switch_state().c_str());
@@ -294,6 +319,9 @@ public:
     }
     link_->send(encode_stop());
     link_->stop();
+    if (head_link_) {
+      head_link_->stop();
+    }
     stop_imu();
   }
 
@@ -410,8 +438,11 @@ private:
       return;
     }
     ++neck_heard_;
+    const bool moved = neck_heard_.load() == 1 || state.pan_ticks != neck_pan_ticks_.load() ||
+      state.tilt_ticks != neck_tilt_ticks_.load();
     neck_pan_ticks_ = state.pan_ticks;
     neck_tilt_ticks_ = state.tilt_ticks;
+    witness_neck(state, moved);
     if (!neck_grid_.due(state.stamp_s)) {
       return;
     }
@@ -430,19 +461,42 @@ private:
       return;
     }
     const NeckPose pose = camera_pose(neck_model_, angles);
-    const auto q = quaternion_from_rpy(pose.roll, pose.pitch, pose.yaw);
+    std::array<double, 3> xyz{pose.x, pose.y, pose.z};
+    auto q = quaternion_from_rpy(pose.roll, pose.pitch, pose.yaw);
+    const auto theta = sway_for_edge();
+    if (theta.has_value()) {  // mast_sway on and a fresh, armed estimate: composed into the edge
+      const auto swayed = compose_sway(*theta, mast_hinge_, xyz, pose.roll, pose.pitch, pose.yaw);
+      xyz = swayed.first;
+      q = swayed.second;
+      ++mast_corrected_;
+    }
     geometry_msgs::msg::TransformStamped transform;
     transform.header.stamp = stamp;
     transform.header.frame_id = neck_parent_frame_;
     transform.child_frame_id = neck_camera_frame_;
-    transform.transform.translation.x = pose.x;
-    transform.transform.translation.y = pose.y;
-    transform.transform.translation.z = pose.z;
+    transform.transform.translation.x = xyz[0];
+    transform.transform.translation.y = xyz[1];
+    transform.transform.translation.z = xyz[2];
     transform.transform.rotation.x = q[0];
     transform.transform.rotation.y = q[1];
     transform.transform.rotation.z = q[2];
     transform.transform.rotation.w = q[3];
     tf_->sendTransform(transform);
+  }
+
+  /// Reader thread: the neck's word for the mast filter -- since when its ticks stood still (0
+  /// while they move), when the last line came, and its angles.
+  void witness_neck(const BaseState & state, bool moved)
+  {
+    if (moved) {
+      neck_still_since_.store(0.0);
+    } else if (neck_still_since_.load() == 0.0) {
+      neck_still_since_.store(state.stamp_s);
+    }
+    const NeckAngles angles = joint_angles(neck_model_, state.pan_ticks, state.tilt_ticks);
+    neck_pan_rad_.store(angles.pan_rad);
+    neck_pitch_rad_.store(angles.pitch_rad);
+    neck_line_at_.store(state.stamp_s);
   }
 
   /// The neck as a report line prints it: how many lines carried its ticks, how many went out,
@@ -619,6 +673,281 @@ private:
     }
   }
 
+  /// The head IMU's parameters (config/head_imu.json through robot.launch.py,
+  /// pepin.head_imu.HeadImuConfig.bridge_parameters) and the mast filter's.
+  void declare_head()
+  {
+    head_enable_ = declare_parameter<bool>("head_imu_enable", false);
+    head_host_ = declare_parameter<std::string>("head_imu_host", "127.0.0.1");
+    head_port_ = static_cast<int>(declare_parameter<int>("head_imu_port", 3340));
+    head_frame_ = declare_parameter<std::string>("head_imu_frame", "head_imu");
+    // An extra delay on top of the config's filter_delay_s (imu_config, head_server's word on
+    // the chip's DLPF): 0 until the tap test measures otherwise.
+    head_extra_delay_s_ = declare_parameter<double>("head_imu_filter_delay_s", 0.0);
+    head_publish_hz_ = declare_parameter<double>("head_imu_publish_hz", 200.0);
+    head_max_age_s_ = declare_parameter<double>("head_imu_max_age_s", 0.5);
+    head_gyro_var_ = declare_parameter<double>("head_imu_gyro_var", 1.3e-5);
+    head_accel_var_ = declare_parameter<double>("head_imu_accel_var", 2.5e-4);
+    // The mute, read per batch: `ros2 param set /base_bridge head_imu_publish false` silences
+    // /head/imu and leaves the link, the counters and the mast filter running.
+    declare_parameter<bool>("head_imu_publish", true);
+    // R(camera_link <- head_imu), row-major, from config/camera.json's head_imu block; empty
+    // while the IMU's extrinsics are unknown, and then the mast filter does not run at all.
+    const auto rotation = declare_parameter<std::vector<double>>(
+      "head_imu_camera_rotation", std::vector<double>{});
+    mast_rotation_valid_ = rotation.size() == 9;
+    if (mast_rotation_valid_) {
+      std::copy(rotation.begin(), rotation.end(), mast_camera_from_imu_.begin());
+    }
+    // Composed into base_link -> camera_link only while this is on (read per neck line): off
+    // until the sign check (vio.md section 5) and the drives' sway number (S6).
+    declare_parameter<bool>("mast_sway", false);
+    mast_settings_.crossover_hz = declare_parameter<double>("mast_crossover_hz", 0.5);
+    mast_settings_.arm_window_s = declare_parameter<double>("mast_arm_window_s", 0.5);
+    mast_settings_.ring_hz = declare_parameter<double>("mast_ring_hz", 5.3);
+    mast_hinge_[0] = declare_parameter<double>("mast_hinge_x_m", -0.058);
+    mast_hinge_[1] = 0.0;
+    mast_hinge_[2] = declare_parameter<double>("mast_hinge_z_m", 0.78);
+    mast_publish_hz_ = declare_parameter<double>("mast_publish_hz", 50.0);
+    mast_bias_s_ = declare_parameter<double>("mast_bias_s", 2.0);
+    mast_filter_ = MastFilter(mast_settings_);
+    head_decimator_ = HeadDecimator(head_publish_hz_);
+    mast_grid_ = NeckGrid(mast_publish_hz_);
+  }
+
+  /// Open the link to head_server (subscribing on every connection) and the publishers.
+  void start_head()
+  {
+    head_publisher_ = create_publisher<sensor_msgs::msg::Imu>("head/imu", 10);
+    head_report_at_ = monotonic_s();  // the first minute line after a whole minute
+    if (mast_rotation_valid_) {
+      mast_publisher_ = create_publisher<sensor_msgs::msg::JointState>("mast/state", 10);
+    }
+    head_link_ = std::make_unique<JsonLineLink>(
+      head_host_, head_port_,
+      [this](const nlohmann::json & message) {on_head_line(message);},
+      "head server", 0.5, 5.0, kSubscribeLine);
+    head_link_->start();
+    RCLCPP_INFO(
+      get_logger(),
+      "head imu: %s:%d -> /head/imu in %s at <= %g Hz (0: every sample), dated by head_server's "
+      "clock map less the imu_config's filter delay%s; mast filter %s (crossover %g Hz, hinge z "
+      "%.2f m, /mast/state %g Hz), mast_sway %s",
+      head_host_.c_str(), head_port_, head_frame_.c_str(), head_publish_hz_,
+      head_extra_delay_s_ != 0.0 ? " and head_imu_filter_delay_s" : "",
+      mast_rotation_valid_ ? "on" : "OFF (no head_imu_camera_rotation: the extrinsics are unknown)",
+      mast_settings_.crossover_hz, mast_hinge_[2], mast_publish_hz_,
+      get_parameter("mast_sway").as_bool() ? "on" : "off");
+  }
+
+  /// Head reader thread: a status line's clock map, or an IMU batch published and filtered.
+  void on_head_line(const nlohmann::json & message)
+  {
+    if (const auto clock = parse_head_status(message)) {
+      head_clock_ready_ = clock->ready;
+      head_clock_spread_ms_ = clock->spread_ms;
+      head_clock_ppm_ = clock->esp_fast_ppm;
+      return;
+    }
+    if (const auto config = parse_head_config(message)) {
+      const bool changed = !head_config_.has_value() || head_config_->cfg != config->cfg ||
+        head_config_->rate_hz != config->rate_hz ||
+        head_config_->filter_delay_s != config->filter_delay_s;
+      head_config_ = config;
+      if (changed) {
+        RCLCPP_INFO(
+          get_logger(), "head imu: config %d, %g Hz, filter delay %.1f ms taken off every stamp",
+          config->cfg, config->rate_hz, config->filter_delay_s * 1000.0);
+      }
+      return;
+    }
+    const auto batch = parse_head_imu(message);
+    if (!batch.has_value()) {
+      return;
+    }
+    if (!head_config_.has_value() || head_config_->cfg != batch->cfg) {
+      // A batch of a config nobody described: no rate, no delay to date it by. Refused.
+      head_unconfigured_ += static_cast<long>(batch->samples.size());
+      return;
+    }
+    const double rate_hz = head_config_->rate_hz;
+    const double delay_s = head_config_->filter_delay_s + head_extra_delay_s_;
+    const bool publish = get_parameter("head_imu_publish").as_bool();
+    head_publish_ = publish;
+    const rclcpp::Time arrival = now();
+    const double mono = monotonic_s();
+    {
+      const std::lock_guard<std::mutex> guard(head_mutex_);
+      head_refused_ += batch->refused;
+      for (const auto & sample : batch->samples) {
+        head_rate_.add(sample.t_mono_s, rate_hz);
+      }
+    }
+    for (const auto & sample : batch->samples) {
+      if (publish && head_decimator_.due(rate_hz)) {
+        publish_head_sample(sample, arrival, mono, delay_s);
+      }
+      filter_mast(sample, rate_hz, mono, delay_s);
+    }
+  }
+
+  /// One sample as sensor_msgs/Imu in the chip's axes, dated by its own moment on the board's
+  /// monotonic clock less `delay_s` (the config's filter delay and head_imu_filter_delay_s); a
+  /// sample older than head_imu_max_age_s or in the future is dated on arrival less the delay.
+  void publish_head_sample(
+    const HeadSample & sample, const rclcpp::Time & arrival, double mono, double delay_s)
+  {
+    const auto age = head_sample_age(mono, sample.t_mono_s, head_max_age_s_);
+    if (!age.has_value()) {
+      ++head_arrival_stamped_;
+    }
+    sensor_msgs::msg::Imu message;
+    message.header.stamp = arrival - rclcpp::Duration::from_seconds(age.value_or(0.0) + delay_s);
+    message.header.frame_id = head_frame_;
+    message.orientation_covariance[0] = -1.0;  // no orientation here
+    message.angular_velocity.x = sample.gyro[0];
+    message.angular_velocity.y = sample.gyro[1];
+    message.angular_velocity.z = sample.gyro[2];
+    message.linear_acceleration.x = sample.accel[0];
+    message.linear_acceleration.y = sample.accel[1];
+    message.linear_acceleration.z = sample.accel[2];
+    for (std::size_t axis = 0; axis < 3; ++axis) {
+      message.angular_velocity_covariance[axis * 4] = head_gyro_var_;
+      message.linear_acceleration_covariance[axis * 4] = head_accel_var_;
+    }
+    head_publisher_->publish(message);
+    ++head_published_;
+  }
+
+  /// Head reader thread: one sample through the mast filter (mast.hpp). Held while the neck moves,
+  /// while the base gyro or the neck's lines are stale, and until the head gyro has a bias from
+  /// a block of rest the wheels AND the neck witnessed; /mast/state at mast_publish_hz.
+  void filter_mast(const HeadSample & sample, double rate_hz, double mono, double delay_s)
+  {
+    if (!mast_rotation_valid_) {
+      return;
+    }
+    if (rate_hz != mast_bias_rate_hz_) {  // a block is samples at the chip's rate
+      head_bias_ = GyroBiasTracker(mast_bias_s_, rate_hz);
+      mast_bias_rate_hz_ = rate_hz;
+    }
+    const double wheels = still_witness(mono);
+    const double neck = neck_still_since_.load();
+    const bool neck_fresh = mono - neck_line_at_.load() < kMastStaleS;
+    const double still = (wheels > 0.0 && neck > 0.0 && neck_fresh) ? std::max(wheels, neck) : 0.0;
+    head_bias_.update(mono, sample.gyro[0], sample.gyro[1], sample.gyro[2], still);
+    const bool base_fresh = mono - gyro_at_.load() < kMastStaleS;
+    MastOutput out;
+    if (!head_bias_.ready() || neck == 0.0 || !neck_fresh || !base_fresh) {
+      mast_filter_.hold();
+      out.theta = out.omega = {kNaN, kNaN, kNaN};
+      out.held = true;
+    } else {
+      const GyroBias bias = head_bias_.bias();
+      const std::array<double, 3> rate{
+        sample.gyro[0] - bias.x, sample.gyro[1] - bias.y, sample.gyro[2] - bias.z};
+      const auto in_base = head_rate_in_base(
+        rate, mast_camera_from_imu_, neck_pan_rad_.load(), neck_pitch_rad_.load());
+      out = mast_filter_.update(sample.t_mono_s, in_base, base_yaw_rate_.load());
+    }
+    mast_theta_x_ = out.theta[0];
+    mast_theta_y_ = out.theta[1];
+    mast_theta_z_ = out.theta[2];
+    mast_at_ = mono;
+    mast_held_ = out.held;
+    if (!out.held) {
+      const double norm = std::sqrt(
+        out.theta[0] * out.theta[0] + out.theta[1] * out.theta[1] + out.theta[2] * out.theta[2]);
+      double seen = mast_peak_rad_.load();
+      while (norm > seen && !mast_peak_rad_.compare_exchange_weak(seen, norm)) {}
+    }
+    if (!mast_publisher_ || !mast_grid_.due(sample.t_mono_s)) {
+      return;
+    }
+    sensor_msgs::msg::JointState state;
+    const auto age = head_sample_age(mono, sample.t_mono_s, head_max_age_s_);
+    state.header.stamp = now() - rclcpp::Duration::from_seconds(age.value_or(0.0) + delay_s);
+    state.name = {"mast_roll", "mast_pitch", "mast_yaw"};
+    state.position = {out.theta[0], out.theta[1], out.theta[2]};
+    state.velocity = {out.omega[0], out.omega[1], out.omega[2]};
+    mast_publisher_->publish(state);
+  }
+
+  /// Reader thread (the neck line): the sway to compose into base_link -> camera_link, or
+  /// nothing -- `mast_sway` off, the filter held, or its last word older than kMastStaleS.
+  std::optional<std::array<double, 3>> sway_for_edge()
+  {
+    const bool on = get_parameter("mast_sway").as_bool();
+    mast_sway_ = on;
+    if (!on || !mast_rotation_valid_ || mast_held_.load() ||
+      monotonic_s() - mast_at_.load() > kMastStaleS)
+    {
+      return std::nullopt;
+    }
+    const std::array<double, 3> theta{mast_theta_x_.load(), mast_theta_y_.load(),
+      mast_theta_z_.load()};
+    for (double value : theta) {
+      if (!std::isfinite(value)) {
+        return std::nullopt;
+      }
+    }
+    return theta;
+  }
+
+  /// Once a minute, and whenever the head link comes up or goes down: the head IMU's line.
+  ///
+  /// ``head imu: 200.1 Hz published of 1000.2 received, link up, server clock spread 0.3 ms skew
+  /// +4.0 ppm, 0 gaps > 1.5 periods (longest 0.0 ms), 0 refused, 0 dated on arrival; mast: armed,
+  /// peak 0.08 deg, 0 edges corrected (mast_sway off)``
+  void log_head_status()
+  {
+    if (!head_link_) {
+      return;
+    }
+    const auto change = head_link_->take_status_change();
+    if (change.has_value()) {
+      if (change->first) {
+        RCLCPP_INFO(get_logger(), "%s; subscribed to the IMU stream", change->second.c_str());
+      } else {
+        RCLCPP_WARN(
+          get_logger(), "%s: /head/imu and /mast/state silent until it is back",
+          change->second.c_str());
+      }
+    }
+    const double now_s = monotonic_s();
+    if (now_s - head_report_at_ < 60.0) {
+      return;
+    }
+    const double elapsed = head_report_at_ > 0.0 ? now_s - head_report_at_ : 60.0;
+    head_report_at_ = now_s;
+    HeadRate rate;
+    long refused = 0;
+    {
+      const std::lock_guard<std::mutex> guard(head_mutex_);
+      rate = head_rate_;
+      refused = head_refused_;
+      head_rate_.reset();
+      head_refused_ = 0;
+    }
+    const long published = head_published_.exchange(0);
+    const long arrival = head_arrival_stamped_.exchange(0);
+    const long unconfigured = head_unconfigured_.exchange(0);
+    const long corrected = mast_corrected_.exchange(0);
+    const double peak = mast_peak_rad_.exchange(0.0);
+    RCLCPP_INFO(
+      get_logger(),
+      "head imu: %.1f Hz published of %.1f received, link %s, server clock %s spread %.2f ms skew "
+      "%+.1f ppm, %ld gaps > 1.5 periods (longest %.1f ms), %ld out of order, %ld refused, %ld "
+      "without an imu_config, %ld dated on arrival; mast: %s, peak %.3f deg, %ld edges "
+      "corrected (mast_sway %s)",
+      static_cast<double>(published) / elapsed, rate.rate_hz(),
+      head_link_->connected() ? "up" : "DOWN", head_clock_ready_ ? "ready" : "NOT READY",
+      head_clock_spread_ms_.load(), head_clock_ppm_.load(), rate.gaps(),
+      rate.longest_gap_s() * 1000.0, rate.out_of_order(), refused, unconfigured, arrival,
+      !mast_rotation_valid_ ? "off (no extrinsics)" : (mast_held_ ? "held" : "armed"),
+      peak / 0.017453292519943295, corrected, mast_sway_ ? "on" : "off");
+  }
+
   /// The live switches as a report line prints them: ``imu_publish=on odom_publish=off``.
   std::string switch_state() const
   {
@@ -626,7 +955,8 @@ private:
            (odom_publish_ ? "on" : "off") + " imu_bias_tracking=" +
            (imu_bias_tracking_ ? "on" : "off") + " zupt_publish=" +
            (zupt_publish_ ? "on" : "off") + " odom_stamp=" +
-           (odom_stamp_encoder_ ? "encoder" : "arrival");
+           (odom_stamp_encoder_ ? "encoder" : "arrival") + " head_imu_publish=" +
+           (head_publish_ ? "on" : "off") + " mast_sway=" + (mast_sway_ ? "on" : "off");
   }
 
   /// How /odom is dated, as the minute line prints it: ``odom stamp encoder: 3000 lines, 0 dated
@@ -920,6 +1250,7 @@ private:
         get_logger(), *get_clock(), 60000, "%s; %s", neck_state().c_str(),
         odom_stamp_state().c_str());
     }
+    log_head_status();
     const auto change = link_->take_status_change();
     if (!change.has_value()) {
       return;
@@ -1061,6 +1392,7 @@ private:
   /// witness, not the message: `imu_publish` off mutes /imu/data_raw and leaves this untouched.
   void witness_gyro(double t, double yaw_rate)
   {
+    base_yaw_rate_.store(yaw_rate);  // the mast filter subtracts it (before gyro_at_, see below)
     if (gyro_turning(yaw_rate, gyro_quiet_rad_s_.load())) {
       gyro_turn_at_.store(t);  // first: a reader that sees this sample's time sees its turn
     }
@@ -1210,6 +1542,59 @@ private:
   std::atomic<int> neck_pan_ticks_{0};
   std::atomic<int> neck_tilt_ticks_{0};
   rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr neck_publisher_;
+  // ...and its word for the mast filter (witness_neck), read by the head reader thread.
+  std::atomic<double> neck_still_since_{0.0};  // board monotonic; 0 while the ticks move
+  std::atomic<double> neck_line_at_{0.0};
+  std::atomic<double> neck_pan_rad_{0.0};
+  std::atomic<double> neck_pitch_rad_{0.0};
+  std::atomic<double> base_yaw_rate_{0.0};  // the base gyro's last bias-corrected yaw rate
+
+  // THE HEAD IMU (declare_head, on_head_line): fixed at start but for the counters, which the
+  // head reader thread writes and the status timer reads.
+  bool head_enable_ = false;
+  std::string head_host_;
+  int head_port_ = 3340;
+  std::string head_frame_;
+  double head_extra_delay_s_ = 0.0;
+  double head_publish_hz_ = 200.0;
+  double head_max_age_s_ = 0.5;
+  double head_gyro_var_ = 1.3e-5;
+  double head_accel_var_ = 2.5e-4;
+  HeadDecimator head_decimator_;  // head reader thread only
+  std::optional<HeadConfig> head_config_;  // ... and so is the last imu_config
+  std::atomic<long> head_unconfigured_{0};
+  std::mutex head_mutex_;         // guards the two below
+  HeadRate head_rate_;
+  long head_refused_ = 0;
+  std::atomic<long> head_published_{0};
+  std::atomic<long> head_arrival_stamped_{0};
+  std::atomic<bool> head_publish_{true};
+  std::atomic<bool> head_clock_ready_{false};
+  std::atomic<double> head_clock_spread_ms_{0.0};
+  std::atomic<double> head_clock_ppm_{0.0};
+  double head_report_at_ = 0.0;  // status timer only
+  rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr head_publisher_;
+  // THE MAST FILTER (filter_mast): the filter and the head gyro's bias are the head reader
+  // thread's; theta crosses to the base reader thread (sway_for_edge) through atomics.
+  bool mast_rotation_valid_ = false;
+  Matrix3 mast_camera_from_imu_{};
+  MastSettings mast_settings_;
+  MastFilter mast_filter_;
+  GyroBiasTracker head_bias_;
+  double mast_bias_s_ = 2.0;
+  double mast_bias_rate_hz_ = 0.0;
+  double mast_publish_hz_ = 50.0;
+  std::array<double, 3> mast_hinge_{-0.058, 0.0, 0.78};
+  NeckGrid mast_grid_{50.0};
+  std::atomic<double> mast_theta_x_{0.0};
+  std::atomic<double> mast_theta_y_{0.0};
+  std::atomic<double> mast_theta_z_{0.0};
+  std::atomic<double> mast_at_{0.0};
+  std::atomic<bool> mast_held_{true};
+  std::atomic<bool> mast_sway_{false};
+  std::atomic<long> mast_corrected_{0};
+  std::atomic<double> mast_peak_rad_{0.0};
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr mast_publisher_;
 
   std::mutex mutex_;  // guards the command the resend timer repeats
   std::optional<std::pair<double, double>> command_;
@@ -1229,6 +1614,8 @@ private:
   Mpu6050 imu_;  // opened only when imu_enable; ~BaseBridge joins the thread before these die
   std::atomic<bool> imu_running_{false};
   std::thread imu_thread_;
+  // The head server's link: after the members its reader thread touches, so it is joined first.
+  std::unique_ptr<JsonLineLink> head_link_;
   // Last member on purpose: its destructor joins the reader thread before the publishers die.
   std::unique_ptr<JsonLineLink> link_;
 };

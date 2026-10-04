@@ -4,6 +4,11 @@ A clip is a plain copy of the stream (curl, a few percent of a core, no re-encod
 when a run opens and ended when it closes, so a laptop that cannot reach the camera still gets
 the video with the recording. Both recorders own one — the JSONL tape's and the bag's — and the
 clip lands beside either under the run's own stem (:func:`pepin.tape.camera_clip_path`).
+
+The raw copy keeps every part's headers, and the URL asks ustreamer for its extra ones
+(``?extra_headers=1``): the capture stamp beside the send stamp, which is what
+``ros/tools/clip_to_bag.py`` dates the frames by when it turns a clip into a camera bag
+(:func:`pepin.mjpeg.capture_time`).
 """
 
 from __future__ import annotations
@@ -14,7 +19,8 @@ from typing import Any
 
 from pepin.tape import camera_clip_path
 
-CAMERA_STREAM = "http://127.0.0.1:8080/stream"  # ustreamer on the board's host network
+# ustreamer on the board's host network, with the capture stamps (pepin.mjpeg)
+CAMERA_STREAM = "http://127.0.0.1:8080/stream?extra_headers=1"
 CLIP_MAX_S = 1800  # curl's own limit: a clip nobody stops is a bug, as a tape nobody stops is
 
 

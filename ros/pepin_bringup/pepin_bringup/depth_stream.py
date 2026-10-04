@@ -662,6 +662,9 @@ class DepthStream(Node):
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),
+            stamp_end=float(self._switches["gate_stamp_end"]),
+            sway_dps=float(self._switches["gate_sway_dps"]),
+            sway_deg=float(self._switches["gate_sway_deg"]),
         )
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)

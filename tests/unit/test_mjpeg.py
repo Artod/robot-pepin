@@ -2,6 +2,8 @@
 
 import io
 
+import pytest
+
 from pepin.mjpeg import capture_time, parts
 
 
@@ -30,3 +32,34 @@ def test_a_stream_cut_mid_frame_ends_cleanly_and_a_missing_stamp_is_none() -> No
     assert list(parts(io.BytesIO(whole[:-6]))) == []  # the body never completes
     assert capture_time({"content-type": "image/jpeg"}) is None
     assert capture_time({"x-timestamp": "soon"}) is None
+
+
+GRAB = {
+    "x-timestamp": "1700000000.250",  # realtime at the send
+    "x-ustreamer-send-time": "5000.250",  # monotonic at the send
+    "x-ustreamer-grab-time": "5000.200",  # monotonic at the V4L2 capture: 50 ms earlier
+}
+
+
+def test_the_grab_mode_moves_the_capture_stamp_onto_the_realtime_clock() -> None:
+    """ustreamer's X-Timestamp is the SEND time; the capture is grab + (X-Timestamp - send)."""
+    from pepin.mjpeg import has_grab, send_lag_s
+
+    assert capture_time(GRAB) == 1700000000.250, "send stays the default"
+    assert capture_time(GRAB, mode="grab") == pytest.approx(1700000000.200, abs=1e-6)
+    renamed = dict(GRAB)
+    renamed["x-ustreamer-grab-begin-time"] = renamed.pop("x-ustreamer-grab-time")  # 6.x
+    assert capture_time(renamed, mode="grab") == pytest.approx(1700000000.200, abs=1e-6)
+    assert send_lag_s(GRAB) == pytest.approx(0.050, abs=1e-6)
+    assert has_grab(GRAB) and has_grab(renamed)
+
+
+def test_without_the_extra_headers_grab_falls_back_to_the_send_time() -> None:
+    from pepin.mjpeg import has_grab, send_lag_s
+
+    plain = {"x-timestamp": "12.5"}
+    assert capture_time(plain, mode="grab") == 12.5
+    assert send_lag_s(plain) is None and not has_grab(plain)
+    assert capture_time({}, mode="grab") is None
+    with pytest.raises(ValueError, match="stamp mode"):
+        capture_time(plain, mode="exposure")

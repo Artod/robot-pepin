@@ -474,6 +474,9 @@ class SensorPack(Node):
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),
+            stamp_end=float(self._switches["gate_stamp_end"]),
+            sway_dps=float(self._switches["gate_sway_dps"]),
+            sway_deg=float(self._switches["gate_sway_deg"]),
         )
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self._on_info, reliable)
         self.create_subscription(Image, IMAGE_TOPIC, self._on_image, pair)

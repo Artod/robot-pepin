@@ -859,7 +859,8 @@ def test_the_laptop_halves_create_the_names_flags_sh_looks_for() -> None:
         c for c in sf.shell_commands(laptop) if "docker run -d --name " in c and "zrouter" not in c
     ]
     runs = [c for c in runs if "rmw_zenohd" not in c]
-    assert len(runs) == 2, "the navigation container, the SLAM container"
+    assert len(runs) == 3, "the navigation container, the SLAM container, the VIO container"
+    assert "pepin_remove_container pepin-vio" in laptop
     for command in runs:
         assert "--stop-signal SIGINT" in command, command
 
@@ -1510,8 +1511,11 @@ def test_a_sensor_is_muted_where_it_is_published_and_both_bridges_know_the_same_
     ros/flags.sh reads), so the two parameter names have to exist in both or `ros/sensor.sh mute
     imu` validates a name the running bridge does not have."""
     flags = load_table(REPO / NODES / "base_bridge.py")
-    mutes = [name for name in flags.names if flags.flag(name).kind == "bool"]
-    assert mutes == ["imu_publish", "odom_publish"]
+    mutes = [name for name in flags.names if flags.flag(name).kind == "bool" and flags[name]]
+    assert mutes == ["imu_publish", "odom_publish", "head_imu_publish"]
+    # The one bool that is not a mute: the mast's sway composed into the camera edge, off until
+    # its sign is checked (vio.md section 5), live, read per neck line.
+    assert flags["mast_sway"] is False and flags.flag("mast_sway").live
     for name in mutes:
         assert flags.flag(name).live and flags[name] is True, f"{name}: on, and live, or no test"
     cpp = (REPO / "ros/pepin_base_cpp/src/base_bridge.cpp").read_text()
@@ -2591,7 +2595,7 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
         ast.unparse(c.args[0]): sf.keywords(c) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
     }
     assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'stereo'", "today's input"
-    assert ast.literal_eval(sf.assignments(vslam)["VO_INPUTS"]) == ("depth", "stereo")
+    assert ast.literal_eval(sf.assignments(vslam)["VO_INPUTS"]) == ("depth", "stereo", "vio")
     stereo = sf.keywords(_node_named(vslam, "stereo_odometry"))
     assert ast.unparse(stereo["executable"]) == "'stereo_odometry'"
     assert ast.unparse(stereo["parameters"]) == ast.unparse(keywords["parameters"])
@@ -2607,6 +2611,7 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
         assert pair in remapped, remapped
     laptop = (REPO / "ros/laptop.sh").read_text()
     assert "--vo-depth) VO_INPUT=depth ;;" in laptop and '"vo_input:=$VO_INPUT"' in laptop
+    assert "--vo-vio) VO_INPUT=vio ;;" in laptop, "the relay on OpenVINS (vio.md)"
     gate = next(
         c
         for c in sf.calls_to(vslam, "ExecuteProcess")

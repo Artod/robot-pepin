@@ -337,6 +337,42 @@ a row the host is left alone and probed again every 30 s. **The checkpoint** liv
 device are in `config/camera.json`'s `net` block. The model's source is vendored under
 `src/pepin/vendor/raft_stereo/` (MIT, princeton-vl/RAFT-Stereo at 6e93ed2).
 
+## The head IMU and the visual-inertial odometry
+
+The head ESP32 reads an MPU6050 glued to the stereo module; `pepin.head_server` (board,
+`pepin-head`, TCP 3340) owns its serial port and maps its clock onto the board's. The base bridge
+subscribes (`head_imu:=true`, `ros/feature.sh head_imu on`) and is the one publisher of what
+follows from it:
+
+- `/head/imu` (sensor_msgs/Imu, frame `head_imu`, the chip's axes), every sample under a 200 Hz cap,
+  dated by the sample's data-ready edge less the chip's filter delay (the `imu_config` line);
+  `head_imu_publish` mutes it live;
+- `/mast/state` (JointState `mast_roll|pitch|yaw`, the sway's angles and rates, NaN while the neck
+  moves) once the IMU's extrinsics are in `config/camera.json` (`stereo.head_imu`); the gaze gate
+  drops a frame on it with `gate_sway_dps`/`gate_sway_deg` (both 0, off, as shipped);
+- the sway composed into `base_link -> camera_link` only under `mast_sway` (off until its sign is
+  checked, docs/head_imu_calibration.md section 7).
+
+The minute line says it all: `head imu: 200.0 Hz published of 200.0 received, link up, server clock
+ready spread 0.21 ms skew +4.5 ppm, 0 gaps > 1.5 periods ...; mast: armed, peak 0.080 deg, ...`.
+
+OpenVINS runs on the laptop in its own container (`pepin-laptop:vio`, OpenVINS pinned to master
+2025-11-30 plus PR #500, its own simulator as the build's gate) and enters the board's EKF through
+the visual odometry's one slot:
+
+```bash
+uv run python ros/tools/vio_config.py          # OpenVINS's files from the repo's numbers (ros/maps/vio)
+ros/laptop-build.sh vio                        # once: 16 min of build, 34 s of gate
+ros/laptop.sh vio                              # OpenVINS in pepin-vio; vio logs | down | kick (at rest)
+ros/laptop.sh vslam --vo-vio                   # the relay reads /ov_msckf/poseimu instead of rtabmap
+```
+
+The relay composes base_link's pose through TF (`head_imu <- base_link`: camera_stream's static
+edge from the extrinsics, the neck chain from the board), gives it the per-step `vio` covariance
+(`vio_step_fraction` of the step, floored at `vo_sigma_m`), counts OpenVINS's re-inits and withholds
+a lost VIO (`vio_lost_*` knobs). Calibration: docs/head_imu_calibration.md. The offline A/B: the
+"Replay" section.
+
 ## Camera calibration
 
 **The stereo head** (writes `config/stereo_calibration.json`):
@@ -502,6 +538,9 @@ minute, and every live flag on it back to its default.
 | `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published |
 | `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
 | `base_bridge` | `odom_stamp` | choice: encoder, arrival | encoder | yes | what /odom and odom -> base_link are dated by: the state line's encoder read carried onto the ROS clock (`encoder`, the stamp /neck/state of the same line carries) or the moment the line reached the bridge (`arrival`); a line older than 0.5 s is dated on arrival either way |
+| `base_bridge` | `head_imu_publish` | bool | on | yes | the head IMU's samples (head_server's TCP 3340 stream, under the launch's head_imu:=true) leave the bridge as /head/imu in the chip's axes, dated by the sample's own moment on the board's clock; off, the link, the counters and the mast filter keep running and nothing is published |
+| `base_bridge` | `mast_sway` | bool | off | yes | the mast's sway, from the head gyro minus the base gyro's yaw and the neck's joints (mast.hpp), is composed INTO base_link -> camera_link as a rotation about the mast's hinge, so every consumer of that edge gets the corrected camera; off, the edge is the neck's alone, exactly as before, and /mast/state publishes either way |
+| `camera_stream` | `camera_stamp` | choice: send, grab | send | yes | which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the stream URL and falls back to send per frame without it, counted in the report line) |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
 | `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's base bridge publishes that edge live from the neck's encoders, because two publishers of one edge fight |
@@ -543,7 +582,7 @@ minute, and every live flag on it back to its default.
 | `sensor_pack` | `place_descriptor` | bool | on | yes | a camera snapshot's descriptor is the localisation service's /place vector of its picture (pepin.localization_service, BoQ on the laptop's GPU); off, every snapshot carries the null descriptor and the service is not asked |
 | `sensor_pack` | `gaze_gate` | bool | on | yes | frames whose exposure window (stamp +- gate_exposure_s) overlaps a head saccade (/gaze/state's blind intervals, + gate_settle_s after settling) or holds a body yaw faster than gate_yaw_dps (/imu/data_raw; 0 is off) are dropped here and counted; off, every frame passes as before |
 | `visual_odometry` | `vo_publish` | bool | on | yes | the gated visual odometry leaves this laptop as /vo, where the board's EKF fuses it as a third input beside the wheels and the gyro; off, the node still measures and reports and the EKF is exactly what it was without it |
-| `visual_odometry` | `vo_covariance` | choice: dynamic, constant, rtabmap | dynamic | yes | whose covariance rides on the published pose: `dynamic`, the registration's own sigma and the depth scale's share of the step just taken added in quadrature (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m, vo_yaw_sigma_deg); or the one rtabmap's registration computed, untouched |
+| `visual_odometry` | `vo_covariance` | choice: dynamic, constant, rtabmap, vio | dynamic | yes | whose covariance rides on the published pose: `dynamic`, the registration's own sigma and the depth scale's share of the step just taken added in quadrature (pepin.visual_odometry.scaled_covariance); the documented constant (vo_sigma_m, vo_yaw_sigma_deg); the one rtabmap's registration computed, untouched; or `vio`, a per-step model for the visual-inertial input (vio_step_fraction of the step, floored at vo_sigma_m = one wheel sample; vo_input vio pins it, since OpenVINS's own covariance is the MARGINAL of an unobservable global pose and only grows) |
 | `visual_odometry` | `gaze_gate` | bool | on | yes | frames whose exposure window (stamp +- gate_exposure_s) overlaps a head saccade (/gaze/state's blind intervals, + gate_settle_s after settling) or holds a body yaw faster than gate_yaw_dps (/imu/data_raw; 0 is off) are dropped here and counted; off, every frame passes as before |
 
 ### Config knobs
@@ -580,6 +619,9 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `depth_stream` | `gate_exposure_s` | number 0..0.2 | 0.035 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `depth_stream` | `gate_settle_s` | number 0..1 | 0.1 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade |
 | `depth_stream` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |
+| `depth_stream` | `gate_stamp_end` | integer 0..1 | 0 | 1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab |
+| `depth_stream` | `gate_sway_dps` | number 0..360 | 0.0 | a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster) |
+| `depth_stream` | `gate_sway_deg` | number 0..10 | 0.0 | a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0 |
 | `gaze` | `frames` | integer 0..20 | 3 | still depth frames a look waits for at each view: fused into the volume and stamped later than one frame period after the head settled; a request may ask for its own number |
 | `gaze` | `settle_tol_deg` | number 0.1..10 | 1.0 | how close, in degrees, the encoders must read to the target for the head to have arrived |
 | `gaze` | `move_timeout_s` | number 0.5..10 | 3.0 | a move not settled by then ends unreached (the encoders say where the head is), and a write the base server keeps refusing for this long is denied |
@@ -625,6 +667,9 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `sensor_pack` | `gate_exposure_s` | number 0..0.2 | 0.035 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `sensor_pack` | `gate_settle_s` | number 0..1 | 0.1 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade |
 | `sensor_pack` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |
+| `sensor_pack` | `gate_stamp_end` | integer 0..1 | 0 | 1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab |
+| `sensor_pack` | `gate_sway_dps` | number 0..360 | 0.0 | a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster) |
+| `sensor_pack` | `gate_sway_deg` | number 0..10 | 0.0 | a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0 |
 | `visual_odometry` | `vo_sigma_m` | number 0.001..1 | 0.07 | the constant position sigma of one visual-odometry pose, in metres; the EKF differences two of them into a velocity and the covariance rides along — as (this pose's + the previous pose's) TIMES the gap, so what the filter actually weighs is a velocity variance of 2 * sigma^2 * dt |
 | `visual_odometry` | `vo_yaw_sigma_deg` | number 0.1..180 | 5.0 | the constant yaw sigma of one visual-odometry pose, in degrees; since 2026-09-15 the board's EKF fuses this yaw differentially (ekf.yaml odom1_config index 5), so this number is what sizes a second heading source against the gyro |
 | `visual_odometry` | `vo_max_speed` | number 0.05..10 | 1.0 | a step between two visual-odometry poses faster than this, in m/s, is dropped: rtabmap restarting its tracking moves the pose without moving the cart |
@@ -632,9 +677,16 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `visual_odometry` | `vo_max_turn` | number 5..720 | 180.0 | a turn between two visual-odometry poses faster than this, in deg/s, is dropped, for the same reason as vo_max_speed |
 | `visual_odometry` | `vo_reset_radius_m` | number 0..1 | 0.05 | a pose that lands this close to rtabmap's own origin while the previous one was farther out is its re-initialisation, not a drive, and is dropped; 0 turns the check off |
 | `visual_odometry` | `vo_publish_hz` | number 0..30 | 10.0 | how often a gated pose may leave for the board's EKF, in hertz; 0 publishes every one of them |
+| `visual_odometry` | `vio_step_fraction` | number 0..1 | 0.03 | vo_covariance vio: the VIO's drift per metre of step, added in quadrature to the vo_sigma_m floor (one wheel sample at 10 Hz). 0.03 is an ESTIMATE (vio.md M3) until the offline A/B measures it |
+| `visual_odometry` | `vio_lost_speed_m_s` | number 0.01..1 | 0.1 | vo_input vio: the composed base speed disagreeing with the wheels' by more than this (m/s) for vio_lost_s while /zupt is silent marks the VIO lost (it never resets itself; a drift at 0.5 m/s would pass vo_max_speed) |
+| `visual_odometry` | `vio_lost_s` | number 0.1..10 | 1.0 | vo_input vio: how long the wheel disagreement must last before the VIO is lost, seconds |
+| `visual_odometry` | `vio_min_features` | integer 0..500 | 20 | vo_input vio: fewer features than this in OpenVINS's last update (/ov_msckf/points_msckf) marks the VIO lost; 0 turns the rule off |
 | `visual_odometry` | `gate_exposure_s` | number 0..0.2 | 0.035 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known; 0.035 covers an auto exposure up to half a 15 fps frame. With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `visual_odometry` | `gate_settle_s` | number 0..1 | 0.1 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade |
 | `visual_odometry` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |
+| `visual_odometry` | `gate_stamp_end` | integer 0..1 | 0 | 1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab |
+| `visual_odometry` | `gate_sway_dps` | number 0..360 | 0.0 | a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster) |
+| `visual_odometry` | `gate_sway_deg` | number 0..10 | 0.0 | a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0 |
 
 ## Two recorders
 
@@ -702,6 +754,43 @@ It runs in a throwaway container with `--network none`; `ros/replay/engine` (C++
 costmaps' clock and loop, so the same bag gives the same costmap bit for bit. The camera volume
 is not re-fused (`/depth_marks` is replayed as recorded) and the loop is open: the recorded plan
 and motion, no planner or controller run. The columns are in `ros/replay/score.py`.
+
+### The camera of a drive (`ros/clip_to_bag.sh`)
+
+The drives record no image topics; the board-side clip `<run>_cam.mjpeg` beside each bag is the
+camera's record (`pepin_bringup.camera_clip`, curl's raw copy, which keeps every part's headers;
+its URL asks for `?extra_headers=1`, so the V4L2 capture stamp rides along). `ros/clip_to_bag.sh`
+turns it into a camera bag of the four stereo topics, rectified exactly as `camera_stream` does
+(`pepin_bringup.stereo_frames`) and dated by the capture (`pepin.mjpeg.capture_time` grab):
+
+```bash
+ros/clip_to_bag.sh 0512                  # ros/maps/rec/0512_*_cam.mjpeg -> 0512_*_cam.bag
+ros/clip_to_bag.sh 0512 --require-grab   # refuse a clip recorded without the capture stamps
+ros2 bag play --clock 100 -i ros/maps/rec/0512_*/ -i ros/maps/rec/0512_*_cam.bag  # drive + camera
+```
+
+It prints the frames, the parts that fell back to the send stamp and the send-grab lag. The raw
+rectified eyes are ~17 MB/s with MCAP's zstd (a 4-minute drive is ~4 GB): convert the drives being
+replayed, not the archive. Clips recorded before 2026-10-03 carry no grab headers (send stamps,
+1-68 ms late and bimodal): fine for looking, not for a VIO or a Kalibr run.
+
+### The visual odometry's A/B (`ros/vio_replay.sh`, `ros/tools/vio_score.py`)
+
+One drive, one arm, the board's EKF (`ros/params/ekf.yaml`) replayed on the drive's own inputs
+plus the arm's `/vo`, in real time (OpenVINS has no ROS 2 serial reader) in a throwaway container
+with no network; then every arm's `/odometry/filtered` scored against the lidar truth with the
+metrics fixed before the drives (vio.md section 6: the median relative pose error per metre over
+1 m segments, the paired bootstrap CI against B, the per-drive wins):
+
+```bash
+ros/vio_replay.sh 0601 --arm A      # the EKF with no /vo
+ros/vio_replay.sh 0601 --arm B      # stereo_odometry + the relay (vo_input stereo): the baseline
+ros/vio_replay.sh 0601 --arm E      # OpenVINS + the relay (vo_input vio); Ez: its ZUPT on
+uv run python ros/tools/vio_score.py runs/06* --arms A B E --baseline B --s3 0601 0602 0603 0604 0605 0606
+```
+
+Each run leaves `<run>_arm_<ARM>.bag` and `.csv` beside the drive; the scorer reads a directory per
+drive holding `truth.csv` (the lidar truth) and one `<ARM>.csv` per arm.
 
 ## Simulation
 

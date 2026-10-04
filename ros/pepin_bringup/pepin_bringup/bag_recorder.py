@@ -74,6 +74,11 @@ CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
 # fused pose that went wrong could not be taken apart into what each source said while it happened.
 # bag_to_tape skips them.
 ODOMETRY_TOPICS = ("/vo", "/zupt")
+# ...and the head: its IMU (the bridge's /head/imu, 200 Hz) and the mast's sway (/mast/state), so a
+# drive's bag carries what the VIO and the sway number (vio.md section 6) are computed from; the
+# camera itself is the board-side clip (ros/tools/clip_to_bag.py). Neither exists without
+# head_imu:=true, and a topic nobody publishes costs the recorder nothing. bag_to_tape skips them.
+HEAD_TOPICS = ("/head/imu", "/mast/state")
 BAG_TOPICS: tuple[str, ...] = (
     *sorted(TOPIC_RECORDS),
     "/tf",
@@ -81,6 +86,7 @@ BAG_TOPICS: tuple[str, ...] = (
     RAW_SCAN_TOPIC,
     *CAMERA_MARK_TOPICS,
     *ODOMETRY_TOPICS,
+    *HEAD_TOPICS,
 )
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking

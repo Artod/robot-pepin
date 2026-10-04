@@ -2,7 +2,9 @@
 
 import math
 from itertools import pairwise
+from typing import Any
 
+import numpy as np
 import pytest
 
 from pepin.visual_odometry import (
@@ -280,3 +282,173 @@ def test_the_dynamic_covariance_adds_the_scale_s_share_of_the_step() -> None:
     floored = scaled_covariance(1e-12, 0.0, yaw_sigma_deg=5.0)
     assert math.isclose(math.sqrt(floored[0]), SIGMA_FLOOR_M, rel_tol=1e-6)
     assert floored[35] > 0.0 and floored[14] > 1e3, "yaw measured, z and roll left to others"
+
+
+def _body_velocity(a: VoPose, b: VoPose) -> tuple[float, float]:
+    """What robot_localization's differential mode fuses from two published poses: the step
+    ``a^-1 * b`` in a's body frame, divided by the gap (ros_filter.cpp, prev.inverseTimes(cur))."""
+    dx, dy = b.x - a.x, b.y - a.y
+    c, s = math.cos(a.yaw), math.sin(a.yaw)
+    dt = b.stamp - a.stamp
+    return (c * dx + s * dy) / dt, (-s * dx + c * dy) / dt
+
+
+def _straight(t0: float, x0: float, y0: float, yaw: float, n: int) -> list[VoPose]:
+    """``n`` source poses 0.1 s apart driving 2 cm a step (0.2 m/s) along ``yaw``."""
+    return [
+        VoPose(t0 + 0.1 * i, x0 + 0.02 * i * math.cos(yaw), y0 + 0.02 * i * math.sin(yaw), yaw)
+        for i in range(n)
+    ]
+
+
+def test_a_source_frame_that_starts_turned_still_reads_as_driving_forward() -> None:
+    """A VIO's gravity frame has whatever yaw the chip and the pan gave it at init: a cart driving
+    straight ahead with the source at yaw 90 deg is forward motion to the EKF, not sideways
+    (the track summed in the source's axes said vy +0.200 m/s, 2026-10-02)."""
+    published = _gated(VoGate(), VoTrack(), _straight(0.0, 1.0, -2.0, math.pi / 2, 6))
+    for a, b in pairwise(published):
+        vx, vy = _body_velocity(a, b)
+        assert vx == pytest.approx(0.200, abs=1e-9)
+        assert vy == pytest.approx(0.000, abs=1e-9)
+
+
+def test_a_turn_inside_a_gated_interval_leaves_no_sideways_velocity_behind() -> None:
+    """A 30 deg body turn while the gaze gate withheld the poses: the track stands still across
+    it, and after it the cart drives along its new heading — the EKF must read forward motion,
+    not vx 0.173 / vy 0.100 for the rest of the session. The withheld turn reaches nobody, its
+    yaw included: the track's heading stays where it was (the gyro owns the turn) and the steps
+    after it are body steps, so the differenced velocity does not care."""
+    gate, track = VoGate(max_gap_s=1.0), VoTrack()
+    published = _gated(gate, track, _straight(0.0, 0.0, 0.0, 0.0, 4))
+    turn = [VoPose(0.4 + 0.1 * i, 0.06, 0.0, math.radians(10 * (i + 1))) for i in range(3)]
+    leg = _straight(0.7, 0.06, 0.0, math.radians(30.0), 5)
+    for pose in [*turn, leg[0]]:  # withheld: each only re-anchors, as visual_odometry._gated does
+        gate.reanchor(pose)
+        track.anchor(gate.anchor)
+    after = _gated(gate, track, leg[1:])
+    for a, b in pairwise(after):
+        vx, vy = _body_velocity(a, b)
+        assert vx == pytest.approx(0.200, abs=1e-9)
+        assert vy == pytest.approx(0.000, abs=1e-9)
+    assert track.pose[2] == pytest.approx(0.0, abs=1e-12), "the gated turn is not differenced"
+    assert published[-1].x == pytest.approx(0.06), "the leg before the turn is untouched"
+
+
+def test_the_track_replays_body_steps_from_its_own_heading() -> None:
+    """A source turned 90 deg against the track: a step to the source's +y (its forward) lands on
+    the track's +x; a turn then rotates every later step with the track."""
+    track = VoTrack()
+    track.advance(VoPose(0.0, 5.0, 5.0, math.pi / 2))
+    first = track.advance(VoPose(0.1, 5.0, 5.1, math.pi / 2))
+    assert (first.x, first.y) == pytest.approx((0.1, 0.0), abs=1e-12)
+    track.advance(VoPose(0.2, 5.0, 5.1, math.pi))  # a 90 deg left turn in place
+    second = track.advance(VoPose(0.3, 4.9, 5.1, math.pi))  # forward again along the source's -x
+    assert (second.x, second.y) == pytest.approx((0.1, 0.1), abs=1e-12)
+    assert second.yaw == pytest.approx(math.pi / 2)
+
+
+# ---- the visual-inertial source --------------------------------------------------------------
+def _rot_z(angle: float) -> Any:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _rot_y(angle: float) -> Any:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]])
+
+
+def _base_to_imu(pan: float, tilt: float) -> Any:
+    """base_link <- head_imu through the neck as neck.hpp chains it: the pan pivot over the front
+    axle, the tilt axis 1.134 m up, the lens 0.025 m ahead and 0.086 m above it, the mount pitch
+    23.8 deg down, and the IMU 4 cm beside the left eye, its axes permuted (a chip glued on its
+    side)."""
+    from pepin.visual_odometry import homogeneous
+
+    pan_t = homogeneous(_rot_z(pan), (0.0, 0.0, 0.0))
+    tilt_axis = homogeneous(np.eye(3), (0.0, 0.0, 1.134))
+    tilt_t = homogeneous(_rot_y(tilt + math.radians(23.8)), (0.0, 0.0, 0.0))
+    lens = homogeneous(np.eye(3), (0.025, 0.0, 0.086))
+    chip = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    imu = homogeneous(chip, (0.0, 0.0305, 0.04))
+    return pan_t @ tilt_axis @ tilt_t @ lens @ imu
+
+
+def test_a_parked_cart_with_its_head_panning_stands_still_in_the_composed_pose() -> None:
+    """T_G_I swings with the pan (the IMU on its lever arms), T_I_B swings back through the
+    neck's TF chain: the composed base pose stands still to well under a millimetre."""
+    from pepin.visual_odometry import compose_base_pose, homogeneous
+
+    t_g_b = homogeneous(_rot_z(math.radians(37.0)), (1.5, -0.4, 0.0))  # G's arbitrary yaw
+    poses = []
+    for i in range(19):
+        pan, tilt = math.radians(-45.0 + 5.0 * i), math.radians(10.0 * math.sin(i))
+        t_b_i = _base_to_imu(pan, tilt)
+        t_g_i = t_g_b @ t_b_i
+        poses.append(compose_base_pose(t_g_i, np.linalg.inv(t_b_i), stamp=0.1 * i))
+    xs = [p.x for p in poses]
+    ys = [p.y for p in poses]
+    assert max(xs) - min(xs) < 1e-3 and max(ys) - min(ys) < 1e-3
+    assert poses[0].x == pytest.approx(1.5) and poses[0].y == pytest.approx(-0.4)
+    assert all(p.yaw == pytest.approx(math.radians(37.0)) for p in poses)
+
+
+def test_a_gravity_frame_yawed_90_deg_still_reads_as_forward_motion_through_the_track() -> None:
+    """OpenVINS's G has whatever yaw init gave it: a cart driving straight ahead reads in G as
+    motion along G's y. Composed and summed in SE(2), the EKF is told vx 0.2, vy 0."""
+    from pepin.visual_odometry import compose_base_pose, homogeneous
+
+    t_b_i = _base_to_imu(math.radians(30.0), 0.0)  # the head looking 30 deg left
+    gate, track = VoGate(), VoTrack()
+    published = []
+    for i in range(6):
+        t_g_b = homogeneous(_rot_z(math.pi / 2), (0.3, 0.02 * i, 0.0))
+        pose = compose_base_pose(t_g_b @ t_b_i, np.linalg.inv(t_b_i), stamp=0.1 * i)
+        assert gate.admit(pose, lost=False) is None
+        published.append(track.advance(pose))
+    for a, b in pairwise(published):
+        vx, vy = _body_velocity(a, b)
+        assert vx == pytest.approx(0.2, abs=1e-9) and vy == pytest.approx(0.0, abs=1e-9)
+
+
+def test_the_vio_health_counts_a_step_of_its_covariance_as_a_reinit() -> None:
+    """The marginal covariance only grows; a drop (or a jump) by 10x is a re-initialisation."""
+    from pepin.visual_odometry import VioHealth
+
+    health = VioHealth()
+    growing = [_covariance(v) for v in (1e-4, 1.2e-4, 1.5e-4, 2e-4)]
+    assert not any(health.observe(c) for c in growing)
+    assert health.observe(_covariance(1e-6)), "re-initialised: back to the init covariance"
+    assert health.reinits == 1
+    assert not health.observe([0.0] * 12), "a truncated covariance says nothing"
+
+
+def test_the_three_lost_rules() -> None:
+    """(a) 0.25 m/s against wheels at 0.05 for a second, the board not at rest; (b) creeping at
+    0.05 m/s while /zupt says rest; (c) 12 features. Each episode is counted once."""
+    from pepin.visual_odometry import VioLost
+
+    lost = VioLost(lost_speed_m_s=0.1, lost_s=1.0, min_features=20)
+    lost.wheels(0.0, 0.05)
+    assert lost.check(0.0, 0.25) is None, "a disagreement has to last"
+    lost.wheels(0.5, 0.05)
+    assert lost.check(0.5, 0.25) is None
+    lost.wheels(1.0, 0.05)
+    reason = lost.check(1.0, 0.25)
+    assert reason is not None and "wheels" in reason
+    lost.wheels(1.1, 0.05)
+    assert lost.check(1.1, 0.25) is not None, "the same episode"
+    lost.wheels(1.2, 0.20)
+    assert lost.check(1.2, 0.22) is None, "agreeing again"
+    lost.zupt(2.0)
+    lost.wheels(2.0, 0.0)
+    rest = lost.check(2.0, 0.05)
+    assert rest is not None and "/zupt" in rest
+    assert lost.check(2.1, 0.01) is None, "still at rest, and the VIO agrees"
+    lost.features(3.0, 12)
+    few = lost.check(3.0, 0.0)
+    assert few is not None and "12 features" in few
+    assert lost.counts == {"wheels": 1, "rest": 1, "features": 1}
+    assert "lost 3 (wheels 1, rest 1, features 1)" in lost.report()
+    silent = VioLost()
+    assert silent.check(10.0, 0.5) is None, "no witness heard: no verdict"

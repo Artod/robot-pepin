@@ -147,15 +147,36 @@ def lidar_mount(sensor: LidarMount) -> Mount:
     )
 
 
+def mount_from_matrix(matrix: Any) -> Mount:
+    """A 4x4 rigid transform (rows) as a :class:`Mount`: its translation and its rotation's rpy,
+    the same placement :meth:`Mount.rotation` and :meth:`Mount.translation` give back."""
+    m = np.asarray(matrix, dtype=np.float64)
+    roll, pitch, yaw = rpy_from_rotation(m[:3, :3])
+    return Mount(
+        float(m[0, 3]),
+        float(m[1, 3]),
+        float(m[2, 3]),
+        math.degrees(roll),
+        math.degrees(pitch),
+        math.degrees(yaw),
+    )
+
+
+IMU_FRAME = "head_imu"
+
+
 @dataclass(frozen=True)
 class CameraMounts:
-    """The camera's two static frames: ``base_link -> link`` (where it sits, looking along
-    +x, tilted down by the neck's pitch) and ``link -> optical`` (the picture's axes)."""
+    """The camera's static frames: ``base_link -> link`` (where it sits, looking along +x,
+    tilted down by the neck's pitch), ``link -> optical`` (the picture's axes) and, on a head
+    with a measured IMU, ``optical -> head_imu`` (Kalibr's T_cam_imu, in the optical axes)."""
 
     link: Mount
     optical: Mount
     link_frame: str = "camera_link"
     optical_frame: str = "camera_optical"
+    imu: Mount | None = None
+    imu_frame: str = IMU_FRAME
 
     @classmethod
     def from_config(cls, cfg: CameraConfig) -> CameraMounts:
@@ -166,7 +187,8 @@ class CameraMounts:
         optical = OPTICAL_MOUNT
         if cfg.eye:
             optical = Mount.from_json(dict(cfg.eye)).then(OPTICAL_MOUNT)
-        return cls(link, optical, cfg.link_frame, cfg.optical_frame)
+        imu = mount_from_matrix(cfg.head_imu) if cfg.head_imu else None
+        return cls(link, optical, cfg.link_frame, cfg.optical_frame, imu)
 
 
 def config_path(config_dir: str | Path | None, name: str) -> Path:

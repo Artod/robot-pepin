@@ -18,12 +18,15 @@
 #                                the board's raw sensors recorded on the board, always, in minute
 #                                MCAP files under maps/board_rec (pepin.board_bag): 20 GB cap,
 #                                10 GB of the card kept free; off by default
+#   ros/feature.sh head_imu on|off
+#                                the head IMU (head_server's 3340 stream) into the base bridge:
+#                                /head/imu and the mast filter (/mast/state); off by default
 # Each change restarts the one launch process (about 60 s); the robot does not move.
 set -euo pipefail
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 . "$(dirname "$0")/lib.sh"  # multiplexed ssh: one handshake per 10 min, not per command
-FEATURE="${1:?imu | ekf | laser_odom | tof | board_bag}"; STATE="${2:?on | off}"
-case "$FEATURE" in imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; board_bag) VAR=PEPIN_BOARD_BAG ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
+FEATURE="${1:?imu | ekf | laser_odom | tof | board_bag | head_imu}"; STATE="${2:?on | off}"
+case "$FEATURE" in imu) VAR=PEPIN_IMU ;; ekf) VAR=PEPIN_EKF ;; laser_odom) VAR=PEPIN_LASER_ODOM ;; tof) VAR=PEPIN_TOF ;; board_bag) VAR=PEPIN_BOARD_BAG ;; head_imu) VAR=PEPIN_HEAD_IMU ;; *) echo "unknown feature $FEATURE"; exit 2 ;; esac
 case "$STATE" in
     on) VAL=true ;;
     off) VAL=false ;;

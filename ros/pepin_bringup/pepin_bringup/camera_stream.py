@@ -6,9 +6,12 @@ the stream with OpenCV, and publishes ``/camera/image`` (bgr8) and ``/camera/cam
 the optics of ``config/camera.json`` — the checkerboard's measured K and distortion once
 ``ros/calibrate.sh`` has written them (``calibrated: true``), the nominal pinhole of the
 configured field of view until then, one reader deciding (:func:`pepin.camera.optics`) and the
-report line saying which — stamped with the moment the board captured the frame (ustreamer's
-X-Timestamp, the clock that stamps the lidar): a frame stamped when the laptop decoded it was a
-few hundred milliseconds late, a picture placed ten degrees wrong while the cart turns.
+report line saying which — stamped on the board's clock (the clock that stamps the lidar): a
+frame stamped when the laptop decoded it was a few hundred milliseconds late, a picture placed ten
+degrees wrong while the cart turns. WHICH board moment is the ``camera_stamp`` flag: ustreamer's
+X-Timestamp is the moment it SENT the frame, 1-68 ms after the capture and bimodal (2026-10-02);
+``grab`` moves the V4L2 capture stamp onto the same clock (:func:`pepin.mjpeg.capture_time`, the
+stream URL carries ``?extra_headers=1`` for it), and the report line prints the send-grab lag.
 
 WHICH CAMERA is not this node's decision and not a flag: ``config/camera.json`` holds the rigs
 by name and says which is active, ``PEPIN_CAMERA`` overrides it for one process, and the
@@ -47,10 +50,11 @@ the base server, and this side must not publish the same edge.
 
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
-included); ``undistort``, live (the picture is straightened by the calibration before it goes out,
-and its CameraInfo then carries no distortion); ``static_camera_tf``, read at start and not live — a
-static transform cannot be withdrawn once sent, so the other value needs a restart. All three are
-printed in every report line.
+included); ``camera_stamp``, live (send or grab, above); ``undistort``, live (the picture is
+straightened by the calibration before it goes out, and its CameraInfo then carries no
+distortion); ``static_camera_tf``, read at start and not live — a static transform cannot be
+withdrawn once sent, so the other value needs a restart. All of them are printed in every report
+line.
 
 The frames are pulled by one thread (:meth:`CameraStream._pump`) which :meth:`CameraStream.close`
 stops and joins before the node is destroyed: a daemon thread left inside OpenCV's decoder when
@@ -82,27 +86,36 @@ from tf2_ros import StaticTransformBroadcaster
 from pepin.calibration import undistort_optics
 from pepin.camera import CameraConfig, Optics, optics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.mjpeg import capture_time, parts
+from pepin.mjpeg import STAMP_MODES, capture_time, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, Window, spin_main
+from pepin_bringup.stereo_frames import (
+    LEFT_IMAGE_TOPIC,
+    LEFT_INFO_TOPIC,
+    RIGHT_IMAGE_TOPIC,
+    RIGHT_INFO_TOPIC,
+    camera_info,
+    eye_messages,
+    rectified_optics,
+    right_camera_info,
+)
 
 CONFIG = "/ws/config/camera.json"
 # The socket's own timeout: a stream that stops feeding raises instead of hanging. It is not
 # the cost of stopping the node — close() shuts the socket down rather than waiting for it.
 STREAM_TIMEOUT_S = 5.0
 RETRY_S = 3.0  # between reconnections, waited on the stop event so a kick does not sit it out
-# The right eye of a stereo rig, beside /camera/image and /camera/camera_info. The names are
-# ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is published on
-# them while the head has no calibration.
-RIGHT_IMAGE_TOPIC = "/camera/right/image"
+# The right eye of a stereo rig, beside /camera/image and /camera/camera_info: RIGHT_IMAGE_TOPIC
+# and RIGHT_INFO_TOPIC (pepin_bringup.stereo_frames, shared with ros/tools/clip_to_bag.py). The
+# names are ROS's stereo convention (image_pipeline's left/right namespaces), and nothing is
+# published on them while the head has no calibration.
 # The right eye goes out grey. RAFT-Stereo's own loaders copy a grey eye into three channels,
 # and with both eyes in colour the depth fell from 5-6 to 3 frames a second (2026-09-28) for a
 # gain the literature calls slight. True publishes bgr8, and the matcher then sends the pair
 # in colour by itself (pepin.stereo_depth.RaftMatcher, pepin.stereo_host's X-Channels).
 RIGHT_EYE_COLOUR = False
-RIGHT_INFO_TOPIC = "/camera/right/camera_info"
 # What a stereo frame is made of, in the order it happens; every one is timed into the tally and
 # printed in the report line as median/p95 milliseconds.
 STEREO_STAGES = ("decode", "split", "rectify", "publish")
@@ -115,6 +128,23 @@ CALIBRATION_POLL_S = 2.0
 # other declaration; both are printed in every report line. The range's low end is inclusive
 # and a scale of zero is a picture of no pixels, so _on_switch refuses that one value.
 FLAGS = FlagSet(
+    Flag(
+        "camera_stamp",
+        "send",
+        choices=STAMP_MODES,
+        description="which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp"
+        " (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock"
+        " (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the"
+        " stream URL and falls back to send per frame without it, counted in the report line)",
+        why="send until one drive is measured: X-Timestamp sits 1-68 ms after the capture,"
+        " bimodal (~1-5 or ~50 ms) with a median moving 4-48 ms between windows"
+        " (scratch/head_imu/ustreamer_stamps.py, 2026-10-02), so every consumer has carried that"
+        " jitter; switching changes every stamp the depth law, RTAB-Map and the VO were tuned on",
+        on_when="after one drive with grab, back to back with send on the same route, shows the"
+        " depth law residual or stereo_odometry's lost frames improve and nothing worse (RTAB-Map"
+        " registrations, the gate's blind count); and always for a VIO or Kalibr recording",
+        off_when="a consumer shows TF extrapolation errors or the law residual worsens under grab",
+    ),
     Flag(
         "undistort",
         False,
@@ -428,6 +458,13 @@ class CameraStream(Node):
             transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp),
             transform_from_mount("base_link", LASER_FRAME, load_lidar_mount(config_dir), stamp),
         ]
+        # The head IMU, glued to the module: Kalibr's T_cam_imu as the static
+        # camera_optical -> head_imu (config/camera.json's head_imu), the edge the VIO relay
+        # composes base_link through. Without the block nothing is published.
+        if camera.imu is not None:
+            transforms.append(
+                transform_from_mount(camera.optical_frame, camera.imu_frame, camera.imu, stamp)
+            )
         if self._switches.on("static_camera_tf"):
             transforms.insert(
                 0, transform_from_mount("base_link", camera.link_frame, camera.link, stamp)
@@ -462,15 +499,8 @@ class CameraStream(Node):
         maps: tuple[Any, Any] | None = None
         if rectifier is not None:
             size = (rectifier.width, rectifier.height)
-            lens = Optics(
-                rectifier.fx,
-                rectifier.fy,
-                rectifier.cx,
-                rectifier.cy,
-                size[0],
-                size[1],
-                (),
-                True,
+            lens = rectified_optics(
+                rectifier,
                 f"stereo calibration ({self._calibration_source}), rectified to"
                 f" {rectifier.fx:.0f} px focal",
             )
@@ -488,23 +518,11 @@ class CameraStream(Node):
                 True,
                 f"{lens.source}, rectified to {new_k[0, 0]:.0f} px focal",
             )
-        info = self._camera_info(size, lens)
+        info = camera_info(size, lens, self._cfg.optical_frame)
         right = None
         if rectifier is not None:
-            right = self._camera_info(size, lens)
-            right.p = list(right.p)
-            right.p[3] = rectifier.right_projection_tx()
+            right = right_camera_info(rectifier, lens, self._cfg.optical_frame)
         return Published(size, info, lens, maps, rectifier, right)
-
-    def _camera_info(self, size: tuple[int, int], lens: Optics) -> CameraInfo:
-        """One ``sensor_msgs/CameraInfo`` for a picture of ``size`` with these optics, in the
-        camera's optical frame and with no stamp yet (the frame's own is put on at publish)."""
-        info = CameraInfo()
-        info.header.frame_id = self._cfg.optical_frame
-        info.width, info.height = size
-        info.distortion_model = "plumb_bob"
-        info.k, info.d, info.r, info.p = lens.camera_info_arrays()
-        return info
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``scale`` and ``undistort`` rebuild the published size, its optics and
@@ -568,7 +586,7 @@ class CameraStream(Node):
                         # A calibration finished while the robot runs: picked up here, on this
                         # thread, so the frame after it is already rectified (a no-op for mono).
                         self._check_calibration()
-                        self._publish(frame, capture_time(headers))
+                        self._publish(frame, self._frame_time(headers))
                     if self._stop.is_set():
                         return  # the socket was shut down under the reader: that is the way out
                     self.get_logger().warning("camera stream ended; reconnecting")
@@ -643,28 +661,40 @@ class CameraStream(Node):
                 left, right = rectifier.rectify(left, right)
             self._tally.count("rectified")
         with self._tally.measure("publish"):
-            published.info.header.stamp = stamp
-            self._image_pub.publish(image_from_array(left, "bgr8", stamp, self._cfg.optical_frame))
-            self._info_pub.publish(published.info)
-            if (
-                rectifier is not None
-                and published.right is not None
-                and self._right_image_pub is not None
-                and self._right_info_pub is not None
+            rectified = rectifier is not None and published.right is not None
+            publishers = {
+                LEFT_IMAGE_TOPIC: self._image_pub,
+                LEFT_INFO_TOPIC: self._info_pub,
+                RIGHT_IMAGE_TOPIC: self._right_image_pub,
+                RIGHT_INFO_TOPIC: self._right_info_pub,
+            }
+            for topic, msg in eye_messages(
+                left,
+                right if rectified else None,
+                published.info,
+                published.right if rectified else None,
+                stamp,
+                self._cfg.optical_frame,
+                RIGHT_EYE_COLOUR,
             ):
-                published.right.header.stamp = stamp
-                self._right_image_pub.publish(
-                    image_from_array(
-                        right,
-                        "bgr8" if RIGHT_EYE_COLOUR else "mono8",
-                        stamp,
-                        self._cfg.optical_frame,
-                    )
-                )
-                self._right_info_pub.publish(published.right)
+                publisher = publishers[topic]
+                if publisher is not None:
+                    publisher.publish(msg)
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
+
+    def _frame_time(self, headers: dict[str, str]) -> float | None:
+        """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
+        that carries both goes into the period's samples, and a ``grab`` part without them is
+        counted (it falls back to the send time)."""
+        mode = str(self._switches["camera_stamp"])
+        lag = send_lag_s(headers)
+        if lag is not None:
+            self._tally.sample("send_lag_ms", lag * 1e3)
+        elif mode == "grab":
+            self._tally.count("no_grab")
+        return capture_time(headers, mode)
 
     def _stamp(self, taken_at: float | None) -> Any:
         """The moment a frame is published under: the board's capture time when ustreamer sent
@@ -687,11 +717,27 @@ class CameraStream(Node):
             f", {w.counts['unstamped']} without a capture time" if w.counts["unstamped"] else ""
         )
         self.get_logger().info(
-            f"camera: {w.rate('frames'):.1f} frames/s{unstamped},"
+            f"camera: {w.rate('frames'):.1f} frames/s{unstamped}, {self._stamp_report(w)},"
             f"{self._stereo_report(w)}"
             f" optics: {self._published.optics.source},"
             f" flags: {self._switches.state(live_only=False)}"
         )
+
+    def _stamp_report(self, w: Window) -> str:
+        """The stamp mode and the period's send-grab lag as median/p90 milliseconds, or why
+        there is none (the URL without ``?extra_headers=1``, an older ustreamer)."""
+        mode = str(self._switches["camera_stamp"])
+        lags = sorted(w.samples.get("send_lag_ms", ()))
+        if not lags and mode == "send":
+            return "stamp=send (no grab headers)"
+        if not lags:
+            return (
+                f"stamp=grab (no grab headers: is ?extra_headers=1 on the URL?"
+                f" {w.counts['no_grab']} frames fell back to send)"
+            )
+        median = lags[len(lags) // 2]
+        p90 = lags[min(len(lags) - 1, int(0.9 * len(lags)))]
+        return f"stamp={mode}, send-grab median/p90 {median:.0f}/{p90:.0f} ms"
 
     def _stereo_report(self, w: Window) -> str:
         """What a stereo rig adds to the report line — the head, the stages and whatever went

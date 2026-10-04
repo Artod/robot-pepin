@@ -45,6 +45,7 @@ LAUNCH_HALVES: dict[str, tuple[str, ...]] = {
     "robot.launch.py": ("board",),
     "nav.launch.py": ("laptop",),
     "vslam.launch.py": ("laptop",),
+    "vio.launch.py": ("laptop",),  # pepin-vio (ros/laptop.sh vio)
 }
 
 # Each params file and the halves whose processes read it at start.

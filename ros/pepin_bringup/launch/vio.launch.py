@@ -1,0 +1,75 @@
+"""The visual-inertial odometry on the laptop: OpenVINS's ROS 2 subscriber in its own container.
+
+``ros/laptop.sh vio`` starts this in ``pepin-vio`` on ``pepin-laptop:vio`` (ros/Dockerfile.vio),
+beside ``pepin-vslam`` and behind the same zenoh router: OpenVINS reads the two rectified eyes
+(``/camera/image``, ``/camera/right/image``, camera_stream's) and the head IMU (``/head/imu``, the
+board's base bridge), and publishes ``/ov_msckf/poseimu`` (the IMU's pose in its gravity frame,
+per image update), which pepin_bringup.visual_odometry reads under ``vo_input:=vio``
+(``ros/laptop.sh vslam --vo-vio``) and turns into ``/vo`` for the board's EKF. Nothing here talks
+to the EKF directly, and nothing here owns a transform.
+
+The config is generated, never edited: ``ros/tools/vio_config.py`` writes estimator_config.yaml
+and the two Kalibr chains into ros/maps/vio (``/maps/vio`` here) from
+config/stereo_calibration.json, config/camera.json's head_imu block and config/head_imu.json. The
+node is respawned when it dies; it does not reset itself when it diverges (the relay marks it
+lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: its static initialisation needs
+stillness, then motion.
+"""
+
+import os
+from pathlib import Path
+
+from launch import LaunchDescription
+from launch.actions import DeclareLaunchArgument, LogInfo, OpaqueFunction
+from launch.substitutions import LaunchConfiguration
+from launch_ros.actions import Node
+
+RESPAWN = {"respawn": True, "respawn_delay": 2.0}
+DEFAULT_CONFIG = "/maps/vio/estimator_config.yaml"
+
+
+def _describe(context):  # type: ignore[no-untyped-def]
+    config = LaunchConfiguration("config").perform(context)
+    if not os.path.isfile(config):
+        return [
+            LogInfo(
+                msg=f"vio NOT started: {config} does not exist. Write it with"
+                " `uv run python ros/tools/vio_config.py` (needs config/camera.json's head_imu, or"
+                " --nominal from the axis photo) and run ros/laptop.sh vio again"
+            )
+        ]
+    shas = Path("/opt/openvins/SHAS")
+    pinned = shas.read_text().strip().replace("\n", "; ") if shas.is_file() else "unknown"
+    node = Node(
+        package="ov_msckf",
+        executable="run_subscribe_msckf",
+        namespace="ov_msckf",
+        output="screen",
+        parameters=[
+            {
+                "config_path": config,
+                "verbosity": LaunchConfiguration("verbosity").perform(context),
+                "use_stereo": True,
+                "max_cameras": 2,
+                "save_total_state": False,
+            }
+        ],
+        **RESPAWN,
+    )
+    return [
+        LogInfo(
+            msg=f"vio up: OpenVINS ({pinned}) on {config}: /camera/image + /camera/right/image +"
+            " /head/imu -> /ov_msckf/poseimu for visual_odometry (vo_input vio)"
+        ),
+        node,
+    ]
+
+
+def generate_launch_description() -> LaunchDescription:
+    return LaunchDescription(
+        [
+            DeclareLaunchArgument("config", default_value=DEFAULT_CONFIG),
+            DeclareLaunchArgument("verbosity", default_value="INFO"),
+            OpaqueFunction(function=_describe),
+        ]
+    )

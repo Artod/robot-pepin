@@ -25,8 +25,10 @@ from pepin.gaze_gate import (  # noqa: E402
     BLIND,
     GAZE_GATE,
     GAZE_STATE_TOPIC,
+    MAST_STATE_TOPIC,
     SPINNING,
     STATE_STALE_S,
+    SWAYING,
     FrameGate,
     GazeState,
     YawLog,
@@ -275,7 +277,11 @@ def test_a_saccade_never_reaches_the_ekf_through_the_visual_odometry() -> None:
 
     node, gated = _drive(gate_on=True)
     last = gated[-1].pose.pose
-    assert last.position.x == pytest.approx(0.02), "the first step and the last, nothing between"
+    # The first step and the last, nothing between: 1 cm each. The last is composed in SE(2)
+    # (pepin.visual_odometry.VoTrack): the source moved 1 cm along its x while claiming yaw 0.3,
+    # which in its own body frame is cos(0.3) forward and sin(0.3) to the right.
+    assert last.position.x == pytest.approx(0.01 + 0.01 * math.cos(0.3))
+    assert last.position.y == pytest.approx(-0.01 * math.sin(0.3))
     assert 2 * math.atan2(last.orientation.z, last.orientation.w) == pytest.approx(0.0)
     assert len(gated) == 3, "0.0, 0.1 and 0.6 went to the EKF"
     counts = node._tally.take().counts
@@ -284,3 +290,74 @@ def test_a_saccade_never_reaches_the_ekf_through_the_visual_odometry() -> None:
     line = node.get_logger().texts("info")[-1]
     assert "gaze gate: 0 blind, 0 spinning of 0 frames withheld" in line  # a fresh window
     assert "head still since" in line
+
+
+# ---- grab stamps and the mast's sway ---------------------------------------------------------
+def test_a_stamp_at_the_exposure_s_end_looks_back_not_forward() -> None:
+    """The critique's case: with grab stamps the stamp sits AFTER the exposure. A frame stamped
+    50 ms before a saccade's write ended before it: kept either way. A frame stamped 5 ms after
+    the write is blind either way. One stamped 60 ms after a 50 ms settle had its exposure begin
+    inside the blind interval: symmetric +-35 ms keeps it, the stamp-end window
+    [stamp - 70, stamp + 10] drops it."""
+    gate = FrameGate(exposure_s=0.035, settle_s=0.0)
+    saccade(gate, settle_s=0.05)  # blind from +1.000 to +1.050
+    assert gate.window(10.0) == pytest.approx((9.965, 10.035))
+    assert gate.verdict(T0 + 1.0 - 0.050, now=0.0) is None
+    assert gate.verdict(T0 + 1.0 + 0.005, now=0.0) == BLIND
+    assert gate.verdict(T0 + 1.05 + 0.060, now=0.0) is None, "symmetric: 25 ms past the edge"
+    gate.stamp_end = True
+    assert gate.window(10.0) == pytest.approx((9.93, 10.01))
+    assert gate.verdict(T0 + 1.0 - 0.050, now=0.0) is None, "ended before the saccade: kept"
+    assert gate.verdict(T0 + 1.0 + 0.005, now=0.0) == BLIND
+    assert gate.verdict(T0 + 1.05 + 0.060, now=0.0) == BLIND, "its exposure began inside it"
+    assert "stamp at its end" in gate.text(now=0.0)
+
+
+def test_small_sway_is_kept_large_or_fast_sway_is_dropped_and_held_says_nothing() -> None:
+    """The ring after a tilt (0.2 deg, 6.7 deg/s peak) is kept: the TF corrects it. A knock
+    (20 deg/s) or a deflection past 1 deg is dropped as swaying. A NaN (the neck moving, the
+    head link silent) gives no sway verdict, and no sample at all gives none either."""
+    gate = FrameGate(exposure_s=0.035, sway_dps=10.0, sway_deg=1.0)
+    assert gate.sway_on
+    ring = math.radians(6.7)
+    for i in range(50):  # 50 Hz, one second of a ring
+        t = T0 + i * 0.02
+        gate.observe_sway(t, (0.0, math.radians(0.2), 0.0), (0.0, ring, 0.0))
+    assert gate.verdict(T0 + 0.5, now=0.0) is None, "the ring is kept"
+    gate.observe_sway(T0 + 1.0, (0.0, math.radians(0.3), 0.0), (0.0, math.radians(20.0), 0.0))
+    assert gate.verdict(T0 + 1.0, now=0.0) == SWAYING, "a knock"
+    gate.observe_sway(T0 + 1.5, (math.radians(1.5), 0.0, 0.0), (0.0, 0.0, 0.0))
+    assert gate.verdict(T0 + 1.5, now=0.0) == SWAYING, "beyond the correction's trust"
+    nan = (math.nan, math.nan, math.nan)
+    gate.observe_sway(T0 + 2.0, nan, nan)
+    gate.observe_sway(T0 + 2.02, (0.0, math.radians(3.0), 0.0), (0.0, 0.0, 0.0))
+    assert gate.verdict(T0 + 2.01, now=0.0) is None, "held in the window: the blind rule's case"
+    assert gate.verdict(T0 + 10.0, now=0.0) is None, "no sample: no verdict"
+    off = FrameGate()
+    off.observe_sway(T0, (0.1, 0.1, 0.1), (1.0, 1.0, 1.0))
+    assert not off.sway_on and off.verdict(T0, now=0.0) is None, "shipped off"
+
+
+def test_the_feed_subscribes_the_mast_only_for_the_sway_gate_and_routes_the_new_knobs() -> None:
+    node = ros_stubs.Node("probe")
+    clock = Clock()
+    feed = GazeFeed(node, exposure_s=0.035, settle_s=0.1, yaw_dps=0.0, clock=clock)
+    assert MAST_STATE_TOPIC not in node.subs, "the sway gate off subscribes nothing more"
+    feed.set("gate_stamp_end", 1.0)
+    assert feed.gate.stamp_end
+    feed.set("gate_sway_dps", 10.0)
+    assert MAST_STATE_TOPIC in node.subs
+    mast = node.subs[MAST_STATE_TOPIC][1]
+    msg = ros_stubs.JointState(
+        header=ros_stubs.Header(stamp=ros_stubs.Time(sec=100, nanosec=0)),
+        name=["mast_roll", "mast_pitch", "mast_yaw"],
+        position=[0.0, 0.001, 0.0],
+        velocity=[0.0, math.radians(30.0), 0.0],
+    )
+    mast(msg)
+    assert feed.verdict(100.0) == SWAYING
+    mast(ros_stubs.JointState(name=["pan"], position=[0.0], velocity=[0.0]))
+    assert "1 /mast/state without the sway joints" in feed.text()
+    feed.set("gate_sway_deg", 1.0)
+    assert feed.gate.sway_deg == 1.0 and "sway gate 10 deg/s / 1 deg" in feed.text()
+    assert gate_counts({"gaze_swaying": 2}, 9) == "0 blind, 0 spinning, 2 swaying of 9 frames"

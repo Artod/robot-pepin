@@ -60,6 +60,7 @@ from pepin.deployment import (
     config_file,
 )
 from pepin.footprint import hull_box
+from pepin.head_imu import HeadImuConfig, camera_from_imu
 from pepin.mounts import Mounts
 from pepin.neck import JOINT_NAMES, NeckConfig, bridge_parameters
 from pepin.sensor_timing import imu_timing
@@ -179,6 +180,7 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
     actuator down with it."""
     imu_on = LaunchConfiguration("imu").perform(context).lower() == "true"
     ekf_on = LaunchConfiguration("ekf").perform(context).lower() == "true"
+    head_on = LaunchConfiguration("head_imu").perform(context).lower() == "true"
     return [
         ComposableNode(
             package="pepin_base_cpp",
@@ -199,10 +201,34 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
                     **imu_parameters(),
                     **neck_parameters(),
+                    **head_imu_parameters(head_on),
                 }
             ],
         )
     ]
+
+
+def head_imu_parameters(enable: bool) -> dict[str, object]:
+    """The head IMU's link, publish cap and mast filter from config/head_imu.json, and the IMU's
+    rotation into camera_link from config/camera.json's head_imu block (pepin.head_imu), read
+    anew at every (re)spawn. ``enable`` is the head_imu launch argument: off, the bridge opens no
+    link to head_server and nothing about the head exists. Without the json the bridge keeps its
+    own defaults and says so; without the extrinsics the mast filter does not run."""
+    try:
+        config = HeadImuConfig.load()
+    except (OSError, KeyError, ValueError) as exc:
+        print(
+            f"[robot.launch] no head IMU config ({exc}): the bridge's defaults, head_imu {enable}"
+        )
+        return {"head_imu_enable": enable}
+    try:
+        rotation = camera_from_imu(config_file("camera.json").parent)
+    except (OSError, KeyError, ValueError) as exc:
+        print(f"[robot.launch] no head IMU extrinsics ({exc}): the mast filter stays off")
+        rotation = None
+    if enable and rotation is None:
+        print("[robot.launch] head_imu on without config/camera.json's head_imu: /head/imu only")
+    return config.bridge_parameters(rotation, enable)
 
 
 def imu_parameters() -> dict[str, float]:
@@ -354,6 +380,9 @@ def generate_launch_description() -> LaunchDescription:
             DeclareLaunchArgument("ekf", default_value="true"),
             DeclareLaunchArgument("laser_odom", default_value="true"),
             DeclareLaunchArgument("board_bag", default_value="false"),
+            # The head IMU (head_server's 3340 stream) into the bridge: off until the head exists
+            # and head_server runs (board/pepin-ros.service's PEPIN_HEAD_IMU, ros/feature.sh).
+            DeclareLaunchArgument("head_imu", default_value="false"),
             OpaqueFunction(function=sensors_container),
             ekf,
             tof,

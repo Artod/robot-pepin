@@ -1,0 +1,54 @@
+# The visual-inertial odometry's image (pepin-laptop:vio): OpenVINS (rpng/open_vins, GPL-3.0) built
+# from source on the laptop image, for its own container (ros/laptop.sh vio, vio.launch.py) beside
+# pepin-vslam. Built by ros/laptop-build.sh vio under the memory watchdog; never pushed anywhere
+# (an image is distribution, and GPL-3.0 then owes a source offer: this repo ships the recipe only).
+#
+# PINNED, NOT FOLLOWED. OpenVINS master's last commit is 2025-11-30 (OV_MASTER) and builds for ROS 2
+# up to Humble/22.04 only; Jazzy/24.04 lives in open PRs. PR #500 (OV_PR500, its head on top of
+# that master) adds the Jazzy CMake/include changes AND replaces dynamic Eigen matrices in
+# UpdaterHelper.cpp — the "segmentation faults caused by the latest Ceres version on Ubuntu 24.04"
+# its description names. PR #556 (2026-09-25) is a second, conflicting take on the same build
+# fixes (merging both conflicts in eight files, checked 2026-10-03), so #500 alone is built; #556
+# is the fallback if #500 stops building. The three facts land in /opt/openvins/SHAS.
+#
+# THE GATE. OpenVINS's own simulator (run_simulation, the stock rpng_sim config, its own trajectory
+# in ov_data: no download) runs to the end inside the build and must exit 0: a Ceres/Eigen crash
+# shows here, before any of our data could be blamed for it. Its tail is /opt/openvins/SIM_GATE.txt.
+#
+# MASK=1 applies patches/openvins-frame-mask.patch (the left camera's per-frame mask from
+# /camera/mask, pepin_bringup.body_mask): off by default until the share of frames with the body
+# in view is measured (vio.md M4).
+ARG BASE=pepin-laptop:xfeat
+FROM ${BASE}
+ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b
+ARG OV_PR500=0bd027a997f3ca911b3df504d20b00b60f371b31
+ARG MASK=0
+# Few jobs on purpose: the Docker VM also runs the live stack (Dockerfile.xfeat's reasoning).
+ARG JOBS=2
+COPY patches/openvins-frame-mask.patch /opt/openvins/patches/openvins-frame-mask.patch
+RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
+    && cd /ws_vio/src/open_vins \
+    && git fetch -q origin pull/500/head \
+    && git checkout -q "$OV_PR500" \
+    && git merge-base --is-ancestor "$OV_MASTER" HEAD \
+    && if [ "$MASK" = 1 ]; then git apply /opt/openvins/patches/openvins-frame-mask.patch; fi \
+    && { echo "open_vins master $OV_MASTER (2025-11-30)"; \
+         echo "PR #500 head $OV_PR500 (Jazzy/24.04, Ceres 2.2 fix)"; \
+         echo "frame mask patch: $MASK"; \
+         echo "built tree $(git rev-parse HEAD)$(git diff --quiet || echo ' + patch')"; } \
+       > /opt/openvins/SHAS \
+    && rm -rf .git
+RUN . /opt/ros/jazzy/setup.sh && cd /ws_vio \
+    && MAKEFLAGS="-j${JOBS}" colcon build --parallel-workers 1 \
+        --packages-select ov_core ov_init ov_msckf ov_data \
+        --cmake-args -DCMAKE_BUILD_TYPE=Release -DENABLE_ROS=ON \
+    && rm -rf build log
+# The gate: the stock simulation to its end, exit 0, within 20 minutes; only the loopback.
+RUN . /opt/ros/jazzy/setup.sh && . /ws_vio/install/setup.sh && cd /ws_vio \
+    && export ROS_DOMAIN_ID=77 ROS_AUTOMATIC_DISCOVERY_RANGE=LOCALHOST \
+    && (timeout 1200 ros2 run ov_msckf run_simulation \
+            src/open_vins/config/rpng_sim/estimator_config.yaml > /tmp/sim.log 2>&1; \
+        echo $? > /tmp/sim.rc) \
+    && sed 's/\x1b\[[0-9;]*m//g' /tmp/sim.log | tail -40 > /opt/openvins/SIM_GATE.txt \
+    && echo "exit $(cat /tmp/sim.rc)" >> /opt/openvins/SIM_GATE.txt \
+    && cat /opt/openvins/SIM_GATE.txt && test "$(cat /tmp/sim.rc)" = 0
