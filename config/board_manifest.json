@@ -241,6 +241,21 @@
       "note": "Measured 1.6 % / 20 MB idle and 2.0 % / 20 MB with a client listening (2026-10-02)."
     },
     {
+      "name": "head_server",
+      "match": "pepin\\.head_server",
+      "role": "Owns the head ESP32's serial port (/dev/pepin-head, CH340 at 921600 baud) on TCP 3340: the mouth's expressions, speech levels and info screens down; the head IMU's samples up, mapped onto the board's clock and streamed to the base bridge; the brain lease.",
+      "on_board_because": [
+        "hardware-attached",
+        "wifi-loss"
+      ],
+      "owner": "pepin-head.service (/opt/pepin, systemd), config/head.json, config/face.json",
+      "budget": {
+        "cpu_percent": 8.0,
+        "rss_mb": 30.0
+      },
+      "note": "TO MEASURE on the board: an ESTIMATE until the head is plugged in. Bench on the Mac (2026-10-03, the real server against a byte-accurate virtual ESP32 on a pty, one subscriber, 10 s each): at the default 200 Hz in 20 ms frames (50 frames/s) the loop thread takes 0.65 % of an M5 core (port reads 0.20 %, frames 0.31 %, commands 0.08 %, ticks 0.06 %; 10 ms read timeout); at 1 kHz in 5-sample frames (200 frames/s, before the 20 ms frames) 1.84 %; RSS 28 MB. At the x4.4 laptop-to-board ratio base_server's note uses, 200 Hz is ~3 %, at x10 ~7 %: 8 % is the budget. Levers if the census says OVER: a longer read timeout, or longer frames in imu.cpp (batch_n). Outside Docker on purpose, like base_server: the face and the IMU must survive a container restart, and the face falls asleep on WiFi loss by the lease rather than by dying."
+    },
+    {
       "name": "ser2net",
       "match": "(^|/)ser2net ",
       "role": "The servo bus and the lidar as TCP ports (3333/3334) so the laptop's tools can reach them without a serial cable.",

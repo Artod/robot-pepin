@@ -64,3 +64,6 @@ ros/sim/run/
 ros/maps/depth_law_stereo.json
 # editor settings
 .vscode/
+
+# PlatformIO build output (firmware/head_esp32)
+.pio/

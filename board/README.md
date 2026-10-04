@@ -38,7 +38,8 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 | 3333 | ser2net | `ser2net.service` | raw TCP to `/dev/servo-bus` (Feetech bus, 1 Mbit/s); `kickolduser` hands the port to the newest client |
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads the encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, a state line every tick; the neck commands (below) |
-| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status` |
+| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status`; with `--lipsync`, the speech's loudness to the head's mouth |
+| 3340 | `pepin.head_server` | `pepin-head.service` | the head ESP32 on `/dev/pepin-head`: the mouth's expressions, speech levels and info screens; the head IMU's samples on the board's clock to subscribers (the base bridge); the brain lease (see "The head" below) |
 | 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera`, its exposure the active rig's `exposure` block of `config/camera.json`, set before ustreamer starts (`pepin.camera_controls`; `ros/exposure.sh` shows and tries the modes live) |
 
 The lidar belongs to the ROS container; its ser2net port (3334) stays commented out in
@@ -55,7 +56,7 @@ and `systemctl start pepin-base` after.
 | `board/ser2net-stale-locks.conf` | `/etc/systemd/system/ser2net.service.d/stale-locks.conf` |
 | `board/99-pepin-usb.rules` | `/etc/udev/rules.d/99-pepin-usb.rules` (then `udevadm control --reload`) |
 | `board/tof_init.sh` | `/usr/local/bin/tof_init.sh` (executable) |
-| `board/tof-init.service`, `pepin-tof.service`, `pepin-base.service`, `pepin-camera.service`, `pepin-audio.service`, `pepin-zrouter.service` | `/etc/systemd/system/` |
+| `board/tof-init.service`, `pepin-tof.service`, `pepin-base.service`, `pepin-camera.service`, `pepin-audio.service`, `pepin-head.service`, `pepin-zrouter.service` | `/etc/systemd/system/` |
 | `board/pepin-ros.service` | `/etc/systemd/system/` (installed by `ros/build-image.sh --ship`) |
 | `board/pepin-reap.service`, `pepin-reap.timer` | `/etc/systemd/system/` (the script below) |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
@@ -65,6 +66,7 @@ and `systemctl start pepin-base` after.
 | `board/xvf_host_install.sh` | run once: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
 | `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure, read by pepin-camera at its start) |
+| `config/head.json`, `config/face.json` | `/opt/pepin/config/` (`head.json`: the head's port, its IMU's rate and ranges, the clock map; `face.json`: the mouth's expressions and the robot events, read by pepin-head and by pepin-audio's lip sync) |
 | `ros/` | `/root/pepin-ros/` (`ros/sync.sh`) |
 
 Deploy the host package and its configuration from the laptop:
@@ -96,6 +98,43 @@ plugged in after it; without it the card is `Array`, which the server finds too.
 VERSION`; the direction froze before it), 2.1.1 current. Check: `{"cmd":"status"}` on :3338
 answers whether capture is alive, frames per second, dropouts and the direction's age; the same
 numbers go to the journal once a minute.
+
+## The head
+
+An ESP32 board with a 1.9" screen sits under the stereo camera: the screen is the robot's mouth,
+and an MPU6050 glued to the camera body is the head IMU ([firmware/head_esp32](../firmware/head_esp32/README.md):
+wiring, flashing, the protocol). It hangs on the expansion board's free USB port (its own bus,
+beside the WiFi dongle's); udev names its CH340 `/dev/pepin-head`, and `pepin.head_server` is the
+only thing that opens it. Install from the laptop (the ESP32 flashed first, on the laptop):
+
+```bash
+scp board/99-pepin-usb.rules root@pepin.local:/etc/udev/rules.d/ && ssh root@pepin.local 'udevadm control --reload && udevadm trigger'
+rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin/pepin/
+scp config/head.json config/face.json root@pepin.local:/opt/pepin/config/
+scp board/pepin-head.service root@pepin.local:/etc/systemd/system/ && ssh root@pepin.local 'systemctl daemon-reload && systemctl enable --now pepin-head'
+uv run python -m pepin.head_link status       # link up, the face's fps, the IMU's rate, the clock
+```
+
+| Line on :3340 | What happens |
+| --- | --- |
+| `{"cmd":"express","source":"voice","name":"thinking","hold_s":null}` | the source's expression (config/face.json's names); `hold_s` null stands until replaced, a number lapses back to what stood before |
+| `{"cmd":"event","source":"goal","name":"arrived","end":true}` | a robot event from config/face.json's table; `end` first clears what the source held |
+| `{"cmd":"clear","source":"voice"}` | the source shows nothing any more |
+| `{"cmd":"mouth","level":0.4}` | the speech level, 0..1, straight to the ESP32 (the audio server's lip sync) |
+| `{"cmd":"show","text":"Temps\|left: 41/70 C","seconds":8}` | an info screen (`items` for the structured form) |
+| `{"cmd":"lease","name":"goal_server","seconds":6}` | a laptop process is here; once a lease was taken and all have lapsed, the face falls asleep |
+| `{"cmd":"config","imu_rate_hz":500,"dlpf":3,"accel_fs":1,"gyro_fs":1,"brightness":120}` | the head IMU's sampling and the screen's brightness, until a restart (`config/head.json` for good) |
+| `{"cmd":"subscribe","imu":true}` | this client gets `{"type":"imu_config","cfg":1,"rate_hz":200,"dlpf":3,"gyro_fs_dps":500,"accel_fs_g":4,"filter_delay_s":0.0048}` first (and on every config change), then one line per serial frame (every 20 ms): `{"type":"imu","cfg":1,"samples":[[t_mono_s, esp_us, gx, gy, gz, ax, ay, az], ...]}`, `t_mono_s` the sample's data-ready edge on the board's `time.monotonic` (the filter delay NOT taken off), `esp_us` the ESP32's micros unwrapped, rad/s and m/s^2 in the chip's axes |
+| `{"cmd":"status"}` | the link, the ESP32's own status (fps, IMU rate and mode, I2C errors, drops), the clock map (offset, ppm, smallest ping round trip), what shows and who asked; also broadcast once a second |
+
+The clock map: every pong and every IMU frame gives (the moment its frame was read here on
+CLOCK_MONOTONIC_RAW, the ESP32's micros in it), less what is known of its way (the frame's own
+bytes on the wire, an IMU sample's I2C read); the smallest difference per second of ESP time is
+the lower envelope, a line through the last 120 s of it carries the offset and the crystal's
+drift (RAW is never slewed by chrony, so the skew is the crystal's alone), half the smallest ping
+round trip is taken off, and each line's samples are carried to `time.monotonic` by reading both
+clocks back to back. The ESP32 rebooting (its micros going back, or a status naming another
+config) makes the server send the config and the face again.
 
 ## The neck on the base server's port (:3336)
 
@@ -144,7 +183,7 @@ apt install ser2net i2c-tools gpiod ffmpeg v4l-utils ustreamer
 python3 -m venv /opt/pepin && /opt/pepin/bin/pip install VL53L1X smbus2
 # copy the files from the table above, then:
 systemctl daemon-reload
-systemctl enable --now ser2net tof-init pepin-tof pepin-base pepin-camera pepin-audio pepin-reap.timer
+systemctl enable --now ser2net tof-init pepin-tof pepin-base pepin-camera pepin-audio pepin-head pepin-reap.timer
 # from the laptop: the image and pepin-ros.service, the code, the clock
 ros/build-image.sh --ship
 ros/sync.sh

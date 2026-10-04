@@ -15,7 +15,7 @@ from typing import Any
 
 from pepin.gaze import DRIVE_REFUSAL
 from pepin.tools.clients import HeadMove, HeadPose, HeadReach, ServiceDownError
-from pepin.tools.registry import Image
+from pepin.tools.registry import Image, ToolError
 from pepin.tools.robot import Robot
 
 REST = HeadPose(0.0, 23.8)  # config/neck.json's working pose
@@ -319,9 +319,59 @@ class FakeSpeech:
         return {"type": "status", "playing": False}
 
 
+@dataclass
+class FakeFace:
+    """The head server's face: what was expressed and shown, in order."""
+
+    expressed: list[tuple[str, float]] = field(default_factory=list)
+    shown: list[tuple[str, float]] = field(default_factory=list)
+    down: bool = False
+
+    def express(self, name: str, seconds: float) -> dict[str, Any]:
+        """Keep it; an unknown name is refused as the head server refuses it."""
+        self._check()
+        from pepin.face import load_face_table
+
+        table = load_face_table()
+        if name not in table.names:
+            raise ToolError(f"the head server refused it: no expression {name!r}")
+        self.expressed.append((name, seconds))
+        return {"type": "ack", "cmd": "express", "showing": name, "by": "llm"}
+
+    def show(self, text: str, seconds: float) -> dict[str, Any]:
+        """Keep it."""
+        self._check()
+        self.shown.append((text, seconds))
+        return {"type": "ack", "cmd": "show", "items": len(text.splitlines()), "sent": True}
+
+    def health(self) -> dict[str, Any]:
+        """Up, unless down."""
+        self._check()
+        return {"link": "up", "showing": "neutral", "face_fps": 49.5, "imu_hz": 1000}
+
+    def _check(self) -> None:
+        if self.down:
+            raise ServiceDownError("head server", "10.0.0.187:3340", "refused", "Is it up?")
+
+
+@dataclass
+class FakeBody:
+    """The base's servo temperatures."""
+
+    temps: dict[str, int] = field(default_factory=lambda: {"left": 41, "right": 39})
+    down: bool = False
+
+    def temperatures(self) -> dict[str, int]:
+        """The temperatures, unless down."""
+        if self.down:
+            raise ServiceDownError("base server", "10.0.0.187:3336", "refused", "Is it up?")
+        return dict(self.temps)
+
+
 def fake_robot(**replace: Any) -> Robot:
     """A robot made of fakes sharing one :class:`FakeClock`; ``replace`` swaps any part
-    (``goals``, ``neck``, ``world``, ``camera``, ``speech``) or sets ``drive_timeout_s``."""
+    (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``) or sets
+    ``drive_timeout_s``."""
     clock = replace.pop("clock", None) or FakeClock()
     neck = replace.pop("neck", None) or FakeNeck(clock)
     parts: dict[str, Any] = {
@@ -330,6 +380,8 @@ def fake_robot(**replace: Any) -> Robot:
         "world": FakeWorld(clock, neck),
         "camera": FakeCamera(),
         "speech": FakeSpeech(),
+        "face": FakeFace(),
+        "body": FakeBody(),
     }
     parts.update(replace)
     return Robot(clock=clock, sleep=clock.sleep, **parts)

@@ -1,0 +1,20 @@
+[Unit]
+Description=Pepin head server: the head ESP32's face and IMU over /dev/pepin-head (TCP 3340)
+After=network.target
+# Never give up restarting; the server itself waits for the ESP32, which may be plugged in late.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=/opt/pepin
+Environment=PYTHONPATH=/opt/pepin
+ExecStart=/opt/pepin/bin/python -m pepin.head_server
+# The IMU samples are dated by when their frames are read: a loop that waits behind the board's
+# other Python servers reads late. The clock map keeps only the earliest reads, so this is
+# about how many good ones it gets, not about correctness.
+Nice=-5
+Restart=on-failure
+RestartSec=2
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

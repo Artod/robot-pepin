@@ -32,6 +32,8 @@ from pathlib import Path
 from typing import Any
 
 from pepin.audio_link import FRAME_SAMPLES, RATE, AudioClient
+from pepin.face_events import VoiceFace
+from pepin.head_link import HeadClient
 from pepin.tools import TOOLS, Robot
 from pepin.tools.registry import render
 from pepin.tools.schemas import gemini_function_declarations
@@ -110,6 +112,7 @@ class Ears:
         self.client = client
         self.floor = -55.0
         self.muted_until = 0.0
+        self.on_start: Any = None  # called when an utterance starts (the face listens)
         self.reconnect: Any = None
 
     def utterance(self) -> bytes | None:
@@ -143,6 +146,8 @@ class Ears:
                 loud_run = loud_run + 1 if loud else 0
                 if loud_run >= 3:
                     talking, start, voiced, quiet = True, time.monotonic(), list(pre), 0
+                    if self.on_start is not None:
+                        self.on_start()
                 continue
             voiced.append(pcm)
             quiet = 0 if loud else quiet + 1
@@ -167,6 +172,7 @@ class Mind:
         self.history: list[Any] = []
         self.turns: list[list[Any]] = []
         self.tools = [types.Tool(function_declarations=gemini_function_declarations(TOOLS))]
+        self.face: VoiceFace | None = None  # --face: the turn's moments on the head's face
 
     def ask(self, contents: list[Any]) -> Any:
         t = self.types
@@ -252,6 +258,8 @@ class Mind:
 
     def speak(self, text: str, log: dict[str, Any]) -> float:
         print(f"pepin> {text}", flush=True)
+        if self.face is not None:
+            self.face.speaking()  # the board's audio server moves the mouth while it plays
         t0 = time.monotonic()
         seconds = float(self.robot.speech.say(text))
         log.setdefault("said", []).append(
@@ -266,6 +274,12 @@ def main() -> int:
         "--model", default="gemini-3.1-flash-lite"
     )  # 3.7 s a turn with a tool call, measured
     ap.add_argument("--host", default=os.environ.get("PEPIN_HOST", "10.0.0.187"))
+    ap.add_argument(
+        "--face",
+        action="store_true",
+        help="show the turn on the head's face (listening, thinking, speaking) through the"
+        " board's head server (pepin.head_server, :3340)",
+    )
     args = ap.parse_args()
     load_env(ENV_FILE)
     if not os.environ.get("GEMINI_API_KEY"):
@@ -273,6 +287,8 @@ def main() -> int:
         return 2
     robot = Robot.connect()
     mind = Mind(args.model, robot)
+    face = VoiceFace(HeadClient(args.host, source="voice").start()) if args.face else None
+    mind.face = face
 
     def connect() -> AudioClient:
         link = AudioClient(args.host).start(listen=True)
@@ -291,6 +307,7 @@ def main() -> int:
     client = connect()
     ears = Ears(client)
     ears.reconnect = connect
+    ears.on_start = face.listening if face is not None else None
     logs = REPO / "data" / "voice"
     logs.mkdir(parents=True, exist_ok=True)
     log_path = logs / f"{time.strftime('%Y%m%d')}.jsonl"
@@ -305,6 +322,8 @@ def main() -> int:
                 continue
             seconds = len(pcm) / 2 / RATE
             if seconds < 0.5:
+                if face is not None:
+                    face.done()
                 continue
             log: dict[str, Any] = {
                 "t": time.time(),
@@ -315,6 +334,8 @@ def main() -> int:
             threading.Thread(target=save_wav, args=(pcm, logs, log["t"]), daemon=True).start()
             t0 = time.monotonic()
             print(f"\n[{seconds:.1f} s of speech] thinking...", flush=True)
+            if face is not None:
+                face.thinking()
             try:
                 answer = mind.hear(pcm, log)
             except Exception as error:
@@ -326,6 +347,8 @@ def main() -> int:
                 ears.muted_until = time.monotonic() + spoken_s + 0.6
             else:
                 print("  (not for me)", flush=True)
+            if face is not None:
+                face.done()
             log["turn_ms"] = round((time.monotonic() - t0) * 1000)
             with log_path.open("a") as f:
                 f.write(json.dumps(log, ensure_ascii=False) + "\n")

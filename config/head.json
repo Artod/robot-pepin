@@ -1,0 +1,24 @@
+{
+  "_note": "pepin.head_server (the board, systemd pepin-head): the head ESP32's serial port, the head IMU's configuration and the server's own clocks. The face itself is config/face.json.",
+  "serial": {
+    "device": "/dev/pepin-head",
+    "baud": 921600,
+    "note": "the CH340's udev name (board/99-pepin-usb.rules); 921600 until 2000000 is measured clean (the 'S' line's rx_errors and the server's crc_errors stay 0) at both ends"
+  },
+  "port": 3340,
+  "imu": {
+    "rate_hz": 200,
+    "dlpf": 3,
+    "accel_fs": 1,
+    "gyro_fs": 1,
+    "note": "THE ONE PLACE the head IMU's sampling is set: sent to the ESP32 as 'C' at every (re)connection, and to every IMU subscriber as an imu_config line (its rate and filter delay are the consumer's, not a copy). Output rate 1000/n Hz: 200 by the VIO design (vio.md S4: at DLPF 42 Hz nothing aliases, this clone reads less noise at SMPLRT_DIV 4 than 0, 1.02 vs 1.15 mrad/s yaw-rate std on the base's clone 2026-10-02, a fifth of the link and the board's load); 1000 stays available (the firmware boots at it). DLPF_CFG 3 (42 Hz, 4.8 ms delay: the mast sways at ~5 Hz), +-4 g, +-500 deg/s (the neck pans at up to ~290 deg/s, past +-250)"
+  },
+  "brightness": 200,
+  "ping_hz": 2.0,
+  "clock": {
+    "bucket_s": 1.0,
+    "window_s": 120.0,
+    "note": "the clock map's lower envelope, against CLOCK_MONOTONIC_RAW (chrony does not slew it, so the skew is the crystal's alone): the smallest (receive time - ESP micros - the frame's known wire and read time) per bucket_s of ESP time, a line through the last window_s of them (offset and skew), less half the smallest ping round trip; samples are carried to CLOCK_MONOTONIC at output"
+  },
+  "brain_lease": true
+}

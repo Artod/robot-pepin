@@ -9,6 +9,7 @@ the placement rule itself).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import types
@@ -495,3 +496,94 @@ def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> N
     done = ros_stubs.GoalStatusArray(status_list=[ros_stubs.GoalStatus(status=4)])
     node.subs["/navigate_through_poses/_action/status"][1](done)
     assert not node.navigating()
+
+
+class FaceSink:
+    """The head server's door as the drive's face uses it: every moment, in order."""
+
+    def __init__(self) -> None:
+        self.said: list[tuple[str, ...]] = []
+
+    def event(self, name: str, *, end: bool = False) -> None:
+        self.said.append(("event", name, "end") if end else ("event", name))
+
+    def clear(self) -> None:
+        self.said.append(("clear",))
+
+    def lease(self, seconds: float) -> None:
+        self.said.append(("lease", str(seconds)))
+
+    def close(self) -> None:
+        self.said.append(("close",))
+
+
+def test_face_events_follow_a_drive_behind_their_flag(tmp_path: Path, monkeypatch: Any) -> None:
+    """Off by default: no door is opened. On: focused when Nav2 takes the goal, one struggle
+    per new recovery, happy at the arrival (ending the focus); the lease rides the node's timer;
+    off again: the door is cleared and closed."""
+    import pepin_bringup.goal_server as goal_server
+
+    sink = FaceSink()
+    monkeypatch.setattr(goal_server, "face_client", lambda: sink)
+    monkeypatch.setattr(goal_server.time, "sleep", lambda _s: None)
+    node = ready_to_drive(tmp_path)
+    assert node._switches["face_events"] is False and node._drive_face is None
+    node._switches.set("face_events", True)
+    feedback: list[Any] = []
+    sent = node._client.send_goal_async
+
+    def takes(goal: Any, callback: Any = None) -> Any:
+        feedback.append(callback)
+        return sent(goal, callback)
+
+    recoveries = iter([0, 1, 1, 2])
+
+    def tick() -> None:
+        count = next(recoveries, 2)
+        message = types.SimpleNamespace(distance_remaining=1.0, number_of_recoveries=count)
+        feedback[0](types.SimpleNamespace(feedback=message))
+
+    node._client.send_goal_async = takes
+    node._client.handle = Handle(4, tick)
+    node._client.handle._result = Reached(4, tick)
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, Wire())
+    assert sink.said == [
+        ("event", "goal_accepted"),
+        ("event", "recovery"),
+        ("event", "recovery"),
+        ("event", "arrived", "end"),
+    ]
+    lease = next(callback for period, callback in node.timers if period == 2.0)
+    lease()
+    assert sink.said[-1] == ("lease", "6.0")
+    node._switches.set("face_events", False)
+    assert sink.said[-2:] == [("clear",), ("close",)] and node._drive_face is None
+
+
+def test_a_refused_goal_is_a_sad_face_and_a_dropped_report_clears_the_focus(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    import pepin_bringup.goal_server as goal_server
+
+    sink = FaceSink()
+    monkeypatch.setattr(goal_server, "face_client", lambda: sink)
+    monkeypatch.setattr(goal_server.time, "sleep", lambda _s: None)
+    node = ready_to_drive(tmp_path)
+    node._switches.set("face_events", True)
+    refused = Handle(1)
+    refused.accepted = False
+    node._client.handle = refused
+    node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, Wire())
+    assert sink.said == [("event", "goal_failed", "end")]
+
+    class Hangs(Wire):
+        def sendall(self, data: bytes) -> None:
+            if b'"feedback"' in data or b'"done"' in data:
+                raise BrokenPipeError("the caller hung up")
+            super().sendall(data)
+
+    sink.said.clear()
+    node._client.handle = Handle(1)
+    with contextlib.suppress(BrokenPipeError):
+        node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, Hangs())
+    assert sink.said[0] == ("event", "goal_accepted") and sink.said[-1] == ("clear",)

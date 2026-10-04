@@ -17,14 +17,20 @@ from dataclasses import dataclass, field
 from pepin import goal_link
 from pepin.tools.clients import (
     AUDIO_PORT,
+    BASE_PORT,
     CAMERA_PORT,
     GAZE_URL,
+    HEAD_PORT,
     WORLD_URL,
+    BaseBody,
     BoardSpeech,
+    Body,
     Camera,
+    Face,
     GazeNeck,
     GoalServer,
     GoalServerLink,
+    HeadFace,
     Neck,
     Speech,
     UstreamerCamera,
@@ -52,6 +58,8 @@ class Endpoints:
     audio_port: int = AUDIO_PORT
     camera_port: int = CAMERA_PORT
     world_url: str = WORLD_URL
+    head_port: int = HEAD_PORT
+    base_port: int = BASE_PORT
 
     @classmethod
     def from_env(cls) -> Endpoints:
@@ -76,6 +84,8 @@ class Robot:
     world: World
     camera: Camera
     speech: Speech
+    face: Face
+    body: Body
     clock: Callable[[], float] = field(default=time.monotonic)
     sleep: Callable[[float], None] = field(default=time.sleep)
     drive_timeout_s: float = DRIVE_TIMEOUT_S
@@ -90,6 +100,8 @@ class Robot:
             world=WorldHttp(where.world_url),
             camera=UstreamerCamera(where.board, where.camera_port),
             speech=BoardSpeech(where.board, where.audio_port),
+            face=HeadFace(where.board, where.head_port),
+            body=BaseBody(where.board, where.base_port),
         )
 
     def halt(self) -> str:
