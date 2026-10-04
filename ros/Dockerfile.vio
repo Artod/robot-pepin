@@ -29,7 +29,9 @@
 # rclcpp 28 leaves a busy callback group's subscriptions out of the wait set it rebuilds, and
 # rmw_zenoh 0.2.10's rmw_wait clears its trigger flag without the lock after attaching the guard
 # conditions, so the one wake-up that could bring them back can be lost. A single thread never
-# rebuilds while a callback runs. EXECUTOR=0 builds upstream's code.
+# rebuilds while a callback runs. The same patch adds publish_path (upstream true: every update's
+# pose kept and the whole path republished each update, unbounded); vio.launch.py passes false.
+# EXECUTOR=0 builds upstream's code.
 ARG BASE=pepin-laptop:xfeat
 FROM ${BASE}
 ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b

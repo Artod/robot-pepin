@@ -81,6 +81,9 @@ def _describe(context):  # type: ignore[no-untyped-def]
                 "publish_calibration_tf": False,
                 "executor": executor,
                 "multi_threading_subs": True,
+                # upstream keeps every update's pose and republishes the whole path each update;
+                # nothing here reads /ov_msckf/pathimu (openvins-executor.patch's switch)
+                "publish_path": False,
             }
         ],
         # The config's rostopics are camera_stream's; with the feed they are remapped onto its
