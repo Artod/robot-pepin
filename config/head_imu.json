@@ -18,11 +18,11 @@
     "port": 3340
   },
   "noise": {
-    "gyro_noise_density": 1.0e-3,
-    "gyro_random_walk": 1.0e-4,
-    "accel_noise_density": 1.0e-2,
-    "accel_random_walk": 1.0e-3,
-    "note": "Kalibr's / OpenVINS's continuous-time densities: rad/s/sqrt(Hz), rad/s^2/sqrt(Hz), m/s^2/sqrt(Hz), m/s^3/sqrt(Hz). rtabmap's OdomOpenVINS defaults, 5-6x the base clone's measured white noise (1.15e-3 / sqrt(42 Hz) = 1.8e-4 rad/s/sqrt(Hz); 10-17 mm/s^2 -> 1.5-2.6e-3), i.e. already inflated as OpenVINS advises (10-20x for unmodelled errors). REPLACED by the Allan block of the parked recording (python -m pepin.allan), then inflated again"
+    "gyro_noise_density": 0.00118,
+    "gyro_random_walk": 0.000102,
+    "accel_noise_density": 0.0192,
+    "accel_random_walk": 0.0015,
+    "note": "MEASURED 2026-10-04 by python -m pepin.allan on the 3 h parked recording (pepin:/root/vio_night/allan_head_imu_20261004.jsonl.gz, 200 Hz, 550k lines): worst axis white noise gyro 1.18e-4 rad/s/sqrt(Hz), random walk 1.02e-5, bias instability 8e-5 (floor at 354 s); accel 1.92e-3 m/s^2/sqrt(Hz), random walk 1.5e-4, bias instability 1.25e-3; the block is that x10 (OpenVINS's advice for unmodelled errors). History: Kalibr's / OpenVINS's continuous-time densities: rad/s/sqrt(Hz), rad/s^2/sqrt(Hz), m/s^2/sqrt(Hz), m/s^3/sqrt(Hz). rtabmap's OdomOpenVINS defaults, 5-6x the base clone's measured white noise (1.15e-3 / sqrt(42 Hz) = 1.8e-4 rad/s/sqrt(Hz); 10-17 mm/s^2 -> 1.5-2.6e-3), i.e. already inflated as OpenVINS advises (10-20x for unmodelled errors). REPLACED by the Allan block of the parked recording (python -m pepin.allan), then inflated again"
   },
   "mast": {
     "crossover_hz": 0.5,

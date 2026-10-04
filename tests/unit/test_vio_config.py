@@ -124,7 +124,10 @@ def test_the_openvins_files_carry_the_rectified_pinhole_the_inverse_and_the_base
     imu = out / "kalibr_imu_chain.yaml"
     assert _read(imu, "imu0", "rostopic") == "/head/imu"
     assert _read(imu, "imu0", "update_rate") == 200.0
-    assert _read(imu, "imu0", "gyroscope_noise_density") == pytest.approx(1e-3)
+    noise = json.loads((REPO / "config/head_imu.json").read_text())["noise"]
+    assert _read(imu, "imu0", "gyroscope_noise_density") == pytest.approx(
+        noise["gyro_noise_density"]
+    ), "the IMU yaml carries config/head_imu.json's noise block (the Allan block x10)"
     estimator = out / "estimator_config.yaml"
     # OpenVINS reads a bool as the first word of the scalar (a trailing comment is part of it)
     assert str(_read(estimator, "try_zupt")).split()[0] == "false"

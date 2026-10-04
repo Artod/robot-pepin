@@ -109,7 +109,8 @@ def test_the_bridge_parameters_are_the_ones_the_cpp_declares() -> None:
         if isinstance(value, float):
             match = re.search(rf'declare_parameter<double>\("{name}", ([-0-9.e]+)\)', cpp)
             assert match and float(match.group(1)) == pytest.approx(value), name
-    assert config.noise["gyro_noise_density"] == 1e-3 and config.rate_hz == 200.0
+    # the Allan block x10 (config/head_imu.json, measured 2026-10-04)
+    assert config.noise["gyro_noise_density"] == 0.00118 and config.rate_hz == 200.0
     off = config.bridge_parameters(None, enable=False)
     # unknown extrinsics: no rotation parameter at all — an empty list kills ros2 launch
     assert "head_imu_camera_rotation" not in off and off["head_imu_enable"] is False
