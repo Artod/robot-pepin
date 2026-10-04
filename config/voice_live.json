@@ -1,0 +1,38 @@
+{
+  "_note": "Pepin's voice on the Gemini Live API (scripts/voice_live.py, pepin.voice_live). Every number that can spend money is here; a session that would break a cap is never opened. Costs are ESTIMATES from the prices below and the server's own token counts, not a bill.",
+  "model": "gemini-3.8-live",
+  "model_note": "the default Live model per ai.google.dev/gemini-api/docs/models (2026-10-02): stable, native audio, async function calling; gemini-3.1-flash-live-preview is the legacy one",
+  "voice": "Puck",
+  "caps": {
+    "max_session_s": 600,
+    "max_sessions_per_hour": 20,
+    "daily_budget_cad": 1.0,
+    "note": "a session is closed at max_session_s; a wake past max_sessions_per_hour (opened in the last 3600 s) or with today's estimate at daily_budget_cad is refused, and a session that crosses the budget is closed. 1 CAD/day keeps a month under the 40 CAD cloud cap"
+  },
+  "prices_usd_per_mtok": {
+    "audio_in": 3.0,
+    "audio_out": 12.0,
+    "text_in": 0.75,
+    "text_out": 4.5,
+    "note": "gemini-3.8-live paid tier, ai.google.dev/gemini-api/docs/pricing fetched 2026-10-02 (audio in 0.005 USD/min, out 0.018 USD/min). The Live API bills the whole context window again at every turn"
+  },
+  "audio_tokens_per_s": 25,
+  "usd_to_cad": 1.38,
+  "session": {
+    "idle_close_s": 25.0,
+    "resume_valid_s": 7000.0,
+    "compression_trigger_tokens": 16000,
+    "compression_target_tokens": 8000,
+    "barge_in": false,
+    "playback_lead_s": 0.5,
+    "note": "idle_close_s: no speech from either side and no tool running for this long closes the session. resume_valid_s: a resumption handle is reused this long after its session ended (the server keeps it 2 h). Compression bounds the context re-billed each turn (16k tokens = 0.048 USD a turn at most). barge_in false: the mic is not streamed while the robot speaks (true streams it, trusting the array's echo canceller, and Live's interruption silences the speaker)"
+  },
+  "wake": {
+    "whisper_repo": "mlx-community/whisper-large-v3-turbo",
+    "initial_prompt": null,
+    "silence_s": 0.5,
+    "max_s": 8.0,
+    "keep_wavs": true,
+    "note": "local gate: a loudness-cut segment (ends after silence_s, at most max_s) transcribed by mlx-whisper (turbo, ~0.3 s a segment on the M5, ~1.6 GB of unified memory; whisper-small-mlx is 0.12 s but hears the name in 69 % of clean/20 dB clips against turbo's 89 %). initial_prompt null: 'Пепин.' there lifts turbo's 20 dB recall 86 -> 103 of 108 but costs 2/90 near-miss false accepts at 20 dB and 14/90 at 8 dB (0 without it); scratch/voice_live/wake_eval.py. The session opens only on the robot's name. Every segment heard is kept as data/voice/<day>/wake/<HHMMSS_mmm>.wav with its transcript in wake.jsonl (keep_wavs)"
+  }
+}
