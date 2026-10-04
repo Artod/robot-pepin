@@ -304,6 +304,7 @@ def test_the_stamp_mode_picks_the_send_or_the_capture_and_the_report_prints_the_
     node._report()
     line = node.logger.texts("info")[-1]
     assert "stamp=send, send-grab median/p90 48/48 ms" in line
+    assert node.set_parameters([Param("camera_stamp_lag_s", 0.0)])[0].successful  # the raw grab
     assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
     headers = {
         "x-timestamp": "1750000001.300000",
@@ -429,7 +430,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     line = node.logger.texts("info")[-1]
     assert (
         "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.0" in line
+        " camera_stamp_lag_s=0.09" in line
     )
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
@@ -754,7 +755,7 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     line = node.logger.texts("info")[-1]
     assert line.endswith(
         "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.0"
+        " camera_stamp_lag_s=0.09"
     )
 
 

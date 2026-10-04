@@ -113,8 +113,8 @@
           1.0
         ]
       ],
-      "time_offset_s": -0.093,
-      "method": "2026-10-04: rotation = the eye block's camera_optical <- camera_link times the hand-eye fit camera_link <- chip (a neck sweep, gyro vs encoder rates, Kabsch; scratch/head_imu_handeye.py), checked by gravity at rest in camera_link to 0.75 deg (scratch/vio_night/gravity_check.py); the first nominal (a pure axis permutation onto the optical axes) skipped the eye block and sat 3.6 deg off. Offset by eye 0.03/-0.035/-0.02 m (Kalibr pending); time_offset_s (t_imu = t_cam + shift, Kalibr's sign) from the pictures' own motion (phase correlation of consecutive frames) against the gyro over slow pans and tilts, -92/-95 ms in two runs, under camera_stamp grab and AUTO exposure at night: the grab stamp sits ~93 ms after the exposure, and this moves with the exposure (scratch/vio_night/cam_imu_lag.py)",
+      "time_offset_s": 0.001,
+      "method": "2026-10-04: rotation = the eye block's camera_optical <- camera_link times the hand-eye fit camera_link <- chip (a neck sweep, gyro vs encoder rates, Kabsch; scratch/head_imu_handeye.py), checked by gravity at rest in camera_link to 0.75 deg (scratch/vio_night/gravity_check.py); the first nominal (a pure axis permutation onto the optical axes) skipped the eye block and sat 3.6 deg off. Offset by eye 0.03/-0.035/-0.02 m (Kalibr pending); time_offset_s (t_imu = t_cam + shift, Kalibr's sign) from the pictures' own motion (phase correlation of consecutive frames) against the gyro over slow pans and tilts (scratch/vio_night/cam_imu_lag.py), measured against camera_stream's stamps at camera_stamp grab with camera_stamp_lag_s at its default (0.09, config/knobs.json): +1 ms by day 2026-10-04 (OpenVINS's online estimate +0.3..+1.0 ms over 17 min live). The raw grab stamp sits 90-95 ms after the exposure, by day as at night, which is what the knob takes off",
       "note": "chip axes against the rectified left eye's optical frame, from the photo"
     }
   },
