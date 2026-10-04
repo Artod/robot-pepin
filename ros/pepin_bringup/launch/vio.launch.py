@@ -45,6 +45,9 @@ def _describe(context):  # type: ignore[no-untyped-def]
         executable="run_subscribe_msckf",
         namespace="ov_msckf",
         output="screen",
+        # a terminal, so OpenVINS's printf lines are line-buffered: through a pipe they reached
+        # docker logs in 4 kB bursts, minutes late at rest (2026-10-04)
+        emulate_tty=True,
         parameters=[
             {
                 "config_path": config,
@@ -52,6 +55,11 @@ def _describe(context):  # type: ignore[no-untyped-def]
                 "use_stereo": True,
                 "max_cameras": 2,
                 "save_total_state": False,
+                # OpenVINS broadcasts global -> imu -> cam0/cam1 on /tf at the IMU's rate by
+                # default (600 transforms/s), and /tf reaches every listener in the graph, the
+                # board's included: off, so nothing here owns a transform
+                "publish_global_to_imu_tf": False,
+                "publish_calibration_tf": False,
             }
         ],
         **RESPAWN,
