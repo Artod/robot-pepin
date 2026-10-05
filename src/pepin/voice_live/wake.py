@@ -5,7 +5,10 @@ Nothing reaches the Live API until :func:`is_wake` accepts a local transcript: a
 audio (:class:`Segmenter`) goes to Whisper on the Mac's GPU (:class:`MlxWhisper`, mlx-whisper),
 and only a transcript holding "Пепин" (or what Whisper makes of it: Пепен, Пипин, Pepin) opens
 the session. Inside a session the goodbye is read from Live's own input transcription
-(:func:`is_goodbye`), so Whisper runs only while the robot is idle.
+(:func:`is_goodbye`); Whisper runs while the robot is idle, and while it drives, when the mic is
+withheld from Live and only speech naming the robot or saying stop (:func:`is_stop`) reaches it.
+Whisper's hallucinations on room noise — the closing lines of the subtitled videos it learned
+from (:func:`is_hallucination`) — are dropped before any decision.
 """
 
 from __future__ import annotations
@@ -35,6 +38,30 @@ _GOODBYE_PHRASES = (
     ("bye",),
     ("goodbye",),
 )
+_STOP_WORDS = frozenset(
+    ("стоп", "стой", "стоять", "остановись", "остановитесь", "хватит", "отмена", "stop")
+)
+# Whisper's lines for silence and hum: subtitle credits and video outros from its training data.
+# 2026-10-05, 327 segments of room noise, motors and speech (scratch/voice_1005): "Продолжение
+# следует..." 121, "Спасибо." 60 (no one thanked the robot), "Субтитры сделал DimaTorzok" 52,
+# "Аплодисменты." 12, "Смотрите продолжение в следующей серии." 11, a subtitle editor's and
+# proofreader's credit 1, "Добро пожаловать в наш канал!" 1. A whole transcript that is one of
+# these (or names the subtitles) carries no command: a bare "спасибо" names nobody.
+_HALLUCINATIONS = frozenset(
+    (
+        "продолжение следует",
+        "спасибо",
+        "спасибо за внимание",
+        "спасибо за просмотр",
+        "аплодисменты",
+        "смотрите продолжение в следующей серии",
+        "добро пожаловать в наш канал",
+        "подписывайтесь на канал",
+        "до новых встреч",
+        "музыка",
+    )
+)
+_HALLUCINATION_MARKS = ("субтитр", "dimatorzok", "корректор")
 _FAREWELL_FILLERS = frozenset(
     ("ну", "все", "спасибо", "давай", "ладно", "хорошо", "тогда", "хей", "эй", "ok", "окей")
 )
@@ -76,6 +103,18 @@ def is_goodbye(text: str) -> bool:
         if any(tuple(said[i : i + n]) == phrase for i in range(len(said) - n + 1)):
             return True
     return False
+
+
+def is_stop(text: str) -> bool:
+    """Whether a transcript tells the robot to stop: стоп, стой, хватит, остановись, отмена."""
+    return any(word in _STOP_WORDS for word in words(text))
+
+
+def is_hallucination(text: str) -> bool:
+    """Whether a transcript is one of Whisper's lines for noise (subtitle credits, video
+    outros, a bare "Спасибо."), not anything said in the room."""
+    said = " ".join(words(text))
+    return said in _HALLUCINATIONS or any(mark in said for mark in _HALLUCINATION_MARKS)
 
 
 def rms_db(pcm: bytes) -> float:

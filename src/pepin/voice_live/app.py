@@ -2,10 +2,11 @@
 
 Frames from the mic (the board's array, or a scripted mic) arrive on a thread and are handed to
 the event loop. While idle, the gate cuts them into segments and Whisper reads each one on a
-worker thread; a segment holding the robot's name, with the caps' consent
-(:meth:`pepin.voice_live.budget.Ledger.refusal`), opens a session that is given the segment
-itself first, so "Пепин, где ты?" said in one breath is heard whole. Every segment's
-transcript and decision go to ``data/voice/<day>/wake.jsonl`` (and its audio to ``wake/``).
+worker thread; Whisper's lines for noise are dropped
+(:func:`pepin.voice_live.wake.is_hallucination`), and a segment holding the robot's name, with
+the caps' consent (:meth:`pepin.voice_live.budget.Ledger.refusal`), opens a session that is
+given the segment itself first, so "Пепин, где ты?" said in one breath is heard whole. Every
+segment's transcript and decision go to ``data/voice/<day>/wake.jsonl`` (its audio to ``wake/``).
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from pepin.voice_live.config import LiveConfig
 from pepin.voice_live.events import Events
 from pepin.voice_live.session import Conversation, Frame, Wake
 from pepin.voice_live.sources import FrameSink
-from pepin.voice_live.wake import Segmenter, Transcriber, is_wake
+from pepin.voice_live.wake import Segmenter, Transcriber, is_hallucination, is_wake
 
 QUEUE_FRAMES = 1500  # 30 s of mic: frames beyond it (nobody reading) are dropped, oldest first
 
@@ -66,6 +67,7 @@ class VoiceLoop:
         self.sessions: list[dict[str, object]] = []
         self.wakes = 0
         self.refused = 0
+        self.hallucinations = 0
         self.dropped_frames = 0
 
     async def run(
@@ -107,11 +109,13 @@ class VoiceLoop:
                 cut = self.clock()
                 text = await loop.run_in_executor(whisper, self.transcriber.transcribe, segment.pcm)
                 detected = self.clock()
-                woke = is_wake(text)
-                self._log_segment(segment.pcm, text, woke, round((detected - cut) * 1000))
+                noise = is_hallucination(text)
+                woke = not noise and is_wake(text)
+                self.hallucinations += noise
+                self._log_segment(segment.pcm, text, woke, round((detected - cut) * 1000), noise)
                 print(
                     f"heard (local, {(detected - cut) * 1000:.0f} ms): {text!r}"
-                    + ("  -> WAKE" if woke else ""),
+                    + ("  -> WAKE" if woke else "  (Whisper's noise line)" if noise else ""),
                     flush=True,
                 )
                 if not woke:
@@ -128,8 +132,9 @@ class VoiceLoop:
         finally:
             whisper.shutdown(wait=False)
 
-    def _log_segment(self, pcm: bytes, text: str, woke: bool, ms: int) -> None:
-        """The segment's transcript and decision; its audio written on a thread."""
+    def _log_segment(self, pcm: bytes, text: str, woke: bool, ms: int, noise: bool) -> None:
+        """The segment's transcript and decision (``noise``: a Whisper hallucination); its
+        audio written on a thread."""
         t = self.wall()
         stamp = time.localtime(t)
         day = self.logs / time.strftime("%Y%m%d", stamp)
@@ -138,6 +143,7 @@ class VoiceLoop:
             "s": round(len(pcm) / 2 / RATE, 2),
             "text": text,
             "wake": woke,
+            "hallucination": noise,
             "whisper_ms": ms,
         }
         if self.config.keep_wake_wavs:
