@@ -96,6 +96,39 @@ def test_a_reverse_leg_is_timed_and_the_rear_swings_away_from_the_turn() -> None
     assert watch.side == 1 and reverse_aim(1, law, REACH).tilt_rad == pytest.approx(HOME.tilt_rad)
 
 
+# Drive 306's reverse leg out of home (2026-10-05 19:36:31Z, the tape's commands at 10 Hz): backing
+# at 0.06-0.14 m/s while the controller swung the turn through zero four times.
+# fmt: off
+DRIVE_306_LEG_W = (
+    -0.4, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5,
+    0.56, 0.58, 0.6, 0.6, 0.61, 0.61, 0.41, 0.21, 0.01, -0.19, -0.39, -0.59, -0.78, -0.83, -0.87,
+    -0.91, -0.91, -0.71, -0.51, -0.31, -0.11, 0.09, 0.29, 0.49, 0.69, 0.89, 0.69, 0.49, 0.29, 0.09,
+    0.29, 0.49, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.3,
+    0.1, -0.1, 0.1, 0.3,
+)
+# fmt: on
+
+
+def test_a_reverse_look_keeps_its_side_while_the_controller_wiggles() -> None:
+    law = ReverseLaw()
+    held, free = ReverseWatch(), ReverseWatch()
+    sides, free_sides = [], []
+    for k, w in enumerate(DRIVE_306_LEG_W):
+        now = 0.1 * k
+        held.update(-0.08, w, now, law)
+        free.update(-0.08, w, now, law)
+        if held.reversing_for(now) >= law.min_s and k % 2 == 0:  # the node's 0.2 s period
+            sides.append(held.hold())
+            free_sides.append(free.side)
+    assert len(set(free_sides)) == 2  # following w, the look would have crossed the back
+    assert len(sides) > 20 and set(sides) == {sides[0]}
+    held.update(0.1, 0.0, 7.0, law)  # the leg ends: the next one chooses again
+    held.update(-0.1, -sides[0] * 0.5, 8.0, law)
+    assert held.side == sides[0]
+    held.update(-0.1, sides[0] * 0.5, 8.1, law)
+    assert held.side == -sides[0]
+
+
 def test_a_tight_rear_is_a_lethal_cell_just_behind_the_hull() -> None:
     res, size = 0.05, 40
     origin = (-1.0, -1.0)

@@ -13,7 +13,8 @@ does not creep.
 REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that has lasted
 ``min_s``, or any reverse with lethal cells within ``rear_m`` behind the hull
 (:func:`tight_rear`), turns the head to ``pan_deg`` on the side the rear swings to (with the cart
-turning left, w > 0, the rear swings right), at ``tilt_deg``.
+turning left, w > 0, the rear swings right), at ``tilt_deg``, and keeps that side until the leg
+ends.
 """
 
 from __future__ import annotations
@@ -100,10 +101,14 @@ class ReverseLaw:
 
 class ReverseWatch:
     """How long the cart has been reversing without a break, and which side its rear last swung
-    to (+1 left, -1 right)."""
+    to (+1 left, -1 right). Once a reverse look has taken the side (:meth:`hold`) it stays for the
+    rest of the leg: a controller that swings its turn through zero while it backs (drive 306:
+    w -0.5, +0.6, -0.9, +0.9 rad/s within 4 s at -0.06 m/s) would otherwise send the head 300 deg
+    across the back at every swing."""
 
     def __init__(self) -> None:
         self._since: float | None = None
+        self._held = False
         self.side = 1
 
     def update(self, v: float, w: float, now: float, law: ReverseLaw) -> None:
@@ -111,12 +116,20 @@ class ReverseWatch:
         if v < -law.min_speed_m_s:
             if self._since is None:
                 self._since = now
+            if self._held:
+                return
             if w > 0.0:
                 self.side = -1
             elif w < 0.0:
                 self.side = 1
         else:
             self._since = None
+            self._held = False
+
+    def hold(self) -> int:
+        """The side for this leg's reverse look, kept from now until the leg ends."""
+        self._held = True
+        return self.side
 
     def reversing_for(self, now: float) -> float:
         """Seconds of this reverse leg so far (0 when not reversing)."""

@@ -497,7 +497,7 @@ class Gaze(Node):
         if self._switches.on("reverse_gaze") and self._reverse.reversing:
             long_leg = self._reverse.reversing_for(now) >= law.min_s
             if long_leg or self._tight_rear(law):
-                self._hold(REVERSE_SOURCE, reverse_aim(self._reverse.side, law, self._reach), now)
+                self._hold(REVERSE_SOURCE, reverse_aim(self._reverse.hold(), law, self._reach), now)
                 return
         if not self._switches.on("path_gaze") or self._reverse.reversing:
             return
