@@ -176,6 +176,49 @@ limits instead (it is walking, not aiming), and it never winds the servo up: a g
 the port, because it may come seconds after the request. WiFi lost: a jog stops within 0.5 s and
 lets go, a lease goes home within its 2 s.
 
+## The I2C bus
+
+`/dev/i2c-2` is TWI3 (`5002c00.i2c`, driver `mv64xxx_i2c`) on PH4 = SCL (header pin 5) and PH5 =
+SDA (pin 3), at 400 kHz (`board/i2c3-400k.dts`). On it: the three VL53L1X, front 0x30 (always
+awake: its XSHUT is PC9, which the kernel will not drive), left 0x31 (XSHUT PC5) and right 0x32
+(XSHUT PC6), and the base MPU6050 at 0x68. Three programs use it: `tof_init.sh` (at boot and
+before every pepin-tof start: XSHUT, `i2cdetect`, `i2ctransfer`), `pepin.tof_server` (the ranges
+at 15 Hz) and the C++ base bridge in `pepin-ros` (the IMU at 100 Hz).
+
+**Serialisation is the kernel's.** The I2C core holds the adapter's lock for a whole transfer, and
+every register read of every client is ONE transfer (`I2C_RDWR`: the register, a repeated START,
+the read — the VL53L1X library always, the bridge since 2026-10-05), so no client's transaction
+can be cut by another's, on the wire or in the driver. There is no file lock on top: it would
+order nothing the adapter lock does not, and a client stuck in a 2 s timeout blocks the others
+either way. Start order does not matter either: the bridge probes the IMU until it answers
+(five tries a second apart, then one a minute) and recovers it live.
+
+**A locked bus** reads `mv64xxx: I2C bus locked, block: 1, time_left: 0` in dmesg every 2 s (a
+1 s timeout and a 1 s abort per transfer) and `Connection timed out` in every client: a slave
+lost its place mid-byte and drives SDA low, so the controller can never make a START. A driver
+unbind/rebind resets the controller, not the slave (and the unbind waits for every open
+`/dev/i2c-2`). The driver calls the I2C core's bus recovery at every lock, but on this SoC the
+core has no pins to drive: its generic recovery needs `scl-gpios` and a `gpio` pinctrl state, and
+the sunxi pinmux is strict (`sunxi_pmx_ops.strict`, no `function_is_gpio`, Linux 6.18), so a GPIO
+request on a pin muxed to i2c3 is refused; no overlay enables it on this kernel. Episodes so far,
+all on a parked cart with the stack running, none at a restart: 2026-09-25 08:23 (100 kHz),
+2026-10-04 11:32 (begun by an arbitration loss reading 0x68; power cycle at 15:03), 2026-10-05
+08:38 (ended at 14:35:52 by a pepin-tof restart: tof_init's XSHUT reset of 0x31/0x32).
+
+Freeing it, cheapest first (as root on the board):
+
+```bash
+/opt/pepin/bin/python -m pepin.i2c_recover check     # SDA/SCL from the controller's line register; who has the bus open
+systemctl stop pepin-tof
+/opt/pepin/bin/python -m pepin.i2c_recover recover   # nine clocks on SCL and a STOP (TWI_LCR, through /dev/mem)
+systemctl start pepin-tof                            # tof_init: XSHUT-resets 0x31/0x32, re-addresses all three
+```
+
+`recover` refuses while anything holds `/dev/i2c-2` open (`--force` overrides); the bridge closes
+it by itself once five IMU reads in a row have failed. A bus still held after both steps (SCL low,
+or 0x30 or 0x68 hung beyond clocks) needs the power cycle. The bridge's minute probe finds the IMU
+again with no restart.
+
 ## Setting up a fresh board
 
 ```bash

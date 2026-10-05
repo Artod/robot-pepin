@@ -97,6 +97,7 @@ PER_CALL = (
     "pepin.census",
     "pepin.goal_link",
     "pepin.head_link",  # the head server's door by hand (bring-up, a bench)
+    "pepin.i2c_recover",  # a locked i2c-2 freed by hand on the board (board/README.md)
     "pepin.push",
     "pepin.red_button",
     "pepin.speed",
