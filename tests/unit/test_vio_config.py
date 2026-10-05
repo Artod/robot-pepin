@@ -205,9 +205,9 @@ def test_a_live_stamp_lag_moves_the_time_shift_by_its_distance_from_the_knob_def
 
 
 def test_the_zupt_holds_rest_and_the_dynamic_init_is_a_switch(tmp_path: Path) -> None:
-    """By default OpenVINS's ZUPT is on (all day, the IMU test at multiplier 1, a slow drive's
-    speed and a moving picture's disparity out) and the init is static only; --dyn-init adds the
-    dynamic one, --no-zupt writes the first design's (ZUPT off), each alone."""
+    """By default OpenVINS's ZUPT is on (all day, the IMU test alone at multiplier 1, a slow
+    drive's speed out) and the init is static only; --dyn-init adds the dynamic one, --no-zupt
+    writes the first design's (ZUPT off), each alone."""
     config = _config_with_imu(tmp_path / "config", _asymmetric())
 
     def estimator(*flags: str) -> Path:
@@ -226,7 +226,7 @@ def test_the_zupt_holds_rest_and_the_dynamic_init_is_a_switch(tmp_path: Path) ->
     assert _read(default, "zupt_chi2_multipler") == 1.0, "0 would leave the picture alone"
     assert _read(default, "zupt_noise_multiplier") == 1.0
     assert _read(default, "zupt_max_velocity") == pytest.approx(0.05)
-    assert _read(default, "zupt_max_disparity") == pytest.approx(0.5), "a still picture passes"
+    assert _read(default, "zupt_max_disparity") == 0.0, "no still-picture override"
     assert _bool(default, "init_dyn_use") is False
     assert _read(default, "init_imu_thresh") == pytest.approx(0.4)
 

@@ -32,7 +32,7 @@ the optical frame; it is printed in every file it shapes. ``--calib-extrinsics``
 refine the camera-IMU transform online (a dedicated well-excited session only, vio.md section 3).
 
 REST AND START. OpenVINS's own zero-velocity update is on (:data:`ZUPT`): a camera interval
-whose IMU reads rest under the current biases (or whose picture stands still) is not propagated,
+whose IMU reads rest under the current biases and OpenVINS's own speed is not propagated,
 and the biases and the tilt are updated from gravity instead, so hours at rest neither move the
 pose nor walk the biases (2026-10-04: with it off, the accel bias walked 0.3-1 m/s^2 over 25 min
 to 2.6 h at rest and diverged at the first metre). With the ZUPT on, its static initialiser does
@@ -76,28 +76,31 @@ IMU_TOPIC = "/head/imu"
 # arrives sooner than 1 / track_frequency after the last, so 10 would drop the faster ones.
 TRACK_FREQUENCY_HZ = 15.0
 # OpenVINS's zero-velocity update (UpdaterZeroVelocity::try_update), tried at every frame: it is
-# ACCEPTED when the picture stands still (mean track motion between the two frames under
-# zupt_max_disparity px with more than 20 tracks) OR when the IMU reads rest (the camera
-# interval's gyro and accel residuals under the current biases pass chi2 at 95 % times
-# zupt_chi2_multipler, with the densities times zupt_noise_multiplier) and OpenVINS's own speed is
-# under zupt_max_velocity. A moving picture is no veto: the IMU test is what keeps a turning neck
-# out. With the x10 densities of config/head_imu.json and multiplier 1 the IMU test passes a still
-# head in 99.6-100 % of 0.1 s windows and refuses any neck turning faster than ~0.8 deg/s (the
-# fastest window accepted while the encoders moved; the arbiter's slowest sweep is 20 deg/s),
-# measured on the two parked recordings of 2026-10-04 (3.8k + 2.9k still windows).
+# ACCEPTED when the IMU reads rest (the camera interval's gyro and accel residuals under the
+# current biases pass chi2 at 95 % times zupt_chi2_multipler, with the densities times
+# zupt_noise_multiplier) and OpenVINS's own speed is under zupt_max_velocity, OR when the picture
+# stands still (mean track motion between two frames under zupt_max_disparity px, more than 20
+# tracks) whatever the filter says. With the x10 densities of config/head_imu.json and multiplier
+# 1 the IMU test passes a still head in 99.6-100 % of 0.1 s windows and refuses any neck turning
+# faster than ~0.8 deg/s (the fastest window accepted while the encoders moved; the arbiter's
+# slowest sweep is 20 deg/s), measured on the two parked recordings of 2026-10-04 (3.8k + 2.9k
+# still windows). The picture's path is OFF (0): its update holds the pose but has no velocity row,
+# so it froze a wrong speed for good (live 2026-10-04: a respawn's start left 0.28 m/s, accepted by
+# the still picture at chi2 256 and kept at rest); through the IMU test a wrong speed or bias is
+# refused and the visual updates repair it first. A still picture at rest reads 0.2-0.3 px.
 ZUPT = {
     "try_zupt": "true",
     "zupt_chi2_multipler": "1",
     "zupt_max_velocity": "0.05",
     "zupt_noise_multiplier": "1",
-    "zupt_max_disparity": "0.5",
+    "zupt_max_disparity": "0.0",
     "zupt_only_at_beginning": "false",
 }
 ZUPT_NOTES = {
     "try_zupt": "rest held by OpenVINS itself; the static init needs no jerk",
     "zupt_max_velocity": "m/s, OpenVINS's own speed: a slow drive is not rest",
     "zupt_noise_multiplier": "a still head passes, a neck over ~0.8 deg/s never (2026-10-04)",
-    "zupt_max_disparity": "px between two frames: a still picture passes whatever the IMU says",
+    "zupt_max_disparity": "off, the IMU test alone (a still picture froze a wrong speed)",
     "zupt_only_at_beginning": "all day, a home robot stands for hours",
 }
 # The first design's (vio.md M4, the board's /zupt owning rest): no ZUPT, the init waits for a jerk

@@ -386,12 +386,14 @@ the EKF's own odom -> base_link. Calibration: docs/head_imu_calibration.md. The 
 "Replay" section.
 
 Rest and start are OpenVINS's own. Its zero-velocity update is on all day: a camera interval whose
-IMU reads rest under the current biases (gyro and accel, chi2 at 95 %, OpenVINS's speed under
-0.05 m/s) or whose picture stands still (tracks moving under 0.5 px between frames) is not
-propagated, and the biases and the tilt are updated from gravity instead, so hours on the charger
-neither move the pose nor walk the biases. The IMU test is what keeps a turning neck out (a still
-head passes, a neck turning faster than ~0.8 deg/s never); a moving picture is no veto. With the
-ZUPT on, the static initialisation starts from ~1 s of stillness, no jerk or head nod needed. The
+IMU reads rest under the current biases (gyro and accel, chi2 at 95 %) with OpenVINS's own speed
+under 0.05 m/s is not propagated, and the biases and the tilt are updated from gravity instead, so
+hours on the charger neither move the pose nor walk the biases. The IMU test is what keeps a
+turning neck out (a still head passes, a neck turning faster than ~0.8 deg/s never); OpenVINS's
+still-picture override is off (its update has no velocity row and froze a wrong speed at rest).
+With the ZUPT on, the static initialisation starts from ~1 s of stillness, no jerk or head nod
+needed; OpenVINS publishes its first pose at the first visual update, i.e. ~0.5 s into the first
+motion after a start (its `initialized()` waits for one). The
 start options are vio_config.py's, passed at `ros/laptop.sh vio` (OpenVINS reads its config only
 when it starts; the guard's restarts keep it):
 
