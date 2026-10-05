@@ -167,6 +167,22 @@ a check that cannot be answered says so.
 | 2.13 | the localisation service answers `/health` on `:8791`; down is a `WARN` (said loudly under `place_recognition descriptor`), a `FAIL` only under `registration_backend service` |
 | 3.x | every live flag of the restarted half is its `FLAGS` table default (`ros/flags.sh drift`); a difference is a `WARN` |
 
+### A node that is quietly stuck: take its stacks before the kick
+
+Alive, silent, a percent of CPU: a kick or a restart destroys exactly the state that says why
+(OpenVINS 2026-10-04: one thread asleep in rmw_zenoh's `rmw_wait` with no timeout; the gaze
+arbiter froze the same way at 22:22 and nobody took its stack). First:
+
+    ros/tools/stack.sh gaze                               # a pepin_bringup node, by module name
+    ros/tools/stack.sh run_subscribe_msckf pepin-vio      # any process, by name, in a container
+
+It writes `ros/maps/rec/stacks/<node>-<UTC>.txt`: for a Python node the faulthandler dump that
+node_kit answers SIGUSR2 with (every thread's Python stack, from the container's log) and, on the
+laptop, `py-spy dump --native`; for a C++ process `gdb thread apply all bt`. py-spy and gdb run in
+a sidecar (`pepin-stack:latest`, built on first use) that shares the container's PID namespace,
+since no image carries them; the process stops only for the second they read it. On the board
+only the Python dump works (no sidecar there). Then kick.
+
 ## One localiser
 
 RTAB-Map on the laptop owns `map -> odom`: it publishes the transform itself (`publish_tf`,
