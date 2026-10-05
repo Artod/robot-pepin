@@ -752,6 +752,7 @@ def test_arm_filter_off_paints_the_arm_like_the_room_and_says_what_the_arm_is(
 ) -> None:
     with_arm(tmp_path)
     node = whisker_node(tmp_path)
+    node._switches.set("arm_filter", False)  # on by default since 2026-10-05
     at = arm_voxels(node)
     node._world.volume.weight[at] = 5.0
     node._on_scan_work(scan_msg())

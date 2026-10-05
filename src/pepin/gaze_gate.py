@@ -79,9 +79,9 @@ GATE_KNOBS = (
 EXPOSURE_S = 0.035  # half a 15 fps frame: an auto exposure indoors is unknown (gaze.md 4.4)
 SETTLE_S = 0.1  # the contract's "settled + one frame period": 0.105 s at 9.5 fps
 YAW_DPS = 0.0  # off: nothing has measured where the body's own turn starts to blur a frame
-STAMP_END = 0  # off: the stamps are ustreamer's send time until camera_stamp grab is measured
-SWAY_DPS = 0.0  # off until /mast/state exists; vio.md proposes 10 (the ring peaks at 6.7 deg/s)
-SWAY_DEG = 0.0  # off until /mast/state exists; vio.md proposes 1.0 (beyond the filter's trust)
+STAMP_END = 1  # the stamp is the capture's end since camera_stamp grab (default 2026-10-05)
+SWAY_DPS = 6.0  # blur model: 1.5 px / (8.6 px/deg x 30 ms auto exposure); taps 12-21, rest 0.4
+SWAY_DEG = 1.0  # beyond the mast filter's trust; a hand-pushed cart over a carpet edge 1.2-1.3
 GATE_MARGIN_S = 0.01  # after a grab stamp: the capture stamp sits after the exposure ends
 GATE_DEFAULTS = (EXPOSURE_S, SETTLE_S, YAW_DPS, STAMP_END, SWAY_DPS, SWAY_DEG)
 

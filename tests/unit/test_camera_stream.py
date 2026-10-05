@@ -294,16 +294,25 @@ def grab_part(sent: float, lag_s: float, body: bytes) -> bytes:
 def test_the_stamp_mode_picks_the_send_or_the_capture_and_the_report_prints_the_lag(
     build: Build,
 ) -> None:
-    """``send`` (the default) stamps ustreamer's X-Timestamp; ``grab``, live, the V4L2 capture
-    moved onto the same clock — 48 ms earlier here; the report names the mode and the lag."""
+    """``grab`` (the default since 2026-10-05) stamps the V4L2 capture moved onto ustreamer's
+    realtime clock, 48 ms before the send here, and camera_stamp_lag_s (0.09) earlier still;
+    ``send``, live, ustreamer's X-Timestamp; the report names the mode and the lag."""
     body = jpeg(1280, 720)
     node, _ = build(grab_part(1_750_000_000.30, 0.048, body))
     images = node.pubs["/camera/image"].sent
     assert until(lambda: images)
-    assert stamp_seconds(images[0].header.stamp) == pytest.approx(1_750_000_000.30, abs=1e-6)
+    assert stamp_seconds(images[0].header.stamp) == pytest.approx(
+        1_750_000_000.30 - 0.048 - 0.09, abs=1e-6
+    )
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "stamp=send, send-grab median/p90 48/48 ms" in line
+    assert "stamp=grab, dated 90 ms earlier, send-grab median/p90 48/48 ms" in line
+    assert node.set_parameters([Param("camera_stamp", "send")])[0].successful
+    assert node._frame_time({"x-timestamp": "1750000001.300000"}) == pytest.approx(
+        1_750_000_001.300, abs=1e-6
+    ), "send: X-Timestamp as it came, the lag untouched"
+    node._report()
+    assert "stamp=send" in node.logger.texts("info")[-1]
     assert node.set_parameters([Param("camera_stamp_lag_s", 0.0)])[0].successful  # the raw grab
     assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
     headers = {
@@ -331,6 +340,7 @@ def test_the_stamp_lag_dates_a_grab_stamp_earlier_and_leaves_send_alone(build: B
         "x-ustreamer-grab-time": "5000.952000",
     }
     assert node.set_parameters([Param("camera_stamp_lag_s", 0.093)])[0].successful
+    assert node.set_parameters([Param("camera_stamp", "send")])[0].successful
     assert node._frame_time(headers) == pytest.approx(1_750_000_001.300, abs=1e-6), "send"
     assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
     assert node._frame_time(headers) == pytest.approx(1_750_000_001.159, abs=1e-6)
@@ -429,7 +439,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     node._report()
     line = node.logger.texts("info")[-1]
     assert (
-        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
+        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
         " camera_stamp_lag_s=0.09" in line
     )
     node._report()
@@ -697,7 +707,7 @@ def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
     for stage in ("decode", "split", "rectify", "publish"):
         assert f"{stage} " in line.split("stages: ")[1]
     assert (
-        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
+        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
     )
 
 
@@ -754,7 +764,7 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.endswith(
-        "flags: camera_stamp=send undistort=off fold_mask=on static_camera_tf=off scale=0.5"
+        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
         " camera_stamp_lag_s=0.09"
     )
 

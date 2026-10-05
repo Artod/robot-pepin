@@ -55,11 +55,11 @@
       "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
     "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
       "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"},
-    "gate_stamp_end": {"default": 0, "range": [0, 1],
+    "gate_stamp_end": {"default": 1, "range": [0, 1],
       "note": "1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab"},
-    "gate_sway_dps": {"default": 0.0, "range": [0.0, 360.0],
+    "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
-    "gate_sway_deg": {"default": 0.0, "range": [0.0, 10.0],
+    "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
       "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
   },
   "gaze": {
@@ -161,17 +161,17 @@
       "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
     "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
       "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"},
-    "gate_stamp_end": {"default": 0, "range": [0, 1],
+    "gate_stamp_end": {"default": 1, "range": [0, 1],
       "note": "1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab"},
-    "gate_sway_dps": {"default": 0.0, "range": [0.0, 360.0],
+    "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
-    "gate_sway_deg": {"default": 0.0, "range": [0.0, 10.0],
+    "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
       "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
   },
   "vio_feed": {
     "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],
       "note": "half the exposure window a pair is judged by, as in the gated camera nodes (with gate_stamp_end 1: [stamp - 2 * this, stamp + 10 ms]); with a manual exposure set it to that exposure"},
-    "gate_stamp_end": {"default": 0, "range": [0, 1],
+    "gate_stamp_end": {"default": 1, "range": [0, 1],
       "note": "1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s. Set it to 1 together with camera_stamp grab, which the VIO always runs on"},
     "head_rate_dps": {"default": 60.0, "range": [0.0, 1000.0],
       "note": "a pair whose exposure window holds a /head/imu sample turning faster than this (deg/s, the gyro's norm) is held back from OpenVINS; 0 holds back nothing. 60 is three times the arbiter's slow sweep (20 deg/s, whose frames OpenVINS needs) and a fifth of a saccade (290 deg/s, whose frames threw it metres off on the run4 replay)"}
@@ -201,7 +201,7 @@
       "note": "vo_input vio: fewer features than this in OpenVINS's last update (/ov_msckf/points_msckf + points_slam) for vio_lost_s while the base moves (/zupt silent) marks the VIO lost; never at rest (no track ends there: points_msckf is 0 with the head still); 0 turns the rule off"},
     "vio_max_speed_m_s": {"default": 1.0, "range": [0.1, 10.0],
       "note": "vo_input vio, the guard: a composed base velocity between two OpenVINS samples faster than this (m/s) is not sent (the wheels top out at 0.32; a diverged OpenVINS runs at metres per second)"},
-    "vio_wheel_diff_m_s": {"default": 0.5, "range": [0.05, 5.0],
+    "vio_wheel_diff_m_s": {"default": 0.2, "range": [0.05, 5.0],
       "note": "vo_input vio, the guard: a composed base velocity farther than this (m/s) from the wheels' (forward speed, no sideways motion) is not sent; judged per sample, no duration (vio_lost_speed_m_s is the slow rule)"},
     "vio_restart_rejects": {"default": 20, "range": [0, 1000],
       "note": "vo_input vio: this many guard rejections in a row (2 s at 10 Hz) with the wheels at rest for 2 s restart OpenVINS through /vio/restart (pepin_bringup.vio_keeper), at most once in 10 s; 0 never restarts"},
@@ -211,11 +211,11 @@
       "note": "how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period, 0.105 s at 9.5 fps; raise it if the mast is seen ringing after a saccade"},
     "gate_yaw_dps": {"default": 0.0, "range": [0.0, 360.0],
       "note": "a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost)"},
-    "gate_stamp_end": {"default": 0, "range": [0, 1],
+    "gate_stamp_end": {"default": 1, "range": [0, 1],
       "note": "1: a frame's stamp is the END of its exposure (camera_stream's camera_stamp grab: the V4L2 capture stamp sits after the exposure) and the window is [stamp - 2 * gate_exposure_s, stamp + 10 ms]; 0: stamp +- gate_exposure_s, for ustreamer's send stamp whose relation to the exposure is unknown (1-68 ms late, 2026-10-02). Set it to 1 together with camera_stamp grab"},
-    "gate_sway_dps": {"default": 0.0, "range": [0.0, 360.0],
+    "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
-    "gate_sway_deg": {"default": 0.0, "range": [0.0, 10.0],
+    "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
       "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
   }
 }

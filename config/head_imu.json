@@ -31,6 +31,7 @@
     "hinge_x_m": -0.058,
     "hinge_z_m": 0.78,
     "publish_hz": 50.0,
+    "sway": true,
     "bias_s": 2.0,
     "note": "The mast-sway filter in the bridge (mast.hpp, pepin.mast; vio.md section 5). crossover_hz: the leak, tau 0.32 s; at 5.3 Hz the gain is 0.996 with a 5.4 deg phase lead. arm_window_s: after the neck settles, theta minus its running mean over one ring period (ring_hz 5.3, measured 2026-10-02): 84 % of a 0.35 deg p-p ring armed at 0.17 deg removed over its first full period (mast_contract.cpp). hinge_x_m, hinge_z_m: where the mast bends, the column's centre (config/body.json) at the shelf top (0.78 m, a catalogue number, untaped): only the camera's POSITION correction depends on it (0.35 m x 0.006 rad = 2 mm). publish_hz: /mast/state. bias_s: the head gyro's rest block (wheels AND neck still), the base gyro's imu_bias_s. The correction is composed into base_link -> camera_link only under the bridge's mast_sway flag (off until the sign check and the S3 bags' sway number, vio.md S6); /mast/state publishes either way once the head IMU's extrinsics are in config/camera.json"
   }

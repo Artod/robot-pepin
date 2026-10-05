@@ -76,7 +76,9 @@ def test_the_gate_drops_exactly_the_frames_of_a_saccade_as_the_arbiter_publishes
     assert gate.verdict(9.9, now) is None, "before the write"
     assert gate.verdict(10.3, now) == BLIND, "inside the move"
     assert gate.verdict(10.65 + SETTLE_S, now) == BLIND, "still inside the tail"
-    assert gate.verdict(10.65 + SETTLE_S + EXPOSURE_S + 0.01, now) is None, "after it"
+    # the stamp is the exposure's END by default (gate_stamp_end 1 since 2026-10-05): the window
+    # looks back two exposures, so the first clean frame is stamped that much after the tail
+    assert gate.verdict(10.65 + SETTLE_S + 2 * EXPOSURE_S + 0.02, now) is None, "after it"
 
 
 def test_the_neck_target_the_arbiter_sends_is_one_the_base_server_takes() -> None:

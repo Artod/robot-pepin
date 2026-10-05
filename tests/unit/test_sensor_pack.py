@@ -218,6 +218,7 @@ def _warm(node: SensorPack) -> None:
 def test_the_node_reads_five_topics_and_writes_one(build: Build) -> None:
     node = build()
     assert set(node.subs) == {
+        "/mast/state",  # the sway gate, on by default since 2026-10-05
         "/camera/image",
         "/camera/depth",
         "/camera/camera_info",

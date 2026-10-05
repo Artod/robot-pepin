@@ -362,13 +362,19 @@ FLAGS = FlagSet(
     ),
     Flag(
         "self_filter",
-        False,
+        True,
         description="the cart's own body (config/body.json: boxes in base_link grown by margin_m)"
         " is cut out of every camera frame: a pixel whose depth lies on or past its ray's entry"
         " into the body measures no room, and no voxel on or past that entry is written, measured"
         " or carved (pepin.body, pepin.tsdf.Tsdf.integrate's clip); off, every ray is written"
         " whole, as before",
-        why="OFF until the body is taped: the boxes are config/base.json's measured footprint"
+        why="ON since 2026-10-05: measured on the parked cart by full head sweeps after the Kalibr"
+        " recalibration (scratch/self_view/): without it 344 body voxels, 122 marks inside the"
+        " footprint and 24 lethal cells behind the cart (dark bin patches read 10-55 cm too"
+        " long); with it and arm_filter 0 in every region over three sweeps, the coffee table"
+        " ahead unchanged, 0.1-1.1 ms a frame; top_load's top 0.95 -> 0.86 m from the sweeps."
+        " The two filters are coupled: the folded arm stands above top_load. Before that it was"
+        " off until the body is taped: the boxes are config/base.json's measured footprint"
         " and the IKEA RASKOG catalogue (top 0.78 m), the mast's section and top are guesses."
         " What is measured is the mechanism (tests/unit/test_body.py: a frame looking down at the"
         " own shelf paints 0 voxels inside the body and carves nothing behind it, a frame that"
@@ -386,13 +392,16 @@ FLAGS = FlagSet(
     ),
     Flag(
         "arm_filter",
-        False,
+        True,
         description="the robot's own arm (config/arm.json: the SO-101's links as boxes posed by"
         " its joints through the vendored URDF, grown by margin_m) is cut out of every camera"
         " frame and whisker fan as the body is, and every voxel inside a grown link is forgotten"
         " after each integration, whoever painted it (pepin.arm, pepin.worldmap.WorldMap.forget);"
         " off, the arm is painted like the room, as before",
-        why="OFF until the mount is taped: config/arm.json's mount is a placeholder, the joints"
+        why="ON since 2026-10-05: the mount is fitted to the head's own depth (fe4fc7b: 99.8 % of"
+        " the arm's voxels within the 3 cm margin, rms 6 mm) and the parked sweeps paint 0"
+        " voxels in the arm's volume with it on (scratch/self_view/). Before that it was off"
+        " until the mount is taped: config/arm.json's mount was a placeholder, the joints"
         " are the parked pose read from the encoders (source config: nothing drives the arm"
         " yet). What is measured is the mechanism (tests/unit/test_arm.py: frames looking at the"
         " arm in four poses paint 0 voxels inside it while the floor beside it is painted, a"
@@ -775,6 +784,10 @@ class DepthFusion(Node):
         with self._lock:
             self._world = self._fresh_world()
             self._last_stamp = None
+            # the lidar's view gate too: a parked cart's next revolution is a new view of an
+            # empty volume, not the one it already gave (2026-10-05: no lidar voxels after a
+            # reset until the cart moved)
+            self._views = ViewGate(self._spec.voxel_m)
         self._worker.clear()
         self._scans.clear()
         self._tofs.clear()

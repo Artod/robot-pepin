@@ -302,6 +302,8 @@ class HeadImuConfig:
             "mast_hinge_x_m": self.mast["hinge_x_m"],
             "mast_hinge_z_m": self.mast["hinge_z_m"],
             "mast_publish_hz": self.mast["publish_hz"],
+            # the IMU-corrected camera edge: config-driven since 2026-10-05 (the C++ default is off)
+            "mast_sway": bool(self.mast.get("sway", False)),
             "mast_bias_s": self.mast["bias_s"],
         }
         # An empty list cannot be a launch parameter (ros2 launch refuses the empty tuple and the

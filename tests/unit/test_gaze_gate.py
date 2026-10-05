@@ -99,7 +99,7 @@ def test_without_any_state_every_frame_passes_as_before() -> None:
 def test_a_saccade_blinds_from_its_write_to_one_frame_after_settling_by_the_exposure() -> None:
     """Exposure +-35 ms, settle +0.1 s: the saccade written at 1.0 and settled at 1.4 blinds a
     frame whose window reaches 1.0 and one whose window starts before 1.5, nothing else."""
-    gate = FrameGate(exposure_s=0.035, settle_s=0.1)
+    gate = FrameGate(exposure_s=0.035, settle_s=0.1, stamp_end=False)  # the symmetric window
     saccade(gate)
     verdicts = {t: gate.verdict(T0 + t, now=0.5) for t in (0.90, 0.97, 1.2, 1.45, 1.53, 1.6)}
     assert verdicts == {0.90: None, 0.97: BLIND, 1.2: BLIND, 1.45: BLIND, 1.53: BLIND, 1.6: None}
@@ -197,8 +197,10 @@ class Clock:
 def test_the_feed_hears_the_state_and_subscribes_the_imu_only_for_the_yaw_gate() -> None:
     node = ros_stubs.Node("probe")
     clock = Clock()
-    feed = GazeFeed(node, exposure_s=0.0, settle_s=0.1, yaw_dps=0.0, clock=clock)
-    assert set(node.subs) == {GAZE_STATE_TOPIC}, "the yaw gate off subscribes nothing more"
+    feed = GazeFeed(
+        node, exposure_s=0.0, settle_s=0.1, yaw_dps=0.0, sway_dps=0.0, sway_deg=0.0, clock=clock
+    )
+    assert set(node.subs) == {GAZE_STATE_TOPIC}, "the yaw and sway gates off subscribe nothing more"
     node.subs[GAZE_STATE_TOPIC][1](ros_stubs.String(data="garbage"))
     node.subs[GAZE_STATE_TOPIC][1](
         ros_stubs.String(data=json.dumps({"phase": "saccade", "blind": True, "since": T0}))
@@ -299,7 +301,7 @@ def test_a_stamp_at_the_exposure_s_end_looks_back_not_forward() -> None:
     the write is blind either way. One stamped 60 ms after a 50 ms settle had its exposure begin
     inside the blind interval: symmetric +-35 ms keeps it, the stamp-end window
     [stamp - 70, stamp + 10] drops it."""
-    gate = FrameGate(exposure_s=0.035, settle_s=0.0)
+    gate = FrameGate(exposure_s=0.035, settle_s=0.0, stamp_end=False)  # the symmetric window
     saccade(gate, settle_s=0.05)  # blind from +1.000 to +1.050
     assert gate.window(10.0) == pytest.approx((9.965, 10.035))
     assert gate.verdict(T0 + 1.0 - 0.050, now=0.0) is None
@@ -333,15 +335,20 @@ def test_small_sway_is_kept_large_or_fast_sway_is_dropped_and_held_says_nothing(
     gate.observe_sway(T0 + 2.02, (0.0, math.radians(3.0), 0.0), (0.0, 0.0, 0.0))
     assert gate.verdict(T0 + 2.01, now=0.0) is None, "held in the window: the blind rule's case"
     assert gate.verdict(T0 + 10.0, now=0.0) is None, "no sample: no verdict"
-    off = FrameGate()
+    shipped = FrameGate()  # 6 deg/s / 1 deg since 2026-10-05: a 57 deg/s, 5.7 deg sway is dropped
+    shipped.observe_sway(T0, (0.1, 0.1, 0.1), (1.0, 1.0, 1.0))
+    assert shipped.sway_on and shipped.verdict(T0, now=0.0) is not None, "shipped on"
+    off = FrameGate(sway_dps=0.0, sway_deg=0.0)
     off.observe_sway(T0, (0.1, 0.1, 0.1), (1.0, 1.0, 1.0))
-    assert not off.sway_on and off.verdict(T0, now=0.0) is None, "shipped off"
+    assert not off.sway_on and off.verdict(T0, now=0.0) is None, "both knobs at 0: off"
 
 
 def test_the_feed_subscribes_the_mast_only_for_the_sway_gate_and_routes_the_new_knobs() -> None:
     node = ros_stubs.Node("probe")
     clock = Clock()
-    feed = GazeFeed(node, exposure_s=0.035, settle_s=0.1, yaw_dps=0.0, clock=clock)
+    feed = GazeFeed(
+        node, exposure_s=0.035, settle_s=0.1, yaw_dps=0.0, sway_dps=0.0, sway_deg=0.0, clock=clock
+    )
     assert MAST_STATE_TOPIC not in node.subs, "the sway gate off subscribes nothing more"
     feed.set("gate_stamp_end", 1.0)
     assert feed.gate.stamp_end

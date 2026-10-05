@@ -131,13 +131,19 @@ CALIBRATION_POLL_S = 2.0
 FLAGS = FlagSet(
     Flag(
         "camera_stamp",
-        "send",
+        "grab",
         choices=STAMP_MODES,
         description="which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp"
         " (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock"
         " (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the"
         " stream URL and falls back to send per frame without it, counted in the report line)",
-        why="send until one drive is measured: X-Timestamp sits 1-68 ms after the capture,"
+        why="grab since 2026-10-05: measured live on 2026-10-04 (60 min grab, 13 min send, head"
+        " still): frame intervals 95-101 ms under grab against 48-152 ms under send, 0 vs 4.2 %"
+        " of stamps off a whole frame period by over 20 ms; the VO 10.0 vs 9.1 poses/s, stereo"
+        " frames lost 0 in both, RTAB-Map recognised 100 % in both; and the gaze gate lets 0"
+        " moving frames through under grab + camera_stamp_lag_s 0.09 against 13 under send."
+        " Before that it was send until one drive is measured: X-Timestamp sits 1-68 ms after"
+        " the capture,"
         " bimodal (~1-5 or ~50 ms) with a median moving 4-48 ms between windows"
         " (scratch/head_imu/ustreamer_stamps.py, 2026-10-02), so every consumer has carried that"
         " jitter; switching changes every stamp the depth law, RTAB-Map and the VO were tuned on",

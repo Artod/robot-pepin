@@ -122,7 +122,7 @@ WITNESS_FRESH_S = 1.0
 # the wheels', is a diverged filter, not a measurement. OpenVINS diverged on the first fast head
 # pan of 2026-10-04's live run (7.7 m inside the move, then km) and never re-initialised.
 VIO_MAX_SPEED_M_S = 1.0
-VIO_WHEEL_DIFF_M_S = 0.5
+VIO_WHEEL_DIFF_M_S = 0.2  # 0.5 let 8-11 samples a drive through on 2026-10-04 (max 0.29)
 # That many implausible samples in a row (2 s at the camera's 10 Hz) with the wheels at rest for
 # VIO_RESTART_REST_S restarts it: its static initialisation needs stillness (vio_config.py).
 VIO_RESTART_REJECTS = 20
