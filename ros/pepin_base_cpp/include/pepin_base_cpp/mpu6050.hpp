@@ -10,8 +10,12 @@
 // of it that knows about the chip.
 //
 // The chip shares /dev/i2c-2 with three VL53L1X ranging sensors (0x30-0x32); it answers
-// at 0x68 and each transaction here is a self-contained write-then-read, so a second
-// process talking to the ToFs between our transfers is harmless.
+// at 0x68. A register read is ONE combined transfer (I2C_RDWR: the register byte, a repeated
+// START, the read; the datasheet's burst-read sequence), which the kernel runs whole under the
+// adapter's lock: no other process's transfer can fall between the seek and the read, on the
+// wire or in the driver. A write is one transfer too. That lock is the bus's whole
+// serialisation (board/README.md, "The I2C bus"). Until 2026-10-05 the seek and the read were
+// two transfers with a STOP between them, harmless only because nobody else reads 0x68.
 //
 // Configuration written by init(): gyro +-500 dps (65.5 LSB/dps), accel +-4 g
 // (8192 LSB/g), DLPF ~44 Hz (which also fixes the internal sample rate at 1 kHz, from
@@ -42,6 +46,7 @@
 
 #include <fcntl.h>
 #include <linux/i2c-dev.h>
+#include <linux/i2c.h>
 #include <sys/ioctl.h>
 #include <unistd.h>
 
@@ -107,6 +112,7 @@ public:
       error = device + ": " + std::strerror(errno);
       return false;
     }
+    address_ = address;
     if (::ioctl(fd_, I2C_SLAVE, static_cast<unsigned long>(address)) < 0) {
       error = "address " + hex_byte(static_cast<std::uint8_t>(address)) + " not claimed: " +
         std::strerror(errno);
@@ -230,24 +236,33 @@ private:
     return true;
   }
 
-  /// Set the register pointer, then read `size` bytes from it; false with `error` on failure.
+  /// `size` bytes from register `reg` in one combined transfer (write the register, repeated
+  /// START, read); false with `error` on failure.
   bool read_block(std::uint8_t reg, std::uint8_t * out, std::size_t size, std::string & error)
   {
     if (fd_ < 0) {
       error = "bus not open";
       return false;
     }
-    if (!write_all(&reg, 1)) {
-      error = "seek to " + hex_byte(reg) + " failed: " + std::strerror(errno);
-      return false;
-    }
-    ssize_t received = 0;
+    i2c_msg messages[2] = {};
+    messages[0].addr = static_cast<__u16>(address_);
+    messages[0].flags = 0;
+    messages[0].len = 1;
+    messages[0].buf = &reg;
+    messages[1].addr = static_cast<__u16>(address_);
+    messages[1].flags = I2C_M_RD;
+    messages[1].len = static_cast<__u16>(size);
+    messages[1].buf = out;
+    i2c_rdwr_ioctl_data transfer = {};
+    transfer.msgs = messages;
+    transfer.nmsgs = 2;
+    int done = 0;
     do {
-      received = ::read(fd_, out, size);
-    } while (received < 0 && errno == EINTR);
-    if (received != static_cast<ssize_t>(size)) {
+      done = ::ioctl(fd_, I2C_RDWR, &transfer);
+    } while (done < 0 && errno == EINTR);
+    if (done != 2) {
       error = "read of " + std::to_string(size) + " bytes at " + hex_byte(reg) + " failed: " +
-        (received < 0 ? std::strerror(errno) : "short transfer");
+        (done < 0 ? std::strerror(errno) : "short transfer");
       return false;
     }
     return true;
@@ -283,6 +298,7 @@ private:
   }
 
   int fd_ = -1;
+  int address_ = 0x68;
   std::uint8_t who_am_i_ = 0;
   std::uint8_t divider_ = 0;
 };
