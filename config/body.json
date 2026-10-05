@@ -27,9 +27,9 @@
       "max_m": [
         0.08,
         0.05,
-        0.95
+        0.86
       ],
-      "source": "what stands on the top basket above its rim: the folded arm (teal, right side), the speaker box and the mic array at the front, cable loops. Measured 2026-10-02 from the head's own depth at pan -90/+90 tilt 63 and pan +-150 tilt 45, cart parked: 45200 points over the cart above 0.83 m, z p99 0.939, p99.9 0.944; outside the mast x p1..p99 -0.13..0.08, y -0.18..0.05 (scratch/body_fit). Until the arm has its own URDF model this box hides it folded; a cover over the basket would let it drop to the rim."
+      "source": "what stands on the top basket above its rim apart from the arm: the speaker box and the mic array at the front, cable loops. x and y measured 2026-10-02 from the head's own depth at pan -90/+90 tilt 63 and pan +-150 tilt 45, cart parked: outside the mast x p1..p99 -0.13..0.08, y -0.18..0.05 (scratch/body_fit). The top refitted 2026-10-05 once the arm had a model of its own (config/arm.json, depth_fusion's arm_filter): over two whole-reach sweeps (scratch/self_view/base1, sf1: pan -150..150 every 30 deg at tilts -19..63, 1472 depth frames) the points above the cart's grown top (0.83) inside this box's grown x-y and outside the arm's grown links reach z p99.9 0.858-0.861, max 0.886 (2 of 55k points), none above 0.91; grown by margin_m the top stands at 0.91. Was 0.95 (p99.9 0.944 of everything above 0.83, the folded arm included, top 0.936): with arm_filter OFF the arm stands above this box, so self_filter relies on arm_filter on."
     },
     {
       "name": "wheels",
@@ -57,7 +57,7 @@
         0.02,
         1.0
       ],
-      "source": "the neck column from the top shelf to under the pan servo, centred on the pan axis where the neck model puts it: x -0.058, y 0, the tilt axis at 1.134 m (pepin.neck.pan_pivot of config/neck.json: the lens at x 0 at the reference pose, less its 0.025/0.086 m lever pitched 23.8 deg). The 4 x 4 cm section and the 1.0 m top are NOT measured; the top stays under the pan servo and, grown, under every ray of the working pose (the frame's bottom edge, 55 deg down, passes its grown top 10 cm ahead of it)"
+      "source": "the neck column from the top shelf to under the pan servo, centred on the pan axis where the neck model puts it: x -0.058, y 0, the tilt axis at 1.134 m (pepin.neck.pan_pivot of config/neck.json: the lens at x 0 at the reference pose, less its 0.025/0.086 m lever pitched 23.8 deg). The 4 x 4 cm section and the 1.0 m top are NOT measured; the top stays under the pan servo and, grown, under every ray of the working pose (the frame's bottom edge, 55 deg down, passes its grown top 10 cm ahead of it). Checked 2026-10-05 over three whole-reach sweeps (pan -150..150, tilt -19..63, 2200 depth frames): no depth point ever fell inside the grown box, i.e. the head never sees the column; its grown box meets rays only at tilts of 51 deg and more, and every one of them also enters the cart or top_load box, so it cuts nothing the others do not"
     }
   ],
   "note": "The cart's own body for the camera's self-filter (pepin.body; depth_fusion's self_filter flag): every box is grown by margin_m (one 5 cm voxel) and a depth pixel whose ray enters a grown box writes nothing on or past that point into the volume. The ToF shelf lips (x 0.027-0.06, 0.16-0.27 m up) are inside the cart box's margin. Read live: an edit of this file reaches the next frame. Check after a tape: head at the tilt limit at pan 0, +-90 and 180 with the cart at rest, 20 frames each, and no voxel may be born inside the boxes (marks_audit's count within the hull)."

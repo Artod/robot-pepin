@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+from pepin.arm import ArmModel
 from pepin.body import BodyBox, BodyMask, BodyModel
 from pepin.camera import OPTICAL_RPY
 from pepin.depth import Intrinsics
@@ -224,21 +225,37 @@ def test_the_mask_is_rebuilt_only_when_the_head_the_optics_or_the_model_move() -
 def test_at_the_working_tilt_a_forward_or_side_look_never_sees_the_body() -> None:
     """At 23.8 deg down, straight ahead and to the left the frame's bottom edge (55 deg down)
     passes over the grown body, so the mask answers None and the integrator runs exactly as
-    without the filter. To the right the folded arm on the top basket (the top_load box, measured
-    2026-10-02) is really in the bottom rows: under a tenth of the rays at pans -30..-95 deg.
-    Looking further back the margin enters the bottom rows, the body as measured does not."""
+    without the filter. To the right the folded arm stands in the bottom rows; it is cut by its
+    own links (config/arm.json, tests/unit/test_arm.py), and the top_load box below it now only
+    grazes a corner: under 1 % of the rays at pans -30..-75 deg, none at -80..-95 (it took 6-9 %
+    while it stood to 0.95 m to hide the arm). Looking further back the margin enters the bottom
+    rows, the body as measured does not."""
     mask = BodyMask(SHIPPED)
     for pan in np.linspace(0.0, 95.0, 20):
         hit = mask.for_frame(EYE, camera(pan, 23.8))
         assert hit is None or hit.share < 0.005, pan
     for pan in np.linspace(-95.0, -30.0, 14):
         hit = mask.for_frame(EYE, camera(pan, 23.8))
-        assert hit is not None and hit.share < 0.10, pan
+        assert hit is None or hit.share < 0.01, pan
     back = mask.for_frame(EYE, camera(150.0, 23.8))
     assert back is not None and back.share < 0.03
     measured = BodyModel(SHIPPED.boxes, margin_m=0.0, stride_px=4).ray_depth(EYE, camera(150, 23.8))
     assert np.isinf(measured.z).all()
     assert mask.for_frame(EYE, camera(150.0, 45.0)) is not None, "reverse-gaze does see it"
+
+
+def test_top_load_holds_what_stands_on_the_basket_and_leaves_the_arm_to_its_own_filter() -> None:
+    """Refitted 2026-10-05 from two whole-reach sweeps of the parked cart (1472 depth frames):
+    above the cart's grown top and outside the arm's grown links the highest point stood at
+    0.886 m (p99.9 0.861, the speaker box and the mic array). Grown, top_load holds it with 2 cm
+    to spare; the folded arm reaches higher and is not hidden by it any more, so the self filter
+    relies on the arm's own (depth_fusion's arm_filter)."""
+    (top_load,) = (box for box in SHIPPED.grown if box.name == "top_load")
+    assert top_load.hi[2] >= 0.886 + 0.02
+    arm = ArmModel.load(REPO / "config/arm.json")
+    assert arm.pose is not None
+    arm_top = max(float(box.corners()[:, 2].max()) for box in arm.boxes_at(arm.pose))
+    assert arm_top > top_load.hi[2], "the arm stands above top_load: its own filter cuts it"
 
 
 def test_the_mast_stands_on_the_neck_s_own_pan_axis() -> None:
