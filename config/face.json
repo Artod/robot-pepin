@@ -49,8 +49,8 @@
   "expressions": [
     {"name": "neutral", "params": {},
       "note": "the resting mouth: a short, slightly lifted line"},
-    {"name": "smile", "params": {"width": 0.54, "smile": 0.62, "thick": 0.5},
-      "note": "a closed smile"},
+    {"name": "smile", "params": {"width": 0.54, "smile": 0.62, "thick": 0.5, "breathe": 0.4},
+      "note": "a closed smile, breathing a little deeper than the rest (the resting face)"},
     {"name": "happy", "params": {"width": 0.6, "open": 0.42, "smile": 0.7, "upper": 0.08, "corner_exp": 2.4, "teeth": 0.32, "breathe": 0.25},
       "note": "an open D-shaped smile with the upper teeth showing (arrived)"},
     {"name": "grin", "params": {"width": 0.7, "open": 0.3, "smile": 0.45, "upper": 0.2, "corner_exp": 3.0, "teeth": 0.5},
@@ -78,14 +78,19 @@
   ],
   "events": {
     "goal_accepted":  {"name": "focused",    "hold_s": null, "note": "the goal server took a goal: held until the drive ends"},
-    "recovery":       {"name": "struggling", "hold_s": 3.0,  "note": "Nav2's recovery count went up"},
+    "recovery":       {"name": "struggling", "hold_s": 3.0,  "min_gap_s": 2.0, "note": "Nav2's recovery count went up"},
     "arrived":        {"name": "happy",      "hold_s": 4.0,  "note": "the drive ended SUCCEEDED"},
     "goal_failed":    {"name": "sad",        "hold_s": 5.0,  "note": "the drive ended ABORTED or was refused"},
     "goal_cancelled": {"name": "flat",       "hold_s": 1.5,  "note": "the drive was cancelled"},
-    "listening":      {"name": "listening",  "hold_s": null, "note": "the voice loop hears an utterance"},
+    "listening":      {"name": "listening",  "hold_s": null, "note": "the voice loop hears an utterance, or a conversation is open and waits for the person"},
     "thinking":       {"name": "thinking",   "hold_s": null, "note": "the LLM call is in flight"},
     "speaking":       {"name": "smile",      "hold_s": null, "intensity": 0.6, "note": "the robot speaks: lip sync rides on top"},
-    "brain_lost":     {"name": "sleepy",     "hold_s": null, "note": "every brain lease lapsed (the laptop or the WiFi is gone)"}
+    "brain_lost":     {"name": "sleepy",     "hold_s": null, "note": "every brain lease lapsed (the laptop or the WiFi is gone)"},
+    "stall_look":     {"name": "surprised",  "hold_s": 1.5,  "min_gap_s": 6.0, "note": "the gaze's stall look turns the head to a blocker the lidar does not back"},
+    "phantom_carved": {"name": "grin",       "hold_s": 2.0,  "intensity": 0.6, "min_gap_s": 6.0, "note": "the stall look found nothing there: the phantom is erased"},
+    "obstacle_confirmed": {"name": "worried", "hold_s": 2.5, "min_gap_s": 6.0, "note": "the stall look found a real thing in the way"},
+    "vio_restart":    {"name": "struggling", "hold_s": 1.5,  "min_gap_s": 30.0, "note": "OpenVINS diverged and its keeper restarted it"},
+    "note": "a moment by name (pepin.face_events senders, pepin.head_link.HeadClient.event): the expression, how long (null: until the source replaces or clears it), how strongly, and min_gap_s: the head server drops the same moment from the same source sooner than this after the last (default 0)"
   },
   "lipsync": {
     "window_s": 0.04,
@@ -94,6 +99,19 @@
     "lead_s": 0.0,
     "start_latency_s": 0.12,
     "note": "pepin.audio_server's levels: the RMS of each window_s of the speech it plays, in dBFS, mapped linearly from floor_db (closed) to full_db (fully open) and sent as an 'M' level when that window reaches the speaker. start_latency_s: from the first chunk written to aplay to its first sound (an estimate: aplay's start plus the ALSA buffer, unmeasured); lead_s: sent this much earlier than that, for the mouth's own attack. The simulator maps its microphone and audio files the same way"
+  },
+  "idle": {
+    "enabled": true,
+    "expressions": ["neutral", "smile"],
+    "every_s": [8.0, 20.0],
+    "settle_s": 3.0,
+    "fade_s": 0.25,
+    "gestures": [
+      {"name": "grin",  "weight": 2.0, "duration_s": 1.6, "mirror": false, "params": {"smile": 0.22, "width": 0.06}},
+      {"name": "tilt",  "weight": 2.0, "duration_s": 2.2, "mirror": true,  "params": {"asym": 0.28, "shift_x": 0.1}},
+      {"name": "blink", "weight": 1.0, "duration_s": 0.4, "mirror": false, "params": {"thick": -0.25, "width": -0.03}}
+    ],
+    "note": "the face alive at rest (the firmware's FaceModel and sim/face.js): while one of `expressions` shows, every every_s (a random span between the two) one gesture, picked by weight, adds its params to the mouth over duration_s as a smooth bump (a mirror gesture flips its sign at random: a tilt either way). Never within settle_s of an expression change or of a speech level, and a gesture under way fades out over fade_s when one comes. enabled false: none"
   },
   "timing": {
     "transition_ms": 280,

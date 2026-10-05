@@ -68,9 +68,30 @@ class FakeTf:
         pass
 
 
+class FaceSink:
+    """The head server's door as the stall look's face speaks to it."""
+
+    def __init__(self) -> None:
+        self.said: list[tuple[str, ...]] = []
+
+    def event(self, name: str, *, end: bool = False) -> None:
+        self.said.append(("event", name))
+
+    def clear(self) -> None:
+        self.said.append(("clear",))
+
+    def lease(self, seconds: float) -> None:
+        self.said.append(("lease",))
+
+    def close(self) -> None:
+        self.said.append(("close",))
+
+
 @pytest.fixture
 def node(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gaze]:
     monkeypatch.setattr(gaze_node, "JsonLineLink", FakeLink)
+    face = FaceSink()
+    monkeypatch.setattr(gaze_node, "face_client", lambda host: face)  # never the board's head
     with ros_stubs.parameters(http_port=0):
         built = Gaze()
     built._tf = FakeTf()  # type: ignore[assignment]
@@ -213,6 +234,7 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
 def test_the_main_spins_on_several_threads(monkeypatch: pytest.MonkeyPatch) -> None:
     rclpy = ros_stubs.install()
     monkeypatch.setattr(gaze_node, "JsonLineLink", FakeLink)
+    monkeypatch.setattr(gaze_node, "face_client", lambda host: FaceSink())
     with ros_stubs.parameters(http_port=0):
         gaze_node.main()
     assert "spin on MultiThreadedExecutor" in rclpy.log
@@ -261,6 +283,10 @@ def test_a_stall_look_saccades_counts_frames_reads_the_verdict_and_comes_home(
     assert record["blockers"]["unexplained"] == 1 and record["before"]["occupied"] == 1
     assert record["after"]["occupied"] == 0 and record["lidar_before"]["cells"] == 0
     assert node._stalls == {"carved": 1}
+    face = node._face._sink  # type: ignore[union-attr]
+    assert face.said == [("event", "stall_look"), ("event", "phantom_carved")]  # the face
+    node._switches.set("face_events", False)
+    assert node._stall_face() is None
 
 
 def test_nothing_under_the_hull_is_nothing_to_look_at(node: Gaze) -> None:

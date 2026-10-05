@@ -17,6 +17,9 @@
   const C = T.rgb565;
   const NEUTRAL = T.expressions.findIndex((e) => e.name === "neutral");
   const TWO_PI = f(6.28318530718);
+  const PI = f(3.14159265359);
+  const QUIET_LEVEL = f(0.01);
+  const IDLE = T.idle;
   const BITE_GAP_PX = 1.0;
   const SAMPLES_MAX = 2 * W + 3;
   const DISC_MAX = 2 * 8 + 2;
@@ -36,6 +39,68 @@
       this.levelTarget = 0; this.level = 0; this.levelAt = 0;
       this.last = 0; this.started = false;
       this.wavePhase = 0; this.breathePhase = 0; this.driftPhase = 0;
+      this.rng = 0x2545F491;
+      this.idleScheduled = false; this.idleNext = 0; this.idleGesture = -1; this.idleT0 = 0;
+      this.idleSign = 1; this.idleFading = false; this.idleFadeAt = 0; this.idleAmp = 0;
+    }
+
+    seed(s) { this.rng = (s >>> 0) !== 0 ? s >>> 0 : 0x2545F491; }
+
+    nextRandom() {
+      let x = this.rng;
+      x = (x ^ (x << 13)) >>> 0;
+      x = (x ^ (x >>> 17)) >>> 0;
+      x = (x ^ (x << 5)) >>> 0;
+      this.rng = x;
+      return x;
+    }
+
+    uniform() { return f((this.nextRandom() >>> 8) * (1 / 16777216)); }
+
+    scheduleIdle(nowMs) {
+      this.idleScheduled = true;
+      const lo = f(IDLE.every_s[0]), hi = f(IDLE.every_s[1]);
+      const span = f(lo + f(f(hi - lo) * this.uniform()));
+      this.idleNext = nowMs + Math.trunc(f(span * 1000));
+    }
+
+    idleAllowed(nowMs) {
+      const id = this.expression;
+      if (id < 0 || id >= 32 || !IDLE.expressions.includes(id)) return false;
+      const settleMs = f(f(IDLE.settle_s) * 1000);
+      if (f(nowMs - this.t0) < f(settleMs + this.dur)) return false;
+      if (f(nowMs - this.levelAt) < settleMs) return false;
+      return this.level < QUIET_LEVEL;
+    }
+
+    updateIdle(nowMs) {
+      this.idleAmp = 0;
+      if (!IDLE.enabled) return;
+      if (!this.idleScheduled) this.scheduleIdle(nowMs);
+      const allowed = this.idleAllowed(nowMs);
+      const G = IDLE.gestures;
+      if (this.idleGesture >= 0) {
+        if (!allowed && !this.idleFading) { this.idleFading = true; this.idleFadeAt = nowMs; }
+        const u = f(f(nowMs - this.idleT0) / f(f(G[this.idleGesture].duration_s) * 1000));
+        let fade = 1;
+        if (this.idleFading) fade = f(1 - ease(f(f(nowMs - this.idleFadeAt) / f(f(IDLE.fade_s) * 1000))));
+        if (u >= 1 || fade <= 0) { this.idleGesture = -1; this.scheduleIdle(nowMs); return; }
+        const sv = sinf(f(PI * clampf(u, 0, 1)));
+        this.idleAmp = f(f(sv * sv) * fade);
+        return;
+      }
+      if (nowMs - this.idleNext < 0) return;
+      if (!allowed) { this.scheduleIdle(nowMs); return; }
+      let total = 0;
+      for (const g of G) total = f(total + f(g.weight));
+      let r = f(this.uniform() * total);
+      let g = 0;
+      for (; g < G.length - 1; g++) {
+        if (r < f(G[g].weight)) break;
+        r = f(r - f(G[g].weight));
+      }
+      this.idleGesture = g; this.idleT0 = nowMs; this.idleFading = false;
+      this.idleSign = G[g].mirror && (this.nextRandom() & 1) ? -1 : 1;
     }
 
     setExpression(id, intensity, transitionMs, nowMs) {
@@ -78,6 +143,7 @@
       this.breathePhase = f(this.breathePhase - Math.floor(this.breathePhase));
       this.driftPhase = f(this.driftPhase + f(G.drift_hz * dt));
       this.driftPhase = f(this.driftPhase - Math.floor(this.driftPhase));
+      this.updateIdle(nowMs);
     }
 
     shape() {
@@ -89,6 +155,13 @@
       const open = f(f(c[P.open] + f(f(br * 0.045) * f(0.5 + f(0.5 * b)))) + f(G.speech_open * this.level));
       p[P.open] = clampf(open, 0, 1);
       p[P.shift_x] = f(c[P.shift_x] + f(f(c[P.drift] * f(1 / 3)) * sinf(TWO_PI * this.driftPhase)));
+      if (this.idleGesture >= 0 && this.idleAmp > 0) {
+        const k = f(this.idleSign * this.idleAmp);
+        const d = IDLE.gestures[this.idleGesture].deltas;
+        for (let i = 0; i < N; i++) {
+          if (d[i] !== 0) p[i] = clampf(f(p[i] + f(f(d[i]) * k)), T.params[i].min, T.params[i].max);
+        }
+      }
       return { p, wavePhase: this.wavePhase };
     }
   }

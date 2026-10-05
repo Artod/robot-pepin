@@ -141,6 +141,7 @@ void setup() {
   Serial.setRxTimeout(2);  // a frame is handed over 2 symbols (22 us) after its last byte
   Serial.onReceive(on_receive, false);
   head::display_begin(kBootBrightness);
+  g_model.seed(esp_random());  // the idle gestures differ from boot to boot
   head::imu_start(on_imu);
   g_last_rx_ms = millis();
 }

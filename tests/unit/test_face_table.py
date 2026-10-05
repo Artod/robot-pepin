@@ -69,6 +69,12 @@ def test_ids_are_positions_so_the_wire_never_reorders() -> None:
         (lambda d: d["events"]["recovery"].update(hold_s=0), "hold_s is positive"),
         (lambda d: d["colors"].update(lip="cyan"), "#RRGGBB"),
         (lambda d: d["lipsync"].update(full_db=-60), "floor_db < full_db"),
+        (lambda d: d["events"]["recovery"].update(min_gap_s=-1), "min_gap_s is not negative"),
+        (lambda d: d["idle"].update(expressions=["smug"]), "idle: no expression smug"),
+        (lambda d: d["idle"].update(every_s=[20, 8]), "0 < min <= max"),
+        (lambda d: d["idle"]["gestures"][0].update(params={"grin": 1}), "unknown params grin"),
+        (lambda d: d["idle"]["gestures"][0].update(weight=0), "weight and duration_s"),
+        (lambda d: d["idle"].update(gestures=[]), "enabled with no gesture"),
     ],
 )
 def test_a_broken_table_is_refused_with_the_reason(edit: Any, why: str) -> None:
@@ -86,3 +92,23 @@ def test_colors_and_levels() -> None:
     assert mouth_level(-15.0, table) == 1.0
     assert mouth_level(-31.5, table) == pytest.approx(0.5)
     assert "constexpr int kNeutral = 0;" in render_header(table)
+
+
+def test_the_idle_block_reaches_the_firmware_as_a_mask_and_gestures() -> None:
+    table = load_face_table(FACE)
+    idle = table.idle
+    assert idle.enabled and idle.expressions == (table.id_of("neutral"), table.id_of("smile"))
+    assert 0 < idle.every_s[0] <= idle.every_s[1] and idle.settle_s > 0
+    names = [g.name for g in idle.gestures]
+    assert names == ["grin", "tilt", "blink"]
+    tilt = idle.gestures[1]
+    assert tilt.mirror and tilt.deltas[[p.name for p in table.params].index("asym")] > 0
+    header = render_header(table)
+    assert "constexpr uint32_t kIdleExpressionMask = 0x00000003u;" in header
+    assert "kIdleGestureCount = 3;" in header
+    off = raw()
+    off["idle"]["enabled"] = False
+    assert "constexpr bool kIdleOn = false;" in render_header(parse_face_table(off))
+    del off["idle"]
+    assert not parse_face_table(off).idle.enabled  # an older table: no idle, one empty gesture
+    assert table.event("speaking").min_gap_s == 0.0 and "note" not in table.events

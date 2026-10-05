@@ -148,6 +148,27 @@ def test_expressions_events_and_their_lapses(table: FaceTable) -> None:
     assert head.sent("E")[-1] == bytes((table.id_of("smile"), 153, 100, 0))
 
 
+def test_a_moment_repeated_sooner_than_its_gap_is_dropped_per_source(table: FaceTable) -> None:
+    clock, _, server, service = make(table)
+    service.step(0.0)
+    gap = table.event("stall_look").min_gap_s
+    assert gap > 0.0
+    first = ask(service, server, {"cmd": "event", "source": "gaze", "name": "stall_look"})
+    assert first["showing"] == "surprised" and "dropped" not in first
+    run(service, clock, 2.0)  # its 1.5 s hold is over
+    again = ask(service, server, {"cmd": "event", "source": "gaze", "name": "stall_look"})
+    assert "dropped" in again and again["showing"] != "surprised"
+    other = ask(service, server, {"cmd": "event", "source": "voice", "name": "stall_look"})
+    assert other["showing"] == "surprised"  # another source's moment is its own
+    run(service, clock, gap)
+    later = ask(service, server, {"cmd": "event", "source": "gaze", "name": "stall_look"})
+    assert later["showing"] == "surprised" and "dropped" not in later
+    assert service.status(clock())["moments_dropped"] == 1
+    ask(service, server, {"cmd": "event", "source": "gaze", "name": "goal_accepted"})
+    ask(service, server, {"cmd": "event", "source": "gaze", "name": "goal_accepted"})
+    assert service.moments_dropped == 1  # a moment without a gap is never dropped
+
+
 def test_refusals_name_what_is_known(table: FaceTable) -> None:
     _, _, server, service = make(table)
     service.step(0.0)

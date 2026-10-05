@@ -34,6 +34,8 @@ import sys
 from pathlib import Path
 
 from pepin.audio_link import board_host
+from pepin.face_events import VoiceStateFace
+from pepin.head_link import HeadClient
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.tools.schemas import gemini_function_declarations
@@ -85,6 +87,10 @@ def main() -> int:
     ap.add_argument(
         "--fake-robot", type=float, metavar="DRIVE_S",
         help="no robot: the tools act on fakes (nothing moves), a drive takes DRIVE_S seconds",
+    )  # fmt: skip
+    ap.add_argument(
+        "--no-face", action="store_true",
+        help="leave the head's face alone (it follows the voice when the board speaks)",
     )  # fmt: skip
     ap.add_argument("--max-session-s", type=float, help="override the cap for this run")
     ap.add_argument("--idle-close-s", type=float, help="override the idle timeout for this run")
@@ -138,6 +144,10 @@ def main() -> int:
         return TOOLS.call(name, arguments, robot)
 
     events = Events(StatePrinter())
+    face: VoiceStateFace | None = None
+    if args.speaker_wav is None and not args.no_face:  # the robot speaks: its face follows
+        face = VoiceStateFace(HeadClient(args.host, source="voice").start())
+        events.subscribe(face)
     speaker: WavSpeaker | BoardLink
     link: BoardLink | None = None
     if args.speaker_wav is not None:
@@ -214,6 +224,8 @@ def main() -> int:
             print("halt:", robot.halt(), flush=True)
     finally:
         stop_pacer.set()
+        if face is not None:
+            face.close()
         for closable in (mic, speaker):
             close = getattr(closable, "close", None)
             if close is not None:

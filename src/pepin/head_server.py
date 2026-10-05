@@ -577,6 +577,8 @@ class HeadService:
         self.clock_map = ClockMap(settings.bucket_s, settings.window_s)
         self.arbiter = FaceArbiter()
         self.leases = BrainLeases()
+        self._moments: dict[tuple[str, str], float] = {}  # (source, event): when last shown
+        self.moments_dropped = 0
         self._config = settings.imu
         self._configs: dict[int, ImuConfig] = {0: FIRMWARE_DEFAULTS, self._config.id: self._config}
         self._brightness = settings.brightness
@@ -825,7 +827,15 @@ class HeadService:
             )
             return self._ack(cmd, now)
         if cmd == "event":
-            event = self._table.event(str(message.get("name")))
+            name = str(message.get("name"))
+            event = self._table.event(name)
+            last = self._moments.get((source, name))
+            if event.min_gap_s > 0.0 and last is not None and now - last < event.min_gap_s:
+                self.moments_dropped += 1  # a moment repeated too soon: the face does not flicker
+                reply = self._ack(cmd, now)
+                reply["dropped"] = f"{name} again within its min_gap_s {event.min_gap_s:g}"
+                return reply
+            self._moments[(source, name)] = now
             if message.get("end"):
                 self.arbiter.clear(source)
             self.arbiter.set(
@@ -968,6 +978,7 @@ class HeadService:
             "showing": showing.name if showing else self._settings.resting,
             "by": showing.source if showing else None,
             "sources": self.arbiter.sources(),
+            "moments_dropped": self.moments_dropped,
             "leases": self.leases.alive(now),
             "brain_lost": self.leases.lost(now),
             "subscribers": len(self._subscribers),

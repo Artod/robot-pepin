@@ -46,7 +46,7 @@ constexpr const char* kExpressionNames[kExpressionCount] = {
 };
 constexpr float kExpressions[kExpressionCount][kParamCount] = {
   {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f},  // 0 neutral
-  {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.15f, 0.0f},  // 1 smile
+  {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f},  // 1 smile
   {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f},  // 2 happy
   {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f},  // 3 grin
   {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f},  // 4 clenched
@@ -90,6 +90,23 @@ constexpr float kHostSilentS = 3.0f;
 constexpr float kMouthAttackS = 0.03f;
 constexpr float kMouthReleaseS = 0.09f;
 constexpr float kMouthStaleS = 0.25f;
+
+// idle: the face alive at rest
+constexpr bool kIdleOn = true;
+constexpr uint32_t kIdleExpressionMask = 0x00000003u;  // neutral, smile
+constexpr float kIdleEveryMinS = 8.0f;
+constexpr float kIdleEveryMaxS = 20.0f;
+constexpr float kIdleSettleS = 3.0f;
+constexpr float kIdleFadeS = 0.25f;
+constexpr int kIdleGestureCount = 3;
+constexpr float kIdleGestureWeight[kIdleGestureCount] = {2.0f, 2.0f, 1.0f};
+constexpr float kIdleGestureDurationS[kIdleGestureCount] = {1.6f, 2.2f, 0.4f};
+constexpr bool kIdleGestureMirror[kIdleGestureCount] = {false, true, false};
+constexpr float kIdleGestures[kIdleGestureCount][kParamCount] = {
+  {0.06f, 0.0f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // grin
+  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.28f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f},  // tilt
+  {-0.03f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.25f, 0.0f, 0.0f},  // blink
+};
 
 // colors, RGB565
 constexpr uint16_t kColorBackground = 0x0000;  // #000000

@@ -71,6 +71,7 @@ from std_srvs.srv import Trigger
 
 from pepin.base_link import BASE_PORT
 from pepin.deployment import config_file
+from pepin.face_events import FaceSink, StallFace
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze import (
     DRIVE_REFUSAL,
@@ -190,6 +191,19 @@ FLAGS = FlagSet(
         on_when="after the self-filter, for the rear the lidar's masked wedges leave unseen",
         off_when="the volume grows marks on the cart itself while it reverses",
     ),
+    Flag(
+        "face_events",
+        True,
+        description="the stall look's moments on the head's face (pepin.face_events.StallFace,"
+        " through the board's head server on PEPIN_HOST:3340): surprised as the head turns to"
+        " the blocker, a small grin when the look carved a phantom, worried when it confirmed a"
+        " thing (config/face.json's events)",
+        why="on (Artem, 2026-10-05: the robot shows what it does): a moment never holds the look"
+        " up (a send is dropped while the head server is away) and the head server drops a"
+        " repeat within its 6 s gap",
+        on_when="always, with the head on the robot",
+        off_when="the face gets in the way of a test; a moment sent while off is simply not sent",
+    ),
 )
 
 
@@ -203,6 +217,13 @@ class _Inputs:
     marks: Any = None
 
 
+def face_client(host: str) -> FaceSink:
+    """The head server's door for the stall look's moments (``source`` gaze), on the board."""
+    from pepin.head_link import HEAD_PORT, HeadClient
+
+    return HeadClient(host, HEAD_PORT, source="gaze").start()
+
+
 class Gaze(Node):
     """The gaze arbiter: requests in through the doors, one writer of the neck out."""
 
@@ -214,6 +235,10 @@ class Gaze(Node):
         self._http_port = int(self.declare_parameter("http_port", GAZE_PORT).value)
         neck_path = str(self.declare_parameter("neck_config", str(config_file("neck.json"))).value)
         self._switches = Switches(self, with_knobs(FLAGS, load_knobs("gaze")))
+        self._face_host = host
+        self._face: StallFace | None = None
+        if self._switches.on("face_events"):  # opened now: its first moment is not lost
+            self._face = StallFace(face_client(host))
         self._cfg = NeckConfig.from_json(neck_path)
         self._reach = Reach.of(self._cfg)
         self._link = JsonLineLink(host, port, self._on_line, name="base server")
@@ -291,11 +316,23 @@ class Gaze(Node):
         self._up = True
 
     def close(self) -> None:
-        """Close the door, the link and the TF listener, before the node is destroyed."""
+        """Close the door, the link, the face's door and the TF listener, before the node is
+        destroyed."""
         if self._door is not None:
             self._door.close()
+        if self._face is not None:
+            self._face.close()
         self._link.stop()
         self._tf.close()
+
+    def _stall_face(self) -> StallFace | None:
+        """The stall look's face while ``face_events`` is on (opened at the first moment when the
+        flag came on live: that moment may be lost to the connection)."""
+        if not self._switches.on("face_events"):
+            return None
+        if self._face is None:
+            self._face = StallFace(face_client(self._face_host))
+        return self._face
 
     # ---- settings ------------------------------------------------------------------------------
     def _knob(self, name: str) -> float:
@@ -642,6 +679,9 @@ class Gaze(Node):
                 record,
             )
         ttl = self._knob("ttl_navigation_s")
+        face = self._stall_face()
+        if face is not None:
+            face.looking()
         look = self._ask(
             Look(
                 STALL_SOURCE,
@@ -663,6 +703,8 @@ class Gaze(Node):
             evidence(after[0], after[1], lidar_cells, res) if not isinstance(after, str) else None
         )
         word = verdict(seen_before, seen_after) if seen_after is not None else "unknown"
+        if face is not None:
+            face.verdict(word)
         home = None
         if not self._head.moves_while_driving:
             home = self._ask(Look(STALL_SOURCE, (), NAVIGATION, 0, 0.0, ttl, kind="home"))

@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from pepin.face import load_face_table
+from pepin.face import FaceTable, load_face_table
 from pepin.head_link import EXPRESSION, IMU, INFO, PING, encode_frame, encode_info
 
 REPO = Path(__file__).resolve().parents[2]
@@ -86,6 +86,84 @@ def test_the_models_tween_and_lip_sync_alike(native: Path, node: str) -> None:
     for line_a, line_b in zip(a, b, strict=True):
         for x, y in zip(line_a.split(), line_b.split(), strict=True):
             assert float(x) == pytest.approx(float(y), abs=2e-4)
+
+
+def shapes(binary: list[str], script: list[str]) -> list[list[float]]:
+    """The model's shape at each ``S`` of ``script`` (one list of 17 numbers each)."""
+    out = run(binary, "\n".join(script) + "\n").decode().split("\n")
+    return [[float(v) for v in line.split()] for line in out if line.strip()]
+
+
+def every(step_ms: int, until_ms: int, start_ms: int = 0) -> list[str]:
+    return [f"S {t}" for t in range(start_ms, until_ms + 1, step_ms)]
+
+
+IDLE_PARAMS = ("smile", "asym", "shift_x", "thick")  # what a gesture moves and nothing else does
+
+
+def gesturing(table: FaceTable, base: list[float], shape: list[float]) -> bool:
+    names = [p.name for p in table.params]
+    return any(abs(shape[names.index(n)] - base[names.index(n)]) > 0.005 for n in IDLE_PARAMS)
+
+
+def test_the_idle_gestures_come_alike_on_the_head_and_in_the_simulator(
+    native: Path, node: str
+) -> None:
+    """Two minutes of the resting smile with a stretch of speech and an event in it: both models
+    (the same seed) draw the same gestures at the same moments."""
+    script = ["E 1 1.0 280 0", *every(100, 40_000)]
+    for t in range(40_100, 50_000, 100):  # ten seconds of speech
+        script += [f"M 0.5 {t}", f"S {t}"]
+    script += [*every(100, 60_000, 50_000), "E 12 1.0 280 60000", *every(100, 70_000, 60_100)]
+    script += ["E 1 1.0 280 70000"]
+    script += every(100, 120_000, 70_100)
+    a = shapes([str(native)], script)
+    b = shapes([node, str(FIRMWARE / "sim" / "dump.js")], script)
+    assert len(a) == len(b) > 1000
+    for row_a, row_b in zip(a, b, strict=True):
+        assert row_a == pytest.approx(row_b, abs=2e-4)
+
+
+def test_the_resting_face_comes_alive_and_never_while_speaking_or_on_an_event(
+    native: Path,
+) -> None:
+    table = load_face_table(REPO / "config" / "face.json")
+    lo, hi = table.idle.every_s
+    rest = shapes([str(native)], ["E 1 1.0 280 0", *every(50, 180_000)])
+    base = rest[100]  # 5 s in: the smile, still (breath and drift leave these four alone)
+    moving = [gesturing(table, base, s) for s in rest]
+    starts = [i for i in range(1, len(moving)) if moving[i] and not moving[i - 1]]
+    assert len(starts) >= 180 / (hi + 2.2) - 1  # a gesture every 8-20 s
+    ends = [i for i in range(1, len(moving)) if moving[i - 1] and not moving[i]]
+    for end, start in zip(ends, starts[1:], strict=False):
+        assert (start - end) * 0.05 >= lo - 0.1  # never sooner than every_s after the last
+    assert not any(moving[8 : int(table.idle.settle_s / 0.05)])  # after the tween: settling
+    # speech all along: the level opens the mouth, no gesture comes
+    speech = ["E 1 1.0 280 0"]
+    for t in range(0, 120_000, 50):
+        speech += [f"M 0.4 {t}", f"S {t}"]
+    talking = shapes([str(native)], speech)
+    assert not any(gesturing(table, base, s) for s in talking[20:])
+    # an event's expression (focused) gets none either
+    focused = shapes([str(native)], ["E 12 1.0 280 0", *every(100, 120_000)])
+    assert not any(gesturing(table, focused[10], s) for s in focused[10:])
+
+
+def test_a_gesture_under_way_leaves_within_its_fade_when_an_event_comes(native: Path) -> None:
+    table = load_face_table(REPO / "config" / "face.json")
+    rest = shapes([str(native)], ["E 1 1.0 280 0", *every(50, 60_000)])
+    base = rest[100]
+    start = next(i for i in range(1, len(rest)) if gesturing(table, base, rest[i]))
+    cut_ms = start * 50 + 200  # 200 ms into the first gesture, the goal server's focus comes
+    script = ["E 1 1.0 280 0", *every(50, cut_ms), f"E 12 1.0 0 {cut_ms}"]
+    script += every(10, cut_ms + 600, cut_ms + 10)
+    after = shapes([str(native)], script)[len(every(50, cut_ms)) :]
+    focus = shapes([str(native)], ["E 12 1.0 0 0", "S 0"])[0]
+    names = [p.name for p in table.params]
+    settled = int(table.idle.fade_s * 100) + 1  # 10 ms steps
+    for row in after[settled:]:
+        for n in IDLE_PARAMS:
+            assert row[names.index(n)] == pytest.approx(focus[names.index(n)], abs=1e-3), n
 
 
 def test_the_firmware_frames_and_parses_what_the_server_writes(native: Path) -> None:

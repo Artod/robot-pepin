@@ -463,7 +463,8 @@ class _Session:
                 return
             if not speaking:
                 busy = self.running or self.awaiting_s is not None
-                o.events.emit("thinking" if busy else "listening")
+                acting = any(call.name in o.moving for call in self.running.values())
+                o.events.emit("acting" if acting else "thinking" if busy else "listening")
 
     # -- server messages -----------------------------------------------------------------------
 
