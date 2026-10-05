@@ -31,8 +31,9 @@
 #   ros/laptop.sh vio        start (or restart) OpenVINS in pepin-vio on pepin-laptop:vio
 #                            (ros/laptop-build.sh vio): the head IMU (/head/imu) and the two eyes,
 #                            config written into ros/maps/vio by ros/tools/vio_config.py inside
-#                            the image at every start (PEPIN_VIO_CONFIG_ARGS: its options);
-#                            vio down | logs | kick (kick only at rest: OpenVINS inits from stillness)
+#                            the image at every start (PEPIN_VIO_CONFIG_ARGS: its options, e.g.
+#                            --dyn-init to let it also initialise in motion, --no-zupt);
+#                            vio down | logs | kick (kick at rest: it starts from ~1 s of stillness)
 #   ros/laptop.sh vslam --fixed-head   the camera node here broadcasts base_link -> camera_link from
 #                            config/camera.json: for a rig without neck servos. By default the board's
 #                            base bridge owns that edge (from the neck's encoders); --neck, the old way
@@ -271,15 +272,15 @@ case "${1:-}" in
         # ros/maps/vio by ros/tools/vio_config.py (below, at every start) and never edited.
         #   ros/laptop.sh vio [up]   start (or restart) it
         #   ros/laptop.sh vio down   stop it; vio logs follows it
-        #   ros/laptop.sh vio kick   restart the node inside (the launch respawns it): AT REST
-        #                            only, OpenVINS initialises from stillness and then motion
+        #   ros/laptop.sh vio kick   restart the node inside (the launch respawns it): AT REST,
+        #                            OpenVINS initialises from ~1 s of stillness (its ZUPT on)
         case "${2:-up}" in
             down) pepin_remove_container pepin-vio; echo "pepin-vio stopped"; exit 0 ;;
             logs) exec docker logs -f pepin-vio ;;
             kick)
                 docker exec pepin-vio sh -c 'pkill -INT -f run_subscribe_msckf' \
                     || { echo "no OpenVINS process in pepin-vio (ros/laptop.sh vio logs)"; exit 3; }
-                echo "OpenVINS signalled; the launch respawns it in 2 s. It initialises at rest, then on the first motion (a head pan will do)"
+                echo "OpenVINS signalled; the launch respawns it in 2 s. It initialises after ~1 s of stillness (no motion needed; with --no-zupt it waits for a jerk)"
                 exit 0 ;;
             up) ;;
             *) echo "usage: ros/laptop.sh vio [up|down|logs|kick]"; exit 2 ;;
@@ -290,8 +291,10 @@ case "${1:-}" in
         # The config is written from the repo's numbers at every start, INSIDE the image: the
         # rectified focal is OpenCV's stereoRectify's and moves with its version (494.22 px under
         # the image's 4.6, camera_stream's, against 495.08 under uv's 4.13, 2026-10-04).
-        # PEPIN_VIO_CONFIG_ARGS passes vio_config.py's options (--calib-extrinsics for a check
-        # session that lets OpenVINS refine the camera-IMU transform).
+        # PEPIN_VIO_CONFIG_ARGS passes vio_config.py's options: --dyn-init (OpenVINS may also
+        # initialise in motion; still windows keep the static init), --no-zupt (the first
+        # design's: no ZUPT, the init waits for a jerk), --calib-extrinsics (a check session that
+        # lets OpenVINS refine the camera-IMU transform). The two lines it prints say which.
         # The time shift follows camera_stream's LIVE camera_stamp_lag_s (the knob dates every
         # grab stamp earlier; head_imu.time_offset_s was measured at its default): read once,
         # here, so a later change of the knob needs a vio restart. PEPIN_VIO_STAMP_LAG overrides
@@ -302,7 +305,7 @@ case "${1:-}" in
         echo "vio: camera_stream's camera_stamp_lag_s ${LAG:-not read (camera_stream down): the knob default}"
         # shellcheck disable=SC2086
         docker run --rm --network none "${MOUNTS[@]}" --entrypoint python3 pepin-laptop:vio \
-            /tools/vio_config.py ${PEPIN_VIO_CONFIG_ARGS:-} ${LAG_ARGS[@]+"${LAG_ARGS[@]}"} | tail -1 \
+            /tools/vio_config.py ${PEPIN_VIO_CONFIG_ARGS:-} ${LAG_ARGS[@]+"${LAG_ARGS[@]}"} | tail -2 \
             || { echo "ros/tools/vio_config.py failed in pepin-laptop:vio"; exit 2; }
         pepin_remove_container pepin-vio
         zrouter_up

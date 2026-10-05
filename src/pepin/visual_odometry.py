@@ -124,7 +124,7 @@ WITNESS_FRESH_S = 1.0
 VIO_MAX_SPEED_M_S = 1.0
 VIO_WHEEL_DIFF_M_S = 0.5
 # That many implausible samples in a row (2 s at the camera's 10 Hz) with the wheels at rest for
-# VIO_RESTART_REST_S restarts it: its static initialisation needs stillness, then a motion.
+# VIO_RESTART_REST_S restarts it: its static initialisation needs stillness (vio_config.py).
 VIO_RESTART_REJECTS = 20
 VIO_RESTART_REST_S = 2.0
 # Not sooner than this after the previous restart: the respawn takes 2 s and the initialisation

@@ -385,6 +385,21 @@ and out, the guard, the stamp-to-receipt latency, whether `ekf_filter_node` subs
 the EKF's own odom -> base_link. Calibration: docs/head_imu_calibration.md. The offline A/B: the
 "Replay" section.
 
+Rest and start are OpenVINS's own. Its zero-velocity update is on all day: a camera interval whose
+IMU reads rest under the current biases (gyro and accel, chi2 at 95 %, OpenVINS's speed under
+0.05 m/s) or whose picture stands still (tracks moving under 0.5 px between frames) is not
+propagated, and the biases and the tilt are updated from gravity instead, so hours on the charger
+neither move the pose nor walk the biases. The IMU test is what keeps a turning neck out (a still
+head passes, a neck turning faster than ~0.8 deg/s never); a moving picture is no veto. With the
+ZUPT on, the static initialisation starts from ~1 s of stillness, no jerk or head nod needed. The
+start options are vio_config.py's, passed at `ros/laptop.sh vio` (OpenVINS reads its config only
+when it starts; the guard's restarts keep it):
+
+```bash
+PEPIN_VIO_CONFIG_ARGS=--dyn-init ros/laptop.sh vio  # may also initialise in motion (still: static)
+PEPIN_VIO_CONFIG_ARGS=--no-zupt ros/laptop.sh vio   # the first design: no ZUPT, init on a jerk
+```
+
 ## Camera calibration
 
 **The stereo head** (writes `config/stereo_calibration.json`):
@@ -809,7 +824,7 @@ metrics fixed before the drives (vio.md section 6: the median relative pose erro
 ```bash
 ros/vio_replay.sh 0601 --arm A      # the EKF with no /vo
 ros/vio_replay.sh 0601 --arm B      # stereo_odometry + the relay (vo_input stereo): the baseline
-ros/vio_replay.sh 0601 --arm E      # OpenVINS + the relay (vo_input vio); Ez: its ZUPT on
+ros/vio_replay.sh 0601 --arm E      # OpenVINS + the relay (vo_input vio); E0: without its ZUPT
 uv run python ros/tools/vio_score.py runs/06* --arms A B E --baseline B --s3 0601 0602 0603 0604 0605 0606
 ```
 

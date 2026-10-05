@@ -92,6 +92,15 @@ def _read(path: Path, *keys: str) -> Any:
     return node.real() if node.isReal() or node.isInt() else node.string()
 
 
+def _bool(path: Path, key: str) -> bool:
+    """A bool the way OpenVINS's YamlParser reads it: the scalar's first word, before any '#'
+    or space (cv::FileStorage keeps a trailing comment in the string)."""
+    value = str(_read(path, key))
+    word = value.split("#")[0].split(" ")[0]
+    assert word in ("true", "false"), f"{key}: {value!r} is no bool OpenVINS reads"
+    return word == "true"
+
+
 def test_the_openvins_files_carry_the_rectified_pinhole_the_inverse_and_the_baseline(
     tmp_path: Path,
 ) -> None:
@@ -129,8 +138,7 @@ def test_the_openvins_files_carry_the_rectified_pinhole_the_inverse_and_the_base
         noise["gyro_noise_density"]
     ), "the IMU yaml carries config/head_imu.json's noise block (the Allan block x10)"
     estimator = out / "estimator_config.yaml"
-    # OpenVINS reads a bool as the first word of the scalar (a trailing comment is part of it)
-    assert str(_read(estimator, "try_zupt")).split()[0] == "false"
+    assert _bool(estimator, "try_zupt") is True, "OpenVINS's own ZUPT holds rest"
     assert _read(estimator, "track_frequency") == 15.0
     assert _read(estimator, "relative_config_imucam") == "kalibr_imucam_chain.yaml"
     text = estimator.read_text()
@@ -157,10 +165,9 @@ def test_without_the_head_imu_block_only_kalibr_s_files_or_a_nominal_guess(tmp_p
         "0.03",
         "0.04",
     ]
-    assert TOOL.main([*args, "--zupt-arm"]) == 0
+    assert TOOL.main(args) == 0
     chain = (tmp_path / "c" / "kalibr_imucam_chain.yaml").read_text()
     assert "NOMINAL: axes x,-z,y" in chain
-    assert "zupt_max_disparity: 0.0" in (tmp_path / "c" / "estimator_config.yaml").read_text()
 
 
 def test_the_nominal_block_is_one_camera_json_accepts(tmp_path: Path) -> None:
@@ -195,3 +202,42 @@ def test_a_live_stamp_lag_moves_the_time_shift_by_its_distance_from_the_knob_def
     assert _read(chain, "cam1", "timeshift_cam_imu") == pytest.approx(0.0042 + 0.073)
     assert "camera_stamp_lag_s 0.0930" in chain.read_text()
     assert TOOL.stamp_lag_default(tmp_path) == 0.0, "no knobs.json: no lag"
+
+
+def test_the_zupt_holds_rest_and_the_dynamic_init_is_a_switch(tmp_path: Path) -> None:
+    """By default OpenVINS's ZUPT is on (all day, the IMU test at multiplier 1, a slow drive's
+    speed and a moving picture's disparity out) and the init is static only; --dyn-init adds the
+    dynamic one, --no-zupt writes the first design's (ZUPT off), each alone."""
+    config = _config_with_imu(tmp_path / "config", _asymmetric())
+
+    def estimator(*flags: str) -> Path:
+        out = tmp_path / ("vio" + "".join(flags))
+        assert TOOL.main(["--config", str(config), "--out", str(out), *flags]) == 0
+        return out / "estimator_config.yaml"
+
+    default = estimator()
+    for path in (default, estimator("--dyn-init"), estimator("--no-zupt")):
+        for line in path.read_text().splitlines():
+            key, _, value = line.partition(":")
+            if value.split("#")[0].strip() in ("true", "false"):
+                _bool(path, key)  # cv::FileStorage reads 'false # a: b' as '': a colon breaks it
+    assert _bool(default, "try_zupt") is True
+    assert _bool(default, "zupt_only_at_beginning") is False, "all day, not only at the start"
+    assert _read(default, "zupt_chi2_multipler") == 1.0, "0 would leave the picture alone"
+    assert _read(default, "zupt_noise_multiplier") == 1.0
+    assert _read(default, "zupt_max_velocity") == pytest.approx(0.05)
+    assert _read(default, "zupt_max_disparity") == pytest.approx(0.5), "a still picture passes"
+    assert _bool(default, "init_dyn_use") is False
+    assert _read(default, "init_imu_thresh") == pytest.approx(0.4)
+
+    dynamic = estimator("--dyn-init")
+    assert _bool(dynamic, "init_dyn_use") is True
+    assert _bool(dynamic, "try_zupt") is True, "the switch is the init's alone"
+    assert _read(dynamic, "init_dyn_num_pose") == 6.0
+
+    first = estimator("--no-zupt")
+    assert _bool(first, "try_zupt") is False
+    assert _bool(first, "init_dyn_use") is False
+    without = default.read_text().splitlines()
+    differ = [a for a, b in zip(without, first.read_text().splitlines(), strict=True) if a != b]
+    assert all(line.startswith("zupt_") or line.startswith("try_zupt") for line in differ), differ

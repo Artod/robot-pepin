@@ -13,9 +13,10 @@ inside this image at every start) writes estimator_config.yaml and the two Kalib
 ros/maps/vio (``/maps/vio`` here) from
 config/stereo_calibration.json, config/camera.json's head_imu block and config/head_imu.json. The
 node is respawned when it dies; it does not reset itself when it diverges (the relay marks it
-lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: its static initialisation needs
-stillness, then motion. pepin_bringup.vio_keeper (always started) does the same on
-``/vio/restart``, which the relay's guard calls after a run of implausible samples at rest.
+lost), so ``ros/laptop.sh vio kick`` restarts it, AT REST: with its ZUPT on (vio_config.py's
+default) the static initialisation starts from ~1 s of stillness, no motion needed (with
+``--dyn-init`` it may also start in motion). pepin_bringup.vio_keeper (always started) does the
+same on ``/vio/restart``, which the relay's guard calls after a run of implausible samples at rest.
 
 ``feed`` (default false: OpenVINS reads camera_stream's topics, every frame) true puts
 pepin_bringup.vio_feed between them: the eye pairs a fast head did not smear reach it on

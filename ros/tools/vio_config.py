@@ -29,8 +29,16 @@ Written into --out (default ros/maps/vio, mounted in the containers as /maps/vio
 ``--nominal`` stands in for the missing head_imu block with a 90 deg permutation (which optical
 axis each chip axis points along, as the axis photo shows) and the tape's offset of the chip in
 the optical frame; it is printed in every file it shapes. ``--calib-extrinsics`` lets OpenVINS
-refine the camera-IMU transform online (a dedicated well-excited session only, vio.md section 3);
-``--zupt-arm`` writes the E' arm of the offline A/B (zupt on, disparity override off, 0.02 m/s).
+refine the camera-IMU transform online (a dedicated well-excited session only, vio.md section 3).
+
+REST AND START. OpenVINS's own zero-velocity update is on (:data:`ZUPT`): a camera interval
+whose IMU reads rest under the current biases (or whose picture stands still) is not propagated,
+and the biases and the tilt are updated from gravity instead, so hours at rest neither move the
+pose nor walk the biases (2026-10-04: with it off, the accel bias walked 0.3-1 m/s^2 over 25 min
+to 2.6 h at rest and diverged at the first metre). With the ZUPT on, its static initialiser does
+not wait for a jerk either: it starts from ~1 s of stillness. ``--no-zupt`` writes the first
+design's (ZUPT off, the init waits for a jerk). ``--dyn-init`` lets OpenVINS initialise IN MOTION
+too (a restart while the head turns or the cart drives); still windows keep the static one.
 
 THE TIME SHIFT is head_imu's ``time_offset_s``, which is measured against the stamps camera_stream
 publishes with its ``camera_stamp_lag_s`` knob at the default of config/knobs.json. When the knob
@@ -67,6 +75,40 @@ IMU_TOPIC = "/head/imu"
 # The camera's own rate is 9.5-11.6 Hz (ustreamer desired-fps 10): OpenVINS skips a frame that
 # arrives sooner than 1 / track_frequency after the last, so 10 would drop the faster ones.
 TRACK_FREQUENCY_HZ = 15.0
+# OpenVINS's zero-velocity update (UpdaterZeroVelocity::try_update), tried at every frame: it is
+# ACCEPTED when the picture stands still (mean track motion between the two frames under
+# zupt_max_disparity px with more than 20 tracks) OR when the IMU reads rest (the camera
+# interval's gyro and accel residuals under the current biases pass chi2 at 95 % times
+# zupt_chi2_multipler, with the densities times zupt_noise_multiplier) and OpenVINS's own speed is
+# under zupt_max_velocity. A moving picture is no veto: the IMU test is what keeps a turning neck
+# out. With the x10 densities of config/head_imu.json and multiplier 1 the IMU test passes a still
+# head in 99.6-100 % of 0.1 s windows and refuses any neck turning faster than ~0.8 deg/s (the
+# fastest window accepted while the encoders moved; the arbiter's slowest sweep is 20 deg/s),
+# measured on the two parked recordings of 2026-10-04 (3.8k + 2.9k still windows).
+ZUPT = {
+    "try_zupt": "true",
+    "zupt_chi2_multipler": "1",
+    "zupt_max_velocity": "0.05",
+    "zupt_noise_multiplier": "1",
+    "zupt_max_disparity": "0.5",
+    "zupt_only_at_beginning": "false",
+}
+ZUPT_NOTES = {
+    "try_zupt": "rest held by OpenVINS itself; the static init needs no jerk",
+    "zupt_max_velocity": "m/s, OpenVINS's own speed: a slow drive is not rest",
+    "zupt_noise_multiplier": "a still head passes, a neck over ~0.8 deg/s never (2026-10-04)",
+    "zupt_max_disparity": "px between two frames: a still picture passes whatever the IMU says",
+    "zupt_only_at_beginning": "all day, a home robot stands for hours",
+}
+# The first design's (vio.md M4, the board's /zupt owning rest): no ZUPT, the init waits for a jerk
+NO_ZUPT = {
+    "try_zupt": "false",
+    "zupt_chi2_multipler": "1",
+    "zupt_max_velocity": "0.1",
+    "zupt_noise_multiplier": "10",
+    "zupt_max_disparity": "0.5",
+    "zupt_only_at_beginning": "false",
+}
 
 
 @dataclass(frozen=True)
@@ -288,17 +330,29 @@ def imu_chain(noise: dict[str, float], rate_hz: float) -> str:
     )
 
 
-def estimator_config(calib_extrinsics: bool, zupt_arm: bool) -> str:
+def zupt_block(zupt: bool) -> str:
+    """The estimator's ZUPT keys: :data:`ZUPT` with its notes, or the first design's
+    :data:`NO_ZUPT`."""
+    if not zupt:
+        values = dict(NO_ZUPT)
+        notes = {"try_zupt": "--no-zupt, the first design's; the init waits for a jerk"}
+    else:
+        values, notes = ZUPT, ZUPT_NOTES
+    return "".join(
+        f"{key}: {value}" + (f" # {notes[key]}" if key in notes else "") + "\n"
+        for key, value in values.items()
+    )
+
+
+def estimator_config(calib_extrinsics: bool, zupt: bool = True, dyn_init: bool = False) -> str:
     """OpenVINS's estimator_config.yaml for this rig (vio.md section 4): stereo, the time offset
-    estimated online, extrinsics fixed, ZUPT off (the board's /zupt owns rest), a ground robot's
-    init threshold, 15 Hz tracking of a 10 Hz camera."""
-    zupt = (
-        "try_zupt: true\nzupt_chi2_multipler: 1\nzupt_max_velocity: 0.02\n"
-        "zupt_noise_multiplier: 10\nzupt_max_disparity: 0.0\nzupt_only_at_beginning: false\n"
-        if zupt_arm
-        else "try_zupt: false # the board's /zupt owns rest (vio.md M4)\nzupt_chi2_multipler: 1\n"
-        "zupt_max_velocity: 0.1\nzupt_noise_multiplier: 10\nzupt_max_disparity: 0.5\n"
-        "zupt_only_at_beginning: false\n"
+    estimated online, extrinsics fixed, OpenVINS's own ZUPT (:data:`ZUPT`, off with ``zupt``
+    false), the static init at a ground robot's threshold (and the dynamic one in motion with
+    ``dyn_init``), 15 Hz tracking of a 10 Hz camera."""
+    dyn_note = (
+        "in motion too (--dyn-init); a still window keeps the static init"
+        if dyn_init
+        else "static init only, from stillness (with the ZUPT) or a jerk; --dyn-init in motion"
     )
     return f"""%YAML:1.0 # Generated by ros/tools/vio_config.py: do not edit.
 
@@ -327,13 +381,13 @@ feat_rep_msckf: "GLOBAL_3D"
 feat_rep_slam: "ANCHORED_MSCKF_INVERSE_DEPTH"
 feat_rep_aruco: "ANCHORED_MSCKF_INVERSE_DEPTH"
 
-{zupt}
+{zupt_block(zupt)}
 init_window_time: 1.0
 init_imu_thresh: 0.4 # a cart rolls off at ~0.25 m/s^2: the drone default 1.5 never triggers
 init_max_disparity: 10.0
 init_max_features: 50
 
-init_dyn_use: false
+init_dyn_use: {str(dyn_init).lower()} # {dyn_note}
 init_dyn_mle_opt_calib: false
 init_dyn_mle_max_iter: 50
 init_dyn_mle_max_time: 0.05
@@ -449,7 +503,14 @@ def main(argv: list[str] | None = None) -> int:
         "--nominal", nargs=4, metavar=("AXES", "X", "Y", "Z"), help="T_cam_imu from the photo"
     )
     parser.add_argument("--calib-extrinsics", action="store_true")
-    parser.add_argument("--zupt-arm", action="store_true", help="the A/B's E' arm")
+    parser.add_argument(
+        "--no-zupt",
+        action="store_true",
+        help="the first design's: ZUPT off, the init waits for a jerk",
+    )
+    parser.add_argument(
+        "--dyn-init", action="store_true", help="OpenVINS may also initialise in motion"
+    )
     parser.add_argument("--tag-size", type=float, default=None, help="metres, measured")
     parser.add_argument("--kalibr-only", action="store_true")
     parser.add_argument(
@@ -490,10 +551,17 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "kalibr_imucam_chain.yaml": imucam_chain(rig),
                 "kalibr_imu_chain.yaml": imu_chain(head.noise, head.rate_hz),
-                "estimator_config.yaml": estimator_config(args.calib_extrinsics, args.zupt_arm),
+                "estimator_config.yaml": estimator_config(
+                    args.calib_extrinsics, zupt=not args.no_zupt, dyn_init=args.dyn_init
+                ),
             }
         )
     write_all(args.out, files)
+    if not args.kalibr_only:
+        print(
+            f"OpenVINS: ZUPT {'off' if args.no_zupt else 'on'}, init"
+            f" {'static + dynamic' if args.dyn_init else 'static'}"
+        )
     print(f"IMU extrinsics: {rig.imu_source}; time shift {rig.time_offset_s * 1e3:+.1f} ms")
     return 0
 

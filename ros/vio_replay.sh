@@ -4,7 +4,7 @@
 # the arm's /odometry/filtered out as the scorer's CSV (ros/tools/vio_score.py).
 #
 #   ros/vio_replay.sh 0601 --arm E        # OpenVINS (/maps/vio) + the relay (vo_input vio)
-#   ros/vio_replay.sh 0601 --arm Ez       # E' : OpenVINS with its ZUPT on (/maps/vio_zupt)
+#   ros/vio_replay.sh 0601 --arm E0       # E without OpenVINS's ZUPT, the first design (/maps/vio_nozupt)
 #   ros/vio_replay.sh 0601 --arm B        # stereo_odometry + the relay (vo_input stereo)
 #   ros/vio_replay.sh 0601 --arm A        # the EKF with no /vo at all
 #   ros/vio_replay.sh --help
@@ -13,8 +13,8 @@
 # /imu/data_raw, /zupt, /odom_laser, /head/imu, /tf with the neck chain) and its camera bag
 # 0601_*_cam.bag (ros/clip_to_bag.sh 0601 --require-grab). Output beside them:
 # 0601_*_arm_<ARM>.bag (/odometry/filtered, /vo, /ov_msckf/poseimu) and 0601_*_arm_<ARM>.csv.
-# The arm's config files are generated first (uv run python ros/tools/vio_config.py [--zupt-arm
-# --out ros/maps/vio_zupt]). Real time (OpenVINS has no ROS 2 serial reader): a drive's length.
+# The arm's config files are generated first (uv run python ros/tools/vio_config.py [--no-zupt
+# --out ros/maps/vio_nozupt]). Real time (OpenVINS has no ROS 2 serial reader): a drive's length.
 # A throwaway container of pepin-laptop:vio with no network at all; sim time from the bags' clock.
 set -euo pipefail
 
@@ -32,10 +32,10 @@ ARM=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --arm) ARM="${2:-}"; shift 2 ;;
-        *) echo "usage: ros/vio_replay.sh RUN --arm A|B|E|Ez"; exit 2 ;;
+        *) echo "usage: ros/vio_replay.sh RUN --arm A|B|E|E0"; exit 2 ;;
     esac
 done
-case "$ARM" in A | B | E | Ez) ;; *) echo "--arm A|B|E|Ez"; exit 2 ;; esac
+case "$ARM" in A | B | E | E0) ;; *) echo "--arm A|B|E|E0"; exit 2 ;; esac
 shopt -s nullglob
 drives=("$REC"/"$RUN"_*/)
 cams=("$REC"/"$RUN"_*_cam.bag)
@@ -49,7 +49,7 @@ fi
 OUT="${DRIVE%/}_arm_${ARM}"
 [ ! -e "$REC/$OUT.bag" ] || { echo "$REC/$OUT.bag exists: remove it first"; exit 2; }
 CONFIG=/maps/vio/estimator_config.yaml
-[ "$ARM" = Ez ] && CONFIG=/maps/vio_zupt/estimator_config.yaml
+[ "$ARM" = E0 ] && CONFIG=/maps/vio_nozupt/estimator_config.yaml
 
 docker run --rm --network none \
     -v "$REPO:/repo:ro" -v "$REC:/rec" -v "$MAPS:/maps:ro" -v "$ROS_DIR/params:/params:ro" \
@@ -70,7 +70,7 @@ python3 /repo/ros/tools/head_static_tf.py "${SIM[@]}" & pids+=($!)
 ros2 run robot_localization ekf_node "${SIM[@]}" --params-file /params/ekf.yaml \
     -p publish_tf:=false -r __node:=ekf_filter_node & pids+=($!)
 case "$ARM" in
-    E | Ez)
+    E | E0)
         ros2 launch pepin_bringup vio.launch.py config:="$CONFIG" & pids+=($!)
         python3 -m pepin_bringup.visual_odometry "${SIM[@]}" -p vo_input:=vio & pids+=($!) ;;
     B)
