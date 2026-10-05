@@ -100,12 +100,12 @@ def test_the_idle_block_reaches_the_firmware_as_a_mask_and_gestures() -> None:
     assert idle.enabled and idle.expressions == (table.id_of("neutral"), table.id_of("smile"))
     assert 0 < idle.every_s[0] <= idle.every_s[1] and idle.settle_s > 0
     names = [g.name for g in idle.gestures]
-    assert names == ["grin", "tilt", "blink"]
-    tilt = idle.gestures[1]
+    assert names == ["grin", "smirk", "hmm", "tilt", "blink"]
+    tilt = idle.gestures[names.index("tilt")]
     assert tilt.mirror and tilt.deltas[[p.name for p in table.params].index("asym")] > 0
     header = render_header(table)
     assert "constexpr uint32_t kIdleExpressionMask = 0x00000003u;" in header
-    assert "kIdleGestureCount = 3;" in header
+    assert f"kIdleGestureCount = {len(names)};" in header
     off = raw()
     off["idle"]["enabled"] = False
     assert "constexpr bool kIdleOn = false;" in render_header(parse_face_table(off))

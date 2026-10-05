@@ -94,18 +94,20 @@ constexpr float kMouthStaleS = 0.25f;
 // idle: the face alive at rest
 constexpr bool kIdleOn = true;
 constexpr uint32_t kIdleExpressionMask = 0x00000003u;  // neutral, smile
-constexpr float kIdleEveryMinS = 8.0f;
-constexpr float kIdleEveryMaxS = 20.0f;
+constexpr float kIdleEveryMinS = 4.0f;
+constexpr float kIdleEveryMaxS = 10.0f;
 constexpr float kIdleSettleS = 3.0f;
 constexpr float kIdleFadeS = 0.25f;
-constexpr int kIdleGestureCount = 3;
-constexpr float kIdleGestureWeight[kIdleGestureCount] = {2.0f, 2.0f, 1.0f};
-constexpr float kIdleGestureDurationS[kIdleGestureCount] = {1.6f, 2.2f, 0.4f};
-constexpr bool kIdleGestureMirror[kIdleGestureCount] = {false, true, false};
+constexpr int kIdleGestureCount = 5;
+constexpr float kIdleGestureWeight[kIdleGestureCount] = {2.0f, 3.0f, 1.5f, 1.5f, 1.0f};
+constexpr float kIdleGestureDurationS[kIdleGestureCount] = {2.0f, 2.6f, 2.2f, 2.6f, 0.4f};
+constexpr bool kIdleGestureMirror[kIdleGestureCount] = {false, true, true, true, false};
 constexpr float kIdleGestures[kIdleGestureCount][kParamCount] = {
-  {0.06f, 0.0f, 0.22f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // grin
-  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.28f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f},  // tilt
-  {-0.03f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.25f, 0.0f, 0.0f},  // blink
+  {0.12f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // grin
+  {0.0f, 0.0f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f},  // smirk
+  {-0.18f, 0.0f, -0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f},  // hmm
+  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f},  // tilt
+  {-0.06f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.4f, 0.0f, 0.0f},  // blink
 };
 
 // colors, RGB565

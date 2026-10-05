@@ -103,13 +103,15 @@
   "idle": {
     "enabled": true,
     "expressions": ["neutral", "smile"],
-    "every_s": [8.0, 20.0],
+    "every_s": [4.0, 10.0],
     "settle_s": 3.0,
     "fade_s": 0.25,
     "gestures": [
-      {"name": "grin",  "weight": 2.0, "duration_s": 1.6, "mirror": false, "params": {"smile": 0.22, "width": 0.06}},
-      {"name": "tilt",  "weight": 2.0, "duration_s": 2.2, "mirror": true,  "params": {"asym": 0.28, "shift_x": 0.1}},
-      {"name": "blink", "weight": 1.0, "duration_s": 0.4, "mirror": false, "params": {"thick": -0.25, "width": -0.03}}
+      {"name": "grin",  "weight": 2.0, "duration_s": 2.0, "mirror": false, "params": {"smile": 0.45, "width": 0.12}},
+      {"name": "smirk", "weight": 3.0, "duration_s": 2.6, "mirror": true,  "params": {"asym": 0.6, "smile": 0.25, "shift_x": 0.15}},
+      {"name": "hmm",   "weight": 1.5, "duration_s": 2.2, "mirror": true,  "params": {"width": -0.18, "smile": -0.15, "asym": 0.3, "shift_x": 0.35}},
+      {"name": "tilt",  "weight": 1.5, "duration_s": 2.6, "mirror": true,  "params": {"asym": 0.55, "shift_x": 0.25}},
+      {"name": "blink", "weight": 1.0, "duration_s": 0.4, "mirror": false, "params": {"thick": -0.4, "width": -0.06}}
     ],
     "note": "the face alive at rest (the firmware's FaceModel and sim/face.js): while one of `expressions` shows, every every_s (a random span between the two) one gesture, picked by weight, adds its params to the mouth over duration_s as a smooth bump (a mirror gesture flips its sign at random: a tilt either way). Never within settle_s of an expression change or of a speech level, and a gesture under way fades out over fade_s when one comes. enabled false: none"
   },

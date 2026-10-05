@@ -511,8 +511,8 @@ const FACE_TABLE = {
    1
   ],
   "every_s": [
-   8.0,
-   20.0
+   4.0,
+   10.0
   ],
   "settle_s": 3.0,
   "fade_s": 0.25,
@@ -520,12 +520,12 @@ const FACE_TABLE = {
    {
     "name": "grin",
     "weight": 2.0,
-    "duration_s": 1.6,
+    "duration_s": 2.0,
     "mirror": false,
     "deltas": [
-     0.06,
+     0.12,
      0.0,
-     0.22,
+     0.45,
      0.0,
      0.0,
      0.0,
@@ -542,9 +542,57 @@ const FACE_TABLE = {
     ]
    },
    {
-    "name": "tilt",
-    "weight": 2.0,
+    "name": "smirk",
+    "weight": 3.0,
+    "duration_s": 2.6,
+    "mirror": true,
+    "deltas": [
+     0.0,
+     0.0,
+     0.25,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.6,
+     0.15,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "name": "hmm",
+    "weight": 1.5,
     "duration_s": 2.2,
+    "mirror": true,
+    "deltas": [
+     -0.18,
+     0.0,
+     -0.15,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.3,
+     0.35,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "name": "tilt",
+    "weight": 1.5,
+    "duration_s": 2.6,
     "mirror": true,
     "deltas": [
      0.0,
@@ -557,8 +605,8 @@ const FACE_TABLE = {
      0.0,
      0.0,
      0.0,
-     0.28,
-     0.1,
+     0.55,
+     0.25,
      0.0,
      0.0,
      0.0,
@@ -571,7 +619,7 @@ const FACE_TABLE = {
     "duration_s": 0.4,
     "mirror": false,
     "deltas": [
-     -0.03,
+     -0.06,
      0.0,
      0.0,
      0.0,
@@ -584,7 +632,7 @@ const FACE_TABLE = {
      0.0,
      0.0,
      0.0,
-     -0.25,
+     -0.4,
      0.0,
      0.0
     ]
