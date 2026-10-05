@@ -7,7 +7,7 @@ StartLimitIntervalSec=0
 [Service]
 WorkingDirectory=/opt/pepin
 Environment=PYTHONPATH=/opt/pepin
-ExecStart=/opt/pepin/bin/python -m pepin.audio_server --port 3338 --lipsync
+ExecStart=/opt/pepin/bin/python -m pepin.audio_server --port 3338
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5

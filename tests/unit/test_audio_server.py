@@ -21,6 +21,7 @@ from pepin.audio_server import (
     SampleClock,
     XrunCounter,
     XvfHost,
+    arguments,
     find_array,
     reboot_array,
     resolve_device,
@@ -611,3 +612,9 @@ def test_a_status_probe_that_never_listens_gets_clean_json() -> None:
         assert header == {"cmd": "status"}
     finally:
         server.close()
+
+
+def test_lip_sync_is_on_by_default_and_the_old_flag_still_parses() -> None:
+    assert arguments([]).lipsync is True
+    assert arguments(["--no-lipsync"]).lipsync is False
+    assert arguments(["--lipsync"]).lipsync is True  # the board's drop-in of 2026-10-05

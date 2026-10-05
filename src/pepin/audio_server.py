@@ -1384,7 +1384,8 @@ def stop_on_sigterm() -> threading.Event:
     return stop
 
 
-def main() -> None:
+def arguments(argv: list[str] | None = None) -> argparse.Namespace:
+    """The command line (``argv``, or the process's)."""
     parser = argparse.ArgumentParser(
         description="Serve the reSpeaker XVF3800 array over TCP: voice, direction, speaker."
     )
@@ -1405,8 +1406,9 @@ def main() -> None:
     )
     parser.add_argument("--deadman-s", type=float, default=DEADMAN_S)
     parser.add_argument(
-        "--lipsync", action="store_true",
-        help="send the speech's loudness to the head server's mouth (pepin.head_server, :3340)",
+        "--lipsync", action=argparse.BooleanOptionalAction, default=True,
+        help="send the speech's loudness to the head server's mouth (pepin.head_server, :3340);"
+        " on by default (2026-10-05: the mouth moved with Live's speech), --no-lipsync off",
     )  # fmt: skip
     parser.add_argument("--head-port", type=int, default=3340)
     parser.add_argument(
@@ -1417,7 +1419,11 @@ def main() -> None:
         "--no-array-reboot", action="store_true",
         help="never reboot the array's chip (by default: once, after 2 streams without a byte)",
     )  # fmt: skip
-    args = parser.parse_args()
+    return parser.parse_args(argv)
+
+
+def main() -> None:
+    args = arguments()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s"
     )
