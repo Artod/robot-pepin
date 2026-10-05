@@ -278,7 +278,9 @@ case "${1:-}" in
             down) pepin_remove_container pepin-vio; echo "pepin-vio stopped"; exit 0 ;;
             logs) exec docker logs -f pepin-vio ;;
             kick)
-                docker exec pepin-vio sh -c 'pkill -INT -f run_subscribe_msckf' \
+                # pkill straight, not under sh -c: -f would match the shell's own command line
+                # and SIGINT it, answering "no process" for a kick that worked (2026-10-04)
+                docker exec pepin-vio pkill -INT -f run_subscribe_msckf \
                     || { echo "no OpenVINS process in pepin-vio (ros/laptop.sh vio logs)"; exit 3; }
                 echo "OpenVINS signalled; the launch respawns it in 2 s. It initialises after ~1 s of stillness (no motion needed; with --no-zupt it waits for a jerk)"
                 exit 0 ;;
