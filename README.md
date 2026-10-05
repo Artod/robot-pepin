@@ -4,35 +4,61 @@ A home robot on an IKEA cart that drives itself to a named place in the flat, ma
 with a stereo head and takes spoken orders. A $35 board on the cart streams the sensors and owns
 the wheels; navigation, mapping and the language model run on the MacBook beside it.
 
-![The camera's fused voxels over the occupancy grid in Foxglove, with the cart's sensor frames](docs/figures/voxels_live.png)
+[![Pepin answering a spoken order and driving to the printer, beside its live costmaps, voxels and stereo depth in Foxglove](docs/figures/demo_2026-10-05.jpg)](https://vimeo.com/1233169078)
 
-*Foxglove on the laptop: the camera's fused voxels over the occupancy grid, with the cart's
-camera, ToF and odometry frames.*
+▶ **[Watch the video on Vimeo](https://vimeo.com/1233169078)**: "Pepin, go to the printer" —
+it answers, plans around the furniture, drives there, looks down at the printer while it parks
+and reports back.
 
-Type `ros/goto.sh printer`, or say "Pepin, go to the printer", and the cart plans around the
-furniture and drives there at up to 0.45 m/s. Every drive is recorded.
+Say "Pepin, go to the printer" (or type `ros/goto.sh printer`), and the cart plans around the
+furniture and drives there at up to 0.30 m/s. Every drive is recorded.
 
-## What it is
+## What it is, in one minute
 
-Pepin is the mobility part of a companion robot. It is built first because everything else
-needs it: a frame that stays true, a body that fits through doorways, a name for every place in
-the flat and a recording of every drive.
+Pepin is the moving body of a companion robot that lives in a flat. You talk to it; it knows
+the rooms by name, finds its way between them, and looks where it is going with a camera head
+on a neck, the way a person would — ahead along its path, down at the spot where it parks,
+behind itself when it backs up. A small screen gives it a mouth that moves when it speaks and
+changes with what it is doing.
+
+It is built from off-the-shelf parts: an IKEA trolley, two servo wheels, a $35 computer, a
+lidar, a stereo camera and a microphone array. The heavy thinking (maps, planning, vision,
+the voice) runs on an ordinary laptop over WiFi. The whole stack is open: code, configuration,
+calibration and the record of every drive.
+
+## Under the hood
 
 The board (Orange Pi Zero 3: four Cortex-A53 cores, 1.5 GB) is a **sensor box**. It reads the
-lidar, three time-of-flight rangers, the wheel encoders, the IMU and the neck encoders. It fuses
-them into `odom -> base_link` with an EKF and serves the stereo camera and the microphone array.
-It owns the wheels with a 0.5 s deadman, so a WiFi stall stops the cart.
+lidar, three time-of-flight rangers, the wheel encoders, the base IMU and the neck encoders, and
+fuses them into `odom -> base_link` with an **EKF** (robot_localization). It serves the stereo
+camera, the microphone array and the head (an ESP32 with the face screen and a second IMU glued
+to the camera). It owns the wheels with a 0.5 s deadman, so a WiFi stall stops the cart.
 
 The Mac runs everything that consumes the camera, and the navigation:
 
-- **Nav2** with the MPPI controller and Smac planners
-- **RTAB-Map**, the one map and the one owner of `map -> odom`
-- **stereo depth** from RAFT-Stereo on the Apple GPU, and **stereo visual odometry**
-- a TSDF volume as the costmaps' obstacle memory
-- **XFeat + LighterGlue + BoQ** for place recognition
-- the **LLM tools** (`pepin.tools`, also an MCP server) behind a voice loop
+- **Nav2**: Smac Hybrid-A* plans with the cart's real footprint; a rotation shim with
+  **Regulated Pure Pursuit** follows the path and **MPPI** takes over for the last metre to
+  park against furniture
+- **RTAB-Map**: the one map and the one owner of `map -> odom`; place recognition with
+  **XFeat + LighterGlue + BoQ**
+- **stereo depth** from **RAFT-Stereo** on the Apple GPU, the head calibrated with **Kalibr**
+  (both eyes, and the camera-IMU extrinsics and time offset)
+- **visual-inertial odometry**: **OpenVINS** on the stereo head and its IMU (zero-velocity
+  updates at rest, a guard that refuses samples the wheels contradict), fed to the board's EKF
+  beside the wheels, the gyro and the lidar's scan-to-scan odometry (**rf2o**); the stereo
+  visual odometry stays as the alternative
+- a **TSDF volume** as the costmaps' obstacle memory, with the robot's own body and its arm
+  (posed by forward kinematics) masked out of every camera ray
+- an **active gaze**: one arbiter owns the neck; the head follows the path, looks at the parking
+  spot and behind when reversing, and when the controller stalls it looks at the blocking
+  voxels to confirm them or carve a phantom away; frames taken during a head move or a mast
+  sway (measured by the head IMU) are kept out of the map
+- **voice**: a local **Whisper** wake word, the conversation on the **Gemini Live API** (native
+  audio both ways), the **reSpeaker XVF3800** array on the cart, the mouth lip-synced to the
+  speech; the **LLM tools** (`pepin.tools`, also an MCP server) drive the robot
 
-The two machines talk over one zenoh router-to-router link.
+The two machines talk over one **zenoh** router-to-router link (rmw_zenoh, with the upstream
+lost-wake-up fix backported). Every feature is a live flag with its measurement beside it.
 
 ## Numbers
 
@@ -43,31 +69,37 @@ Measured on the robot unless marked otherwise.
 | Wheel odometry / EKF, as received on the Mac | 49.5 / 48.3 Hz |
 | IMU on the shared I2C bus | 99.4 Hz at 400 kHz (53 Hz at the default 100 kHz, which the ToF crowded out) |
 | Stereo visual odometry | 8-10 poses/s, 0.15-0.21 s behind the picture |
+| Visual-inertial odometry (OpenVINS) into the EKF | 9-10 Hz while driving; at rest 0 mm and 0.000° over 38 min with ZUPT |
+| Head calibration (Kalibr), two runs | camera-IMU rotation 0.03° apart, 3.4 mm, 0.2 ms; stereo reprojection 0.56 px |
+| Floor 0.5-1.5 m ahead in the stereo depth, seven head poses | within 5 mm of flat after the Kalibr stereo calibration (15-24 cm low before) |
+| Own body and arm in the voxel volume, full head sweep | 0 voxels (344 without the masks) |
 | RAFT-Stereo on the Mac's GPU, 800x600 pair | 89 ms (OpenCV SGBM: 17 ms) |
 | Airborne phantom blobs on glossy parquet, 8 pairs | 94 with RAFT-Stereo, 450 with SGBM |
 | A stereo pair's disparity through Docker | 206 ms with the compressed reply (295 ms raw) |
 | Place recognition, run 0457 replayed in RTAB-Map | BoQ descriptors: 16 of 23 camera updates localised, 15 of 15 judged right; stock ORB words: 0 |
 | XFeat + LighterGlue registration, one replay | 454 ms through the model service, 1879 ms on the Docker VM's CPU |
-| Top speed | 0.45 m/s (base cap = MPPI `vx_max`) |
+| Top speed | 0.30 m/s (the wheel servos measure 0.31-0.32 m/s on the floor) |
 | Goal tolerance | 0.10 m / 0.20 rad |
 | Board memory, sensor stack up | 615 MB of 1.5 GB |
 | Board image | 0.35 GB compressed, 1.32 GB unpacked (1.08 / 3.85 GB while it carried Nav2) |
 | Loop closure over a 33 m lap, offline pose graph | 5 cm (wheel odometry alone: 8 m) |
-| Unit tests | over 1,600, mypy strict, no hardware needed |
+| Unit tests | over 2,000, mypy strict, no hardware needed |
 
 ## Architecture
 
 ```
  BOARD  Orange Pi Zero 3                         │  MAC  MacBook Pro (Docker + Apple GPU)
                                                  │
- pepin-base   wheels, encoders, 50 Hz, deadman   │  pepin-macnav  Nav2 (MPPI, Smac, costmaps,
- pepin-tof    3x VL53L1X, 15 Hz                  │                behaviour tree), goal server
- ustreamer    stereo camera as MJPEG             │                :3337, run recorder
- pepin-audio  XVF3800 array + speaker            │  pepin-vslam   RTAB-Map (map -> odom), stereo
- pepin-ros    LD19 lidar, C++ base bridge,       │                depth + odometry, TSDF volume,
-              IMU 100 Hz, EKF (odom->base_link), │                Foxglove bridge :8765
+ pepin-base   wheels, encoders, neck, 50 Hz,     │  pepin-macnav  Nav2 (shim + RPP, MPPI, Smac,
+              deadman                            │                costmaps, behaviour tree),
+ pepin-tof    3x VL53L1X, 15 Hz                  │                goal server :3337, gaze
+ ustreamer    stereo camera as MJPEG             │                arbiter :3339, run recorder
+ pepin-audio  XVF3800 array + speaker, lip sync  │  pepin-vslam   RTAB-Map (map -> odom), stereo
+ pepin-head   ESP32: face screen, head IMU 200 Hz│                depth + VO, TSDF volume,
+ pepin-ros    LD19 lidar, C++ base bridge,       │                Foxglove bridge :8765
+              IMU 100 Hz, EKF (odom->base_link), │  pepin-vio     OpenVINS (head camera + IMU)
               rf2o laser odometry, ToF fans,     │  host          RAFT-Stereo :8790; XFeat,
-              neck encoders                      │                LighterGlue, BoQ :8791
+              neck encoders, mast-sway filter    │                LighterGlue, BoQ :8791
                                                  │  tools         pepin.tools (MCP), voice loop
          ◄── /cmd_vel ──── zenoh, router to router over WiFi ─────
          ──── /scan /odom /imu /tof /tf ──►
@@ -119,7 +151,7 @@ under `ros/maps/rec/`.
 **Talk**
 
 ```bash
-uv run python scripts/voice.py           # GEMINI_API_KEY in the environment or .env
+uv run python scripts/voice_live.py      # "Пепин, ..." — Gemini Live; GEMINI_API_KEY in .env
 uv run python -m pepin.tools.mcp         # the same tools as an MCP server (Claude Code / Desktop)
 ```
 
@@ -150,12 +182,15 @@ checks, the feature flags, recording, the model services and the board's budget.
    numbers the run, opens the tape (which already holds the last 15 s of every topic) and sends
    the pose to Nav2.
 3. Smac Hybrid-A* (the saved pick; `ros/goto.sh planner NAME` swaps it) plans with the cart's
-   true footprint, and MPPI follows the plan at 10 Hz. The local costmap is in `odom`; the
-   global costmap reads RTAB-Map's `/map`.
+   true footprint. A rotation shim with Regulated Pure Pursuit follows the plan at 10 Hz and
+   hands over to MPPI within a metre of the goal (`ros/goto.sh controller` swaps the pair).
+   The local costmap is in `odom`; the global costmap reads RTAB-Map's `/map`.
 4. `/cmd_vel` crosses to the board. The C++ base bridge hands it to the base server, which
-   applies it at 50 Hz next to the UART.
-5. Coming back: the EKF fuses the wheels, the gyro, the stereo odometry and the lidar's
-   scan-to-scan odometry into `odom -> base_link`. RTAB-Map's `map -> odom` corrects it.
+   applies it at 50 Hz next to the UART. Meanwhile the gaze arbiter turns the head along the
+   path, down at the goal while parking and behind on a reverse; on a stall it looks at what
+   blocks the way before the tree replans.
+5. Coming back: the EKF fuses the wheels, the gyro, the visual-inertial odometry and the
+   lidar's scan-to-scan odometry into `odom -> base_link`. RTAB-Map's `map -> odom` corrects it.
 
 The costmaps hear the lidar, the three ToF fans and the camera. The camera reaches them through
 the TSDF volume, so a single bad stereo frame cannot paint a wall.
@@ -179,9 +214,11 @@ stage cut the closing error: wheel odometry alone ended 8 m away, correlative sc
 - LDRobot LD19 360° lidar, mounted upside down at 0.383 m
 - 3x VL53L1X time-of-flight rangers (front, left, right) and an MPU6050 IMU, on one I2C bus
 - Global-shutter stereo module (2x 800x600, 61 mm baseline) on a 2-DoF pan/tilt neck
+- The head: an ESP32 with a 1.9" ST7789 screen (the mouth) and an MPU6050 glued to the camera
+  for the visual-inertial odometry and the mast's sway
 - reSpeaker XVF3800 microphone array, with the speaker on its jack
 - 18 V tool battery: a 12 V servo rail and two isolated 5 V rails
-- A 6-DoF SO-ARM101, not yet part of the stack
+- A 6-DoF SO-ARM101, parked: masked out of the camera's view, not yet driven by the stack
 
 Footprint 0.0625 m ahead of the axle, 0.30 m behind it, 0.275 m half-width. The planners use
 it with zero padding, because parking against furniture is the normal case.
