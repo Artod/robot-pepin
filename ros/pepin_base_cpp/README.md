@@ -11,6 +11,7 @@ that node is in git history before 2026-10-02. Its live switches are described i
 - `include/pepin_base_cpp/protocol.hpp` — the wire format, no ROS and no sockets in it.
 - `include/pepin_base_cpp/link.hpp` — reconnecting JSON-lines TCP client, one reader thread.
 - `include/pepin_base_cpp/mpu6050.hpp` — the IMU on an i2c-dev bus, SI units, no ROS.
+- `include/pepin_base_cpp/imu_probe.hpp` — when the IMU is probed, given up on, probed again.
 - `include/pepin_base_cpp/twist_from_pose.hpp` — the twist the wheels measured, off two poses.
 - `include/pepin_base_cpp/gyro_bias.hpp` — the gyro's zero, and the wheels' word on rest.
 - `include/pepin_base_cpp/zupt.hpp` — when the cart is certainly still, for the EKF's /zupt.
@@ -51,11 +52,20 @@ Python process at 10 % and 66 MB.
 `imu_enable` (false), `imu_device` (/dev/i2c-2), `imu_address` (0x68), `imu_rate_hz` (50),
 `imu_output_rate_hz` (1000), `imu_filter_delay_s` (0), `imu_frame` (base_link), `imu_bias_s`
 (2.0), `imu_bias_tracking` (true): a thread samples an MPU6050 at `imu_rate_hz` and publishes
-`imu/data_raw` without orientation; a missing chip is one warning and the wheels carry on.
+`imu/data_raw` without orientation; a missing chip is a line in the report and the wheels carry
+on. The chip is probed, not opened once (`imu_probe.hpp`, `test/imu_probe_contract.cpp`): five
+probes a second apart at start, then one a minute while it does not answer; a live chip whose
+reads fail five times in a row is closed (nothing of the bridge holds `/dev/i2c-2` open while the
+bus is recovered) and probed again. A chip that missed the start — a locked bus, 2026-10-04 and
+-05 — comes back live without a restart, its bias tracker kept. The minute line opens with the
+IMU's word: `imu: live 3600 s`, `imu: probing, 2 of 5 failed, next in 0.6 s (last: ...)` or
+`imu: ABSENT 61 s, next probe in 59 s (every 60 s), 6 of 6 probes failed (last: ...); wheel
+odometry only`.
 Registers PWR_MGMT_1 0x01, SMPLRT_DIV 1000/`imu_output_rate_hz`-1, CONFIG 0x03 (DLPF ~44 Hz),
 GYRO_CONFIG 0x08 (+-500 dps), ACCEL_CONFIG 0x08 (+-4 g), WHO_AM_I 0x68, 14 bytes from
-ACCEL_XOUT_H 0x3B. The EKF that fuses the yaw rate with /odom is robot_localization, configured
-outside this package.
+ACCEL_XOUT_H 0x3B, each register read one `I2C_RDWR` transfer (the register, a repeated START,
+the read: board/README.md, "The I2C bus"). The EKF that fuses the yaw rate with /odom is
+robot_localization, configured outside this package.
 
 robot.launch.py passes `imu_rate_hz` 100 (`pepin.deployment.IMU_RATE_HZ`, since 2026-10-01): the
 DLPF's ~44 Hz is under that rate's Nyquist limit, so the samples are the same noise as at 50 Hz,

@@ -1,5 +1,5 @@
-"""The C++ base bridge's own contracts, compiled and run: the gyro's bias tracker, the
-zero-velocity update and the neck's model (ros/pepin_base_cpp/test/*_contract.cpp).
+"""The C++ base bridge's own contracts, compiled and run: the gyro's bias tracker, the IMU's probe
+schedule, the zero-velocity update and the neck's model (ros/pepin_base_cpp/test/*_contract.cpp).
 
 The package has no ament test target and the board image is not built on a laptop, so each
 contract is one stand-alone main() over its header, no ROS and no gtest. This test compiles each
@@ -21,7 +21,13 @@ from pepin.neck import NeckConfig, NeckPivot, bridge_parameters, camera_pose, jo
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = REPO / "ros/pepin_base_cpp"
-CONTRACTS = ("gyro_bias_contract", "zupt_contract", "head_imu_contract", "mast_contract")
+CONTRACTS = (
+    "gyro_bias_contract",
+    "zupt_contract",
+    "head_imu_contract",
+    "mast_contract",
+    "imu_probe_contract",
+)
 
 
 @pytest.mark.slow

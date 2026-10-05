@@ -32,6 +32,11 @@
 // a gyro yaw rate fused with the wheels in an EKF, configured outside this node. The IMU
 // is optional in the strong sense: nothing about it can stop the wheels from working.
 //
+// The chip is PROBED, not opened once (imu_probe.hpp): five tries a second apart at start, then one
+// a minute while it does not answer, and a live chip whose reads fail five times in a row is closed
+// and probed again — so an IMU that missed the start (a locked i2c-2, 2026-10-04 and -05) comes
+// back live without a restart. The minute line says which: ``imu: live``, ``probing``, ``ABSENT``.
+//
 // /imu/data_raw is DATED BY THE CHIP'S SAMPLE: the moment the 14-byte burst came back, less the
 // chip's low-pass group delay (`imu_filter_delay_s`, 4.8 ms at DLPF_CFG 3: mpu6050.hpp has the
 // table), and the chip refreshes those registers at 1 kHz (`imu_output_rate_hz`), so the sample
@@ -100,6 +105,7 @@
 #include "pepin_base_cpp/gyro_bias.hpp"
 #include "pepin_base_cpp/head_imu.hpp"
 #include "pepin_base_cpp/head_line.hpp"
+#include "pepin_base_cpp/imu_probe.hpp"
 #include "pepin_base_cpp/link.hpp"
 #include "pepin_base_cpp/mast.hpp"
 #include "pepin_base_cpp/mpu6050.hpp"
@@ -118,6 +124,11 @@ constexpr double kStatusHz = 2.0;  // how often link up/down transitions are log
 constexpr double kGyroStdDev = 0.02;   // rad/s
 constexpr double kAccelStdDev = 0.5;   // m/s^2
 constexpr double kRadToDeg = 57.29577951308232;
+
+// The IMU's probe schedule (imu_probe.hpp): a round of five probes a second apart at start and
+// after a loss, then one a minute; five failed reads in a row lose a live chip. Each probe on a
+// locked bus blocks the IMU thread alone for the driver's 2 s timeout.
+const ImuProbeSettings kImuProbeSettings{5, 1.0, 60.0, 5};
 
 // TwistFromPose's own max_gap_s, named here because a second reader needs the same number: a
 // state stream with a gap this long is not a measurement, so the estimator re-primes AND the rest
@@ -168,7 +179,7 @@ public:
     // transform while /odom is silent is a state no sensor failure produces.
     declare_parameter<bool>("imu_publish", true);
     declare_parameter<bool>("odom_publish", true);
-    const bool imu_enable = declare_parameter<bool>("imu_enable", false);
+    imu_enable_ = declare_parameter<bool>("imu_enable", false);
     imu_device_ = declare_parameter<std::string>("imu_device", "/dev/i2c-2");
     imu_address_ = static_cast<int>(declare_parameter<int>("imu_address", 0x68));
     imu_rate_hz_ = declare_parameter<double>("imu_rate_hz", 50.0);
@@ -296,7 +307,7 @@ public:
         apply_zupt_settings(parameters);
       });
 
-    if (imu_enable) {
+    if (imu_enable_) {
       start_imu();
     }
     if (head_enable_) {
@@ -1241,10 +1252,11 @@ private:
   /// a cart that never stands still it is what shows they do not.
   void log_link_status()
   {
-    if (imu_publisher_) {
+    if (imu_enable_) {
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 60000, "%s; %s; %s; %s", gyro_bias_state().c_str(),
-        zupt_state().c_str(), neck_state().c_str(), odom_stamp_state().c_str());
+        get_logger(), *get_clock(), 60000, "%s; %s; %s; %s; %s", imu_state().c_str(),
+        gyro_bias_state().c_str(), zupt_state().c_str(), neck_state().c_str(),
+        odom_stamp_state().c_str());
     } else {
       RCLCPP_INFO_THROTTLE(
         get_logger(), *get_clock(), 60000, "%s; %s", neck_state().c_str(),
@@ -1257,35 +1269,88 @@ private:
     }
     if (change->first) {
       RCLCPP_INFO(
-        get_logger(), "%s; odom twist: %s, %s; %s; %s; %s", change->second.c_str(),
+        get_logger(), "%s; odom twist: %s, %s; %s; %s; %s; %s", change->second.c_str(),
         twist_measured_ ? "measured" : "commanded", switch_state().c_str(),
+        imu_enable_ ? imu_state().c_str() : "imu: off (imu_enable false)",
         gyro_bias_state().c_str(), zupt_state().c_str(), neck_state().c_str());
     } else {
       RCLCPP_WARN(get_logger(), "%s", change->second.c_str());
     }
   }
 
-  /// Open the IMU and start sampling it; a missing chip is a warning, not a failure.
+  /// Start the IMU thread, which probes the chip and samples it once it answers; a missing chip is
+  /// a line in the report, never a failure. The publisher exists from the start, silent until a
+  /// bias does, so a chip found later publishes without a restart.
   void start_imu()
   {
-    std::string error;
-    if (!imu_.open_device(imu_device_, imu_address_, imu_output_rate_hz_, error)) {
-      RCLCPP_ERROR(get_logger(), "no IMU (%s): the bridge runs on wheel odometry", error.c_str());
-      return;
-    }
-    const unsigned divider = imu_.output_divider();
-    RCLCPP_INFO(
-      get_logger(),
-      "IMU on %s read at %d Hz, chip output %g Hz (SMPLRT_DIV %u, DLPF_CFG %u), stamped %.1f ms "
-      "before the read (imu_filter_delay_s), WHO_AM_I 0x%02x, %c axis up, published in %s",
-      imu_device_.c_str(), static_cast<int>(imu_rate_hz_), 1000.0 / (1.0 + divider), divider,
-      static_cast<unsigned>(kDlpfConfig), imu_filter_delay_s_ * 1000.0,
-      static_cast<unsigned>(imu_.who_am_i()), imu_up_axis_, imu_frame_.c_str());
     imu_publisher_ = create_publisher<sensor_msgs::msg::Imu>("imu/data_raw", 10);
     gyro_bias_ = GyroBiasTracker(imu_bias_s_, imu_rate_hz_);
     bias_block_samples_ = gyro_bias_.block_samples();
+    {
+      std::lock_guard<std::mutex> lock(imu_state_mutex_);
+      imu_state_ = ImuProbe(kImuProbeSettings, monotonic_s()).state();
+    }
     imu_running_ = true;
     imu_thread_ = std::thread([this] {read_imu();});
+  }
+
+  /// The IMU as the report line prints it (imu_probe.hpp's describe_imu): live, probing, ABSENT.
+  std::string imu_state()
+  {
+    std::lock_guard<std::mutex> lock(imu_state_mutex_);
+    return describe_imu(imu_state_, imu_last_error_, monotonic_s());
+  }
+
+  /// IMU thread: hand the schedule's state and the last failure to the report line.
+  void share_imu_state(const ImuProbe & probe, const std::string & error)
+  {
+    std::lock_guard<std::mutex> lock(imu_state_mutex_);
+    imu_state_ = probe.state();
+    if (!error.empty()) {
+      imu_last_error_ = error;
+    }
+  }
+
+  /// IMU thread: one probe — open the chip, check WHO_AM_I and write its configuration — and its
+  /// lines: the start line when it answers, the failures of a round, the give-up, the recovery.
+  void probe_imu(ImuProbe & probe)
+  {
+    std::string error;
+    const bool ok = imu_.open_device(imu_device_, imu_address_, imu_output_rate_hz_, error);
+    const double now = monotonic_s();
+    const ImuPresence before = probe.presence();
+    probe.probed(ok, now);
+    share_imu_state(probe, error);
+    const ImuProbeState & state = probe.state();
+    if (ok) {
+      const unsigned divider = imu_.output_divider();
+      RCLCPP_INFO(
+        get_logger(),
+        "IMU on %s read at %d Hz, chip output %g Hz (SMPLRT_DIV %u, DLPF_CFG %u), stamped %.1f ms "
+        "before the read (imu_filter_delay_s), WHO_AM_I 0x%02x, %c axis up, published in %s%s",
+        imu_device_.c_str(), static_cast<int>(imu_rate_hz_), 1000.0 / (1.0 + divider), divider,
+        static_cast<unsigned>(kDlpfConfig), imu_filter_delay_s_ * 1000.0,
+        static_cast<unsigned>(imu_.who_am_i()), imu_up_axis_, imu_frame_.c_str(),
+        state.failed_probes == 0 && state.losses == 0 ? "" :
+        (state.lives > 1 ? "; live again without a restart" :
+        "; found after failed probes, without a restart"));
+      return;
+    }
+    if (before == ImuPresence::kProbing && probe.presence() == ImuPresence::kAbsent) {
+      RCLCPP_ERROR(
+        get_logger(), "no IMU (%s) after %d probes: the bridge runs on wheel odometry and probes "
+        "again every %.0f s (a timed-out bus is a slave holding SDA: board/README.md, \"The I2C "
+        "bus\")", error.c_str(), state.start_attempts, kImuProbeSettings.reprobe_s);
+    } else if (probe.presence() == ImuPresence::kProbing) {
+      RCLCPP_WARN(
+        get_logger(), "IMU probe %d of %d failed (%s); again in %.0f s", state.attempt,
+        state.start_attempts, error.c_str(), kImuProbeSettings.start_interval_s);
+    } else {
+      // The minute probes of an absent chip: the report line carries them; one line an hour here.
+      RCLCPP_WARN_THROTTLE(
+        get_logger(), *get_clock(), 3600000, "IMU probe failed (%s); %ld of %ld failed so far",
+        error.c_str(), state.failed_probes, state.probes);
+    }
   }
 
   /// Ask the IMU thread to finish and join it; safe to call twice.
@@ -1305,11 +1370,15 @@ private:
   /// that is no longer a stopwatch but the wheels' word: the cart may be rolling when this node
   /// starts (the old code could not know, and took the roll as its zero), so the first block waits
   /// for witnessed rest however long that takes, and says so every 10 s while it waits.
+  ///
+  /// Until the chip answers, the thread probes it on imu_probe.hpp's schedule (probe_imu); a live
+  /// chip whose reads keep failing is closed and probed again, and its bias survives the gap.
   void read_imu()
   {
     const auto tick = period(1.0 / imu_rate_hz_);
     auto next = std::chrono::steady_clock::now();
-    const double boot_s = monotonic_s();
+    double boot_s = monotonic_s();  // when the chip last went live: the bias warning's clock
+    ImuProbe probe(kImuProbeSettings, boot_s);
     // `imu_bias_tracking` off is the contract this node shipped with: one block, taken on trust
     // the moment the node starts, never replaced. Dating the last motion one block before the
     // start declares the settle window already over, which is exactly what it used to do.
@@ -1320,6 +1389,21 @@ private:
         gyro_bias_.block_samples(), imu_bias_s_, imu_bias_s_);
     }
     while (imu_running_) {
+      if (probe.presence() != ImuPresence::kLive) {
+        const double now = monotonic_s();
+        if (!probe.due(now)) {
+          // Short naps, so a shutdown is never kept waiting by the minute between probes.
+          std::this_thread::sleep_for(
+            period(std::min(0.1, std::max(0.0, probe.next_probe_at() - now))));
+          continue;
+        }
+        probe_imu(probe);
+        if (probe.presence() == ImuPresence::kLive) {
+          boot_s = monotonic_s();
+          next = std::chrono::steady_clock::now();
+        }
+        continue;
+      }
       next += tick;
       const auto sample_at = std::chrono::steady_clock::now();
       if (next < sample_at) {
@@ -1335,9 +1419,19 @@ private:
       if (!sample.has_value()) {
         RCLCPP_WARN_THROTTLE(
           get_logger(), *get_clock(), 5000, "IMU read failed: %s", error.c_str());
+        if (probe.read(false, monotonic_s())) {
+          imu_.close_device();  // nothing of ours holds /dev/i2c-2 open while it is recovered
+          share_imu_state(probe, error);
+          RCLCPP_ERROR(
+            get_logger(), "IMU lost: %d reads failed in a row (last: %s); the bus is closed, "
+            "/imu/data_raw is silent, probing again (%d x %.0f s, then every %.0f s)",
+            kImuProbeSettings.lost_after, error.c_str(), kImuProbeSettings.start_attempts,
+            kImuProbeSettings.start_interval_s, kImuProbeSettings.reprobe_s);
+        }
         continue;
       }
       const double t = monotonic_s();
+      probe.read(true, t);
       const bool tracking = get_parameter("imu_bias_tracking").as_bool();
       imu_bias_tracking_ = tracking;
       bool took_block = false;
@@ -1612,8 +1706,14 @@ private:
   rclcpp::TimerBase::SharedPtr zupt_timer_;
 
   Mpu6050 imu_;  // opened only when imu_enable; ~BaseBridge joins the thread before these die
+  bool imu_enable_ = false;
   std::atomic<bool> imu_running_{false};
   std::thread imu_thread_;
+  // The probe schedule's state for the report line: the IMU thread copies it in at every probe and
+  // loss (never per sample), the status timer reads it.
+  std::mutex imu_state_mutex_;
+  ImuProbeState imu_state_;
+  std::string imu_last_error_;
   // The head server's link: after the members its reader thread touches, so it is joined first.
   std::unique_ptr<JsonLineLink> head_link_;
   // Last member on purpose: its destructor joins the reader thread before the publishers die.
