@@ -21,8 +21,10 @@ from pepin.arm import ArmModel
 from pepin.body import BodyBox, BodyMask, BodyModel
 from pepin.camera import OPTICAL_RPY
 from pepin.depth import Intrinsics
+from pepin.kalibr_stereo import rectification
 from pepin.mounts import rotation_from_rpy
 from pepin.neck import NeckAngles, NeckConfig, angle_limits, camera_pose, pan_pivot
+from pepin.stereo import StereoCalibration
 from pepin.tsdf import DepthLaw, GridSpec, RigidPose, Tsdf
 
 REPO = Path(__file__).resolve().parents[2]
@@ -30,8 +32,26 @@ NECK = NeckConfig.from_json(REPO / "config/neck.json")
 SHIPPED = BodyModel.load(REPO / "config/body.json")
 INTR = Intrinsics(fx=40.0, fy=40.0, cx=39.5, cy=29.5, width=80, height=60)  # ~90 deg, small
 MODEL = dataclasses.replace(SHIPPED, stride_px=1)  # every ray its own: exact for the asserts
-# The rectified left eye of the stereo head: fx 494.6 px at 800x600 (gaze.md section 0).
-EYE = Intrinsics(fx=494.6, fy=494.6, cx=399.5, cy=299.5, width=800, height=600)
+
+
+def rectified_eye(scale: float = 1.0) -> Intrinsics:
+    """The stereo head's rectified left eye as depth_stream publishes it, from
+    config/stereo_calibration.json (since the Kalibr calibration of 2026-10-04 fx 454 px, cy 266:
+    the principal point sits high, so the bottom edge looks 36 deg below the axis), ``scale`` of
+    its 800x600."""
+    cal = StereoCalibration.load(REPO / "config/stereo_calibration.json")
+    p1 = rectification(cal)[2]
+    return Intrinsics(
+        fx=float(p1[0, 0]) * scale,
+        fy=float(p1[1, 1]) * scale,
+        cx=float(p1[0, 2]) * scale,
+        cy=float(p1[1, 2]) * scale,
+        width=round(cal.width * scale),
+        height=round(cal.height * scale),
+    )
+
+
+EYE = rectified_eye()
 
 
 def camera(pan_deg: float, pitch_deg: float) -> RigidPose:
@@ -190,9 +210,10 @@ def test_a_ray_that_enters_the_body_carves_nothing_behind_it() -> None:
 def test_a_frame_that_never_sees_the_body_is_written_bit_for_bit() -> None:
     """The working pose (straight ahead, 23.8 deg down): no ray meets the body, the mask says so
     (None: the integrator pays nothing), and a clip of nothing but infinities changes nothing. The
-    synthetic eye's bottom edge is the real eye's, 55 deg down (fy 50 over 30 rows): the grown
-    top_load box's front face at x 0.13 m stands 3 cm short of where that edge crosses its top."""
-    intr = Intrinsics(fx=50.0, fy=50.0, cx=39.5, cy=29.5, width=80, height=60)
+    eye is the real one at a tenth of its size, its bottom edge 60 deg down: the grown top_load
+    box's front face at x 0.13 m stands 3 cm short of where that edge crosses its top (0.91 m;
+    at the 1.0 m it had until 2026-10-05 the edge entered it, 5 % of the live frame's rays)."""
+    intr = rectified_eye(0.1)
     pose = camera(0.0, 23.8)
     depth = march(intr, pose, SHIPPED.boxes)
     mask = BodyMask(SHIPPED)
@@ -223,24 +244,24 @@ def test_the_mask_is_rebuilt_only_when_the_head_the_optics_or_the_model_move() -
 
 
 def test_at_the_working_tilt_a_forward_or_side_look_never_sees_the_body() -> None:
-    """At 23.8 deg down, straight ahead and to the left the frame's bottom edge (55 deg down)
-    passes over the grown body, so the mask answers None and the integrator runs exactly as
-    without the filter. To the right the folded arm stands in the bottom rows; it is cut by its
-    own links (config/arm.json, tests/unit/test_arm.py), and the top_load box below it now only
-    grazes a corner: under 1 % of the rays at pans -30..-75 deg, none at -80..-95 (it took 6-9 %
-    while it stood to 0.95 m to hide the arm). Looking further back the margin enters the bottom
-    rows, the body as measured does not."""
+    """At 23.8 deg down through the real eye (its bottom edge 60 deg down): from 10 deg right to
+    35 deg left no ray meets the grown body, so the mask answers None and the integrator runs
+    exactly as without the filter. Further to the sides only the margin enters the bottom rows,
+    the body as measured does not: the cart box's under 2 % of the rays to the left, top_load's
+    corner under 3 % to the right (the folded arm there is cut by its own links, config/arm.json;
+    top_load took 6-9 % while it stood to 0.95 m to hide it). Looking back the cart's rear rim
+    itself reaches the bottom rows."""
     mask = BodyMask(SHIPPED)
-    for pan in np.linspace(0.0, 95.0, 20):
+    bare = dataclasses.replace(SHIPPED, margin_m=0.0)
+    for pan in np.linspace(-10.0, 35.0, 10):
+        assert mask.for_frame(EYE, camera(pan, 23.8)) is None, pan
+    for pan in np.concatenate([np.linspace(40.0, 95.0, 12), np.linspace(-95.0, -15.0, 17)]):
         hit = mask.for_frame(EYE, camera(pan, 23.8))
-        assert hit is None or hit.share < 0.005, pan
-    for pan in np.linspace(-95.0, -30.0, 14):
-        hit = mask.for_frame(EYE, camera(pan, 23.8))
-        assert hit is None or hit.share < 0.01, pan
+        assert hit is None or hit.share < (0.02 if pan > 0 else 0.03), pan
+        assert np.isinf(bare.ray_depth(EYE, camera(pan, 23.8)).z).all(), pan
     back = mask.for_frame(EYE, camera(150.0, 23.8))
-    assert back is not None and back.share < 0.03
-    measured = BodyModel(SHIPPED.boxes, margin_m=0.0, stride_px=4).ray_depth(EYE, camera(150, 23.8))
-    assert np.isinf(measured.z).all()
+    assert back is not None and back.share < 0.05
+    assert bare.ray_depth(EYE, camera(150.0, 23.8)).share < 0.005
     assert mask.for_frame(EYE, camera(150.0, 45.0)) is not None, "reverse-gaze does see it"
 
 
