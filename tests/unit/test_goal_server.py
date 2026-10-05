@@ -21,6 +21,7 @@ import ros_stubs
 ros_stubs.install()
 
 
+import pepin_bringup.goal_server as goal_server_module  # noqa: E402
 from pepin_bringup.goal_server import GoalServer  # noqa: E402
 from ros_stubs import (  # noqa: E402
     Header,
@@ -47,11 +48,35 @@ class Wire:
         return [json.loads(line) for line in self.raw.decode().splitlines() if line.strip()]
 
 
-def server(tmp_path: Path) -> Any:
+class FaceSink:
+    def __init__(self) -> None:
+        self.said: list[tuple[str, ...]] = []
+
+    def event(self, name: str, *, end: bool = False) -> None:
+        self.said.append(("event", name, "end") if end else ("event", name))
+
+    def clear(self) -> None:
+        self.said.append(("clear",))
+
+    def lease(self, seconds: float) -> None:
+        self.said.append(("lease", str(seconds)))
+
+    def close(self) -> None:
+        self.said.append(("close",))
+
+
+def server(tmp_path: Path, face: FaceSink | None = None) -> Any:
     """A goal server on an ephemeral port, its records in ``tmp_path``: no TF, no placement,
-    no Nav2 — a test adds what its stack has."""
-    with ros_stubs.parameters(port=0, record_dir=str(tmp_path)):
-        node = GoalServer()
+    no Nav2 — a test adds what its stack has; its face (on by default) speaks to ``face``,
+    never to the board's head server."""
+    sink = face or FaceSink()
+    real = goal_server_module.face_client
+    goal_server_module.face_client = lambda: sink  # type: ignore[assignment]
+    try:
+        with ros_stubs.parameters(port=0, record_dir=str(tmp_path)):
+            node = GoalServer()
+    finally:
+        goal_server_module.face_client = real  # type: ignore[assignment]
     node.clock.seconds = NOW
     return node
 
@@ -310,9 +335,9 @@ class Goal:
         self.cancelled += 1
 
 
-def ready_to_drive(tmp_path: Path) -> Any:
+def ready_to_drive(tmp_path: Path, face: FaceSink | None = None) -> Any:
     """A placed node with a fresh pose, Nav2 up, and no recorder to wait for."""
-    node = server(tmp_path)
+    node = server(tmp_path, face)
     standing_at(node, at(0.0, 0.0, 0.0, age_s=0.1))
     placed(node)
     node._client.server = True
@@ -498,37 +523,16 @@ def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> N
     assert not node.navigating()
 
 
-class FaceSink:
-    """The head server's door as the drive's face uses it: every moment, in order."""
-
-    def __init__(self) -> None:
-        self.said: list[tuple[str, ...]] = []
-
-    def event(self, name: str, *, end: bool = False) -> None:
-        self.said.append(("event", name, "end") if end else ("event", name))
-
-    def clear(self) -> None:
-        self.said.append(("clear",))
-
-    def lease(self, seconds: float) -> None:
-        self.said.append(("lease", str(seconds)))
-
-    def close(self) -> None:
-        self.said.append(("close",))
-
-
 def test_face_events_follow_a_drive_behind_their_flag(tmp_path: Path, monkeypatch: Any) -> None:
-    """Off by default: no door is opened. On: focused when Nav2 takes the goal, one struggle
-    per new recovery, happy at the arrival (ending the focus); the lease rides the node's timer;
-    off again: the door is cleared and closed."""
+    """On by default: the door is opened at the start. Focused when Nav2 takes the goal, one
+    struggle per new recovery, happy at the arrival (ending the focus); the lease rides the
+    node's timer; off: the door is cleared and closed."""
     import pepin_bringup.goal_server as goal_server
 
     sink = FaceSink()
-    monkeypatch.setattr(goal_server, "face_client", lambda: sink)
     monkeypatch.setattr(goal_server.time, "sleep", lambda _s: None)
-    node = ready_to_drive(tmp_path)
-    assert node._switches["face_events"] is False and node._drive_face is None
-    node._switches.set("face_events", True)
+    node = ready_to_drive(tmp_path, sink)
+    assert node._switches["face_events"] is True and node._drive_face is not None
     feedback: list[Any] = []
     sent = node._client.send_goal_async
 
@@ -566,10 +570,8 @@ def test_a_refused_goal_is_a_sad_face_and_a_dropped_report_clears_the_focus(
     import pepin_bringup.goal_server as goal_server
 
     sink = FaceSink()
-    monkeypatch.setattr(goal_server, "face_client", lambda: sink)
     monkeypatch.setattr(goal_server.time, "sleep", lambda _s: None)
-    node = ready_to_drive(tmp_path)
-    node._switches.set("face_events", True)
+    node = ready_to_drive(tmp_path, sink)
     refused = Handle(1)
     refused.accepted = False
     node._client.handle = refused

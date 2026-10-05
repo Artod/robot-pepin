@@ -9,7 +9,7 @@ from typing import Any
 
 import pytest
 
-from pepin.tools import TOOLS, Result, Robot
+from pepin.tools import TOOLS, Result, Robot, progress_to
 from pepin.tools.clients import HeadPose
 from pepin.tools.fakes import (
     REST,
@@ -20,6 +20,7 @@ from pepin.tools.fakes import (
     FakeSpeech,
     FakeThing,
     FakeWorld,
+    WallClock,
     arrival_script,
     fake_robot,
 )
@@ -120,6 +121,42 @@ def test_go_to_waits_for_the_arrival_and_reports_it() -> None:
         "off_by_m": 0.06,
     }
     assert goals(robot).asked[-1] == {"cmd": "go", "place": "printer"}
+
+
+def test_a_drive_reports_when_the_goal_server_takes_it_to_a_caller_that_listens() -> None:
+    robot = fake_robot()
+    heard: list[tuple[float, dict[str, Any]]] = []
+    with progress_to(lambda report: heard.append((robot.clock(), report))):
+        result = call(robot, "go_to", place="printer")
+    assert heard == [(1.0, {"status": "driving", "target": "printer", "run": 7})]  # accepted
+    assert result["arrived"] and robot.clock() == 4.0  # the drive went on to its end
+    assert call(fake_robot(), "go_to", place="printer")["arrived"]  # nobody listening: fine
+
+
+def test_a_progress_listener_that_breaks_never_breaks_the_drive() -> None:
+    def broken(report: dict[str, Any]) -> None:
+        raise RuntimeError("the session is gone")
+
+    with progress_to(broken):
+        result = call(fake_robot(), "go_to", place="printer")
+    assert result["arrived"]
+
+
+def test_a_refused_drive_reports_no_start() -> None:
+    robot = fake_robot()
+    heard: list[dict[str, Any]] = []
+    with progress_to(heard.append):
+        result = call(robot, "go_to", place="kitchen")
+    assert not result["ok"] and heard == []
+
+
+def test_the_wall_clock_fake_takes_real_time_and_accepts_on_its_own_delay() -> None:
+    clock = WallClock()
+    robot = fake_robot(clock=clock, goals=FakeGoalServer(clock, step_s=0.01, accept_s=0.03))
+    when: list[float] = []
+    with progress_to(lambda report: when.append(clock())):
+        assert call(robot, "go_to", place="home")["arrived"]
+    assert 0.03 <= when[0] < 0.2 and 0.06 <= clock() < 0.5
 
 
 def test_go_to_pose_sends_the_coordinates() -> None:

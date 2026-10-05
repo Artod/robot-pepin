@@ -72,6 +72,13 @@ The speech level ('M' frames, sent by the board's audio server while it plays) o
 whatever expression shows, with a fast attack and a slower release; without fresh levels for
 250 ms the mouth closes by itself.
 
+**At rest the face is alive** (`config/face.json`, `idle`): while a resting expression shows
+(neutral, smile), every 8-20 s one gesture passes over it as a smooth bump: a brief wider smile, a
+small tilt either way (asymmetry and a sideways shift) or a blink-like thinning of the line. None
+starts within 3 s of an expression change or of a speech level, and one under way fades out in
+0.25 s when an event or speech comes. The choices are random (seeded from `esp_random()` at
+boot); the simulator draws the same ones from the same seed.
+
 Expressions, by wire id (append only):
 
 | id | name | looks like |

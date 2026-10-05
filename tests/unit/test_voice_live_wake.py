@@ -7,7 +7,15 @@ import struct
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES
-from pepin.voice_live.wake import Segmenter, is_goodbye, is_wake, rms_db, words
+from pepin.voice_live.wake import (
+    Segmenter,
+    is_goodbye,
+    is_hallucination,
+    is_stop,
+    is_wake,
+    rms_db,
+    words,
+)
 
 
 @pytest.mark.parametrize(
@@ -112,3 +120,67 @@ def test_a_long_segment_is_cut_at_max_s_and_a_blip_is_dropped() -> None:
     results += [blip.feed(tone(-20.0), 0.1) for _ in range(3)]
     results += [blip.feed(tone(-60.0), 0.2) for _ in range(5)]
     assert all(r is None for r in results)
+
+
+# 2026-10-05, the wake gate's 327 segments (data/voice/20261005/wake.jsonl): Whisper's lines for
+# room noise and motors, with their counts, and every call of the robot that day.
+WHISPER_NOISE = [
+    ("Продолжение следует...", 121),
+    ("Спасибо.", 60),
+    ("Субтитры сделал DimaTorzok", 52),
+    ("Аплодисменты.", 12),
+    ("Смотрите продолжение в следующей серии.", 11),
+    ("Добро пожаловать в наш канал!", 1),
+    ("Редактор субтитров А.Семкин Корректор А.Егорова", 1),
+]
+CALLS = [
+    "Пеппин и ЖЭК принтеру.",
+    "Пеппин и жарик принтеров.",
+    "Пипин, где ты находишься?",
+    "А пипин и жек принтеру.",
+    "Эй, Пипин, где ты находишься?",
+    "Пипин, повтори ровно два слова и больше ничего, слушаюсь, хозяин.",
+    "Эй, Пипин, езжай к принтеру!",
+]
+SAID = [  # speech that was no call, kept as speech
+    "Вот так.",
+    "Ага, все.",
+    "Ну хорошо, а Жошу, спасибо.",
+    "Всё, спасибо. Пока.",
+    "Спасибо, Пепин",
+    "Поехали!",
+    "Все тихо.",
+]
+
+
+@pytest.mark.parametrize(("text", "count"), WHISPER_NOISE)
+def test_whispers_lines_for_noise_are_dropped(text: str, count: int) -> None:
+    assert is_hallucination(text)
+
+
+@pytest.mark.parametrize("text", CALLS + SAID)
+def test_speech_and_every_call_of_the_day_are_kept(text: str) -> None:
+    assert not is_hallucination(text)
+
+
+def test_the_days_calls_still_wake_and_its_noise_never_did() -> None:
+    assert all(is_wake(text) for text in CALLS)
+    assert not any(is_wake(text) for text, _ in WHISPER_NOISE)
+    assert sum(count for _, count in WHISPER_NOISE) == 258  # of 327 segments
+
+
+@pytest.mark.parametrize(
+    ("text", "stop"),
+    [
+        ("Стоп!", True),
+        ("Пепин, стой", True),
+        ("Хватит, остановись", True),
+        ("stop", True),
+        ("Отмена", True),
+        ("Постой, а где принтер?", False),
+        ("Стопка книг на столе", False),
+        ("Пепин, езжай домой", False),
+    ],
+)
+def test_a_stop_is_a_word_of_its_own(text: str, stop: bool) -> None:
+    assert is_stop(text) is stop

@@ -6,7 +6,8 @@ for a restart once its samples have been implausible for a while with the wheels
 (``vio_restart_rejects``); this node, started by vio.launch.py in ``pepin-vio`` beside OpenVINS,
 answers by sending OpenVINS's process the launch's own SIGINT, as ``ros/laptop.sh vio kick``
 does by hand. The launch respawns it 2 s later, and it initialises again at rest on the next
-motion (a head pan).
+motion (a head pan). Each restart is a moment on the head's face (``vio_restart``: struggling for
+a moment, pepin.face_events), through the board's head server.
 """
 
 from __future__ import annotations
@@ -17,11 +18,20 @@ from collections.abc import Callable, Sequence
 from rclpy.node import Node
 from std_srvs.srv import Trigger
 
+from pepin.face_events import VIO_RESTART, FaceSink
 from pepin_bringup.node_kit import spin_main
 
 RESTART_SERVICE = "/vio/restart"
 PROCESS = "run_subscribe_msckf"  # OpenVINS's executable, matched on the command line
 SIGNAL = ("pkill", "-INT", "-f", PROCESS)
+
+
+def face_client() -> FaceSink:
+    """The head server's door for the restarts' moments (``source`` vio), on the board."""
+    from pepin.audio_link import board_host
+    from pepin.head_link import HEAD_PORT, HeadClient
+
+    return HeadClient(board_host(), HEAD_PORT, source="vio").start()
 
 
 def _run(command: Sequence[str]) -> int:
@@ -32,9 +42,14 @@ def _run(command: Sequence[str]) -> int:
 class VioKeeper(Node):
     """Serves ``/vio/restart``: SIGINT to OpenVINS, which vio.launch.py respawns."""
 
-    def __init__(self, run: Callable[[Sequence[str]], int] = _run) -> None:
+    def __init__(
+        self, run: Callable[[Sequence[str]], int] = _run, face: FaceSink | None = None
+    ) -> None:
+        """``run`` runs a command (pkill); ``face`` takes the restarts' moments (the board's
+        head server by default)."""
         super().__init__("vio_keeper")
         self._run = run
+        self._face = face if face is not None else face_client()
         self._restarts = 0
         self.create_service(Trigger, RESTART_SERVICE, self._on_restart)
         self.get_logger().info(
@@ -53,6 +68,7 @@ class VioKeeper(Node):
                 f"{PROCESS} signalled ({self._restarts} since the start): respawned in 2 s, it"
                 " initialises at rest on the next motion"
             )
+            self._face.event(VIO_RESTART)
         else:
             response.message = f"no {PROCESS} process to signal (pkill exit {code})"
         self.get_logger().info(f"restart asked: {response.message}")

@@ -20,7 +20,17 @@ def test_a_restart_sends_openvins_the_launchs_sigint_and_says_when_nothing_ran()
         ran.append(list(command))
         return codes.pop(0)
 
-    node = VioKeeper(run=run)
+    face: list[str] = []
+
+    class Face:
+        def event(self, name: str, *, end: bool = False) -> None:
+            face.append(name)
+
+        def clear(self) -> None: ...
+        def lease(self, seconds: float) -> None: ...
+        def close(self) -> None: ...
+
+    node = VioKeeper(run=run, face=Face())
     _, serve = node.services[RESTART_SERVICE]
     ok = serve(Trigger.Request(), Trigger.Response())
     assert ok.success and "signalled (1 since the start)" in ok.message
@@ -28,3 +38,4 @@ def test_a_restart_sends_openvins_the_launchs_sigint_and_says_when_nothing_ran()
     none = serve(Trigger.Request(), Trigger.Response())
     assert not none.success and "no run_subscribe_msckf process" in none.message
     assert any("vio keeper up" in t for t in node.get_logger().texts("info"))
+    assert face == ["vio_restart"]  # the restart, not the miss, on the head's face

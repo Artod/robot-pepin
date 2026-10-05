@@ -60,7 +60,7 @@ from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
 from pepin.face_events import DriveFace, FaceSink
-from pepin.flags import UNMEASURED, Flag, FlagSet, load_knobs, with_knobs
+from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
@@ -156,13 +156,15 @@ FLAGS = FlagSet(
     ),
     Flag(
         "face_events",
-        False,
+        True,
         description="the drive's moments on the head's face (pepin.face_events, through the"
         " board's head server on PEPIN_HOST:3340): focused while a goal runs, struggling for a"
         " moment at each new Nav2 recovery, happy on arrival, sad on an abort or a refusal, a"
         " flat line on a cancel (config/face.json's events say what each looks like); and a"
         " brain lease every 2 s, so the face falls asleep when this node or the WiFi is gone",
-        why=UNMEASURED,
+        why="on since 2026-10-05: set live for the demo's voice drives, the head showed each"
+        " drive's moments with no cost to the drive (a send never blocks; a head server that is"
+        " away costs one logged reconnection every 5 s); the robot shows what it does",
         on_when="the head is on the robot and its server answers (uv run python -m"
         " pepin.head_link status)",
         off_when="the face gets in the way of a test, or the head server is not there (each"

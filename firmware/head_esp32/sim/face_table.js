@@ -154,10 +154,10 @@ const FACE_TABLE = {
     0.0,
     0.0,
     0.5,
-    0.15,
+    0.4,
     0.0
    ],
-   "note": "a closed smile"
+   "note": "a closed smile, breathing a little deeper than the rest (the resting face)"
   },
   {
    "name": "happy",
@@ -428,48 +428,168 @@ const FACE_TABLE = {
   "goal_accepted": {
    "name": "focused",
    "hold_s": null,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "recovery": {
    "name": "struggling",
    "hold_s": 3.0,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 2.0
   },
   "arrived": {
    "name": "happy",
    "hold_s": 4.0,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "goal_failed": {
    "name": "sad",
    "hold_s": 5.0,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "goal_cancelled": {
    "name": "flat",
    "hold_s": 1.5,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "listening": {
    "name": "listening",
    "hold_s": null,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "thinking": {
    "name": "thinking",
    "hold_s": null,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
   },
   "speaking": {
    "name": "smile",
    "hold_s": null,
-   "intensity": 0.6
+   "intensity": 0.6,
+   "min_gap_s": 0.0
   },
   "brain_lost": {
    "name": "sleepy",
    "hold_s": null,
-   "intensity": 1.0
+   "intensity": 1.0,
+   "min_gap_s": 0.0
+  },
+  "stall_look": {
+   "name": "surprised",
+   "hold_s": 1.5,
+   "intensity": 1.0,
+   "min_gap_s": 6.0
+  },
+  "phantom_carved": {
+   "name": "grin",
+   "hold_s": 2.0,
+   "intensity": 0.6,
+   "min_gap_s": 6.0
+  },
+  "obstacle_confirmed": {
+   "name": "worried",
+   "hold_s": 2.5,
+   "intensity": 1.0,
+   "min_gap_s": 6.0
+  },
+  "vio_restart": {
+   "name": "struggling",
+   "hold_s": 1.5,
+   "intensity": 1.0,
+   "min_gap_s": 30.0
   }
+ },
+ "idle": {
+  "enabled": true,
+  "expressions": [
+   0,
+   1
+  ],
+  "every_s": [
+   8.0,
+   20.0
+  ],
+  "settle_s": 3.0,
+  "fade_s": 0.25,
+  "gestures": [
+   {
+    "name": "grin",
+    "weight": 2.0,
+    "duration_s": 1.6,
+    "mirror": false,
+    "deltas": [
+     0.06,
+     0.0,
+     0.22,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "name": "tilt",
+    "weight": 2.0,
+    "duration_s": 2.2,
+    "mirror": true,
+    "deltas": [
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.28,
+     0.1,
+     0.0,
+     0.0,
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "name": "blink",
+    "weight": 1.0,
+    "duration_s": 0.4,
+    "mirror": false,
+    "deltas": [
+     -0.03,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     0.0,
+     -0.25,
+     0.0,
+     0.0
+    ]
+   }
+  ]
  },
  "screen": {
   "width": 320,

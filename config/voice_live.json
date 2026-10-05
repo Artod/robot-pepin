@@ -1,31 +1,42 @@
 {
-  "_note": "Pepin's voice on the Gemini Live API (scripts/voice_live.py, pepin.voice_live). Every number that can spend money is here; a session that would break a cap is never opened. Costs are ESTIMATES from the prices below and the server's own token counts, not a bill.",
+  "_note": "Pepin's voice on the Gemini Live API (scripts/voice_live.py, pepin.voice_live). Every number that can spend money is here; a session that would break a cap is never opened. Costs are ESTIMATES from the prices below, the server's own token counts and the seconds streamed, not a bill (pepin.voice_live.budget).",
   "model": "gemini-3.8-live",
   "model_note": "the default Live model per ai.google.dev/gemini-api/docs/models (2026-10-02): stable, native audio, async function calling; gemini-3.1-flash-live-preview is the legacy one",
   "voice": "Puck",
   "caps": {
     "max_session_s": 600,
     "max_sessions_per_hour": 20,
-    "daily_budget_cad": 1.0,
-    "note": "a session is closed at max_session_s; a wake past max_sessions_per_hour (opened in the last 3600 s) or with today's estimate at daily_budget_cad is refused, and a session that crosses the budget is closed. 1 CAD/day keeps a month under the 40 CAD cloud cap"
+    "daily_budget_cad": 5.0,
+    "note": "a session is closed at max_session_s; a wake past max_sessions_per_hour (opened in the last 3600 s) or with today's estimate at daily_budget_cad is refused, and a session that crosses the budget is closed. 5 CAD/day on Artem's word (2026-10-05): a demo is never cut off by the cap again (it closed one that day at an estimate 3x Google's own counts). A month under the 40 CAD cloud cap rests on the per-command cost, 0.016 CAD a spoken drive command as measured 2026-10-05, not on this number"
   },
   "prices_usd_per_mtok": {
     "audio_in": 3.0,
     "audio_out": 12.0,
     "text_in": 0.75,
     "text_out": 4.5,
-    "note": "gemini-3.8-live paid tier, ai.google.dev/gemini-api/docs/pricing fetched 2026-10-02 (audio in 0.005 USD/min, out 0.018 USD/min). The Live API bills the whole context window again at every turn"
+    "note": "gemini-3.8-live paid tier, ai.google.dev/gemini-api/docs/pricing fetched 2026-10-02 (audio in 0.005 USD/min, out 0.018 USD/min). Every model pass bills the context it reads (the server's usage report); every second streamed is billed once (silence too)"
   },
   "audio_tokens_per_s": 25,
   "usd_to_cad": 1.38,
   "session": {
     "idle_close_s": 25.0,
-    "resume_valid_s": 7000.0,
+    "idle_after_drive_s": 8.0,
+    "resume_valid_s": 120.0,
     "compression_trigger_tokens": 16000,
     "compression_target_tokens": 8000,
     "barge_in": false,
     "playback_lead_s": 0.5,
-    "note": "idle_close_s: no speech from either side and no tool running for this long closes the session. resume_valid_s: a resumption handle is reused this long after its session ended (the server keeps it 2 h). Compression bounds the context re-billed each turn (16k tokens = 0.048 USD a turn at most). barge_in false: the mic is not streamed while the robot speaks (true streams it, trusting the array's echo canceller, and Live's interruption silences the speaker)"
+    "report_drive_start": true,
+    "mic_while_driving": "gated",
+    "transcription_languages": [
+      "ru-RU"
+    ],
+    "note": "idle_close_s: this long without the person's speech (the server's VAD or transcript; room noise does not count) and no tool running closes the session; idle_after_drive_s: the same after a drive's last line. resume_valid_s: a resumption handle is reused this long after its session ended: a resumed session re-bills the whole earlier conversation at every pass (2026-10-05: 2.9k tokens a pass fresh, up to 10k resumed by the day's end), so only a follow-up within two minutes continues it. Compression bounds the context re-billed each pass (16k tokens = 0.012-0.048 USD a pass at most). barge_in false: the mic is not streamed while the robot speaks (true streams it, trusting the array's echo canceller, and Live's interruption silences the speaker). report_drive_start: a drive answers twice on its call, 'driving' when the goal server takes it (the model says its acknowledgement) and the result when it ends; false: once, at the end. mic_while_driving gated: during a drive nothing is streamed; Whisper listens and only speech naming the robot or saying stop goes to Live (a stop halts the robot at once); streamed: the mic goes to Live all along (2026-10-05: motor noise and side talk made spurious turns and once a cancel). transcription_languages: BCP-47 hints for Live's transcript of the person (the goodbye is read from it; unhinted it wrote Russian as Portuguese, Spanish, Korean)"
+  },
+  "persona": {
+    "acknowledge": "Слушаюсь, хозяин",
+    "arrived": "Я на месте, хозяин",
+    "note": "the style of the robot's own lines: 'acknowledge' when a drive sets off, 'arrived' when it gets there. The model says them in its own voice and may phrase them; empty: no style given"
   },
   "wake": {
     "whisper_repo": "mlx-community/whisper-large-v3-turbo",

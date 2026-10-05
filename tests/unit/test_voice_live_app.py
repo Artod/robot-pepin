@@ -103,8 +103,14 @@ def test_the_name_opens_a_session_with_the_segment_heard_first(tmp_path: Path) -
     assert str(row["wav"]).startswith("wake/")
 
 
-def test_other_speech_opens_nothing_and_is_still_logged(tmp_path: Path) -> None:
-    loop, live = build(tmp_path, "просто разговор на кухне")
+@pytest.mark.parametrize(
+    ("text", "noise"),
+    [("просто разговор на кухне", False), ("Субтитры сделал DimaTorzok", True)],
+)
+def test_other_speech_opens_nothing_and_is_still_logged(
+    tmp_path: Path, text: str, noise: bool
+) -> None:
+    loop, live = build(tmp_path, text)
     stop = threading.Event()
 
     async def main() -> None:
@@ -118,7 +124,8 @@ def test_other_speech_opens_nothing_and_is_still_logged(tmp_path: Path) -> None:
     asyncio.run(main())
     assert loop.sessions == [] and live.sessions == []
     (row,) = wake_rows(tmp_path)
-    assert row["wake"] is False
+    assert row["wake"] is False and row["hallucination"] is noise
+    assert loop.hallucinations == int(noise)
 
 
 def test_a_wake_past_the_hourly_cap_is_refused(tmp_path: Path) -> None:

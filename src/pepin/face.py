@@ -55,11 +55,38 @@ class Expression:
 @dataclass(frozen=True)
 class FaceEvent:
     """What a robot event shows: an expression, how long (None: until replaced or cleared) and
-    how strongly (1.0 the expression itself, 0.5 halfway from neutral)."""
+    how strongly (1.0 the expression itself, 0.5 halfway from neutral); ``min_gap_s``: the same
+    event from the same source sooner than this after the last is dropped."""
 
     expression: str
     hold_s: float | None
     intensity: float
+    min_gap_s: float = 0.0
+
+
+@dataclass(frozen=True)
+class IdleGesture:
+    """One idle gesture: what it adds to the parameters at its peak, for how long, how often
+    against the others, and whether it may go either way (``mirror``: the sign at random)."""
+
+    name: str
+    weight: float
+    duration_s: float
+    mirror: bool
+    deltas: tuple[float, ...]
+
+
+@dataclass(frozen=True)
+class Idle:
+    """The face alive at rest: on which expressions, how often a gesture comes, how long after
+    a change or speech none may, how fast one under way fades, and the gestures."""
+
+    enabled: bool
+    expressions: tuple[int, ...]
+    every_s: tuple[float, float]
+    settle_s: float
+    fade_s: float
+    gestures: tuple[IdleGesture, ...]
 
 
 @dataclass(frozen=True)
@@ -74,6 +101,7 @@ class FaceTable:
     timing: dict[str, float]
     screen: dict[str, int]
     lipsync: dict[str, float]
+    idle: Idle
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -145,6 +173,8 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
         raise ValueError("the firmware falls asleep into 'sleepy': the table needs it")
     events = {}
     for event, spec in data.get("events", {}).items():
+        if event == "note":
+            continue
         expression = str(spec["name"])
         if expression not in names:
             raise ValueError(f"event {event}: no expression {expression!r}")
@@ -154,7 +184,10 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
             raise ValueError(f"event {event}: hold_s is positive or null")
         if not 0.0 <= intensity <= 1.0:
             raise ValueError(f"event {event}: intensity in 0..1")
-        events[event] = FaceEvent(expression, None if hold is None else float(hold), intensity)
+        gap = float(spec.get("min_gap_s", 0.0))
+        if gap < 0.0:
+            raise ValueError(f"event {event}: min_gap_s is not negative")
+        events[event] = FaceEvent(expression, None if hold is None else float(hold), intensity, gap)
     colors = {k: str(v) for k, v in data["colors"].items() if k != "note"}
     for key, color in colors.items():
         if not re.fullmatch(r"#[0-9A-Fa-f]{6}", color):
@@ -168,6 +201,47 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
         timing={k: float(v) for k, v in data["timing"].items() if k != "note"},
         screen={k: int(v) for k, v in data["screen"].items() if k != "note"},
         lipsync=_lipsync({k: float(v) for k, v in data["lipsync"].items() if k != "note"}),
+        idle=_idle(data.get("idle", {"enabled": False}), names, params),
+    )
+
+
+def _idle(block: dict[str, Any], names: list[str], params: list[FaceParam]) -> Idle:
+    """The idle block, checked: known expressions and params, a sane span, positive weights and
+    durations, at least one gesture when enabled."""
+    enabled = bool(block.get("enabled", True))
+    wanted = [str(n) for n in block.get("expressions", [])]
+    unknown = [n for n in wanted if n not in names]
+    if unknown:
+        raise ValueError(f"idle: no expression {', '.join(unknown)}")
+    if max((names.index(n) for n in wanted), default=0) >= 32:
+        raise ValueError("idle: the firmware's mask holds expressions 0..31")
+    lo, hi = (float(v) for v in block.get("every_s", (10.0, 10.0)))
+    if not 0.0 < lo <= hi:
+        raise ValueError(f"idle: every_s {lo}..{hi}, 0 < min <= max")
+    by_name = [p.name for p in params]
+    gestures = []
+    for spec in block.get("gestures", []):
+        name = str(spec["name"])
+        given = dict(spec.get("params", {}))
+        bad = sorted(set(given) - set(by_name))
+        if bad:
+            raise ValueError(f"idle gesture {name}: unknown params {', '.join(bad)}")
+        weight, duration = float(spec.get("weight", 1.0)), float(spec["duration_s"])
+        if not weight > 0.0 or not duration > 0.0:
+            raise ValueError(f"idle gesture {name}: weight and duration_s are positive")
+        deltas = tuple(float(given.get(p, 0.0)) for p in by_name)
+        gestures.append(IdleGesture(name, weight, duration, bool(spec.get("mirror")), deltas))
+    if enabled and not gestures:
+        raise ValueError("idle: enabled with no gesture")
+    if not gestures:  # the firmware's arrays need one entry
+        gestures.append(IdleGesture("none", 1.0, 1.0, False, (0.0,) * len(params)))
+    return Idle(
+        enabled=enabled and bool(wanted),
+        expressions=tuple(names.index(n) for n in wanted),
+        every_s=(lo, hi),
+        settle_s=float(block.get("settle_s", 3.0)),
+        fade_s=max(1e-3, float(block.get("fade_s", 0.25))),
+        gestures=tuple(gestures),
     )
 
 
@@ -204,6 +278,8 @@ def _float(value: float) -> str:
 def render_header(table: FaceTable) -> str:
     """face_table.h: the table as C++ constants for the firmware (and its native tests)."""
     n = len(table.params)
+    gestures = table.idle.gestures
+    mask = sum(1 << i for i in table.idle.expressions)
     lows = ", ".join(_float(p.lo) for p in table.params)
     highs = ", ".join(_float(p.hi) for p in table.params)
     lines = [
@@ -243,6 +319,28 @@ def render_header(table: FaceTable) -> str:
         "// timing",
         *(f"constexpr float k{_camel(k)} = {_float(v)};" for k, v in table.timing.items()),
         "",
+        "// idle: the face alive at rest",
+        f"constexpr bool kIdleOn = {'true' if table.idle.enabled else 'false'};",
+        f"constexpr uint32_t kIdleExpressionMask = 0x{mask:08X}u;"
+        f"  // {', '.join(table.names[i] for i in table.idle.expressions) or 'none'}",
+        f"constexpr float kIdleEveryMinS = {_float(table.idle.every_s[0])};",
+        f"constexpr float kIdleEveryMaxS = {_float(table.idle.every_s[1])};",
+        f"constexpr float kIdleSettleS = {_float(table.idle.settle_s)};",
+        f"constexpr float kIdleFadeS = {_float(table.idle.fade_s)};",
+        f"constexpr int kIdleGestureCount = {len(gestures)};",
+        "constexpr float kIdleGestureWeight[kIdleGestureCount] = {"
+        + ", ".join(_float(g.weight) for g in gestures)
+        + "};",
+        "constexpr float kIdleGestureDurationS[kIdleGestureCount] = {"
+        + ", ".join(_float(g.duration_s) for g in gestures)
+        + "};",
+        "constexpr bool kIdleGestureMirror[kIdleGestureCount] = {"
+        + ", ".join("true" if g.mirror else "false" for g in gestures)
+        + "};",
+        "constexpr float kIdleGestures[kIdleGestureCount][kParamCount] = {",
+        *(f"  {{{', '.join(_float(v) for v in g.deltas)}}},  // {g.name}" for g in gestures),
+        "};",
+        "",
         "// colors, RGB565",
         *(
             f"constexpr uint16_t kColor{_camel(k)} = 0x{rgb565(v):04X};  // {v}"
@@ -266,8 +364,30 @@ def render_script(table: FaceTable) -> str:
             {"name": e.name, "values": list(e.values), "note": e.note} for e in table.expressions
         ],
         "events": {
-            k: {"name": v.expression, "hold_s": v.hold_s, "intensity": v.intensity}
+            k: {
+                "name": v.expression,
+                "hold_s": v.hold_s,
+                "intensity": v.intensity,
+                "min_gap_s": v.min_gap_s,
+            }
             for k, v in table.events.items()
+        },
+        "idle": {
+            "enabled": table.idle.enabled,
+            "expressions": list(table.idle.expressions),
+            "every_s": list(table.idle.every_s),
+            "settle_s": table.idle.settle_s,
+            "fade_s": table.idle.fade_s,
+            "gestures": [
+                {
+                    "name": g.name,
+                    "weight": g.weight,
+                    "duration_s": g.duration_s,
+                    "mirror": g.mirror,
+                    "deltas": list(g.deltas),
+                }
+                for g in table.idle.gestures
+            ],
         },
         "screen": table.screen,
         "geometry": table.geometry,

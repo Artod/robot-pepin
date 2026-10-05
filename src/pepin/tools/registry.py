@@ -26,6 +26,8 @@ the failure: a tool body is written for the case where the owners answer.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import inspect
 import json
 import logging
@@ -83,6 +85,39 @@ class Image:
         """What stands in the result's text for the picture that travels beside it."""
         size = f"{self.width}x{self.height} " if self.width and self.height else ""
         return f"{size}{self.mime}, {len(self.data) / 1024:.0f} KB, attached"
+
+
+ProgressSink = Callable[[Result], None]
+"""Where a running tool's interim reports go: called on the tool's own thread."""
+
+_progress: contextvars.ContextVar[ProgressSink | None] = contextvars.ContextVar(
+    "tool_progress", default=None
+)
+
+
+def progress(**payload: Any) -> None:
+    """A running tool's interim report (a drive the goal server has taken), for a caller that
+    can carry it to the model before the result (the Live API's continuing function response);
+    nothing happens when no caller listens (:func:`progress_to`), and a caller that fails is
+    logged, never allowed to break the tool."""
+    sink = _progress.get()
+    if sink is None:
+        return
+    try:
+        sink(dict(payload))
+    except Exception:
+        logger.exception("a progress report was lost")
+
+
+@contextlib.contextmanager
+def progress_to(sink: ProgressSink) -> Iterator[None]:
+    """Tools run in this context (and in threads started from it with its context copied, as
+    ``asyncio.to_thread`` does) report their progress to ``sink``."""
+    token = _progress.set(sink)
+    try:
+        yield
+    finally:
+        _progress.reset(token)
 
 
 def render(result: Result) -> tuple[str, list[Image]]:

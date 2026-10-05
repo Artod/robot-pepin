@@ -2,8 +2,10 @@
 
 States: ``idle`` (no session; the wake gate listens), ``listening`` (a session is open and the
 user may speak), ``thinking`` (the user finished, or a tool runs, and no answer plays yet),
-``speaking`` (the answer plays; sent every ~40 ms with the amplitude of what the speaker is
-playing at that moment, 0..1). A subscriber is any ``Callable[[VoiceEvent], None]``.
+``acting`` (a tool that moves the robot runs: a drive the voice started), ``speaking`` (the
+answer plays; sent every ~40 ms with the amplitude of what the speaker is playing at that
+moment, 0..1). A subscriber is any ``Callable[[VoiceEvent], None]``; the head's face is one
+(:class:`pepin.face_events.VoiceStateFace`).
 """
 
 from __future__ import annotations
@@ -16,7 +18,7 @@ from typing import Literal
 
 logger = logging.getLogger(__name__)
 
-State = Literal["idle", "listening", "thinking", "speaking"]
+State = Literal["idle", "listening", "thinking", "acting", "speaking"]
 
 
 @dataclass(frozen=True)

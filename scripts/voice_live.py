@@ -15,6 +15,11 @@ speech written to a WAV, only read-only tools):
     uv run python scripts/voice_live.py --say "Пепин, где ты?" --say "Всё, спасибо, пока" \\
         --speaker-wav /tmp/pepin.wav --tools where_am_i,list_places --sessions 1
 
+A drive with nothing moving (the tools act on fakes; a drive takes 5 s):
+
+    uv run python scripts/voice_live.py --say "Пепин, езжай к принтеру" \\
+        --speaker-wav /tmp/pepin.wav --fake-robot 5 --sessions 1
+
 The key: GEMINI_API_KEY in the environment or in the repo's gitignored .env (the main checkout's,
 from a worktree). scripts/voice.py stays the per-utterance fallback.
 """
@@ -29,7 +34,10 @@ import sys
 from pathlib import Path
 
 from pepin.audio_link import board_host
+from pepin.face_events import VoiceStateFace
+from pepin.head_link import HeadClient
 from pepin.tools import TOOLS, Robot
+from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.tools.schemas import gemini_function_declarations
 from pepin.voice_live.app import VoiceLoop
 from pepin.voice_live.audio import Pacer
@@ -44,6 +52,7 @@ from pepin.voice_live.wake import MlxWhisper
 
 REPO = Path(__file__).resolve().parents[1]
 NOT_FOR_LIVE = {"say"}  # the model speaks for itself
+FAKE_ACCEPT_S = 0.3  # a fake drive is taken this long after the go (the recorder's start)
 
 
 def env_file() -> Path:
@@ -69,8 +78,20 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="no Google: a local beep answers")
     ap.add_argument("--say", action="append", help="speak this into the loop instead of the mic")
     ap.add_argument("--speaker-wav", type=Path, help="write the robot's speech here, no sound")
+    ap.add_argument(
+        "--say-gap-s", type=float, default=1.2,
+        help="each --say waits for the robot to be idle or listening this long",
+    )  # fmt: skip
     ap.add_argument("--tools", help="comma-separated: only these tools (default: all but say)")
     ap.add_argument("--sessions", type=int, help="exit after this many sessions")
+    ap.add_argument(
+        "--fake-robot", type=float, metavar="DRIVE_S",
+        help="no robot: the tools act on fakes (nothing moves), a drive takes DRIVE_S seconds",
+    )  # fmt: skip
+    ap.add_argument(
+        "--no-face", action="store_true",
+        help="leave the head's face alone (it follows the voice when the board speaks)",
+    )  # fmt: skip
     ap.add_argument("--max-session-s", type=float, help="override the cap for this run")
     ap.add_argument("--idle-close-s", type=float, help="override the idle timeout for this run")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
@@ -108,7 +129,14 @@ def main() -> int:
         registry = [d for d in gemini_function_declarations(TOOLS) if d["name"] in allowed]
         live = GeminiLive(config, declarations(registry, moving))
 
-    robot = Robot.connect()
+    if args.fake_robot is not None:
+        clock = WallClock()
+        step_s = max(0.0, args.fake_robot - FAKE_ACCEPT_S) / 3  # accepted, 2 reports, done
+        goals = FakeGoalServer(clock, step_s=step_s, accept_s=FAKE_ACCEPT_S)
+        robot = fake_robot(clock=clock, goals=goals)
+        print(f"FAKE ROBOT: nothing moves; a drive takes {args.fake_robot:.1f} s", flush=True)
+    else:
+        robot = Robot.connect()
 
     def run_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
         if name not in allowed:
@@ -116,6 +144,10 @@ def main() -> int:
         return TOOLS.call(name, arguments, robot)
 
     events = Events(StatePrinter())
+    face: VoiceStateFace | None = None
+    if args.speaker_wav is None and not args.no_face:  # the robot speaks: its face follows
+        face = VoiceStateFace(HeadClient(args.host, source="voice").start())
+        events.subscribe(face)
     speaker: WavSpeaker | BoardLink
     link: BoardLink | None = None
     if args.speaker_wav is not None:
@@ -137,7 +169,7 @@ def main() -> int:
         def ready() -> bool:
             return events.state in ("idle", "listening") and not pacer.speaking()
 
-        mic = ScriptedMic([synthesize(text) for text in args.say], ready)
+        mic = ScriptedMic([synthesize(text) for text in args.say], ready, gap_s=args.say_gap_s)
     else:
         mic = link or BoardLink(args.host)
 
@@ -162,6 +194,7 @@ def main() -> int:
                 logs=logs,
                 ledger=ledger,
                 resume=resume,
+                transcriber=whisper,
             )
         )
         return conversations[-1]
@@ -191,6 +224,8 @@ def main() -> int:
             print("halt:", robot.halt(), flush=True)
     finally:
         stop_pacer.set()
+        if face is not None:
+            face.close()
         for closable in (mic, speaker):
             close = getattr(closable, "close", None)
             if close is not None:

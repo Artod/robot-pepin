@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from pepin.tools import progress
 from pepin.voice_live.audio import Pacer
 from pepin.voice_live.budget import Ledger, Usage
 from pepin.voice_live.config import LiveConfig
@@ -29,7 +30,7 @@ from pepin.voice_live.live import (
     ToolCall,
     ToolResponse,
 )
-from pepin.voice_live.session import Conversation, Frame, ResumeStore, Wake
+from pepin.voice_live.session import UNASKED_DRIVE, Conversation, Frame, ResumeStore, Wake
 
 pytestmark = pytest.mark.slow  # each session runs its idle timer and its speech in real time
 
@@ -68,6 +69,7 @@ class Rig:
         config: LiveConfig | None = None,
         ledger: bool = True,
         tools: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
+        transcriber: Any = None,
     ) -> None:
         self.config = config or LiveConfig(idle_close_s=0.15)
         self.speaker = FakeSpeaker()
@@ -107,17 +109,29 @@ class Rig:
             logs=tmp / "voice",
             ledger=self.ledger,
             resume=self.resume,
+            transcriber=transcriber,
             tick_s=0.005,
         )
 
-    def run(self, wake_pcm: bytes | None = None, text: str = "Пепин, где ты?") -> dict[str, Any]:
+    def run(
+        self,
+        wake_pcm: bytes | None = None,
+        text: str = "Пепин, где ты?",
+        voice: Callable[[float], bytes] | None = None,
+    ) -> dict[str, Any]:
+        """One session; ``voice(t)`` is the mic's frame ``t`` seconds after the wake (silence
+        when None)."""
+
         async def main() -> dict[str, Any]:
             self.frames = asyncio.Queue()
             self.conversation.frames = self.frames
+            start = time.monotonic()
 
             async def hum() -> None:
                 while True:
-                    self.frames.put_nowait(Frame(SILENCE, time.monotonic()))
+                    now = time.monotonic()
+                    pcm = voice(now - start) if voice is not None else SILENCE
+                    self.frames.put_nowait(Frame(pcm, now))
                     await asyncio.sleep(0.02)  # a frame per frame: real time
 
             humming = asyncio.create_task(hum())
@@ -222,7 +236,7 @@ def test_tools_run_aside_and_their_results_go_back_and_end_conversation_closes(
     )
     rig = Rig(tmp_path, live, tools=lambda name, args: {"ok": True, "at": "home"})
     summary = rig.run()
-    assert rig.tool_calls == [("where_am_i", {})]
+    assert rig.tool_calls == [("list_places", {}), ("where_am_i", {})]  # the book, then the call
     assert live.sessions[0].responses == [
         ToolResponse("c1", "where_am_i", {"ok": True, "at": "home"}, None),
         ToolResponse("c2", END_CONVERSATION, {"ok": True}),
@@ -237,6 +251,8 @@ def test_a_drive_does_not_block_and_a_cancelled_drive_is_halted(tmp_path: Path) 
     calls: list[str] = []
 
     def slow_tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name != "go_to":
+            return {"ok": True}
         calls.append(name)
         release.wait(5.0)
         return {"ok": True, "arrived": True}
@@ -245,8 +261,8 @@ def test_a_drive_does_not_block_and_a_cancelled_drive_is_halted(tmp_path: Path) 
         """Cancels the drive once it is running, then hangs up after the halt."""
 
         @contextlib.asynccontextmanager
-        async def connect(self, handle: str | None) -> AsyncIterator[LiveSession]:
-            async with super().connect(handle) as session:
+        async def connect(self, handle: str | None, system: str) -> AsyncIterator[LiveSession]:
+            async with super().connect(handle, system) as session:
                 fake = self.sessions[-1]
 
                 async def script() -> None:
@@ -319,11 +335,11 @@ def test_the_handle_resumes_the_next_session_and_a_stale_one_falls_back(tmp_path
 
     class RefusesHandles(ScriptedLive):
         @contextlib.asynccontextmanager
-        async def connect(self, handle: str | None) -> AsyncIterator[LiveSession]:
+        async def connect(self, handle: str | None, system: str) -> AsyncIterator[LiveSession]:
             if handle is not None:
                 self.handles.append(handle)
                 raise ConnectionError("handle expired")
-            async with super().connect(handle) as session:
+            async with super().connect(handle, system) as session:
                 yield session
 
     stale = RefusesHandles([])
@@ -374,7 +390,7 @@ def test_a_failed_connection_is_logged_without_the_key(
 
     class Broken(ScriptedLive):
         @contextlib.asynccontextmanager
-        async def connect(self, handle: str | None) -> AsyncIterator[LiveSession]:
+        async def connect(self, handle: str | None, system: str) -> AsyncIterator[LiveSession]:
             raise ConnectionError("rejected key SECRET-KEY-123456")
             yield  # pragma: no cover
 
@@ -393,3 +409,148 @@ def test_the_dry_run_beeps_after_the_speech_and_records_no_cost(tmp_path: Path) 
     assert len(rig.speaker.played) > 0
     assert not (tmp_path / "ledger.jsonl").exists()
     assert rig.resume.get()[0] == "dry-1"
+
+
+BOOK = {"ok": True, "places": [{"name": "home"}, {"name": "printer"}]}
+
+
+def driving_tools(drive_s: float) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """The places book, and a go_to that reports its start and arrives after ``drive_s``."""
+
+    def run(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "list_places":
+            return BOOK
+        if name == "go_to":
+            progress(status="driving", target=args["place"])
+            time.sleep(drive_s)
+            return {"ok": True, "arrived": True, "target": args["place"]}
+        return {"ok": True}
+
+    return run
+
+
+def go(call_id: str, place: str = "printer") -> LiveMessage:
+    return LiveMessage(tool_calls=(ToolCall(call_id, "go_to", {"place": place}),))
+
+
+def test_a_drive_answers_when_it_sets_off_and_its_end_is_the_robots_report(
+    tmp_path: Path,
+) -> None:
+    live = ScriptedLive(
+        [
+            Step("connect", [LiveMessage(input_text="Пепин, к принтеру"), go("d1")]),
+            Step("tool_response", [LiveMessage(audio=beep(0.05), output_text="Еду.")]),
+            Step(
+                "text",
+                [
+                    LiveMessage(audio=beep(0.05), output_text="Я на месте."),
+                    LiveMessage(turn_complete=True),
+                ],
+            ),
+        ]
+    )
+    config = LiveConfig(idle_close_s=5.0, idle_after_drive_s=0.2)
+    rig = Rig(tmp_path, live, config=config, tools=driving_tools(0.2))
+    started = time.monotonic()
+    summary = rig.run()
+    assert "home, printer" in live.systems[0]  # the book, read as the session opened
+    session = live.sessions[0]
+    (start,) = session.responses
+    assert start.id == "d1" and start.scheduling == "WHEN_IDLE"
+    assert start.response["status"] == "driving" and start.response["target"] == "printer"
+    (report,) = session.texts
+    assert report.startswith("[robot] the drive go_to(place='printer') has ended: ")
+    assert json.loads(report.split("has ended: ", 1)[1])["arrived"] is True
+    assert rig.tool_calls == [("list_places", {}), ("go_to", {"place": "printer"})]
+    assert summary["close"] == "idle"
+    assert time.monotonic() - started < 3.0  # idle_after_drive_s, not idle_close_s
+
+
+def test_a_model_that_acknowledged_before_its_call_hears_the_start_silently(
+    tmp_path: Path,
+) -> None:
+    live = ScriptedLive(
+        [Step("connect", [LiveMessage(audio=beep(0.05), output_text="Слушаюсь."), go("d1")])]
+    )
+    rig = Rig(tmp_path, live, config=LiveConfig(idle_close_s=0.2), tools=driving_tools(0.05))
+    rig.run()
+    (start,) = live.sessions[0].responses
+    assert start.scheduling == "SILENT" and start.response["status"] == "driving"
+
+
+def test_a_drive_nobody_asked_for_is_refused_silently_until_a_person_speaks(
+    tmp_path: Path,
+) -> None:
+    live = ScriptedLive(
+        [
+            Step("connect", [go("d1")]),
+            Step("tool_response", [go("d2")]),  # again, at its start: nobody asked
+            Step("text", [LiveMessage(input_text="А теперь домой"), go("d3", "home")]),
+        ]
+    )
+    config = LiveConfig(idle_close_s=0.3, idle_after_drive_s=0.3)
+    rig = Rig(tmp_path, live, config=config, tools=driving_tools(0.1))
+    summary = rig.run()
+    by_id = {r.id: r for r in live.sessions[0].responses}
+    assert by_id["d2"].scheduling == "SILENT"
+    assert by_id["d2"].response == {"ok": False, "why": UNASKED_DRIVE}
+    assert by_id["d1"].response["status"] == by_id["d3"].response["status"] == "driving"
+    assert [c for c in rig.tool_calls if c[0] == "go_to"] == [
+        ("go_to", {"place": "printer"}),
+        ("go_to", {"place": "home"}),
+    ]
+    assert summary["refused_drives"] == 1 and len(live.sessions[0].texts) == 2
+
+
+class FakeEar:
+    def __init__(self, text: str) -> None:
+        self.text = text
+        self.heard: list[int] = []
+
+    def transcribe(self, pcm: bytes) -> str:
+        self.heard.append(len(pcm))
+        return self.text
+
+
+def loud_seconds(pcm: bytes) -> float:
+    x = np.frombuffer(pcm[: len(pcm) // 640 * 640], dtype="<i2").astype(float).reshape(-1, 320)
+    return float((np.sqrt((x**2).mean(axis=1)) > 1000).sum() * 0.02)
+
+
+@pytest.mark.parametrize(("heard", "forwarded", "halted"), [
+    ("Пепин, стоп!", True, True),
+    ("Пепин, а что ты видишь?", True, False),
+    ("ну и ладно", False, False),
+    ("Продолжение следует...", False, False),
+])  # fmt: skip
+def test_while_driving_the_mic_is_withheld_and_only_a_call_or_a_stop_reaches_live(
+    tmp_path: Path, heard: str, forwarded: bool, halted: bool
+) -> None:
+    said = speech(0.4)
+
+    def voice(t: float) -> bytes:  # the person speaks 0.4 s while the robot drives
+        i = int((t - 0.4) * 16_000) * 2
+        return said[i : i + 640].ljust(640, b"\x00") if 0 <= i < len(said) else SILENCE
+
+    live = ScriptedLive([Step("connect", [go("d1")])])
+    config = LiveConfig(idle_close_s=0.2, idle_after_drive_s=0.2)
+    ear = FakeEar(heard)
+    rig = Rig(tmp_path, live, config=config, tools=driving_tools(1.6), transcriber=ear)
+    summary = rig.run(speech(0.3), voice=voice)
+    session = live.sessions[0]
+    assert len(ear.heard) == 1  # the segment, read while driving
+    assert summary["heard_while_driving"][0]["text"] == heard
+    assert summary["withheld_s"] > 1.2
+    assert rig.halts == (1 if halted else 0)
+    assert session.audio_ends == (1 if forwarded else 0)
+    expected = 0.3 + (0.4 if forwarded else 0.0)  # the wake, and the segment if it went
+    assert loud_seconds(bytes(session.audio)) == pytest.approx(expected, abs=0.08)
+
+
+def test_room_noise_does_not_hold_the_session_open(tmp_path: Path) -> None:
+    hum = speech(0.02)  # loud all along, as motors are; the server hears no one
+    live = ScriptedLive([])
+    config = LiveConfig(idle_close_s=0.3, max_session_s=3.0)
+    rig = Rig(tmp_path, live, config=config)
+    summary = rig.run(voice=lambda t: hum)
+    assert summary["close"] == "idle"

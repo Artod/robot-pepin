@@ -101,7 +101,18 @@ def test_both_costmaps_read_the_map_the_laptop_publishes() -> None:
 def _goal_server() -> Any:
     from pepin_bringup import goal_server
 
-    return goal_server.GoalServer()
+    class Silent:  # its face (on by default) never reaches the board's head server here
+        def event(self, name: str, *, end: bool = False) -> None: ...
+        def clear(self) -> None: ...
+        def lease(self, seconds: float) -> None: ...
+        def close(self) -> None: ...
+
+    real = goal_server.face_client
+    goal_server.face_client = Silent  # type: ignore[assignment]
+    try:
+        return goal_server.GoalServer()
+    finally:
+        goal_server.face_client = real  # type: ignore[assignment]
 
 
 def test_the_goal_server_answers_where_from_tf_with_no_fit_in_it() -> None:

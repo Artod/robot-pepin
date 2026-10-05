@@ -38,7 +38,7 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 | 3333 | ser2net | `ser2net.service` | raw TCP to `/dev/servo-bus` (Feetech bus, 1 Mbit/s); `kickolduser` hands the port to the newest client |
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads the encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, a state line every tick; the neck commands (below) |
-| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status`; with `--lipsync`, the speech's loudness to the head's mouth |
+| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status`; the speech's loudness to the head's mouth (lip sync, on by default; `--no-lipsync` off) |
 | 3340 | `pepin.head_server` | `pepin-head.service` | the head ESP32 on `/dev/pepin-head`: the mouth's expressions, speech levels and info screens; the head IMU's samples on the board's clock to subscribers (the base bridge); the brain lease (see "The head" below) |
 | 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera`, its exposure the active rig's `exposure` block of `config/camera.json`, set before ustreamer starts (`pepin.camera_controls`; `ros/exposure.sh` shows and tries the modes live) |
 

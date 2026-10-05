@@ -16,7 +16,7 @@ import math
 from typing import Any
 
 from pepin.goal_link import NAV2_CANCELED, NAV2_SUCCEEDED, cancel_line
-from pepin.tools.registry import Result, ToolError, fail, ok, tool
+from pepin.tools.registry import Result, ToolError, fail, ok, progress, tool
 from pepin.tools.robot import Robot
 
 AT_PLACE_M = 0.35  # "at" a place: within this distance of it
@@ -158,7 +158,8 @@ def cancel(robot: Robot) -> Result:
 
 def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
     """One drive through the goal server, reported when it has ended: the body of go_to and
-    go_to_pose, and of any later tool that drives (approach, explore)."""
+    go_to_pose, and of any later tool that drives (approach, explore). When the goal server
+    takes the drive, a caller that listens hears ``status: driving`` (:func:`progress`)."""
     deadline = robot.clock() + robot.drive_timeout_s
     accepted: dict[str, Any] | None = None
     feedback: dict[str, Any] = {}
@@ -174,6 +175,7 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
                 return refused(robot, str(event.get("detail", "")))
             if kind == "accepted":
                 accepted = event
+                progress(status="driving", target=target, run=event.get("run"))
             elif kind == "feedback":
                 feedback = event
             elif kind == "lost":
