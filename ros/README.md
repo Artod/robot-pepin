@@ -71,7 +71,8 @@ ros/laptop.sh vslam                 # the camera's mapping: RTAB-Map is the map 
 ros/laptop.sh nav                   # Nav2 in pepin-macnav (controller mppi); `nav down`, `nav logs`
 ros/ready.sh                        # the cart put on its base: seeded there, voxels and costmaps
                                     # emptied, one plan proven, the pose read back ([X Y YAW]: elsewhere)
-ros/preflight.sh                    # ready for a goal? pose, lidar, planner, snapshots, recognition,
+ros/preflight.sh                    # ready for a goal? pose, lidar, planner, snapshots, the three
+                                    # ToF (each at its rate, not all "unknown"), recognition,
                                     # Foxglove, one plan; --no-plan during a drive
 ros/goto.sh printer                 # a goal; Ctrl-C cancels it; exit 0 only when reached
 ros/goto.sh -1.0 0.3 90             # map coordinates and a heading

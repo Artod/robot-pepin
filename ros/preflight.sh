@@ -1,7 +1,8 @@
 #!/bin/bash
-# Is the cart ready for a goal? Seven short lines, one fact each, OK or FAIL first: the pose and
+# Is the cart ready for a goal? Eight short lines, one fact each, OK or FAIL first: the pose and
 # the lidar from the goal server's `where` (127.0.0.1:3337, Nav2 on this Mac), the planner it
-# picked, the last snapshot and recognition reports of the laptop's mapping, the Foxglove bridge,
+# picked, the last snapshot and recognition reports of the laptop's mapping, the three ToF sensors
+# reaching the laptop (ros/tools/tof_check.py: a rate and a reading each), the Foxglove bridge,
 # and one plan from the planner (ros/tools/planner_check.py: a plan, never motion). Nothing here
 # commands motion.
 #   ros/preflight.sh [--no-plan]   --no-plan during a drive: the planner is not asked for a plan
@@ -28,6 +29,10 @@ pack="$(grep '\[sensor_pack\]: sensor pack:' <<<"$LOG" | tail -1)"
 snap="$(sed -nE 's/.*; last: ([a-z-]+).*/\1/p' <<<"$pack")"
 cam="$(grep -oE 'camera (fresh [0-9.]+ Hz|silent [0-9.]+ s)' <<<"$pack" | head -1)"
 if [ "$snap" = full ]; then say OK snapshots "full, $cam"; else say FAIL snapshots "${snap:-none}, $cam"; fi
+tof="$(docker exec pepin-vslam /pepin_entrypoint.sh timeout -s KILL 8 python3 /tools/tof_check.py 2 2>&1 | grep -E '^(OK|FAIL) ' | tail -1)"
+if [ "${tof%% *}" = OK ]; then say OK tof "${tof#OK }"
+elif [ -n "$tof" ]; then say FAIL tof "${tof#FAIL }"
+else say FAIL tof "no answer from ros/tools/tof_check.py in pepin-vslam"; fi
 rec="$(grep '\[rtabmap_frame\]: rtabmap frame:' <<<"$LOG" | tail -2 \
     | sed -E 's/.*rtabmap frame: ([0-9]+) updates, ([0-9]+) recognised.*/\1 \2/' \
     | awk 'NR==1{u=$1;r=$2} END{if(NR>1) printf "%d of %d in the last 30 s", $2-r, $1-u; else print "one report only"}')"
