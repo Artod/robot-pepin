@@ -1,6 +1,7 @@
 """The audio server's logic with fakes: card lookup, channel split, stamps, deadman, player."""
 
 import array
+import subprocess
 import threading
 import time
 from typing import Any
@@ -13,12 +14,15 @@ from pepin.audio_server import (
     AudioService,
     CaptureLoop,
     ChannelSplitter,
+    DeadStreamPolicy,
     DoaPoller,
     Framer,
     Player,
     SampleClock,
     XrunCounter,
+    XvfHost,
     find_array,
+    reboot_array,
     resolve_device,
 )
 
@@ -228,6 +232,137 @@ def test_xruns_are_counted_from_the_tools_stderr() -> None:
     counter.line("Recording raw data 'stdin' : Signed 16 bit Little Endian", "arecord")
     counter.line("arecord: pcm_read:2221: read error: Input/output error", "arecord")
     assert counter.count == 1
+
+
+# -- the cold-boot rescue ----------------------------------------------------------------------
+
+
+def test_the_policy_reboots_once_after_two_dead_streams_in_a_row() -> None:
+    policy = DeadStreamPolicy(dead_streams=2, max_reboots=1)
+    assert not policy.closed(delivered=False)
+    assert not policy.closed(delivered=True)  # a stream that delivered resets the count
+    assert not policy.closed(delivered=False)
+    assert policy.closed(delivered=False)
+    assert policy.reboots == 1
+    assert [policy.closed(delivered=False) for _ in range(10)] == [False] * 10  # once only
+
+
+def dead_stream(loop: CaptureLoop, source: FakeSource, clock: FakeClock) -> None:
+    """One open whose arecord ends without a byte (the cold-boot read error), then the retry."""
+    source.script = [EOFError("arecord exited with code 1")]
+    loop.step()  # open
+    loop.step()  # ends
+    clock.now += 2.0
+
+
+def test_two_streams_without_a_byte_reboot_the_array_once_and_reopen_at_once(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reboots: list[float] = []
+    loop, source, clock, frames = make_loop(retry_s=2.0, rescue=lambda: reboots.append(1.0))
+    dead_stream(loop, source, clock)
+    assert reboots == []
+    source.script = [EOFError("arecord exited with code 1")]
+    loop.step()
+    loop.step()  # second dead stream: reboot, reopen without the retry wait
+    assert reboots == [1.0] and loop.reboots == 1 and "ARRAY CAPTURE DEAD" in caplog.text
+    source.script = [stereo([1, 2, 3, 4], [0] * 4)]
+    loop.step()  # open
+    loop.step()
+    assert len(frames) == 1 and "capture ALIVE after the array's reboot" in caplog.text
+    for _ in range(4):
+        dead_stream(loop, source, clock)
+    assert reboots == [1.0]  # never again in this process
+
+
+def test_a_reboot_that_does_not_cure_is_said_once_and_not_repeated(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    reboots: list[int] = []
+    loop, source, clock, _ = make_loop(retry_s=2.0, rescue=lambda: reboots.append(1))
+    for _ in range(8):
+        dead_stream(loop, source, clock)
+    assert reboots == [1] and caplog.text.count("STILL DEAD") == 1
+
+
+def test_a_stream_that_delivered_and_ended_is_not_the_cold_boot_state() -> None:
+    reboots: list[int] = []
+    loop, source, clock, _ = make_loop(retry_s=2.0, rescue=lambda: reboots.append(1))
+    for _ in range(5):
+        source.script = [stereo([1, 2, 3, 4], [0] * 4), EOFError("read error")]
+        loop.step()
+        loop.step()
+        loop.step()
+        clock.now += 2.0
+    assert loop.ends == 5 and reboots == []
+
+
+def test_without_a_rescue_dead_streams_are_only_retried() -> None:
+    loop, source, clock, _ = make_loop(retry_s=2.0)
+    for _ in range(5):
+        dead_stream(loop, source, clock)
+    assert loop.reboots == 0 and source.opens == 5
+
+
+def completed(stdout: str, code: int = 0) -> subprocess.CompletedProcess[str]:
+    return subprocess.CompletedProcess([], code, stdout, "")
+
+
+FOUND = "Device (USB)::device_init() -- Found device VID: 10374 PID: 26 interface: 3\n"
+
+
+def test_xvf_host_answers_are_read_off_its_last_line_and_a_refusal_is_an_oserror() -> None:
+    answers = {
+        "GPO_READ_VALUES": completed(FOUND + "GPO_READ_VALUES 0 0 0 1 0 \n"),
+        "GPI_READ_VALUES": completed(FOUND + "GPI_READ_VALUES 1 0 0 \n"),
+        "PLL_LOCK_STATUS": completed(FOUND + "PLL_LOCK_STATUS -1 \n"),
+        "USB_D2H_BUFFER_STABLE": completed("No device found\n", 1),
+    }
+    xvf = XvfHost("xvf_host", run=lambda command: answers[command[1]])
+    assert xvf.read("GPO_READ_VALUES") == "GPO_READ_VALUES 0 0 0 1 0"
+    with pytest.raises(OSError, match="No device found"):
+        xvf.read("USB_D2H_BUFFER_STABLE")
+    assert xvf.state() == (
+        "GPO_READ_VALUES 0 0 0 1 0; GPI_READ_VALUES 1 0 0; PLL_LOCK_STATUS -1; "
+        "USB_D2H_BUFFER_STABLE ? (xvf_host USB_D2H_BUFFER_STABLE: No device found)"
+    )
+
+
+def test_a_reboot_without_its_argument_or_without_the_tool_is_an_oserror() -> None:
+    usage = "Command: REBOOT is write-only and expects 1 argument(s), \n0 are given.\n"
+    with pytest.raises(OSError, match="expects"):
+        XvfHost(run=lambda command: completed(usage)).reboot()
+
+    def missing(command: list[str]) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError(command[0])
+
+    with pytest.raises(OSError, match="REBOOT 1"):
+        XvfHost("/nope/xvf_host", run=missing).reboot()
+
+
+def test_the_rescue_logs_the_state_reboots_and_waits_for_the_chip_to_answer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    calls: list[str] = []
+    clock = FakeClock()
+    down = {"left": 2}  # VERSION fails twice while the chip re-enumerates
+
+    def run(command: list[str]) -> subprocess.CompletedProcess[str]:
+        calls.append(" ".join(command[1:]))
+        if command[1] == "VERSION" and down["left"]:
+            down["left"] -= 1
+            return completed("No device found\n", 1)
+        return completed(f"{command[1]} 0 \n")
+
+    def sleep(s: float) -> None:
+        clock.now += s
+
+    reboot_array(XvfHost(run=run), settle_s=2.0, wait_s=10.0, sleep=sleep, clock=clock)
+    assert calls.index("REBOOT 1") == len(XvfHost.STATE)  # the state first, then the reboot
+    assert calls.count("VERSION") == 3 and calls[-1] == XvfHost.STATE[-1]
+    assert "before its reboot: GPO_READ_VALUES 0" in caplog.text
+    assert "after its reboot: GPO_READ_VALUES 0" in caplog.text
+    assert clock.now == pytest.approx(103.0)
 
 
 # -- direction ---------------------------------------------------------------------------------

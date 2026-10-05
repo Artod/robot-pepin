@@ -322,6 +322,122 @@ class ArecordSource:
                     stream.close()
 
 
+# -- the cold-boot rescue ----------------------------------------------------------------------
+
+
+@dataclass
+class DeadStreamPolicy:
+    """When to reboot the array's chip: after ``dead_streams`` capture streams in a row closed
+    without delivering a byte, at most ``max_reboots`` times in the server's life.
+
+    After a cold power-up the XVF3800 enumerates and answers control transfers, yet its capture
+    endpoint delivers nothing: every arecord ends 0.55 s after the open (1.1x the 0.5 s buffer,
+    the kernel's capture timeout) in "read error: Input/output error", for hours. The chip's
+    own reboot cures it. A stream that delivered and then ended is another failure (a USB
+    controller dropping the stream) and resets the count.
+    """
+
+    dead_streams: int = 2
+    max_reboots: int = 1
+    dead_in_row: int = 0
+    reboots: int = 0
+
+    def closed(self, delivered: bool) -> bool:
+        """Record one stream that closed; True when the chip should be rebooted now."""
+        if delivered:
+            self.dead_in_row = 0
+            return False
+        self.dead_in_row += 1
+        if self.dead_in_row < self.dead_streams or self.reboots >= self.max_reboots:
+            return False
+        self.reboots += 1
+        self.dead_in_row = 0
+        return True
+
+
+Runner = Callable[[list[str]], subprocess.CompletedProcess[str]]
+
+
+def _run(command: list[str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(command, capture_output=True, text=True, timeout=5.0, check=False)
+
+
+class XvfHost:
+    """Seeed's ``xvf_host`` tool (``board/xvf_host_install.sh``): the chip's state in one line
+    and its reboot (it re-enumerates on USB, every parameter back to default)."""
+
+    # The GPO levels (X0D11, X0D30, X0D31, X0D33, X0D39) and the GPI levels, the first of which
+    # (X1D09) is the onboard mute button, 1 = released (Seeed's xvf_host.py): the mute question
+    # in the journal at every rescue. The PLL and the device-to-host FIFO: was audio clocked.
+    STATE = ("GPO_READ_VALUES", "GPI_READ_VALUES", "PLL_LOCK_STATUS", "USB_D2H_BUFFER_STABLE")
+
+    def __init__(self, tool: str = "xvf_host", *, run: Runner = _run) -> None:
+        """``tool`` is the command (a path or a name on PATH)."""
+        self._tool = tool
+        self._run = run
+
+    def read(self, name: str) -> str:
+        """``name``'s answer as the tool prints it ("GPO_READ_VALUES 0 0 0 1 0"); raises OSError."""
+        try:
+            done = self._run([self._tool, name])
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OSError(f"{self._tool} {name}: {exc}") from exc
+        for line in reversed(done.stdout.splitlines()):
+            if line.startswith(name + " "):
+                return line.strip()
+        tail = (done.stderr or done.stdout).strip().splitlines()
+        raise OSError(f"{self._tool} {name}: {tail[-1] if tail else f'exit {done.returncode}'}")
+
+    def state(self) -> str:
+        """The mute LED, the mute button, the PLL and the FIFO in one line; a failed read says
+        so in its place."""
+        parts = []
+        for name in self.STATE:
+            try:
+                parts.append(self.read(name))
+            except OSError as exc:
+                parts.append(f"{name} ? ({exc})")
+        return "; ".join(parts)
+
+    def reboot(self) -> None:
+        """``xvf_host REBOOT 1``; raises OSError when the tool cannot be run or fails."""
+        try:
+            done = self._run([self._tool, "REBOOT", "1"])
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise OSError(f"{self._tool} REBOOT 1: {exc}") from exc
+        if done.returncode != 0 or "expects" in done.stdout:
+            raise OSError(f"{self._tool} REBOOT 1: {done.stdout.strip() or done.returncode}")
+
+
+def reboot_array(
+    xvf: XvfHost,
+    *,
+    settle_s: float = 2.0,
+    wait_s: float = 10.0,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Log the chip's state, reboot it, wait until it answers again and log the state after.
+
+    Blocks the caller for ``settle_s`` and up to ``wait_s`` more; raises OSError when the
+    reboot itself cannot be issued."""
+    logger.error("array state before its reboot: %s", xvf.state())
+    xvf.reboot()
+    sleep(settle_s)
+    deadline = clock() + wait_s
+    while True:
+        try:
+            xvf.read("VERSION")
+            break
+        except OSError as exc:
+            if clock() >= deadline:
+                logger.error("the array did not answer %.0f s after its reboot: %s",
+                             settle_s + wait_s, exc)  # fmt: skip
+                return
+            sleep(0.5)
+    logger.error("array state after its reboot: %s", xvf.state())
+
+
 class CaptureLoop:
     """Keeps a capture stream open and turns it into stamped mono frames.
 
@@ -330,6 +446,8 @@ class CaptureLoop:
     array's isochronous stream) is reopened after ``retry_s``; a stream that stays open but
     delivers nothing for ``deadman_s`` is logged as a stall and reopened at once. Each opening
     starts a new sample clock; ``seq`` runs on across them, the stamps say where time jumped.
+    With ``rescue``, streams that close without a byte reboot the array's chip as
+    :class:`DeadStreamPolicy` says (the XVF3800's cold-boot state).
     """
 
     def __init__(
@@ -345,9 +463,16 @@ class CaptureLoop:
         retry_s: float = 2.0,
         read_timeout_s: float = 0.2,
         clock: Callable[[], float] = time.monotonic,
+        rescue: Callable[[], None] | None = None,
+        policy: DeadStreamPolicy | None = None,
     ) -> None:
-        """``on_frame`` receives every frame on the capture thread (it must not block)."""
+        """``on_frame`` receives every frame on the capture thread (it must not block);
+        ``rescue`` reboots the array (blocking, on the capture thread), None never does."""
         self._source = source
+        self._rescue = rescue
+        self._policy = policy if policy is not None else DeadStreamPolicy()
+        self._delivered = False
+        self._rescued = False
         self._on_frame = on_frame
         self._splitter = ChannelSplitter(channels, channel)
         self._framer = Framer(frame_samples)
@@ -369,6 +494,7 @@ class CaptureLoop:
         self.opens = 0
         self.ends = 0  # streams that ended by themselves
         self.stalls = 0  # streams the deadman closed
+        self.reboots = 0  # of the array's chip, by ``rescue``
         self.last_frame_at: float | None = None
         self.frame_age = LatencyTracker("audio.frame_age")
 
@@ -386,6 +512,10 @@ class CaptureLoop:
         now = self._clock()
         if data:
             self._last_data = now
+            if not self._delivered and self._rescued:
+                logger.error("capture ALIVE after the array's reboot: %s", self.where)
+                self._rescued = False
+            self._delivered = True
             self._ingest(data, now)
         elif now - self._last_data > self._deadman_s:
             self.stalls += 1
@@ -441,6 +571,7 @@ class CaptureLoop:
                                exc, self._retry_s)  # fmt: skip
             return
         self._open = True
+        self._delivered = False
         self.opens += 1
         if self._first_open is None:
             self._first_open = now
@@ -459,6 +590,28 @@ class CaptureLoop:
         self._next_open = self._clock() + (self._retry_s if retry else 0.0)
         if retry:
             logger.error("%s; reopening in %.0f s", why, self._retry_s)
+        if self._rescue is None:
+            return
+        policy = self._policy
+        if policy.closed(self._delivered):
+            logger.error(
+                "ARRAY CAPTURE DEAD: %d streams in a row closed without a byte (the XVF3800's "
+                "cold-boot state); rebooting the chip (xvf_host REBOOT 1), reboot %d of %d",
+                policy.dead_streams, policy.reboots, policy.max_reboots,
+            )  # fmt: skip
+            self.reboots += 1
+            self._rescued = True
+            try:
+                self._rescue()
+            except OSError as exc:
+                logger.error("the array's reboot failed: %s", exc)
+            self._next_open = self._clock()
+        elif self._rescued and policy.dead_in_row == policy.dead_streams:
+            logger.error(
+                "capture STILL DEAD after the array's reboot (%d streams without a byte); no "
+                "more reboots — power-cycle the array or `xvf_host REBOOT 1` by hand",
+                policy.dead_in_row,
+            )  # fmt: skip
 
     def _ingest(self, data: bytes, now: float) -> None:
         mono = self._splitter.take(data)
@@ -1159,6 +1312,7 @@ class AudioService:
             "stalls": cap.stalls,
             "ends": cap.ends,
             "opens": cap.opens,
+            "array_reboots": cap.reboots,
             "doa_deg": None if latest is None else latest.deg,
             "doa_speech": None if latest is None else latest.speech,
             "doa_age_s": None if age is None else round(age, 3),
@@ -1255,6 +1409,14 @@ def main() -> None:
         help="send the speech's loudness to the head server's mouth (pepin.head_server, :3340)",
     )  # fmt: skip
     parser.add_argument("--head-port", type=int, default=3340)
+    parser.add_argument(
+        "--xvf-host", default="/usr/local/bin/xvf_host",
+        help="Seeed's control tool, for the chip's reboot when capture streams are dead",
+    )  # fmt: skip
+    parser.add_argument(
+        "--no-array-reboot", action="store_true",
+        help="never reboot the array's chip (by default: once, after 2 streams without a byte)",
+    )  # fmt: skip
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s"
@@ -1281,6 +1443,7 @@ def main() -> None:
         }
 
     server = AudioServer(args.port, hello)
+    xvf = XvfHost(args.xvf_host)
     capture = CaptureLoop(
         ArecordSource(
             args.device, rate=args.rate, channels=args.capture_channels, xruns=capture_xruns
@@ -1290,6 +1453,7 @@ def main() -> None:
         channel=args.channel,
         rate=args.rate,
         deadman_s=args.deadman_s,
+        rescue=None if args.no_array_reboot else lambda: reboot_array(xvf),
     )
     capture_ref.append(capture)
     doa = None

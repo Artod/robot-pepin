@@ -99,6 +99,14 @@ VERSION`; the direction froze before it), 2.1.1 current. Check: `{"cmd":"status"
 answers whether capture is alive, frames per second, dropouts and the direction's age; the same
 numbers go to the journal once a minute.
 
+After every cold power-up so far (4 of 4) the array enumerates and answers control transfers,
+yet its capture endpoint delivers nothing: each `arecord` ends 0.55 s after the open in `read
+error: Input/output error`, for hours; plugged in after boot, or after the chip's own reboot
+(`xvf_host REBOOT 1`), it streams. The server reboots the chip itself once, after two streams in
+a row closed without a byte, and logs the chip's state (GPO/GPI levels with the mute button, PLL
+lock, USB FIFO) before and after: `journalctl -u pepin-audio | grep -E "ARRAY|array state"`.
+`--no-array-reboot` turns it off; the reboot resets every parameter to its default.
+
 ## The head
 
 An ESP32 board with a 1.9" screen sits under the stereo camera: the screen is the robot's mouth,
