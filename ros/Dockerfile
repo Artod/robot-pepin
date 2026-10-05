@@ -125,6 +125,11 @@ ENV RMW_IMPLEMENTATION=rmw_cyclonedds_cpp
 ENV ROS_DOMAIN_ID=7
 COPY entrypoint.sh /pepin_entrypoint.sh
 RUN chmod +x /pepin_entrypoint.sh
+# rmw_zenoh_cpp's lost wake-up, fixed (ros/patches/rmw_zenoh-lost-wakeup.patch): the .so that
+# ros/tools/build_rmw_zenoh_fix.sh built goes over the apt one while that is 0.2.10 (the build
+# refuses a 0.2.10 image without it; from 0.2.11 on the fix is upstream and nothing is copied).
+COPY build/rmw_zenoh_fix/ tools/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix/
+RUN sh /tmp/rmw_zenoh_fix/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix && rm -rf /tmp/rmw_zenoh_fix
 # What `docker stop` sends. SIGINT is the signal ros2 launch answers by shutting its nodes down;
 # the default SIGTERM it answers by cancelling itself, and the nodes are SIGKILLed without ever
 # closing what they were writing (RTAB-Map's database: ros/maps/rtabmap.db, malformed after the

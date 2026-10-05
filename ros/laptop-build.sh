@@ -12,6 +12,9 @@
 #                                   ros/laptop.sh nav runs it whenever it is built on that image
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Every image COPYs the lost-wake-up librmw_zenoh_cpp.so (ros/patches/rmw_zenoh-lost-wakeup.patch):
+# built once here, a minute, unless it is already in ros/build/rmw_zenoh_fix/.
+[ -f "$HERE/build/rmw_zenoh_fix/librmw_zenoh_cpp.so" ] || "$HERE/tools/build_rmw_zenoh_fix.sh"
 if [ "${1:-}" = gaze ]; then
     BASE="${PEPIN_GAZE_BASE:-pepin-laptop:zenoh}"
     docker build -f "$HERE/Dockerfile.laptop" -t pepin-laptop:gaze --build-arg "BASE=$BASE" "$HERE"

@@ -1,0 +1,3 @@
+ros/tools/build_rmw_zenoh_fix.sh writes librmw_zenoh_cpp.so (rmw_zenoh_cpp 0.2.10 with
+ros/patches/rmw_zenoh-lost-wakeup.patch), its .debug twin and BUILD.txt here; the images COPY this
+directory (ros/tools/install_rmw_zenoh_fix.sh). Only this README is tracked.

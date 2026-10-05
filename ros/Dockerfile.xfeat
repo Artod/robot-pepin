@@ -57,3 +57,8 @@ COPY xfeat/rtabmap_xfeat.py xfeat/rtabmap_lighterglue.py /opt/xfeat/
 # The adapters load and answer once here (their local path: no service at build time), so a
 # broken model fails the build and not a drive.
 RUN cd /opt/xfeat && python3 rtabmap_xfeat.py && python3 rtabmap_lighterglue.py
+# rmw_zenoh_cpp's lost wake-up, fixed (ros/patches/rmw_zenoh-lost-wakeup.patch): the .so that
+# ros/tools/build_rmw_zenoh_fix.sh built goes over the apt one while that is 0.2.10 (the build
+# refuses a 0.2.10 image without it; from 0.2.11 on the fix is upstream and nothing is copied).
+COPY build/rmw_zenoh_fix/ tools/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix/
+RUN sh /tmp/rmw_zenoh_fix/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix && rm -rf /tmp/rmw_zenoh_fix

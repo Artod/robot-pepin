@@ -28,6 +28,9 @@ set -euo pipefail
 
 BOARD="${PEPIN_HOST:-10.0.0.187}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
+# Every image COPYs the lost-wake-up librmw_zenoh_cpp.so (ros/patches/rmw_zenoh-lost-wakeup.patch):
+# built once here, a minute, unless it is already in ros/build/rmw_zenoh_fix/.
+[ -f "$HERE/build/rmw_zenoh_fix/librmw_zenoh_cpp.so" ] || "$HERE/tools/build_rmw_zenoh_fix.sh"
 IMAGE=pepin-ros
 LOCAL="$IMAGE:sensors"
 BOARD_TAGS=("$IMAGE:latest" "$IMAGE:zenoh")

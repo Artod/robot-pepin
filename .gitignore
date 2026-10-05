@@ -69,3 +69,10 @@ ros/maps/depth_law_stereo.json
 
 # PlatformIO build output (firmware/head_esp32)
 .pio/
+
+# rmw_zenoh_cpp built from source with the lost wake-up fix (ros/tools/build_rmw_zenoh_fix.sh); the
+# directory itself is kept (its README) so the images' COPY finds it on a fresh clone
+ros/build/*
+!ros/build/rmw_zenoh_fix/
+ros/build/rmw_zenoh_fix/*
+!ros/build/rmw_zenoh_fix/README

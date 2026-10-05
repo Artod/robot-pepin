@@ -21,17 +21,14 @@
 #
 # EXECUTOR=1 (default) applies patches/openvins-executor.patch: run_subscribe_msckf's executor and
 # update thread become the parameters executor (multi|single) and multi_threading_subs (upstream:
-# multi, true), and the IMU callback hands its message to the update thread by value (upstream
-# captured the stack variable by reference into a detached thread). vio.launch.py picks single:
-# upstream froze for good 4 of 4 runs live and 2 of 5 on the recorded run4 replayed through a
-# zenoh router (2026-10-04), every executor thread idle and one asleep in rmw_wait with no
-# timeout while the data kept arriving. The suspected race (from the sources, not isolated):
-# rclcpp 28 leaves a busy callback group's subscriptions out of the wait set it rebuilds, and
-# rmw_zenoh 0.2.10's rmw_wait clears its trigger flag without the lock after attaching the guard
-# conditions, so the one wake-up that could bring them back can be lost. A single thread never
-# rebuilds while a callback runs. The same patch adds publish_path (upstream true: every update's
-# pose kept and the whole path republished each update, unbounded); vio.launch.py passes false.
-# EXECUTOR=0 builds upstream's code.
+# multi, true); the IMU callback hands its message to the update thread by value (upstream captured
+# the stack variable by reference into a detached thread: undefined behaviour); and publish_path
+# (upstream true: every update's pose kept and the whole path republished each update, unbounded).
+# vio.launch.py passes executor multi and publish_path false. The freeze of 2026-10-04 (every
+# executor thread idle, one asleep in rmw_wait with no timeout; 4 of 4 live, about half the runs
+# on the zenoh bench) was rmw_zenoh's lost wake-up, fixed by ros/patches/rmw_zenoh-lost-wakeup.patch
+# (the COPY at the end): with it the stock OpenVINS ran 10 of 10 bench runs clean (night of
+# 2026-10-04). single stays a parameter as the fallback. EXECUTOR=0 builds upstream's code.
 ARG BASE=pepin-laptop:xfeat
 FROM ${BASE}
 ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b
@@ -70,3 +67,8 @@ RUN . /opt/ros/jazzy/setup.sh && . /ws_vio/install/setup.sh && cd /ws_vio \
     && sed 's/\x1b\[[0-9;]*m//g' /tmp/sim.log | tail -40 > /opt/openvins/SIM_GATE.txt \
     && echo "exit $(cat /tmp/sim.rc)" >> /opt/openvins/SIM_GATE.txt \
     && cat /opt/openvins/SIM_GATE.txt && test "$(cat /tmp/sim.rc)" = 0
+# rmw_zenoh_cpp's lost wake-up, fixed (ros/patches/rmw_zenoh-lost-wakeup.patch): the .so that
+# ros/tools/build_rmw_zenoh_fix.sh built goes over the apt one while that is 0.2.10 (the build
+# refuses a 0.2.10 image without it; from 0.2.11 on the fix is upstream and nothing is copied).
+COPY build/rmw_zenoh_fix/ tools/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix/
+RUN sh /tmp/rmw_zenoh_fix/install_rmw_zenoh_fix.sh /tmp/rmw_zenoh_fix && rm -rf /tmp/rmw_zenoh_fix
