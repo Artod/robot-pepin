@@ -23,9 +23,10 @@ pepin_bringup.vio_feed between them: the eye pairs a fast head did not smear rea
 ``/vio/image`` + ``/vio/right/image`` (OpenVINS's two image topics remapped there). Off by
 default because neither gate made OpenVINS survive the saccades of the run4 replay (vio_feed's
 docstring has the numbers).
-``executor`` (default single) is run_subscribe_msckf's executor
-(ros/patches/openvins-executor.patch, built in by Dockerfile.vio's EXECUTOR=1): upstream's multi
-froze for good seconds after init on rmw_zenoh (2026-10-04); an EXECUTOR=0 image ignores it.
+``executor`` (default multi, upstream's) is run_subscribe_msckf's executor
+(ros/patches/openvins-executor.patch, built in by Dockerfile.vio's EXECUTOR=1; an EXECUTOR=0 image
+ignores it). single was the workaround for the freeze of 2026-10-04, whose cause was rmw_zenoh's
+lost wake-up (ros/patches/rmw_zenoh-lost-wakeup.patch, in every image): kept as the fallback.
 """
 
 import os
@@ -120,7 +121,7 @@ def generate_launch_description() -> LaunchDescription:
         [
             DeclareLaunchArgument("config", default_value=DEFAULT_CONFIG),
             DeclareLaunchArgument("verbosity", default_value="INFO"),
-            DeclareLaunchArgument("executor", default_value="single"),
+            DeclareLaunchArgument("executor", default_value="multi"),
             DeclareLaunchArgument("feed", default_value="false"),
             OpaqueFunction(function=_describe),
         ]
