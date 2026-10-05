@@ -9,6 +9,7 @@ was asked, so a test can say what a tool did; none of them touches a socket. Tim
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
@@ -44,12 +45,33 @@ class FakeClock:
         self.now += max(0.0, seconds)
 
 
+class WallClock(FakeClock):
+    """Real seconds since construction, for fakes driven in real time (a voice test with
+    ``scripts/voice_live.py --fake-robot``): a sleep really waits."""
+
+    def __init__(self) -> None:
+        """Time zero is now."""
+        super().__init__()
+        self._start = time.monotonic()
+
+    def __call__(self) -> float:
+        """The seconds since construction."""
+        self.now = time.monotonic() - self._start
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        """Wait ``seconds``."""
+        time.sleep(max(0.0, seconds))
+        self()
+
+
 @dataclass
 class FakeGoalServer:
     """The goal server: a pose, a book of places, and the events of the next drive.
 
-    ``drive`` is the script of a ``go``: its events are yielded one per ``step_s`` of the clock;
-    after a ``cancel`` the drive ends with Nav2's CANCELED. ``refuse`` makes a go answer only an
+    ``drive`` is the script of a ``go``: its events are yielded one per ``step_s`` of the clock
+    (the first, ``accepted``, after ``accept_s`` when set); after a ``cancel`` the drive ends
+    with Nav2's CANCELED. ``refuse`` makes a go answer only an
     error with that detail, as the server does for an unknown place or a stale pose.
     """
 
@@ -61,6 +83,7 @@ class FakeGoalServer:
     drive: list[dict[str, Any]] | None = None
     refuse: str | None = None
     step_s: float = 1.0
+    accept_s: float | None = None
     down: bool = False
     asked: list[dict[str, Any]] = field(default_factory=list)
     cancelled: int = 0
@@ -97,7 +120,10 @@ class FakeGoalServer:
                     "arrival": self.pose,
                 }
                 return
-            self.clock.sleep(self.step_s)
+            wait = self.step_s
+            if event.get("event") == "accepted" and self.accept_s is not None:
+                wait = self.accept_s
+            self.clock.sleep(wait)
             if event.get("event") == "done" and isinstance(event.get("arrival"), dict):
                 self.pose = dict(event["arrival"])
             yield event

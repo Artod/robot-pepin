@@ -13,7 +13,18 @@ in a new module added to that list. The registry, the adapters and their tests d
 """
 
 from pepin.tools import drive, face, head, memory, speech, status  # noqa: F401 -- they register
-from pepin.tools.registry import TOOLS, Image, Registry, Result, ToolError, fail, ok, tool
+from pepin.tools.registry import (
+    TOOLS,
+    Image,
+    Registry,
+    Result,
+    ToolError,
+    fail,
+    ok,
+    progress,
+    progress_to,
+    tool,
+)
 from pepin.tools.robot import Endpoints, Robot
 
 __all__ = [
@@ -26,5 +37,7 @@ __all__ = [
     "ToolError",
     "fail",
     "ok",
+    "progress",
+    "progress_to",
     "tool",
 ]
