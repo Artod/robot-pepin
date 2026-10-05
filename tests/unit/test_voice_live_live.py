@@ -7,7 +7,15 @@ from google.genai import types
 from pepin.tools import TOOLS
 from pepin.tools.schemas import gemini_function_declarations
 from pepin.voice_live.config import LiveConfig
-from pepin.voice_live.live import END_CONVERSATION, convert, declarations, live_config, usage_of
+from pepin.voice_live.live import (
+    END_CONVERSATION,
+    ROBOT_REPORT,
+    convert,
+    declarations,
+    live_config,
+    system_instruction,
+    usage_of,
+)
 
 
 def tools() -> list[types.FunctionDeclaration]:
@@ -26,13 +34,14 @@ def test_drives_do_not_block_the_conversation_and_end_conversation_is_offered() 
 
 
 def test_the_setup_asks_for_audio_transcripts_vad_compression_and_resumption() -> None:
-    config = LiveConfig()
-    setup = live_config(config, tools(), "handle-1")
+    config = LiveConfig(transcription_languages=("ru-RU",))
+    setup = live_config(config, tools(), "handle-1", system_instruction(config, None))
     assert setup.response_modalities == [types.Modality.AUDIO]
     assert setup.speech_config is not None and setup.speech_config.voice_config is not None
     voice = setup.speech_config.voice_config.prebuilt_voice_config
     assert voice is not None and voice.voice_name == config.voice
     assert setup.input_audio_transcription is not None
+    assert setup.input_audio_transcription.language_codes == ["ru-RU"]
     assert setup.output_audio_transcription is not None
     vad = setup.realtime_input_config
     assert vad is not None and vad.automatic_activity_detection is not None
@@ -44,6 +53,19 @@ def test_the_setup_asks_for_audio_transcripts_vad_compression_and_resumption() -
     assert setup.session_resumption is not None
     assert setup.session_resumption.handle == "handle-1"
     assert "Пепин" in str(setup.system_instruction)
+
+
+def test_the_instructions_carry_the_places_and_the_personas_lines_from_the_config() -> None:
+    config = LiveConfig.load()
+    text = system_instruction(config, ["home", "printer", "bookshelf"])
+    assert "home, printer, bookshelf" in text and "call go_to at once" in text
+    assert config.persona_acknowledge in text and config.persona_arrived in text
+    assert "status driving" in text and ROBOT_REPORT in text  # the start, then the robot's report
+    assert "never on your own" in text
+    unknown = system_instruction(LiveConfig(), None)
+    assert "list_places gives the names" in unknown and "style of" not in unknown
+    once = system_instruction(LiveConfig(report_drive_start=False, persona_arrived="Тут"), None)
+    assert "status driving" not in once and "'Тут'" in once
 
 
 def test_audio_transcripts_and_the_turn_end_are_read() -> None:
@@ -84,6 +106,7 @@ def test_tool_calls_cancellations_handles_and_go_away_are_read() -> None:
     )
     assert [(c.id, c.name, c.args) for c in m.tool_calls] == [("c1", "go_to", {"place": "home"})]
     assert m.cancelled == ("c0",) and m.handle == "h2" and m.go_away_s == 12.5
+    assert m.activity is None
     not_resumable = convert(
         types.LiveServerMessage(
             session_resumption_update=types.LiveServerSessionResumptionUpdate(
@@ -113,3 +136,15 @@ def test_usage_is_split_by_modality_and_thoughts_count_as_text_out() -> None:
     assert (usage.audio_in, usage.text_in, usage.audio_out, usage.text_out) == (700, 305, 150, 70)
     m = convert(types.LiveServerMessage(usage_metadata=types.UsageMetadata(prompt_token_count=9)))
     assert m.usage is not None and m.usage.text_in == 9 and m.usage.reports == 1
+
+
+def test_the_servers_vad_is_read_as_the_persons_speech_starting_and_ending() -> None:
+    kinds = {
+        types.VoiceActivityType.ACTIVITY_START: "start",
+        types.VoiceActivityType.ACTIVITY_END: "end",
+    }
+    for kind, expected in kinds.items():
+        m = convert(
+            types.LiveServerMessage(voice_activity=types.VoiceActivity(voice_activity_type=kind))
+        )
+        assert m.activity == expected

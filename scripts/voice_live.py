@@ -15,6 +15,11 @@ speech written to a WAV, only read-only tools):
     uv run python scripts/voice_live.py --say "Пепин, где ты?" --say "Всё, спасибо, пока" \\
         --speaker-wav /tmp/pepin.wav --tools where_am_i,list_places --sessions 1
 
+A drive with nothing moving (the tools act on fakes; a drive takes 5 s):
+
+    uv run python scripts/voice_live.py --say "Пепин, езжай к принтеру" \\
+        --speaker-wav /tmp/pepin.wav --fake-robot 5 --sessions 1
+
 The key: GEMINI_API_KEY in the environment or in the repo's gitignored .env (the main checkout's,
 from a worktree). scripts/voice.py stays the per-utterance fallback.
 """
@@ -30,6 +35,7 @@ from pathlib import Path
 
 from pepin.audio_link import board_host
 from pepin.tools import TOOLS, Robot
+from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.tools.schemas import gemini_function_declarations
 from pepin.voice_live.app import VoiceLoop
 from pepin.voice_live.audio import Pacer
@@ -39,35 +45,12 @@ from pepin.voice_live.events import Events, StatePrinter
 from pepin.voice_live.fake import DryRunLive
 from pepin.voice_live.live import GeminiLive, LiveConnector, declarations
 from pepin.voice_live.session import Conversation, Frame, ResumeStore
-from pepin.tools.clients import BoardSpeech
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker, synthesize
 from pepin.voice_live.wake import MlxWhisper
 
 REPO = Path(__file__).resolve().parents[1]
 NOT_FOR_LIVE = {"say"}  # the model speaks for itself
-# The demo's acknowledgement before a drive, recorded once in the Live voice (2026-10-05):
-# data/voice/demo/slushayus.wav, 16 kHz mono; the model is told not to say it itself.
-ACK_WAV = REPO / "data" / "voice" / "demo" / "slushayus.wav"
-
-
-class WavLine:
-    """A recorded line as BoardSpeech's synthesizer: the WAV's samples, whatever the text."""
-
-    def __init__(self, path: Path) -> None:
-        self.path = path
-
-    def pcm(self, text: str, rate: int) -> bytes:
-        import wave
-
-        with wave.open(str(self.path)) as audio:
-            data = audio.readframes(audio.getnframes())
-            if audio.getframerate() == rate:
-                return data
-        import numpy as np
-
-        x = np.frombuffer(data, dtype=np.int16).astype(float)
-        n = int(len(x) * rate / 16000)
-        return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.int16).tobytes()
+FAKE_ACCEPT_S = 0.3  # a fake drive is taken this long after the go (the recorder's start)
 
 
 def env_file() -> Path:
@@ -93,8 +76,16 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true", help="no Google: a local beep answers")
     ap.add_argument("--say", action="append", help="speak this into the loop instead of the mic")
     ap.add_argument("--speaker-wav", type=Path, help="write the robot's speech here, no sound")
+    ap.add_argument(
+        "--say-gap-s", type=float, default=1.2,
+        help="each --say waits for the robot to be idle or listening this long",
+    )  # fmt: skip
     ap.add_argument("--tools", help="comma-separated: only these tools (default: all but say)")
     ap.add_argument("--sessions", type=int, help="exit after this many sessions")
+    ap.add_argument(
+        "--fake-robot", type=float, metavar="DRIVE_S",
+        help="no robot: the tools act on fakes (nothing moves), a drive takes DRIVE_S seconds",
+    )  # fmt: skip
     ap.add_argument("--max-session-s", type=float, help="override the cap for this run")
     ap.add_argument("--idle-close-s", type=float, help="override the idle timeout for this run")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
@@ -132,21 +123,18 @@ def main() -> int:
         registry = [d for d in gemini_function_declarations(TOOLS) if d["name"] in allowed]
         live = GeminiLive(config, declarations(registry, moving))
 
-    robot = Robot.connect()
+    if args.fake_robot is not None:
+        clock = WallClock()
+        step_s = max(0.0, args.fake_robot - FAKE_ACCEPT_S) / 3  # accepted, 2 reports, done
+        goals = FakeGoalServer(clock, step_s=step_s, accept_s=FAKE_ACCEPT_S)
+        robot = fake_robot(clock=clock, goals=goals)
+        print(f"FAKE ROBOT: nothing moves; a drive takes {args.fake_robot:.1f} s", flush=True)
+    else:
+        robot = Robot.connect()
 
     def run_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
         if name not in allowed:
             return {"ok": False, "why": f"{name} is not available in this conversation"}
-        if name == "go_to" and ACK_WAV.is_file():  # the demo line, in the model's own voice
-            def ack() -> None:
-                try:
-                    BoardSpeech(args.host, synthesizer=WavLine(ACK_WAV)).say("ack")
-                except Exception as error:  # the drive matters more than the line
-                    print(f"  !! ack line: {error}", flush=True)
-
-            import threading
-
-            threading.Thread(target=ack, daemon=True).start()  # the drive does not wait for it
         return TOOLS.call(name, arguments, robot)
 
     events = Events(StatePrinter())
@@ -171,7 +159,7 @@ def main() -> int:
         def ready() -> bool:
             return events.state in ("idle", "listening") and not pacer.speaking()
 
-        mic = ScriptedMic([synthesize(text) for text in args.say], ready)
+        mic = ScriptedMic([synthesize(text) for text in args.say], ready, gap_s=args.say_gap_s)
     else:
         mic = link or BoardLink(args.host)
 
@@ -196,6 +184,7 @@ def main() -> int:
                 logs=logs,
                 ledger=ledger,
                 resume=resume,
+                transcriber=whisper,
             )
         )
         return conversations[-1]

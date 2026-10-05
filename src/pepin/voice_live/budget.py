@@ -1,10 +1,13 @@
 """What a session costs (an estimate) and whether another may open.
 
-Two estimates, the larger one counts. The server's own token counts (:class:`Usage`, summed over
-its usage reports) are the bill's basis; before the first report arrives, and in case the
-reports undercount, :func:`audio_estimate` prices the audio itself: every turn re-bills the
-whole context window (the Live API's rule), which grows with the audio heard and spoken until
-compression caps it.
+The estimate is the server's own token counts (:class:`Usage`, summed over its usage reports:
+one per model pass, each counting the whole context that pass read, which is how the Live API
+bills) plus every second of mic audio streamed, priced once as audio in (Google Billing: silence
+in an open stream is billed too). The context holds only the person's speech the server's VAD
+took, not the stream: on 2026-10-05 a session that streamed 586 s carried 1926 audio tokens
+(77 s) in its last pass, and the earlier estimate, which re-billed every streamed second at
+every turn, read 3.1x Google's counts (scratch/voice_1005/spend.py). A pass still in flight is
+not counted until its report arrives (a few seconds, ~0.003 USD for a fresh session).
 
 :class:`Ledger` keeps every session's latest estimate in one JSON-lines file, written at the
 open, every few seconds and at the close, so a crash mid-session still counts what it spent; a
@@ -23,8 +26,6 @@ from typing import Any
 from pepin.voice_live.config import LiveConfig, Prices
 
 logger = logging.getLogger(__name__)
-
-TEXT_OVERHEAD_TOKENS = 1500  # system instruction + tool declarations, in the context every turn
 
 
 @dataclass
@@ -55,52 +56,22 @@ class Usage:
         ) / 1e6
 
 
-def audio_estimate(
-    turn_contexts_s: list[float],
-    audio_out_s: float,
-    prices: Prices,
-    *,
-    context_cap_tokens: int,
-    overhead_tokens: int = TEXT_OVERHEAD_TOKENS,
-) -> float:
-    """USD from the audio alone: each turn bills the context it saw (``turn_contexts_s``: the
-    seconds of audio, both ways, in the context at each turn; capped by compression) as input,
-    plus the spoken audio as output; the text overhead is billed each turn too."""
-    tokens_per_s = prices.audio_tokens_per_s
-    audio_in = sum(min(s * tokens_per_s, context_cap_tokens) for s in turn_contexts_s)
-    text_in = overhead_tokens * max(1, len(turn_contexts_s))
-    return (
-        audio_in * prices.audio_in
-        + text_in * prices.text_in
-        + audio_out_s * tokens_per_s * prices.audio_out
-    ) / 1e6
-
-
 @dataclass
 class SessionCost:
-    """One session's running estimate: what was streamed, the turns, the server's counts."""
+    """One session's running estimate: the mic seconds streamed, the speech received, the
+    server's counts."""
 
     prices: Prices
-    context_cap_tokens: int
-    audio_in_s: float = 0.0
-    audio_out_s: float = 0.0
-    turn_contexts_s: list[float] = field(default_factory=list)
+    audio_in_s: float = 0.0  # streamed to Live
+    audio_out_s: float = 0.0  # spoken by the model
     usage: Usage = field(default_factory=Usage)
-    carried_s: float = 0.0  # context brought in by a resumed session (unknown: its last estimate)
-
-    def turn(self) -> None:
-        """A model turn happened: it billed the context as it stands."""
-        self.turn_contexts_s.append(self.carried_s + self.audio_in_s + self.audio_out_s)
+    carried_s: float = 0.0  # context brought in by a resumed session (for the resume store)
 
     @property
-    def audio_usd(self) -> float:
-        """The estimate from the audio."""
-        return audio_estimate(
-            self.turn_contexts_s,
-            self.audio_out_s,
-            self.prices,
-            context_cap_tokens=self.context_cap_tokens,
-        )
+    def stream_usd(self) -> float:
+        """Every second streamed, billed once as audio in."""
+        p = self.prices
+        return self.audio_in_s * p.audio_tokens_per_s * p.audio_in / 1e6
 
     @property
     def usage_usd(self) -> float:
@@ -109,8 +80,8 @@ class SessionCost:
 
     @property
     def usd(self) -> float:
-        """The larger of the two: a cap errs on the side of the wallet."""
-        return max(self.audio_usd, self.usage_usd)
+        """The session's estimate: the passes as the server counted them, plus the stream."""
+        return self.usage_usd + self.stream_usd
 
 
 class Ledger:

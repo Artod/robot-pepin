@@ -22,7 +22,7 @@ from pepin.voice_live.budget import Usage
 from pepin.voice_live.live import LiveMessage, LiveSession, ToolResponse
 from pepin.voice_live.wake import Segmenter
 
-Trigger = Literal["connect", "audio", "tool_response", "image"]
+Trigger = Literal["connect", "audio", "tool_response", "image", "text"]
 
 
 @dataclass
@@ -44,6 +44,8 @@ class FakeSession:
     audio: bytearray = field(default_factory=bytearray)
     images: list[bytes] = field(default_factory=list)
     responses: list[ToolResponse] = field(default_factory=list)
+    texts: list[str] = field(default_factory=list)
+    audio_ends: int = 0
     closed: bool = False
     _queue: asyncio.Queue[LiveMessage | None] = field(default_factory=asyncio.Queue)
 
@@ -83,6 +85,15 @@ class FakeSession:
         self.responses.extend(responses)
         self.release("tool_response")
 
+    async def end_audio(self) -> None:
+        """The mic paused."""
+        self.audio_ends += 1
+
+    async def send_text(self, text: str) -> None:
+        """Read a text turn."""
+        self.texts.append(text)
+        self.release("text")
+
     async def messages(self) -> AsyncIterator[LiveMessage]:
         """What the script says, until the connection is closed."""
         while not self.closed:
@@ -94,18 +105,21 @@ class FakeSession:
 
 class ScriptedLive:
     """:class:`pepin.voice_live.live.LiveConnector` over scripts: the n-th connection plays
-    ``scripts[n]``; every connection is kept in :attr:`sessions`."""
+    ``scripts[n]``; every connection is kept in :attr:`sessions`, its handle in :attr:`handles`
+    and its system instruction in :attr:`systems`."""
 
     def __init__(self, *scripts: list[Step]) -> None:
         """One script per expected connection."""
         self.scripts = [list(s) for s in scripts]
         self.sessions: list[FakeSession] = []
         self.handles: list[str | None] = []
+        self.systems: list[str] = []
 
     @contextlib.asynccontextmanager
-    async def connect(self, handle: str | None) -> AsyncIterator[LiveSession]:
+    async def connect(self, handle: str | None, system: str) -> AsyncIterator[LiveSession]:
         """The next scripted connection."""
         self.handles.append(handle)
+        self.systems.append(system)
         script = self.scripts[len(self.sessions)] if len(self.sessions) < len(self.scripts) else []
         session = FakeSession(list(script), handle)
         self.sessions.append(session)
@@ -162,7 +176,7 @@ class DryRunLive:
         self.sessions: list[FakeSession] = []
 
     @contextlib.asynccontextmanager
-    async def connect(self, handle: str | None) -> AsyncIterator[LiveSession]:
+    async def connect(self, handle: str | None, system: str) -> AsyncIterator[LiveSession]:
         """A local session; it hands out a handle so resumption is exercised too."""
         session = _DryRunSession(handle)
         self.sessions.append(session)

@@ -1,5 +1,5 @@
 """``config/voice_live.json``: the model, the caps that refuse a session, the prices of the cost
-estimate, the session's timings and the wake gate."""
+estimate, the session's timings, the persona's lines and the wake gate."""
 
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_FILE = "voice_live.json"
+MIC_WHILE_DRIVING = ("gated", "streamed")
 
 
 @dataclass(frozen=True)
@@ -35,11 +36,17 @@ class LiveConfig:
     daily_budget_cad: float = 1.0
     prices: Prices = Prices()
     idle_close_s: float = 25.0
-    resume_valid_s: float = 7000.0
+    idle_after_drive_s: float = 8.0
+    resume_valid_s: float = 120.0
     compression_trigger_tokens: int = 16000
     compression_target_tokens: int = 8000
     barge_in: bool = False
     playback_lead_s: float = 0.5
+    report_drive_start: bool = True
+    mic_while_driving: str = "gated"
+    transcription_languages: tuple[str, ...] = ()
+    persona_acknowledge: str = ""
+    persona_arrived: str = ""
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
     whisper_prompt: str | None = None
     wake_silence_s: float = 0.5
@@ -52,6 +59,7 @@ class LiveConfig:
         caps = data.get("caps", {})
         prices = data.get("prices_usd_per_mtok", {})
         session = data.get("session", {})
+        persona = data.get("persona", {})
         wake = data.get("wake", {})
         d = cls()
         config = cls(
@@ -69,6 +77,7 @@ class LiveConfig:
                 usd_to_cad=float(data.get("usd_to_cad", d.prices.usd_to_cad)),
             ),
             idle_close_s=float(session.get("idle_close_s", d.idle_close_s)),
+            idle_after_drive_s=float(session.get("idle_after_drive_s", d.idle_after_drive_s)),
             resume_valid_s=float(session.get("resume_valid_s", d.resume_valid_s)),
             compression_trigger_tokens=int(
                 session.get("compression_trigger_tokens", d.compression_trigger_tokens)
@@ -78,6 +87,14 @@ class LiveConfig:
             ),
             barge_in=bool(session.get("barge_in", d.barge_in)),
             playback_lead_s=float(session.get("playback_lead_s", d.playback_lead_s)),
+            report_drive_start=bool(session.get("report_drive_start", d.report_drive_start)),
+            mic_while_driving=str(session.get("mic_while_driving", d.mic_while_driving)),
+            transcription_languages=tuple(
+                str(code)
+                for code in session.get("transcription_languages", d.transcription_languages)
+            ),
+            persona_acknowledge=str(persona.get("acknowledge", d.persona_acknowledge)),
+            persona_arrived=str(persona.get("arrived", d.persona_arrived)),
             whisper_repo=str(wake.get("whisper_repo", d.whisper_repo)),
             whisper_prompt=wake.get("initial_prompt") or None,
             wake_silence_s=float(wake.get("silence_s", d.wake_silence_s)),
@@ -104,8 +121,10 @@ class LiveConfig:
             raise ValueError("max_sessions_per_hour >= 1 and daily_budget_cad > 0")
         if not 0 < self.compression_target_tokens < self.compression_trigger_tokens:
             raise ValueError("0 < compression_target_tokens < compression_trigger_tokens")
-        if self.idle_close_s <= 0:
-            raise ValueError("idle_close_s > 0")
+        if self.idle_close_s <= 0 or self.idle_after_drive_s <= 0:
+            raise ValueError("idle_close_s > 0 and idle_after_drive_s > 0")
+        if self.mic_while_driving not in MIC_WHILE_DRIVING:
+            raise ValueError(f"mic_while_driving: one of {', '.join(MIC_WHILE_DRIVING)}")
 
     def with_overrides(self, **changes: Any) -> LiveConfig:
         """A copy with the given fields replaced (command-line overrides), checked again."""

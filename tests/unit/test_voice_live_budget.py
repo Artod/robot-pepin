@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from pepin.voice_live.budget import Ledger, SessionCost, Usage, audio_estimate
+from pepin.voice_live.budget import Ledger, SessionCost, Usage
 from pepin.voice_live.config import LiveConfig, Prices
 
 NOON = time.mktime((2026, 10, 2, 12, 0, 0, 0, 0, -1))  # local noon: no midnight inside a test
@@ -20,6 +20,11 @@ def test_the_checked_in_config_loads_and_its_caps_hold() -> None:
     assert config.daily_budget_usd == pytest.approx(
         config.daily_budget_cad / config.prices.usd_to_cad
     )
+    # the persona's lines are named in the config, not in the code
+    assert config.persona_acknowledge and config.persona_arrived
+    assert config.mic_while_driving == "gated" and config.report_drive_start
+    assert config.idle_after_drive_s < config.idle_close_s
+    assert config.resume_valid_s <= 300  # a resumed context is re-billed at every pass
 
 
 @pytest.mark.parametrize(
@@ -30,6 +35,8 @@ def test_the_checked_in_config_loads_and_its_caps_hold() -> None:
         {"caps": {"daily_budget_cad": 0}},
         {"caps": {"max_sessions_per_hour": 0}},
         {"session": {"compression_trigger_tokens": 100, "compression_target_tokens": 200}},
+        {"session": {"idle_after_drive_s": 0}},
+        {"session": {"mic_while_driving": "muted"}},
     ],
 )
 def test_a_cap_without_its_point_is_refused(change: dict[str, dict[str, float]]) -> None:
@@ -52,28 +59,16 @@ def test_usage_prices_each_modality() -> None:
     assert usage.audio_in == 1_000_010 and usage.reports == 1
 
 
-def test_the_audio_estimate_rebills_the_context_every_turn_up_to_the_cap() -> None:
-    prices = Prices(audio_in=3.0, audio_out=12.0, text_in=0.0, audio_tokens_per_s=25.0)
-    # a minute heard and nothing said, one turn: 0.0045 USD (the docs' 0.005/min, rounded)
-    assert audio_estimate([60.0], 0.0, prices, context_cap_tokens=10**9) == pytest.approx(0.0045)
-    # three turns over a growing context bill 10 + 20 + 30 s
-    assert audio_estimate(
-        [10.0, 20.0, 30.0], 0.0, prices, context_cap_tokens=10**9
-    ) == pytest.approx(60 * 25 * 3.0 / 1e6)
-    # compression caps what each turn can bill
-    capped = audio_estimate([1000.0] * 4, 0.0, prices, context_cap_tokens=1000)
-    assert capped == pytest.approx(4 * 1000 * 3.0 / 1e6)
-    # a minute spoken: 0.018 USD
-    assert audio_estimate([], 60.0, prices, context_cap_tokens=1) == pytest.approx(0.018)
-
-
-def test_a_session_counts_the_larger_of_its_two_estimates() -> None:
-    cost = SessionCost(Prices(), context_cap_tokens=16000)
-    cost.audio_in_s = 10.0
-    cost.turn()
-    assert cost.usd == pytest.approx(cost.audio_usd) and cost.audio_usd > 0
-    cost.usage.add(Usage(audio_in=1_000_000))
-    assert cost.usd == pytest.approx(cost.usage_usd) == pytest.approx(3.0)
+def test_a_session_costs_its_passes_as_counted_plus_every_second_streamed() -> None:
+    prices = Prices(audio_in=3.0, audio_out=12.0, text_in=0.75, text_out=4.5)
+    cost = SessionCost(prices)
+    cost.audio_in_s = 60.0  # a minute streamed, silence or not: 0.0045 USD (the docs' 0.005/min)
+    assert cost.stream_usd == pytest.approx(0.0045) and cost.usd == pytest.approx(0.0045)
+    # 2026-10-05's first drive in a fresh session: two passes (2.9k and 3.0k tokens of context)
+    cost.usage.add(Usage(audio_in=486, text_in=5256, text_out=154, reports=1))
+    cost.usage.add(Usage(audio_in=243, text_in=2721, audio_out=43, text_out=74, reports=1))
+    assert cost.usage_usd == pytest.approx(0.0097, abs=1e-4)
+    assert cost.usd == pytest.approx(cost.usage_usd + 0.0045)
 
 
 def test_the_ledger_refuses_past_the_hourly_count_and_the_daily_budget(tmp_path: Path) -> None:
