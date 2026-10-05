@@ -39,11 +39,35 @@ from pepin.voice_live.events import Events, StatePrinter
 from pepin.voice_live.fake import DryRunLive
 from pepin.voice_live.live import GeminiLive, LiveConnector, declarations
 from pepin.voice_live.session import Conversation, Frame, ResumeStore
+from pepin.tools.clients import BoardSpeech
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker, synthesize
 from pepin.voice_live.wake import MlxWhisper
 
 REPO = Path(__file__).resolve().parents[1]
 NOT_FOR_LIVE = {"say"}  # the model speaks for itself
+# The demo's acknowledgement before a drive, recorded once in the Live voice (2026-10-05):
+# data/voice/demo/slushayus.wav, 16 kHz mono; the model is told not to say it itself.
+ACK_WAV = REPO / "data" / "voice" / "demo" / "slushayus.wav"
+
+
+class WavLine:
+    """A recorded line as BoardSpeech's synthesizer: the WAV's samples, whatever the text."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def pcm(self, text: str, rate: int) -> bytes:
+        import wave
+
+        with wave.open(str(self.path)) as audio:
+            data = audio.readframes(audio.getnframes())
+            if audio.getframerate() == rate:
+                return data
+        import numpy as np
+
+        x = np.frombuffer(data, dtype=np.int16).astype(float)
+        n = int(len(x) * rate / 16000)
+        return np.interp(np.linspace(0, len(x) - 1, n), np.arange(len(x)), x).astype(np.int16).tobytes()
 
 
 def env_file() -> Path:
@@ -113,6 +137,16 @@ def main() -> int:
     def run_tool(name: str, arguments: dict[str, object]) -> dict[str, object]:
         if name not in allowed:
             return {"ok": False, "why": f"{name} is not available in this conversation"}
+        if name == "go_to" and ACK_WAV.is_file():  # the demo line, in the model's own voice
+            def ack() -> None:
+                try:
+                    BoardSpeech(args.host, synthesizer=WavLine(ACK_WAV)).say("ack")
+                except Exception as error:  # the drive matters more than the line
+                    print(f"  !! ack line: {error}", flush=True)
+
+            import threading
+
+            threading.Thread(target=ack, daemon=True).start()  # the drive does not wait for it
         return TOOLS.call(name, arguments, robot)
 
     events = Events(StatePrinter())

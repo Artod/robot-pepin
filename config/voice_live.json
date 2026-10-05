@@ -6,7 +6,7 @@
   "caps": {
     "max_session_s": 600,
     "max_sessions_per_hour": 20,
-    "daily_budget_cad": 1.0,
+    "daily_budget_cad": 5.0,
     "note": "a session is closed at max_session_s; a wake past max_sessions_per_hour (opened in the last 3600 s) or with today's estimate at daily_budget_cad is refused, and a session that crosses the budget is closed. 1 CAD/day keeps a month under the 40 CAD cloud cap"
   },
   "prices_usd_per_mtok": {
