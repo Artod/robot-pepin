@@ -318,7 +318,7 @@
       "on_board_because": [
         "real-time"
       ],
-      "owner": "pepin-reap.timer -> pepin-reap.service -> board/reap_ros2_cli.sh",
+      "owner": "pepin-reap.timer -> pepin-reap.service -> ros/reap_ros2_cli.sh",
       "when": "sometimes",
       "budget": {
         "cpu_percent": 5.0,

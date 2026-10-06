@@ -130,6 +130,30 @@ def test_both_routers_have_more_rx_workers_than_the_sessions_they_serve() -> Non
     assert runtime in (REPO / "ros/laptop.sh").read_text().split("zrouter_up() {")[1]
 
 
+def test_every_file_a_board_unit_runs_from_the_synced_tree_is_one_sync_ships() -> None:
+    """ros/sync.sh mirrors ros/ to /root/pepin-ros/ (and src/pepin, config/ under pepin_src/):
+    a unit that runs /root/pepin-ros/X runs ros/X. pepin-reap.service named
+    /root/pepin-ros/board/reap_ros2_cli.sh, which nothing ever wrote, and failed every minute
+    from 2026-09-24 to 2026-10-06."""
+    sync = (REPO / "ros/sync.sh").read_text()
+    assert '"$HERE/" "root@$BOARD:/root/pepin-ros/"' in sync, "sync mirrors ros/ there"
+    ran: list[tuple[str, str]] = []
+    for unit in sorted((REPO / "board").glob("*.service")):
+        for line in unit.read_text().splitlines():
+            key, _, command = line.partition("=")
+            if key not in ("ExecStart", "ExecStartPre", "ExecStartPost", "ExecStop"):
+                continue
+            program = command.lstrip("-@:+!").split()[0] if command.strip() else ""
+            if program.startswith("/root/pepin-ros/"):
+                ran.append((unit.name, program.removeprefix("/root/pepin-ros/")))
+    assert ("pepin-reap.service", "reap_ros2_cli.sh") in ran
+    assert ("pepin-ros.service", "run.sh") in ran
+    for unit_name, rest in ran:
+        source = REPO / "ros" / rest
+        assert source.is_file(), f"{unit_name} runs /root/pepin-ros/{rest}: no ros/{rest}"
+        assert source.stat().st_mode & 0o111, f"ros/{rest} must be executable"
+
+
 def test_the_board_router_keeps_its_log_across_a_restart_like_the_stack_does() -> None:
     """Under `docker run --rm` the board router's log of the 2026-09-23 wake (the 20-s closures
     to the sleeping laptop) went with its first restart. The container now outlives its process,

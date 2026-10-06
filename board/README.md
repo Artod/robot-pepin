@@ -58,7 +58,7 @@ and `systemctl start pepin-base` after.
 | `board/tof_init.sh` | `/usr/local/bin/tof_init.sh` (executable) |
 | `board/tof-init.service`, `pepin-tof.service`, `pepin-base.service`, `pepin-camera.service`, `pepin-audio.service`, `pepin-head.service`, `pepin-zrouter.service` | `/etc/systemd/system/` |
 | `board/pepin-ros.service` | `/etc/systemd/system/` (installed by `ros/build-image.sh --ship`) |
-| `board/pepin-reap.service`, `pepin-reap.timer` | `/etc/systemd/system/` (the script below) |
+| `board/pepin-reap.service`, `pepin-reap.timer` | `/etc/systemd/system/` (they run `ros/reap_ros2_cli.sh`, which `ros/sync.sh` puts in `/root/pepin-ros/`) |
 | `board/wifi-runtime-pm-on.conf` | `/etc/systemd/system/wifi-powersave-off.service.d/runtime-pm-on.conf` |
 | `board/i2c3-400k.dts` | `armbian-add-overlay board/i2c3-400k.dts`, then a reboot: the IMU and the ToF share that bus, and at the default 100 kHz the ToF held the IMU at 53 of its 100 Hz |
 | `board/chrony.sh`, `board/chrony/` | installed by `ros/time.sh install` ([ros/README.md](../ros/README.md), "One clock") |
@@ -268,9 +268,10 @@ Check from the laptop: `uv run python scripts/health_check.py --quick`.
 
 ## Stray ros2 CLI tools
 
-`board/reap_ros2_cli.sh` (systemd timer `pepin-reap.timer`, every minute) kills `ros2
+`ros/reap_ros2_cli.sh` (systemd timer `pepin-reap.timer`, every minute) kills `ros2
 topic|param|run|node|service|...` processes older than 90 s inside `pepin-ros`: a `timeout` around
 a CLI probe ends the tool but not always its DDS shutdown, and a dozen leftovers took the board to
-load 12 (2026-09-13). Nodes are never touched. The unit runs the script from
-`/root/pepin-ros/board/`. Operator rule: probe the board with `timeout -s KILL` and one tool at a
-time.
+load 12 (2026-09-13). Nodes are never touched. The unit runs the script from `/root/pepin-ros/`,
+where `ros/sync.sh` mirrors `ros/` (a unit runs nothing from `/root/pepin-ros/` that `ros/` does
+not hold: `tests/unit/test_deployment.py`). Operator rule: probe the board with `timeout -s KILL`
+and one tool at a time.

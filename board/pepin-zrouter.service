@@ -64,7 +64,7 @@ ExecStart=/bin/sh -c 'if [ -f /root/pepin-ros/zenoh/router.json5 ]; then exec /u
 # (scratch/nav2_hang/, and the tof_bridge module docstring). So the unit is not "started" until
 # the port answers: 30 s in 0.5 s steps, and a router that never listens fails the unit loudly
 # instead of letting the whole stack start behind it. bash for /dev/tcp — nothing else here
-# opens a socket, and the board already runs bash units (board/reap_ros2_cli.sh).
+# opens a socket, and the board already runs bash units (ros/reap_ros2_cli.sh).
 ExecStartPost=/bin/bash -c 'timeout 30 bash -c "until (exec 3<>/dev/tcp/127.0.0.1/7447) 2>/dev/null; do sleep 0.5; done" || { echo "pepin-zrouter: nothing is accepting on tcp/127.0.0.1:7447 after 30 s; the stack must not start behind a router that is not listening" >&2; exit 1; }'
 ExecStop=-/usr/bin/docker stop -t 5 pepin-zrouter
 Restart=always

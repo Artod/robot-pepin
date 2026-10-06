@@ -2,4 +2,7 @@
 Description=Pepin: reap ros2 CLI tools left behind in the pepin-ros container
 [Service]
 Type=oneshot
-ExecStart=/root/pepin-ros/board/reap_ros2_cli.sh
+# ros/reap_ros2_cli.sh, which ros/sync.sh mirrors to /root/pepin-ros/ with the rest of ros/
+# (until 2026-10-06 the unit named /root/pepin-ros/board/..., a path sync never wrote: it failed
+# every minute from 2026-09-24).
+ExecStart=/root/pepin-ros/reap_ros2_cli.sh
