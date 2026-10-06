@@ -20,7 +20,9 @@ class BaseGeometry:
     """Differential-drive geometry and the wheel encoder scale."""
 
     wheel_diameter_m: float = 0.125
-    track_width_m: float = 0.505
+    # The EFFECTIVE track for yaw, fit against the lidar truth (config/base.json's
+    # track_width_note); the ruler says 0.515 between the wheels' contact centres.
+    track_width_m: float = 0.544
     ticks_per_rev: int = 4096
 
     @property

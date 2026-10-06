@@ -1,7 +1,7 @@
 {
   "geometry": {
     "wheel_diameter_m": 0.125,
-    "track_width_m": 0.505,
+    "track_width_m": 0.544,
     "ticks_per_rev": 4096
   },
   "left": {
@@ -12,6 +12,7 @@
     "motor_id": 8,
     "direction": 1
   },
+  "track_width_note": "the EFFECTIVE track for yaw, not the ruler's: the wheels' contact centres are 0.515 m apart (ruler, 2026-10-06), but on 19 lidar-truth drives (0329-0347) the cart turned 0.929 [0.892, 0.960] of what (dR - dL) / 0.505 said (|dtheta|-weighted median of 357 turning seconds, drive-bootstrap CI; the base gyro agrees with the lidar to 0.997), so T = 0.505 / 0.929 = 0.544 [0.526, 0.566] m: pivots 0.907, inner wheel stopped 0.932, wide arcs 0.963 (slip and caster scrub grow as the turn tightens). Straight-line distance 0.980 [0.946, 1.013] and the two wheels' difference (-0.1 [-2.4, +2.0] deg per metre) are inside their CIs: the wheel diameter is unchanged. Re-integrated on the same drives, the heading error over 5 s windows went p50 4.4 -> 3.5 deg, drive-end p50 24.7 -> 16.6 deg. The same number shapes the commands (pepin.kinematics, pepin.base.wheel_ceiling): a commanded yaw rate now asks the wheels for ~8 % more differential speed (expected to land the turn, not yet driven), and the ceiling slows a fast arc a little sooner. The stalls (one wheel spinning, the cart still: 0337, 0341) are not in it: they are slip, for the gyro and the twist covariance to answer.",
   "max_speed_m_s": 0.45,
   "max_yaw_rate_rad_s": 1.0,
   "max_wheel_speed_m_s": 0.30,
