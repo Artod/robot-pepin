@@ -27,7 +27,13 @@ and :class:`VioLost` says when it has diverged (it never resets itself); :class:
 every single sample no cart of this speed could have made and says when to restart it. As a BODY
 VELOCITY instead of a pose (the relay's ``vo_output twist``), the composed step becomes
 :func:`se2_twist` and its weight is OpenVINS's own velocity covariance, matched by stamp
-(:class:`TwistCovariances`) and turned into base_link's axes (:func:`base_twist_covariance`).
+(:class:`TwistCovariances`) and turned into base_link's axes (:func:`base_twist_covariance`). At
+the IMU's rate instead (the relay's ``vio_twist_source imu``), odomimu's own velocity state and
+gyro are carried into base_link through the neck (:func:`imu_base_twist`), sampled evenly
+(:class:`EvenRate`, :class:`ImuQueue`) with the neck differenced over the step
+(:class:`NeckBaseline`). While the VIO is lost only its yaw rate is sent, its variance grown by
+the gyro bias's walk since the last visual update (:class:`YawOnly`,
+:func:`yaw_only_covariance`); :func:`scaled_twist_covariance` is the relay's sigma scales.
 
 Nothing here is ROS: poses and wheel speeds in, verdicts and a report line out
 (:mod:`pepin_bringup.visual_odometry` is the node around it).
@@ -49,10 +55,14 @@ __all__ = [
     "REST_YAW_RAD_S",
     "SCALE_ERROR",
     "SIGMA_FLOOR_M",
+    "VIO_IMU_HALF_SAMPLE_S",
+    "VIO_IMU_LAG_S",
     "VIO_LOST_S",
     "VIO_LOST_SPEED_M_S",
     "VIO_MAX_SPEED_M_S",
     "VIO_MIN_FEATURES",
+    "VIO_NECK_DT_FLOOR_S",
+    "VIO_NECK_GAP_S",
     "VIO_REINIT_RATIO",
     "VIO_RESTART_GAP_S",
     "VIO_RESTART_REJECTS",
@@ -63,6 +73,10 @@ __all__ = [
     "VIO_TWIST_MATCH_S",
     "VIO_WHEEL_DIFF_M_S",
     "WEIGHTLESS_VARIANCE",
+    "EvenRate",
+    "ImuQueue",
+    "ImuState",
+    "NeckBaseline",
     "PublishCap",
     "RestDrift",
     "RestWatch",
@@ -73,15 +87,20 @@ __all__ = [
     "VoGate",
     "VoPose",
     "VoTrack",
+    "YawOnly",
     "base_twist_covariance",
     "body_velocity",
     "compose_base_pose",
     "homogeneous",
+    "imu_base_twist",
     "is_lost",
     "planar_covariance",
+    "rotation_vector",
     "scaled_covariance",
+    "scaled_twist_covariance",
     "se2_twist",
     "weightless_covariance",
+    "yaw_only_covariance",
 ]
 
 # What rtabmap writes on the diagonal of a pose it did not measure: its odometry nodes publish a
@@ -152,6 +171,26 @@ VIO_TWIST_MATCH_S = 0.02
 # How much odomimu history is kept for that match: poseimu arrives 0.15-0.3 s after its stamp
 # (the update waits for the image), odomimu as the IMU sample lands.
 VIO_TWIST_HORIZON_S = 2.0
+# THE TWIST AT THE IMU'S RATE (the relay's ``vio_twist_source imu``): odomimu carries OpenVINS's
+# velocity STATE and the bias-corrected gyro once per head-IMU sample (200 Hz nominal, 5 ms; 163 Hz
+# on 2026-10-05's drives, gaps to 30 ms). Its POSES cannot be differenced at that rate: each is
+# the last update's state propagated on the IMU alone, and every update moves the base of that
+# propagation, so the pose stream jumps once per camera frame -- differenced over ~20 ms the pair
+# that straddles an update reads |dp/dt - v| 7-11 cm/s p50, 33-38 cm/s p90 and 2.2-2.5 m/s p99
+# (drives 0329/0330, scratch/vio_relay_night/odomimu_steps.py), against 0.1-0.2 cm/s p50 for the
+# pairs inside one propagation. So the 50 Hz twist is odomimu's own velocity and rate, carried
+# into base_link through the neck (:func:`imu_base_twist`). A sample is taken when it is at least
+# one period minus half an IMU sample after the last one taken (:class:`EvenRate`), so the neck's
+# rate is never differenced over less than ~17 ms (the floor below) nor across a gap longer than
+# VIO_NECK_GAP_S (a mean over a gap is not a rate).
+VIO_IMU_HALF_SAMPLE_S = 0.0025
+VIO_NECK_DT_FLOOR_S = 0.010
+VIO_NECK_GAP_S = 0.1
+# How far behind the newest odomimu a sample is taken: its neck chain must already be in the TF
+# buffer (the bridge's camera edge at 50 Hz crosses the same WiFi as the head IMU), so the lookup
+# never waits and a 50 Hz loop never blocks. The twist then reaches the EKF ~0.1 s after its
+# stamp, against 0.15-0.3 s for poseimu's step (the update waits for the image).
+VIO_IMU_LAG_S = 0.1
 
 
 @dataclass(frozen=True)
@@ -722,26 +761,34 @@ def weightless_covariance() -> list[float]:
 _PLANAR_TWIST = (0, 1, 5)
 
 
-def base_twist_covariance(imu_covariance: Sequence[float], r_b_i: Any) -> list[float] | None:
+def base_twist_covariance(
+    imu_covariance: Sequence[float], r_b_i: Any, lever: Any = None
+) -> list[float] | None:
     """OpenVINS's twist covariance turned into base_link's axes, for the three the EKF fuses.
 
     ``imu_covariance`` is odomimu's 6x6 row-major twist covariance: the IMU's linear velocity
     and its angular velocity, both in the IMU's own axes (Propagator::fast_state_propagate);
-    ``r_b_i`` is base_link <- head_imu at the same stamp. The result is
-    ``R6 C R6^T``, ``R6 = diag(R_B_I, R_B_I)``, kept on vx, vy and vyaw with their cross terms
-    and :data:`WEIGHTLESS_VARIANCE` on every other axis. ``None`` when the source is not a
-    covariance: too short, a non-finite entry, or a kept 3x3 block that is not positive definite
-    (OpenVINS before its first update, a zero matrix)."""
+    ``r_b_i`` is base_link <- head_imu at the same stamp. The result is ``J C J^T`` with ``J``
+    the rows vx, vy, vyaw of ``R6 = diag(R_B_I, R_B_I)``, kept with their cross terms and
+    :data:`WEIGHTLESS_VARIANCE` on every other axis. ``lever`` (the IMU's position in base_link,
+    metres) adds what :func:`imu_base_twist` does with the yaw rate: ``vx += wz * py``,
+    ``vy -= wz * px``, so the gyro's noise reaches vx and vy through the arm; ``None`` is the
+    composed step's case (no arm term). ``None`` when the source is not a covariance: too short, a
+    non-finite entry, or a kept 3x3 block that is not positive definite (OpenVINS before its
+    first update, a zero matrix)."""
     if len(imu_covariance) < 36:
         return None
     source = np.asarray(list(imu_covariance)[:36], dtype=float).reshape(6, 6)
     if not np.all(np.isfinite(source)):
         return None
-    rotation = np.zeros((6, 6))
-    rotation[:3, :3] = np.asarray(r_b_i, dtype=float)
-    rotation[3:, 3:] = rotation[:3, :3]
-    base = rotation @ source @ rotation.T
-    block = base[np.ix_(_PLANAR_TWIST, _PLANAR_TWIST)]
+    r = np.asarray(r_b_i, dtype=float)
+    jacobian = np.zeros((3, 6))
+    jacobian[0, :3], jacobian[1, :3], jacobian[2, 3:] = r[0], r[1], r[2]
+    if lever is not None:
+        px, py = float(lever[0]), float(lever[1])
+        jacobian[0, 3:] += py * r[2]
+        jacobian[1, 3:] -= px * r[2]
+    block = jacobian @ source @ jacobian.T
     block = 0.5 * (block + block.T)
     if not np.all(np.linalg.eigvalsh(block) > 0.0):
         return None
@@ -786,6 +833,239 @@ class TwistCovariances:
             if item[0] < stamp - self.match_s:
                 break
         return None if best is None else best[1]
+
+
+def rotation_vector(rotation: Any) -> Any:
+    """The axis times the angle (rad) of a 3x3 rotation: its logarithm as a vector."""
+    r = np.asarray(rotation, dtype=float)
+    skew = np.array([r[2, 1] - r[1, 2], r[0, 2] - r[2, 0], r[1, 0] - r[0, 1]])
+    cosine = min(max((float(np.trace(r)) - 1.0) / 2.0, -1.0), 1.0)
+    angle = math.acos(cosine)
+    if angle < 1e-6:
+        return 0.5 * skew
+    return skew * (angle / (2.0 * math.sin(angle)))
+
+
+def imu_base_twist(
+    velocity: Any, rate: Any, t_b_i: Any, t_b_i_before: Any, dt: float
+) -> tuple[float, float, float] | None:
+    """base_link's planar twist (forward m/s, left m/s, yaw rad/s) from OpenVINS's IMU state.
+
+    ``velocity`` is odomimu's twist.linear (the IMU's velocity in G, in the IMU's own axes),
+    ``rate`` its twist.angular (the bias-corrected gyro, IMU axes); ``t_b_i`` is base_link <-
+    head_imu (4x4) at the sample's stamp and ``t_b_i_before`` the same ``dt`` seconds earlier: the
+    neck's (and the mast's) own motion over the step, ``R_rel = R(t) R(t - dt)^T`` and
+    ``p_dot = (p(t) - p(t - dt)) / dt`` in base axes. Rigid-body kinematics with a planar base
+    (``w_B = (0, 0, wz)``: its roll and pitch are the TF's, as the mast filter models them):
+
+        wz  = (R_B_I w_I)_z - log(R_rel)_z / dt
+        v_B = R_B_I v_I - w_B x p_B_I - p_dot
+
+    ``None`` when ``dt`` is under :data:`VIO_NECK_DT_FLOOR_S` (a neck rate differenced over less
+    is the encoders' quantisation, 0.088 deg a tick)."""
+    if dt < VIO_NECK_DT_FLOOR_S:
+        return None
+    now, before = np.asarray(t_b_i, dtype=float), np.asarray(t_b_i_before, dtype=float)
+    r, p = now[:3, :3], now[:3, 3]
+    neck_rate = rotation_vector(r @ before[:3, :3].T) / dt
+    p_dot = (p - before[:3, 3]) / dt
+    wz = float((r @ np.asarray(rate, dtype=float))[2] - neck_rate[2])
+    v = r @ np.asarray(velocity, dtype=float)
+    forward = float(v[0] + wz * p[1] - p_dot[0])
+    left = float(v[1] - wz * p[0] - p_dot[1])
+    return forward, left, wz
+
+
+@dataclass(frozen=True)
+class ImuState:
+    """One odomimu sample: its stamp (s), OpenVINS's IMU velocity and bias-corrected rate (both
+    in the IMU's own axes) and their 6x6 row-major covariance."""
+
+    stamp: float
+    velocity: tuple[float, float, float]
+    rate: tuple[float, float, float]
+    covariance: tuple[float, ...]
+
+
+class EvenRate:
+    """Which stamps of a stream to take for ``hz`` evenly spaced samples: one at least
+    ``1 / hz - VIO_IMU_HALF_SAMPLE_S`` after the last one taken and strictly later (a token
+    bucket would hand out two IMU samples 5 ms apart after any pause); ``hz`` 0 takes every
+    stamp that moves forward."""
+
+    def __init__(self, hz: float) -> None:
+        self.hz = hz  # live: the relay's vio_publish_hz writes it
+        self._last: float | None = None
+
+    def take(self, stamp: float) -> bool:
+        """Whether this stamp is taken; it then becomes the last one taken."""
+        last = self._last
+        if last is not None:
+            if stamp <= last:
+                return False
+            if self.hz > 0.0 and stamp - last < 1.0 / self.hz - VIO_IMU_HALF_SAMPLE_S:
+                return False
+        self._last = stamp
+        return True
+
+    def reset(self) -> None:
+        """Forget the last stamp (a restarted source, whose clock may start again)."""
+        self._last = None
+
+
+class ImuQueue:
+    """odomimu samples waiting for their neck chain: :meth:`due` hands out, oldest first, the
+    ones at least ``lag_s`` behind the newest that :class:`EvenRate` takes, and drops the rest as
+    they pass. A stamp that goes backwards (a restarted OpenVINS) empties it."""
+
+    def __init__(self, hz: float, lag_s: float = VIO_IMU_LAG_S) -> None:
+        self.rate = EvenRate(hz)
+        self.lag_s = lag_s
+        self._items: deque[ImuState] = deque()
+
+    def add(self, sample: ImuState) -> None:
+        """One odomimu sample, in arrival order."""
+        if self._items and sample.stamp <= self._items[-1].stamp:
+            self._items.clear()
+            self.rate.reset()
+        self._items.append(sample)
+
+    def due(self) -> list[ImuState]:
+        """The samples to process now: lag_s behind the newest and taken by the rate."""
+        items = self._items
+        if not items:
+            return []
+        horizon = items[-1].stamp - self.lag_s
+        out = []
+        while items and items[0].stamp <= horizon:
+            sample = items.popleft()
+            if self.rate.take(sample.stamp):
+                out.append(sample)
+        return out
+
+    def clear(self) -> None:
+        """Drop every waiting sample (another input took over)."""
+        self._items.clear()
+        self.rate.reset()
+
+
+class NeckBaseline:
+    """The neck chain at the last sample taken, for the neck's own rate over the step to the
+    next: :meth:`step` answers the earlier transform and the seconds between, or ``None`` when
+    there is nothing to difference against (the first sample, a gap over ``gap_s``). A step
+    under ``floor_s`` answers ``None`` and keeps the older baseline, so the next one differences
+    over a longer step; otherwise the new transform becomes the baseline."""
+
+    def __init__(self, floor_s: float = VIO_NECK_DT_FLOOR_S, gap_s: float = VIO_NECK_GAP_S) -> None:
+        self.floor_s = floor_s
+        self.gap_s = gap_s
+        self._last: tuple[float, Any] | None = None
+
+    def step(self, stamp: float, t_b_i: Any) -> tuple[Any, float] | None:
+        """``(t_b_i_before, dt)`` for this sample, or ``None``."""
+        last = self._last
+        if last is not None and 0.0 < stamp - last[0] < self.floor_s:
+            return None
+        self._last = (stamp, t_b_i)
+        if last is None:
+            return None
+        dt = stamp - last[0]
+        if dt <= 0.0 or dt > self.gap_s:
+            return None
+        return last[1], dt
+
+    def reset(self) -> None:
+        """Nothing to difference against until the next sample (a re-init, an input switch)."""
+        self._last = None
+
+
+def scaled_twist_covariance(
+    covariance: Sequence[float], linear_scale: float, yaw_scale: float
+) -> list[float]:
+    """``S C S`` with ``S`` = ``linear_scale`` on vx and vy and ``yaw_scale`` on vyaw: the sigmas
+    of the three fused axes multiplied by the relay's ``vio_sigma_scale`` and
+    ``vio_yaw_sigma_scale``, a cross term by the product of its two scales (the matrix stays a
+    covariance), every other entry untouched."""
+    out = [float(v) for v in covariance]
+    scale = {0: float(linear_scale), 1: float(linear_scale), 5: float(yaw_scale)}
+    for i, si in scale.items():
+        for j, sj in scale.items():
+            out[i * 6 + j] *= si * sj
+    return out
+
+
+def yaw_only_covariance(covariance: Sequence[float], bias_variance: float) -> list[float]:
+    """A twist covariance that keeps only the yaw rate: vx and vy at
+    :data:`WEIGHTLESS_VARIANCE` with their cross terms 0 (robot_localization fuses them with a
+    gain of ~1e-8: nothing), vyaw's own variance plus ``bias_variance`` (:meth:`YawOnly.variance`).
+    """
+    out = [float(v) for v in covariance]
+    for i in (0, 1):
+        for j in (0, 1, 5):
+            out[i * 6 + j] = out[j * 6 + i] = 0.0
+        out[i * 6 + i] = WEIGHTLESS_VARIANCE
+    out[35] += float(bias_variance)
+    return out
+
+
+class YawOnly:
+    """Since when the VIO has only its yaw rate to give, and what that rate is worth.
+
+    OpenVINS lost (no features in the dark, the lost rules of :class:`VioLost`) still
+    propagates on the IMU: its velocity then drifts on the accelerometer and is withheld, but its
+    rate is the gyro less the bias the last visual updates estimated, and the gyro needs no
+    light. What the dark costs the rate is the bias's walk since the last visual update: after
+    ``t`` seconds its sigma is ``brw * sqrt(t)`` (``brw`` the head IMU's gyro random walk,
+    rad/s/sqrt(s)), added to the rate's own variance:
+
+        sigma_yaw(t)^2 = sigma_reported^2 + brw^2 * t
+
+    ``brw`` ``None`` (config/head_imu.json unreadable) refuses: no yaw is sent while lost. Stamps
+    are the samples' own (the IMU's clock)."""
+
+    def __init__(self, brw: float | None) -> None:
+        self.brw = brw
+        self._visual: float | None = None  # the last sample with visual support
+        self._since: float | None = None  # the start of the lost episode
+        self.reason: str | None = None
+        self.episodes = 0
+
+    def visual(self, stamp: float) -> None:
+        """A sample that passed the lost rules: the visual updates vouch for the bias again."""
+        if self._visual is None or stamp > self._visual:
+            self._visual = stamp
+        self._since = None
+
+    def lost(self, stamp: float, reason: str) -> None:
+        """A sample the lost rules refused: the episode starts (once) and its reason is kept."""
+        if self._since is None:
+            self._since = stamp
+            self.episodes += 1
+        self.reason = reason
+
+    @property
+    def active(self) -> bool:
+        """Whether the VIO is lost now (yaw only)."""
+        return self._since is not None
+
+    def age(self, stamp: float) -> float:
+        """Seconds since the last visual sample at ``stamp`` (since the episode's start when the
+        VIO never had one); 0 while not lost."""
+        if self._since is None:
+            return 0.0
+        base = self._visual if self._visual is not None else self._since
+        return max(stamp - base, 0.0)
+
+    def variance(self, stamp: float) -> float | None:
+        """The bias's share ``brw^2 * t`` (rad/s)^2 at ``stamp``; ``None`` without a ``brw``."""
+        if self.brw is None:
+            return None
+        return self.brw**2 * self.age(stamp)
+
+    def reset(self) -> None:
+        """A new filter (a re-init, a restart, an input switch): nothing is lost, nothing seen."""
+        self._visual = None
+        self._since = None
 
 
 class VioGuard:
