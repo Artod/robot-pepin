@@ -19,8 +19,8 @@
 ///     | diff - ros/zenoh/router.json5
 ///
 /// Re-derive it after an image rebuild that moves rmw_zenoh_cpp. The three changes, all in
-/// transport/link/tx: wait_before_close 5 s -> 20 s (the closures), wait_before_drop 1 ms ->
-/// 50 ms (best-effort samples thrown away on a hiccup), keep_alive 2 -> 4 (a lossy link, not a
+/// transport/link/tx: wait_before_close 5 s -> 20 s (the closures), wait_before_drop left at
+/// zenoh's 1 ms since 2026-10-05 (50 ms from 09-22 to 10-05, see below), keep_alive 2 -> 4 (a lossy link, not a
 /// loopback). The SESSION config of the nodes is untouched — see ros/README.md.
 ///
 /// This file attempts to list and document available configuration elements.
@@ -709,7 +709,15 @@
               /// than it takes its own successor to arrive — the bound that keeps this from
               /// becoming a buffer of stale sensor data. Dropping is still the behaviour; it
               /// just waits out a hiccup first.
-              wait_before_drop: 50000,
+              ///
+              /// PEPIN 2026-10-05: back to 1000 (1 ms). The 50 ms turned every exiting subscriber on
+              /// the laptop (the per-run bag recorder, a topic echo, a kicked node) into a stall of
+              /// the whole link: its queue fills, each of ~500 samples/s routed to it holds the
+              /// receive task 50 ms, and the base bridge's streams arrive 0.6-3.8 s late for
+              /// seconds (23 of 24 run ends on 2026-10-05, scratch/neck_lag/onsets.py). On the
+              /// mt7921u dongle (-48 dBm, 0 failed sends) the hiccups the 50 ms waited out are
+              /// gone; if dropped samples return, this is the line to revisit.
+              wait_before_drop: 1000,
               /// The maximum deadline limit for multi-fragment messages.
               /// PEPIN: left at 50 ms on purpose. A fragmented droppable message (a grid, a fan)
               /// that cannot be finished inside its deadline is dropped WHOLE, which is what
