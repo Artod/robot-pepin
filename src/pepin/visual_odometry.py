@@ -543,23 +543,33 @@ def compose_base_pose(t_g_i: Any, t_i_b: Any, stamp: float) -> VoPose:
 class VioHealth:
     """OpenVINS's own covariance read as a health signal, never as a weight: its marginal pose
     covariance only grows (global x, y and yaw are unobservable), so a STEP of its trace by
-    ``reinit_ratio`` either way is a re-initialisation, counted for the report line."""
+    ``reinit_ratio`` either way is a re-initialisation, counted for the report line. So is a new
+    frame name: OpenVINS's in-process reset (ros/patches/openvins-reset.patch) starts a new
+    gravity frame and names it (``global``, then ``global_<n>``), and a warm-seeded filter's
+    trace need not step at all."""
 
     def __init__(self, reinit_ratio: float = VIO_REINIT_RATIO) -> None:
         self.reinit_ratio = reinit_ratio
         self.reinits = 0
         self.last_trace: float | None = None
+        self.last_frame: str | None = None
 
-    def observe(self, covariance: Sequence[float]) -> bool:
-        """One poseimu covariance (6x6 row-major): True when it marks a re-initialisation."""
+    def observe(self, covariance: Sequence[float], frame: str = "") -> bool:
+        """One poseimu covariance (6x6 row-major) and its frame: True when it marks a
+        re-initialisation."""
+        renamed = bool(frame) and self.last_frame is not None and frame != self.last_frame
+        if frame:
+            self.last_frame = frame
         if len(covariance) < 36:
-            return False
+            if renamed:
+                self.reinits += 1
+            return renamed
         trace = sum(float(covariance[i * 6 + i]) for i in range(6))
         previous, self.last_trace = self.last_trace, trace
-        if previous is None or previous <= 0.0 or trace <= 0.0:
-            return False
-        ratio = max(trace / previous, previous / trace)
-        if ratio > self.reinit_ratio:
+        stepped = False
+        if previous is not None and previous > 0.0 and trace > 0.0:
+            stepped = max(trace / previous, previous / trace) > self.reinit_ratio
+        if renamed or stepped:
             self.reinits += 1
             return True
         return False
