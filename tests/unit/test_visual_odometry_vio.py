@@ -550,3 +550,240 @@ def test_the_camera_edges_come_from_the_config_not_from_a_late_tf_static() -> No
         " camera_optical -> head_imu" in line
     )
     node.close()
+
+
+# ---- the lost rule's split, the mast gate, the imu source, the rates and the scales -----------
+BRW = 1.02e-4  # config/head_imu.json noise.gyro_random_walk, what the relay loads
+
+
+def _arc(t: float, speed: float = 0.2, turn: float = 0.3) -> Any:
+    """base_link in G on an arc from the origin, heading 0 at t = 0."""
+    m = _yaw(turn * t)
+    m[:3, 3] = (speed / turn * math.sin(turn * t), speed / turn * (1.0 - math.cos(turn * t)), 0.0)
+    return m
+
+
+def _drive_into_the_dark(
+    node: VisualOdometry, clock: _Clock, seconds: float = 4.0, sway: tuple[float, float] = (0, 0)
+) -> None:
+    """The cart drives an arc (0.2 m/s, 0.3 rad/s) with the head still; 50 features for the
+    first second, then none (the dark kitchen of 2026-10-05); odomimu around every pose;
+    /mast/state swaying at 0.2 rad/s (11.5 deg/s) inside ``sway`` (seconds). vio_lost_s 0.95:
+    ten 0.1 s ticks of the test's clock sum to 0.99999, not 1.0."""
+    assert node.set_parameters([ros_stubs.Parameter("vio_lost_s", value=0.95)])[0].successful
+    for i in range(round(seconds * 10)):
+        t = 0.1 * i
+        clock.now += 0.1
+        _wheels(node, 0.2)
+        node.subs[VIO_POINTS_TOPIC][1](_cloud(50 if t < 1.0 else 0))
+        for k in range(-3, 17):
+            node.subs[VIO_ODOM_TOPIC][1](_odomimu(t + 0.005 * k))
+        for k in range(5):
+            s = t - 0.08 + 0.02 * k
+            if sway[0] <= s < sway[1]:
+                mast = ros_stubs.JointState()
+                mast.header.stamp = stamp_from_seconds(T0 + s)
+                mast.name = ["mast_roll", "mast_pitch", "mast_yaw"]
+                mast.position = [0.001, 0.0, 0.0]
+                mast.velocity = [0.2, 0.0, 0.0]
+                node.subs["/mast/state"][1](mast)
+        _feed(node, t, _arc(t), 0.0)
+
+
+def test_lost_in_the_dark_sends_the_yaw_rate_alone_and_its_sigma_grows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vo_output twist, step source: the features rule fires 1 s into the dark (t 2.0) and from
+    then every pose sends vyaw alone -- 0.3 rad/s, vx and vy 0 at 1e6 -- its variance the IMU's
+    y-rate 4e-6 (base z = -IMU y) plus BRW^2 times the seconds since the last visual pose (1.9):
+    at t 3.9, 4e-6 + 1.0404e-8 * 2.0. The report says how long and how much."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node()
+    assert node._yaw_only.brw == pytest.approx(BRW), "config/head_imu.json's x10 number"
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock)
+    twists = node.pubs[VO_TWIST_TOPIC].sent
+    full = [m for m in twists if m.twist.covariance[0] < 1.0]
+    yaw = [m for m in twists if m.twist.covariance[0] >= 1e6]
+    assert len(full) == 19 and len(yaw) == 20, "t 0.1-1.9 whole, t 2.0-3.9 yaw only"
+    for m in yaw:
+        v, c = m.twist.twist, m.twist.covariance
+        assert (v.linear.x, v.linear.y) == (0.0, 0.0)
+        assert v.angular.z == pytest.approx(0.3, abs=1e-6)
+        assert c[0] == c[7] == 1e6 and c[1] == c[5] == c[11] == 0.0
+    assert yaw[0].twist.covariance[35] == pytest.approx(4e-6 + BRW**2 * 0.1, rel=1e-9)
+    assert yaw[-1].twist.covariance[35] == pytest.approx(4e-6 + BRW**2 * 2.0, rel=1e-9)
+    assert full[-1].twist.twist.linear.x == pytest.approx(0.2, abs=1e-6)
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "yaw only since 2.0 s, sigma_yaw 0.11 deg/s (0 features (under 20)" in line
+    assert "yaw only 20 sent, withheld: mast 0, gaze 0" in line and "lost episodes 1" in line
+    assert "40 twists sent" not in line and "39 twists sent" in line
+    node.close()
+
+
+def test_the_mast_swaying_withholds_the_yaw_rate_while_lost(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The same dark drive with the mast swaying at 11.5 deg/s (over gate_sway_dps 6) from t 2.5
+    to 3.0: those yaw rates are withheld and counted as mast (a pose is judged at both ends of
+    its step, so the one after the sway goes too); the rest still flow."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node()
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock, sway=(2.45, 3.0))
+    yaw = [m for m in node.pubs[VO_TWIST_TOPIC].sent if m.twist.covariance[0] >= 1e6]
+    w = node._tally.take()
+    assert 5 <= w.counts["yaw_mast"] <= 7
+    assert len(yaw) + w.counts["yaw_mast"] == 20
+    stamps = [round(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0, 1) for m in yaw]
+    assert not any(2.5 <= s <= 3.0 for s in stamps), "nothing inside the sway"
+    node.close()
+
+
+def _imu_state(t: float, pan_rate: float) -> tuple[Any, Any]:
+    """OpenVINS's IMU velocity and rate in its own axes for the cart driving straight along G's
+    y at 0.2 m/s (G's yaw 90 deg) while the head pans at ``pan_rate`` from 0."""
+    pan = pan_rate * t
+    r_g_b = _yaw(math.pi / 2)[:3, :3]
+    t_b_i = _base_to_imu(pan)
+    z = np.array([0.0, 0.0, 1.0])
+    p_dot = pan_rate * np.cross(z, _rot_z(pan)[:3, :3] @ IMU_ON_NECK[:3, 3])
+    v_g = r_g_b @ (np.array([0.2, 0.0, 0.0]) + p_dot)
+    r_g_i = r_g_b @ t_b_i[:3, :3]
+    return r_g_i.T @ v_g, r_g_i.T @ (pan_rate * z)
+
+
+def _imu_odom(t: float, pan_rate: float) -> Any:
+    msg = _odomimu(t)
+    v, w = _imu_state(t, pan_rate)
+    lin, ang = msg.twist.twist.linear, msg.twist.twist.angular
+    lin.x, lin.y, lin.z = (float(x) for x in v)
+    ang.x, ang.y, ang.z = (float(x) for x in w)
+    return msg
+
+
+def test_the_imu_source_sends_the_wheels_rate_through_a_panning_neck(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vio_twist_source imu: odomimu at 200 Hz, the head panning at 0.3 rad/s, the neck chain by
+    stamp. Over 2 s: 94 twists 20 ms apart (one in four, the first without a neck baseline,
+    nothing younger than 0.1 s), each (0.2, 0, 0) within 0.3 mm/s, each weighed by its own
+    odomimu covariance with the lever arm; /vo keeps the track weightless at the camera rate."""
+    from pepin.visual_odometry import base_twist_covariance
+
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node()
+    pan_rate = 0.3
+
+    def lookup(target: str, source: str, time: Any, timeout: Any = None) -> Any:
+        pan = pan_rate * (time.nanoseconds * 1e-9 - T0)
+        return _transform(np.linalg.inv(_base_to_imu(pan)))
+
+    node._tf.buffer.lookup_transform = lookup  # type: ignore[union-attr]
+    for name, value in (("vo_output", "twist"), ("vio_twist_source", "imu")):
+        assert node.set_parameters([ros_stubs.Parameter(name, value=value)])[0].successful
+    for i in range(20):
+        clock.now += 0.1
+        _wheels(node, 0.2)
+        for k in range(20):
+            node.subs[VIO_ODOM_TOPIC][1](_imu_odom(0.1 * i + 0.005 * k, pan_rate))
+        t_g_b = _yaw(math.pi / 2)
+        t_g_b[:3, 3] = (0.5, 0.02 * i, 0.0)
+        t_b_i = _base_to_imu(pan_rate * 0.1 * i)
+        node.subs[VIO_POSE_TOPIC][1](_poseimu(0.1 * i, t_g_b @ t_b_i @ np.linalg.inv(T_B_I)))
+    twists = node.pubs[VO_TWIST_TOPIC].sent
+    stamps = [m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0 for m in twists]
+    assert len(twists) == 94
+    assert (stamps[0], stamps[-1]) == pytest.approx((0.02, 1.88), abs=1e-6)
+    assert np.diff(stamps) == pytest.approx([0.02] * 93, abs=1e-6)
+    for m in twists:
+        v = m.twist.twist
+        assert (v.linear.x, v.linear.y) == pytest.approx((0.2, 0.0), abs=3e-4)
+        assert v.angular.z == pytest.approx(0.0, abs=1e-5)  # stamps at 1.76e9 s: 0.24 us apart
+    t_b_i = _base_to_imu(pan_rate * stamps[-1])
+    expected = base_twist_covariance(
+        [m for m in _odomimu(0.0).twist.covariance], t_b_i[:3, :3], lever=t_b_i[:3, 3]
+    )
+    assert expected is not None
+    assert twists[-1].twist.covariance == pytest.approx(expected, rel=1e-6)
+    poses = node.pubs[VO_TOPIC].sent
+    assert len(poses) == 20 and poses[-1].pose.covariance[0] == 1e6
+    w = node._tally.take()
+    assert w.counts["no_step"] == 1 and w.counts["imu_held"] == 0
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "source imu at 50 Hz, sigma scale x1 yaw x1, held 0" in line
+    node.close()
+
+
+def test_the_imu_source_sends_the_yaw_rate_alone_while_lost_and_nothing_after_a_divergence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The dark drive under vio_twist_source imu: whole twists at 50 Hz until the poseimu at t 2.0
+    says lost, yaw-only ones after (vx, vy at 1e6, vyaw's variance 4e-6 + BRW^2 times the
+    seconds since the last visual pose, 1.9, at each sample's own stamp); a guard rejection
+    then holds every sample until a poseimu passes again."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node()
+    for name, value in (("vo_output", "twist"), ("vio_twist_source", "imu")):
+        assert node.set_parameters([ros_stubs.Parameter(name, value=value)])[0].successful
+    _drive_into_the_dark(node, clock)
+    twists = node.pubs[VO_TWIST_TOPIC].sent
+    stamps = [m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0 for m in twists]
+    yaw = [(s, m) for s, m in zip(stamps, twists, strict=True) if m.twist.covariance[0] >= 1e6]
+    whole = [s for s, m in zip(stamps, twists, strict=True) if m.twist.covariance[0] < 1.0]
+    assert whole and max(whole) < 2.0 and min(s for s, _ in yaw) > 1.9
+    assert 95 <= len(yaw) <= 101, "~50/s from 1.9 to 3.88"
+    for s, m in yaw:
+        assert m.twist.covariance[35] == pytest.approx(4e-6 + BRW**2 * (s - 1.9), rel=1e-6)
+    sent = len(twists)
+    node._vio_verdict = "rejected"
+    for k in range(40):
+        node.subs[VIO_ODOM_TOPIC][1](_odomimu(4.0 + 0.005 * k))
+    assert len(node.pubs[VO_TWIST_TOPIC].sent) == sent
+    assert node._tally.take().counts["imu_held"] >= 5
+    node.close()
+
+
+def test_the_rate_is_vio_publish_hz_under_vio_and_vo_publish_hz_under_rtabmap() -> None:
+    """vo_input vio: the cap and the imu source run at vio_publish_hz (50 by default, live);
+    stereo keeps vo_publish_hz (10)."""
+    node = _node()
+    assert node._cap.hz == 50.0 and node._imu_queue.rate.hz == 50.0
+    assert node.set_parameters([ros_stubs.Parameter("vio_publish_hz", value=30.0)])[0].successful
+    assert node._cap.hz == 30.0 and node._imu_queue.rate.hz == 30.0
+    assert node.set_parameters([ros_stubs.Parameter("vo_publish_hz", value=5.0)])[0].successful
+    assert node._cap.hz == 30.0, "rtabmap's knob does not move the VIO's rate"
+    node.close()
+    stereo = VisualOdometry()
+    assert stereo._cap.hz == 10.0
+    stereo.close()
+
+
+def test_the_scale_knobs_reach_the_published_twist() -> None:
+    """vio_sigma_scale 2 and vio_yaw_sigma_scale 3 on the panning-head drive: at the last pan vx
+    4 x 7.161e-4, vy 4 x 2.839e-4, vyaw 9 x 4e-6; the unfused axes stay 1e6."""
+    node = _node()
+    for name, value in (("vo_output", "twist"), ("vio_sigma_scale", 2.0)):
+        assert node.set_parameters([ros_stubs.Parameter(name, value=value)])[0].successful
+    assert node.set_parameters([ros_stubs.Parameter("vio_yaw_sigma_scale", value=3.0)])[
+        0
+    ].successful
+    _drive_with_a_panning_head(node, [0.1 * i for i in range(6)])
+    last = node.pubs[VO_TWIST_TOPIC].sent[-1].twist.covariance
+    c2, s2 = math.cos(0.5) ** 2, math.sin(0.5) ** 2
+    assert last[0] == pytest.approx(4 * (c2 * 9e-4 + s2 * 1e-4))
+    assert last[7] == pytest.approx(4 * (s2 * 9e-4 + c2 * 1e-4))
+    assert last[35] == pytest.approx(9 * 4e-6)
+    assert [last[i * 6 + i] for i in (2, 3, 4)] == [1e6] * 3
+    node._report()
+    assert (
+        "source step (per camera frame), sigma scale x2 yaw x3"
+        in (node.get_logger().texts("info")[-1])
+    )
+    node.close()

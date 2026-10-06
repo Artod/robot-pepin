@@ -669,3 +669,218 @@ def test_twist_covariances_match_a_pose_by_stamp_and_forget_the_past() -> None:
     buffer.add(50.0, [7.0] * 36)
     assert buffer.nearest(100.0) is None and buffer.nearest(50.0) == tuple([7.0] * 36)
     assert buffer.received == 601
+
+
+# ---- the twist at the IMU's rate, the lost rule's split, the scales ---------------------------
+# OpenVINS's reported yaw-rate sigma: config/head_imu.json's x10 gyro density over one 200 Hz
+# sample, sqrt(1.18e-3^2 / 0.005) = 0.016688 rad/s = 0.9561 deg/s (the report lines read 0.96)
+SIGMA_REPORTED = 1.18e-3 / math.sqrt(0.005)
+BRW = 1.02e-4  # config/head_imu.json noise.gyro_random_walk (the x10 Allan number)
+
+
+def test_the_yaw_sigma_grows_with_the_bias_walk_since_the_last_visual_update() -> None:
+    """sigma_yaw(t)^2 = sigma_reported^2 + BRW^2 t with the head IMU's numbers: 0.9561 deg/s at
+    t = 0, 0.9563 at 10 s, 0.9572 at 60 s -- the x10 white noise of one 200 Hz sample dwarfs the
+    walk (equal only after (0.016688 / 1.02e-4)^2 = 7.4 h). t runs from the last VISUAL sample,
+    not from when the lost rule fired; nothing grows while not lost; no BRW refuses."""
+    from pepin.visual_odometry import YawOnly
+
+    clock = YawOnly(BRW)
+    clock.visual(100.0)
+    assert not clock.active and clock.age(130.0) == 0.0 and clock.variance(130.0) == 0.0
+    clock.lost(101.0, "0 features (under 20) for 1.0 s while moving")
+    clock.lost(101.1, "still")
+    assert clock.active and clock.episodes == 1 and clock.reason == "still"
+    sigmas = {}
+    for t in (0.0, 10.0, 60.0):
+        bias = clock.variance(100.0 + t)
+        assert bias == pytest.approx(BRW**2 * t)
+        sigmas[t] = math.degrees(math.sqrt(SIGMA_REPORTED**2 + bias))
+    assert sigmas[0.0] == pytest.approx(0.95613, abs=5e-5)
+    assert sigmas[10.0] == pytest.approx(0.95631, abs=5e-5)
+    assert sigmas[60.0] == pytest.approx(0.95721, abs=5e-5)
+    hours = (SIGMA_REPORTED / BRW) ** 2 / 3600.0
+    assert hours == pytest.approx(7.4, abs=0.1)
+    clock.visual(170.0)
+    assert not clock.active and clock.age(200.0) == 0.0
+    dark_start = YawOnly(BRW)  # lost before any visual sample: t from the episode's start
+    dark_start.lost(5.0, "features")
+    assert dark_start.age(8.0) == pytest.approx(3.0)
+    assert YawOnly(None).variance(1.0) is None, "a default is a refusal"
+
+
+def test_a_yaw_only_twist_leaves_vx_and_vy_weightless() -> None:
+    """vx and vy go to 1e6 with their cross terms 0 (robot_localization's twist0 then fuses them
+    with a gain of P / (P + 1e6), ~1e-8 for a velocity variance of 1e-2: nothing); vyaw keeps
+    its variance plus the bias walk; the unfused axes stay as they were."""
+    from pepin.visual_odometry import WEIGHTLESS_VARIANCE, yaw_only_covariance
+
+    full = _imu_covariance((4e-4, 1e-4, 1e6), (1e6, 1e6, 2.8e-4))
+    full[1] = full[6] = 5e-5
+    full[5] = full[30] = 1e-6
+    full[11] = full[31] = -2e-6
+    out = yaw_only_covariance(full, 6.24e-7)
+    assert out[0] == out[7] == WEIGHTLESS_VARIANCE
+    assert out[1] == out[6] == out[5] == out[30] == out[11] == out[31] == 0.0
+    assert out[35] == pytest.approx(2.8e-4 + 6.24e-7)
+    assert [out[i * 6 + i] for i in (2, 3, 4)] == [1e6] * 3
+    gain = 1e-2 / (1e-2 + out[0])
+    assert gain < 1.1e-8
+
+
+def test_the_scale_knobs_multiply_the_sigmas_and_keep_a_covariance() -> None:
+    """vio_sigma_scale 2 and vio_yaw_sigma_scale 3: vx and vy variances x4, vyaw x9, the vx-vy
+    cross term x4, the vx-vyaw one x6; the weightless axes untouched; still positive definite."""
+    from pepin.visual_odometry import scaled_twist_covariance
+
+    c = _imu_covariance((4e-4, 1e-4, 1e6), (1e6, 1e6, 2.8e-4))
+    c[1] = c[6] = 5e-5
+    c[5] = c[30] = 1e-6
+    out = scaled_twist_covariance(c, 2.0, 3.0)
+    assert (out[0], out[7], out[35]) == pytest.approx((1.6e-3, 4e-4, 2.52e-3))
+    assert out[1] == out[6] == pytest.approx(2e-4) and out[5] == out[30] == pytest.approx(6e-6)
+    assert [out[i * 6 + i] for i in (2, 3, 4)] == [1e6] * 3
+    block = np.array(out).reshape(6, 6)[np.ix_((0, 1, 5), (0, 1, 5))]
+    assert np.all(np.linalg.eigvalsh(block) > 0.0)
+    assert scaled_twist_covariance(c, 1.0, 1.0) == c
+
+
+def test_the_imu_rate_takes_one_sample_in_four_and_never_two_close() -> None:
+    """At 200 Hz, 50 Hz takes every 4th sample (20 ms); on a stream like 2026-10-05's (163 Hz,
+    gaps up to 30 ms) every step taken is >= 17.5 ms and the rate stays near 50; a stamp that
+    does not advance is never taken; hz 0 takes every advancing one."""
+    from pepin.visual_odometry import EvenRate
+
+    rate = EvenRate(50.0)
+    taken = [t for t in (100.0 + 0.005 * i for i in range(200)) if rate.take(t)]
+    assert len(taken) == 50
+    assert np.diff(taken) == pytest.approx([0.02] * 49)
+    assert not rate.take(taken[-1]), "strictly increasing"
+    rng = np.random.default_rng(7)
+    gaps = rng.choice([0.005, 0.0075, 0.03], p=[0.8, 0.15, 0.05], size=6000)
+    stamps = 200.0 + np.cumsum(gaps)
+    assert 145.0 < len(stamps) / (stamps[-1] - stamps[0]) < 160.0, "like the drives' 163 Hz"
+    rate = EvenRate(50.0)
+    kept = np.array([t for t in stamps if rate.take(float(t))])
+    assert np.diff(kept).min() >= 0.0175 - 1e-9
+    assert 42.0 < len(kept) / (stamps[-1] - stamps[0]) <= 50.5
+    every = EvenRate(0.0)
+    assert all(every.take(t) for t in (1.0, 1.001, 1.002)) and not every.take(1.002)
+
+
+def test_the_imu_queue_waits_for_the_lag_and_empties_on_a_restart() -> None:
+    """A sample leaves the queue only once a newer one stands 0.1 s past it (its neck chain is
+    then in the TF buffer); a stamp that goes back (a restarted OpenVINS) drops the queue."""
+    from pepin.visual_odometry import ImuQueue, ImuState
+
+    def sample(t: float) -> ImuState:
+        return ImuState(t, (0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0,) * 36)
+
+    queue = ImuQueue(50.0, lag_s=0.1)
+    out = []
+    for i in range(20):  # 0.000 .. 0.095
+        queue.add(sample(10.0 + 0.005 * i))
+        out += queue.due()
+    assert out == [], "nothing is 0.1 s old yet"
+    queue.add(sample(10.1))
+    out += queue.due()
+    assert [s.stamp for s in out] == pytest.approx([10.0])
+    for i in range(21, 41):
+        queue.add(sample(10.0 + 0.005 * i))
+        out += queue.due()
+    assert [round(s.stamp - 10.0, 3) for s in out] == [0.0, 0.02, 0.04, 0.06, 0.08, 0.1]
+    queue.add(sample(3.0))
+    assert queue.due() == [] and queue.rate.take(3.0), "the restart starts the rate again too"
+
+
+def test_the_neck_baseline_needs_a_step_of_ten_ms_and_forgets_a_gap() -> None:
+    from pepin.visual_odometry import NeckBaseline
+
+    neck = NeckBaseline(floor_s=0.01, gap_s=0.1)
+    a, b, c, d = (np.eye(4) * k for k in (1.0, 2.0, 3.0, 4.0))
+    assert neck.step(1.000, a) is None, "nothing to difference against"
+    assert neck.step(1.005, b) is None, "5 ms: under the floor, the baseline kept"
+    step = neck.step(1.020, c)
+    assert step is not None and step[0] is a and step[1] == pytest.approx(0.020)
+    assert neck.step(1.200, d) is None, "a 180 ms gap: a mean, not a rate"
+    step = neck.step(1.220, a)
+    assert step is not None and step[0] is d
+
+
+# base_link <- head_imu through a panning neck, as the relay's tests build it: the pan axis
+# 0.78 m up and 5 cm back, the IMU 4 cm ahead of it and 3 cm to the side on a chip on its side
+_CHIP = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+_NECK_P = np.array([-0.05, 0.0, 0.78])
+_ON_NECK_P = np.array([0.04, 0.03, 0.42])
+
+
+def _rz(angle: float) -> Any:
+    c, s = math.cos(angle), math.sin(angle)
+    return np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+
+
+def _t_b_i(pan: float) -> Any:
+    from pepin.visual_odometry import homogeneous
+
+    return homogeneous(_rz(pan) @ _CHIP, _NECK_P + _rz(pan) @ _ON_NECK_P)
+
+
+def _imu_state(
+    t: float, speed: float, turn: float, pan0: float, pan_rate: float
+) -> tuple[Any, Any, Any]:
+    """OpenVINS's exact IMU state for a cart on an arc (``speed`` m/s, ``turn`` rad/s, heading 0
+    at t = 0) whose head pans at ``pan_rate`` from ``pan0``: the IMU's velocity and rate in its
+    own axes, and base_link <- head_imu at ``t``."""
+    pan = pan0 + pan_rate * t
+    r_g_b = _rz(turn * t)
+    t_b_i = _t_b_i(pan)
+    r_b_i, p_b_i = t_b_i[:3, :3], t_b_i[:3, 3]
+    z = np.array([0.0, 0.0, 1.0])
+    p_dot = pan_rate * np.cross(z, _rz(pan) @ _ON_NECK_P)
+    v_g = r_g_b @ (np.array([speed, 0.0, 0.0]) + turn * np.cross(z, p_b_i) + p_dot)
+    w_g = (turn + pan_rate) * z
+    r_g_i = r_g_b @ r_b_i
+    return r_g_i.T @ v_g, r_g_i.T @ w_g, t_b_i
+
+
+def test_the_imu_twist_subtracts_the_neck_and_the_lever_arm() -> None:
+    """Exact IMU states, the neck differenced over 20 ms: a parked cart with its head panning at
+    30 deg/s reads (0, 0, 0); a cart on an arc (0.2 m/s, 0.5 rad/s) with the head held at 40 deg
+    reads (0.2, 0, 0.5); both at once still read (0.2, 0, 0.5) -- within 0.3 mm/s, the chord the
+    20 ms difference makes of the IMU's 5 cm arm. The rate is exact (a constant axis)."""
+    from pepin.visual_odometry import imu_base_twist
+
+    dt = 0.02
+    cases = (
+        ((0.0, 0.0, 0.3, math.radians(30.0)), (0.0, 0.0, 0.0)),
+        ((0.2, 0.5, math.radians(40.0), 0.0), (0.2, 0.0, 0.5)),
+        ((0.2, 0.5, math.radians(-20.0), math.radians(30.0)), (0.2, 0.0, 0.5)),
+    )
+    for (speed, turn, pan0, pan_rate), expected in cases:
+        v, w, now = _imu_state(1.0, speed, turn, pan0, pan_rate)
+        _, _, before = _imu_state(1.0 - dt, speed, turn, pan0, pan_rate)
+        twist = imu_base_twist(v, w, now, before, dt)
+        assert twist is not None
+        assert twist[:2] == pytest.approx(expected[:2], abs=3e-4)
+        assert twist[2] == pytest.approx(expected[2], abs=1e-9)
+    v, w, now = _imu_state(1.0, 0.2, 0.5, 0.0, 0.0)
+    assert imu_base_twist(v, w, now, now, 0.005) is None, "under the 10 ms floor"
+
+
+def test_the_lever_carries_the_gyro_noise_into_vx_and_vy() -> None:
+    """vx += wz * py and vy -= wz * px: with the chip on its side (base z = -IMU y) and the IMU
+    at (0.03, 0.04, 1.2), vx takes 0.04^2 of the y-rate variance 2.8e-4 on top of the IMU's z
+    variance, vy 0.03^2, vx-vyaw 0.04 of it, vy-vyaw -0.03, vx-vy -0.0012; with no lever the
+    composed step's matrix, unchanged."""
+    from pepin.visual_odometry import base_twist_covariance
+
+    source = _imu_covariance((1e-4, 4e-4, 9e-4), (1e-6, 2.8e-4, 9e-6))
+    out = base_twist_covariance(source, _CHIP, lever=(0.03, 0.04, 1.2))
+    assert out is not None
+    assert out[0] == pytest.approx(9e-4 + 0.04**2 * 2.8e-4)
+    assert out[7] == pytest.approx(1e-4 + 0.03**2 * 2.8e-4)
+    assert out[35] == pytest.approx(2.8e-4)
+    assert out[5] == pytest.approx(0.04 * 2.8e-4) and out[11] == pytest.approx(-0.03 * 2.8e-4)
+    assert out[1] == pytest.approx(-0.0012 * 2.8e-4)
+    plain = base_twist_covariance(source, _CHIP)
+    assert plain is not None and (plain[0], plain[5]) == pytest.approx((9e-4, 0.0))
