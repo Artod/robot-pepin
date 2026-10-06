@@ -22,9 +22,10 @@ The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set vis
 is exactly what it was before this node existed), ``vo_covariance`` (the constant or rtabmap's own),
 ``vo_sigma_m`` and ``vo_yaw_sigma_deg`` (the constant), ``vo_max_speed``, ``vo_max_turn``,
 ``vo_max_gap_s`` and ``vo_reset_radius_m`` (the gate's ceilings) and ``vo_publish_hz`` (how often it
-is published). The published pose is the sum of the steps the gate admitted, never rtabmap's own: a
-refused jump re-anchors the gate, and a filter that differences the stream it receives would
-otherwise get the whole discontinuity in one frame time (2026-09-14, odom -> base_link 43 km out).
+is published; ``vio_publish_hz`` under vo_input vio). The published pose is the sum of the steps
+the gate admitted, never rtabmap's own: a refused jump re-anchors the gate, and a filter that
+differences the stream it receives would otherwise get the whole discontinuity in one frame time
+(2026-09-14, odom -> base_link 43 km out).
 
 The gaze gate (``gaze_gate`` and the ``gate_*`` knobs, :mod:`pepin.gaze_gate`) withholds the
 same way: a pose of a frame taken during a head saccade (``/gaze/state``) or a body yaw above
@@ -57,6 +58,21 @@ missing or not a covariance (non-finite, not positive definite) is withheld and 
 covariance's median sigmas are in the report line under either output, so the switch is
 measured before it is made. Under rtabmap's inputs the output is ``pose``.
 
+THE TWIST'S SOURCE is ``vio_twist_source``: ``step`` (above, one per camera frame) or ``imu``,
+odomimu's own velocity state and bias-corrected gyro carried into base_link through the neck chain
+(:func:`pepin.visual_odometry.imu_base_twist`) at ``vio_publish_hz`` (50, the wheels' rate), each
+sample processed :data:`pepin.visual_odometry.VIO_IMU_LAG_S` behind the newest so its TF is
+already there, judged by the last poseimu's verdict and by the gaze gate at its own stamp. Both
+sources carry ``vio_sigma_scale`` on vx and vy and ``vio_yaw_sigma_scale`` on vyaw (1.0: no
+fudge until drives measure one). LOST SPLITS THE TWIST: while the lost rules hold, vx and vy are
+withheld (``WEIGHTLESS_VARIANCE`` on both, 0 as the value: robot_localization's twist0 fuses them
+with a gain of ~1e-8) and the yaw rate keeps flowing -- the gyro needs no light -- with its
+variance grown by the bias walk since the last visual update,
+``sigma_yaw(t)^2 = (vio_yaw_sigma_scale * sigma_reported)^2 + gyro_random_walk^2 * t``
+(:class:`pepin.visual_odometry.YawOnly`, the walk from config/head_imu.json), unless the mast
+sways beyond ``gate_sway_dps`` / ``gate_sway_deg`` or the gaze gate holds the stamp (withheld and
+counted). The guard's divergence still withholds everything.
+
 Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
 a base velocity over ``vio_max_speed_m_s`` is not sent, nor, while ``vio_guard`` is on, one
 ``vio_wheel_diff_m_s`` from the wheels'), then the three lost rules of
@@ -87,9 +103,13 @@ from std_srvs.srv import Trigger
 
 from pepin.depth import rotation_matrix
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
+from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE, SWAYING
+from pepin.head_imu import HeadImuConfig
 from pepin.mounts import load_camera_mounts
 from pepin.visual_odometry import (
+    ImuQueue,
+    ImuState,
+    NeckBaseline,
     PublishCap,
     RestWatch,
     TwistCovariances,
@@ -99,24 +119,37 @@ from pepin.visual_odometry import (
     VoGate,
     VoPose,
     VoTrack,
+    YawOnly,
     base_twist_covariance,
     body_velocity,
     compose_base_pose,
     homogeneous,
+    imu_base_twist,
     is_lost,
     planar_covariance,
     scaled_covariance,
+    scaled_twist_covariance,
     se2_twist,
     weightless_covariance,
+    yaw_only_covariance,
 )
 from pepin_bringup.gaze_feed import GazeFeed, gate_counts
-from pepin_bringup.msgs import camera_edges, pose_from_transform, stamp_seconds, yaw_of
+from pepin_bringup.msgs import (
+    camera_edges,
+    pose_from_transform,
+    stamp_from_seconds,
+    stamp_seconds,
+    yaw_of,
+)
 from pepin_bringup.node_kit import Switches, Tally, TfLookup, bridged_qos_profile, spin_main
 
 RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output, on this laptop only
 VO_TOPIC = "/vo"  # what crosses to the board's EKF
 VO_TWIST_TOPIC = "/vo_twist"  # vo_output twist: the EKF's twist0 (pepin.deployment.VO_TWIST_TOPIC)
 VO_OUTPUTS = ("pose", "twist")
+# Where vo_output twist takes its velocity: `step`, the composed poseimu step (one per camera
+# frame); `imu`, odomimu's velocity state and gyro at vio_publish_hz through the neck.
+VIO_TWIST_SOURCES = ("step", "imu")
 WHEELS_TOPIC = "/odom"  # the board's wheel odometry: the rest signal, over the bridge
 REPORT_S = 30.0
 # The vo_input parameter: what the relay reads. stereo/depth: rtabmap's /vo/raw (the launch
@@ -244,6 +277,32 @@ FLAGS = FlagSet(
         " implausibly small, or the twist drives do not beat pose against the lidar truth",
     ),
     Flag(
+        "vio_twist_source",
+        "step",
+        choices=VIO_TWIST_SOURCES,
+        description="vo_output twist only: where the body velocity comes from. `step`, the SE(2)"
+        " log of two composed poseimu poses (one per camera frame, 9.5-11.6 Hz, the neck"
+        " subtracted by the composition); `imu`, every odomimu sample vio_publish_hz takes (50 Hz):"
+        " OpenVINS's IMU velocity STATE and bias-corrected gyro carried into base_link through the"
+        " neck chain (its rate differenced from TF over the step,"
+        " pepin.visual_odometry.imu_base_twist), its covariance odomimu's own with the lever arm,"
+        " processed 0.1 s behind the newest sample so the TF lookup never waits. Under lost both"
+        " send the yaw rate alone",
+        why="step until drives measure imu: per sample imu is the noisier of the two. Offline on"
+        " drives 0329/0330 through the same functions (scratch/vio_relay_night/"
+        "imu_twist_offline.py), where the live relay sent a twist, moving, head still: imu at 47"
+        " twists/s, vx vs the wheels z p50 1.58/1.45, p90 3.7/4.1 (the live step: 1.20/1.24,"
+        " 2.9/3.9); sideways |vy| p50 2.2/1.7 cm/s (step 1.0/0.7); the yaw rate vs the base gyro"
+        " 1.1/1.0 deg/s, z 1.2/1.1 (step 1.3/0.7 deg/s); at rest vx z p50 0.6/1.1 (step"
+        " 0.12/0.03). odomimu's velocity follows its own poseimu track in the median (angle"
+        " -1.5/+0.1 deg, speed ratio 0.97/1.00) with a p10-p90 spread of -29..+13 deg over 0.1 s"
+        " (odomimu_direction.py). Differencing odomimu's POSES instead is out: every update moves"
+        " them (|dp/dt - v| p99 2.2-2.5 m/s at 20 ms, odomimu_steps.py)",
+        on_when="imu for a drive whose point is the VIO's vote at the wheels' rate, the report"
+        " line's sideways numbers read first",
+        off_when="step whenever the twist must be the measured one",
+    ),
+    Flag(
         "vio_guard",
         False,
         description="the plausibility guard's wheel rule: a composed base velocity farther than"
@@ -279,7 +338,7 @@ class VisualOdometry(Node):
         self._launched = str(self._switches["vo_input"])
         self._gate = self._new_gate()
         self._track = VoTrack()
-        self._cap = PublishCap(float(self._switches["vo_publish_hz"]))
+        self._cap = PublishCap(self._publish_hz())
         self._rest = RestWatch()
         self._tally = Tally()
         self._last_window: Any = None  # the report's window, for the twist sigmas
@@ -306,6 +365,13 @@ class VisualOdometry(Node):
             TwistWithCovarianceStamped, VO_TWIST_TOPIC, bridged_qos_profile(VO_TWIST_TOPIC)
         )
         self._covariances = TwistCovariances()
+        # vio_twist_source imu: odomimu samples waiting for their neck chain, the neck at the
+        # last one taken, and the lost episode's clock (the yaw rate's bias walk)
+        self._imu_queue = ImuQueue(float(self._switches["vio_publish_hz"]))
+        self._neck = NeckBaseline()
+        self._yaw_only = YawOnly(self._gyro_random_walk())
+        self._vio_verdict: str | None = None  # the last poseimu's: ok, lost or rejected
+        self._last_yaw_sigma: float | None = None  # rad/s, the last yaw-only twist's
         self._seeded: str | None = None  # the static camera edges put into the buffer
         self._vio_health = VioHealth()
         self._vio_lost = VioLost(
@@ -347,6 +413,25 @@ class VisualOdometry(Node):
 
     def _source(self) -> str:
         return VIO_POSE_TOPIC if self._input == "vio" else RAW_TOPIC
+
+    def _publish_hz(self) -> float:
+        """The cap's rate: vio_publish_hz under vio (the wheels' 50), vo_publish_hz otherwise."""
+        name = "vio_publish_hz" if self._input == "vio" else "vo_publish_hz"
+        return float(self._switches[name])
+
+    def _gyro_random_walk(self) -> float | None:
+        """The head IMU's gyro bias random walk (rad/s/sqrt(s)) from config/head_imu.json's noise
+        block: the x10 Allan number OpenVINS itself runs on (1.02e-4; measured 1.02e-5), so the
+        bias walk and the reported rate sigma (sigma_w^2/dt from the same block) are one model.
+        ``None`` (unreadable) refuses the yaw rate under lost rather than guess one."""
+        try:
+            return float(HeadImuConfig.load().noise["gyro_random_walk"])
+        except (OSError, KeyError, ValueError) as exc:
+            self.get_logger().warning(
+                f"config/head_imu.json's gyro_random_walk unreadable ({exc}): no yaw rate is"
+                " sent while the VIO is lost"
+            )
+            return None
 
     def _new_gate(self) -> VoGate:
         return VoGate(
@@ -427,8 +512,11 @@ class VisualOdometry(Node):
             self._gate.max_gap_s = float(new)  # type: ignore[arg-type]
         elif name == "vo_reset_radius_m":
             self._gate.reset_radius_m = float(new)  # type: ignore[arg-type]
-        elif name == "vo_publish_hz":
-            self._cap.hz = float(new)  # type: ignore[arg-type]
+        elif name in ("vo_publish_hz", "vio_publish_hz"):
+            self._cap.hz = self._publish_hz()
+            self._imu_queue.rate.hz = float(self._switches["vio_publish_hz"])
+        elif name in ("vio_twist_source", "vo_output"):
+            self._twist_restart()
         elif name == "vio_max_speed_m_s":
             self._guard.max_speed_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_wheel_diff_m_s":
@@ -469,6 +557,8 @@ class VisualOdometry(Node):
         self._last_vio = None
         self._last_vio_xy = None
         self._after_gate = False
+        self._cap.hz = self._publish_hz()
+        self._twist_restart(full=True)
         self.get_logger().info(
             f"vo_input {old} -> {new}: {self._source()} -> {VO_TOPIC}, the gate restarted, the"
             f" track carries on from ({self._track.pose[0]:.2f}, {self._track.pose[1]:.2f})"
@@ -581,6 +671,7 @@ class VisualOdometry(Node):
             self._tally.count("vio_reinit")
             self._last_vio = None
             self._reanchor(None)  # a new gravity frame: nothing differences across it
+            self._twist_restart(full=True)
         assert self._tf is not None
         transform = self._tf.transform(IMU_FRAME, BASE_FRAME, msg.header.stamp, TF_TIMEOUT_S)
         if transform is None:
@@ -597,14 +688,22 @@ class VisualOdometry(Node):
         now = time.monotonic()
         if self._guard.check(now, velocity) is not None:
             self._tally.count("rejected")
+            self._vio_verdict = "rejected"
             self._reanchor(pose)
             self._maybe_restart(now)
             return
         speed = 0.0 if velocity is None else math.hypot(*velocity)
-        if self._vio_lost.check(now, speed) is not None:
+        lost = self._vio_lost.check(now, speed)
+        if lost is not None:
             self._tally.count("vio_lost")
+            self._vio_verdict = "lost"
+            self._yaw_only.lost(stamp, lost)
             self._reanchor(pose)
+            if last is not None and self._twist_source() == "step":
+                self._step_yaw_only(msg.header.stamp, last, pose, t_i_b.rotation.T)
             return
+        self._vio_verdict = "ok"
+        self._yaw_only.visual(stamp)
         published = self._admit(pose, lost=False)
         if published is None:
             return
@@ -624,15 +723,16 @@ class VisualOdometry(Node):
             self._tally.sample("sigma_vy", math.sqrt(covariance[7]))
             self._tally.sample("sigma_vyaw", math.sqrt(covariance[35]))
         if self._output_mode() == "twist":
-            step = self._track.last_step
-            twist = None if step is None else se2_twist(*step)
-            if twist is None:
-                self._tally.count("no_step")  # the first pose after an anchor: no velocity yet
-                return
-            if covariance is None:
-                self._tally.count("cov_missing" if source is None else "cov_bad")
-                return
-            self._publish_twist(msg.header.stamp, twist, covariance)
+            if self._twist_source() == "step":  # under imu the odomimu path sends the twist
+                step = self._track.last_step
+                twist = None if step is None else se2_twist(*step)
+                if twist is None:
+                    self._tally.count("no_step")  # the first pose after an anchor: no velocity yet
+                    return
+                if covariance is None:
+                    self._tally.count("cov_missing" if source is None else "cov_bad")
+                    return
+                self._publish_twist(msg.header.stamp, twist, self._scaled(covariance))
             out.pose.covariance = weightless_covariance()
         elif self._covariance_mode() == "constant":
             out.pose.covariance = planar_covariance(
@@ -649,6 +749,120 @@ class VisualOdometry(Node):
         inputs carry no velocity covariance, so they read as ``pose``."""
         return str(self._switches["vo_output"]) if self._input == "vio" else "pose"
 
+    # ---- the twist: its source, the lost rule's split, the scales -----------------------------
+    def _twist_source(self) -> str:
+        """Where the twist's velocity comes from (``vio_twist_source``); ``none`` unless the
+        output is twist."""
+        if self._output_mode() != "twist":
+            return "none"
+        return str(self._switches["vio_twist_source"])
+
+    def _scaled(self, covariance: list[float]) -> list[float]:
+        """The twist covariance with vio_sigma_scale on vx and vy, vio_yaw_sigma_scale on vyaw."""
+        return scaled_twist_covariance(
+            covariance,
+            float(self._switches["vio_sigma_scale"]),
+            float(self._switches["vio_yaw_sigma_scale"]),
+        )
+
+    def _twist_restart(self, full: bool = False) -> None:
+        """Nothing of the twist path differences across this: the IMU queue and the neck baseline
+        start again; ``full`` (a re-init, an input switch: a new filter) also forgets the lost
+        episode and the last verdict."""
+        self._imu_queue.clear()
+        self._neck.reset()
+        if full:
+            self._yaw_only.reset()
+            self._vio_verdict = None
+
+    def _step_yaw_only(self, stamp_msg: Any, last: VoPose, pose: VoPose, r_b_i: Any) -> None:
+        """Lost under the step source: the composed step's yaw rate alone, weighed by odomimu's
+        rate variance at the pose's stamp and the bias walk since the last visual update."""
+        twist = se2_twist(last, pose)
+        source = self._covariances.nearest(pose.stamp)
+        covariance = None if source is None else base_twist_covariance(source, r_b_i)
+        if twist is None:
+            self._tally.count("no_step")
+            return
+        if covariance is None:
+            self._tally.count("cov_missing" if source is None else "cov_bad")
+            return
+        self._publish_yaw_only(stamp_msg, (last.stamp, pose.stamp), twist[2], covariance)
+
+    def _publish_yaw_only(
+        self, stamp_msg: Any, judged: tuple[float, ...], yaw_rate: float, covariance: list[float]
+    ) -> None:
+        """The yaw rate alone while the VIO is lost (vx, vy weightless), unless a stamp in
+        ``judged`` is gated -- the mast swaying beyond gate_sway_dps / gate_sway_deg (counted as
+        mast) or the head blind / the body spinning (gaze) -- or it turns faster than
+        vo_max_turn. Its variance: (vio_yaw_sigma_scale * sigma_reported)^2 + brw^2 * t."""
+        if not self._switches.on("vo_publish"):
+            self._tally.count("withheld")
+            return
+        if self._switches.on("gaze_gate"):
+            for stamp in judged:
+                verdict = self._gaze.verdict(stamp)
+                if verdict is not None:
+                    self._tally.count("yaw_mast" if verdict == SWAYING else "yaw_gaze")
+                    return
+        if abs(yaw_rate) > math.radians(float(self._switches["vo_max_turn"])):
+            self._tally.count("yaw_fast")
+            return
+        bias = self._yaw_only.variance(judged[-1])
+        if bias is None:
+            self._tally.count("yaw_no_brw")
+            return
+        yaw_scale = float(self._switches["vio_yaw_sigma_scale"])
+        weighed = yaw_only_covariance(scaled_twist_covariance(covariance, 1.0, yaw_scale), bias)
+        self._last_yaw_sigma = math.sqrt(weighed[35])
+        self._tally.sample("sigma_yaw_only", self._last_yaw_sigma)
+        self._publish_twist(stamp_msg, (0.0, 0.0, yaw_rate), weighed)
+        self._tally.count("yaw_out")
+
+    def _imu_twist(self, sample: ImuState) -> None:
+        """One odomimu sample the rate took (vio_twist_source imu): base_link's twist through the
+        neck chain at its stamp (no wait: the sample is VIO_IMU_LAG_S old), judged by the last
+        poseimu's verdict -- ok: the whole twist; lost: the yaw rate alone; rejected or none yet:
+        nothing -- and by the gaze gate at its own stamp."""
+        verdict = self._vio_verdict
+        if verdict is None or verdict == "rejected":
+            self._tally.count("imu_held")
+            self._neck.reset()
+            return
+        if not self._switches.on("vo_publish"):
+            self._tally.count("withheld")
+            return
+        assert self._tf is not None
+        stamp_msg = stamp_from_seconds(sample.stamp)
+        transform = self._tf.transform(IMU_FRAME, BASE_FRAME, stamp_msg, 0.0)
+        if transform is None:
+            self._tally.count("imu_tf_miss")
+            self._neck.reset()
+            return
+        t_i_b = pose_from_transform(transform)
+        r_b_i = t_i_b.rotation.T
+        t_b_i = homogeneous(r_b_i, -r_b_i @ t_i_b.translation)
+        step = self._neck.step(sample.stamp, t_b_i)
+        twist = None if step is None else imu_base_twist(sample.velocity, sample.rate, t_b_i, *step)
+        if twist is None:
+            self._tally.count("no_step")
+            return
+        covariance = base_twist_covariance(sample.covariance, r_b_i, lever=t_b_i[:3, 3])
+        if covariance is None:
+            self._tally.count("cov_bad")
+            return
+        if verdict == "lost":
+            self._publish_yaw_only(stamp_msg, (sample.stamp,), twist[2], covariance)
+            return
+        if self._switches.on("gaze_gate") and self._gaze.verdict(sample.stamp) is not None:
+            self._tally.count("imu_gated")
+            return
+        too_fast = math.hypot(twist[0], twist[1]) > float(self._switches["vio_max_speed_m_s"])
+        if too_fast or abs(twist[2]) > math.radians(float(self._switches["vo_max_turn"])):
+            self._tally.count("imu_fast")
+            return
+        self._publish_twist(stamp_msg, twist, self._scaled(covariance))
+
     def _publish_twist(
         self, stamp: Any, twist: tuple[float, float, float], covariance: list[float]
     ) -> None:
@@ -664,12 +878,27 @@ class VisualOdometry(Node):
         self._tally.count("twist_out")
 
     def _on_vio_odom(self, msg: Odometry) -> None:
-        """OpenVINS's odomimu: only its twist covariance is kept, by stamp, for the pose of the
-        same instant."""
+        """OpenVINS's odomimu: its twist covariance kept by stamp for the pose of the same
+        instant; under vo_output twist with vio_twist_source imu, also the sample itself, sent as
+        a twist once it is VIO_IMU_LAG_S old (:meth:`_imu_twist`)."""
         if self._input != "vio":
             return
-        self._covariances.add(stamp_seconds(msg.header.stamp), msg.twist.covariance)
+        stamp = stamp_seconds(msg.header.stamp)
+        self._covariances.add(stamp, msg.twist.covariance)
         self._tally.count("odomimu")
+        if self._twist_source() != "imu":
+            return
+        v, w = msg.twist.twist.linear, msg.twist.twist.angular
+        self._imu_queue.add(
+            ImuState(
+                stamp,
+                (float(v.x), float(v.y), float(v.z)),
+                (float(w.x), float(w.y), float(w.z)),
+                tuple(float(c) for c in msg.twist.covariance),
+            )
+        )
+        for sample in self._imu_queue.due():
+            self._imu_twist(sample)
 
     def _maybe_restart(self, now: float) -> None:
         """Restart OpenVINS when the guard says so (rejections in a row, the wheels at rest):
@@ -813,8 +1042,43 @@ class VisualOdometry(Node):
         seeded = self._seeded or "none"
         return (
             f"{sigmas}, {counts['twist_out']} twists sent, withheld: cov missing"
-            f" {counts['cov_missing']}, cov bad {counts['cov_bad']}, no step {counts['no_step']};"
+            f" {counts['cov_missing']}, cov bad {counts['cov_bad']}, no step {counts['no_step']}"
+            f"{self._source_text(counts)}; {self._yaw_only_text(counts)};"
             f" odomimu {counts['odomimu']} in; static edges from config/camera.json: {seeded}"
+        )
+
+    def _source_text(self, counts: Counter[str]) -> str:
+        """The twist's source, its rate and scales, and what the imu source withheld."""
+        source = str(self._switches["vio_twist_source"])
+        scales = (
+            f"sigma scale x{float(self._switches['vio_sigma_scale']):g}"
+            f" yaw x{float(self._switches['vio_yaw_sigma_scale']):g}"
+        )
+        if source != "imu":
+            return f"; source step (per camera frame), {scales}"
+        return (
+            f"; source imu at {float(self._switches['vio_publish_hz']):g} Hz, {scales}, held"
+            f" {counts['imu_held']} (no verdict / rejected), gated {counts['imu_gated']}, too fast"
+            f" {counts['imu_fast']}, tf miss {counts['imu_tf_miss']}"
+        )
+
+    def _yaw_only_text(self, counts: Counter[str]) -> str:
+        """The lost rule's split: ``yaw only since N s, sigma_yaw X deg/s`` while lost, the
+        yaw-only twists sent, and what the mast and gaze gates withheld of them."""
+        lost = self._yaw_only
+        last = self._last_vio
+        if lost.active:
+            since = 0.0 if last is None else lost.age(last.stamp)
+            sigma = self._last_yaw_sigma
+            shown = "n/a" if sigma is None else f"{math.degrees(sigma):.2f}"
+            state = f"yaw only since {since:.1f} s, sigma_yaw {shown} deg/s ({lost.reason})"
+        else:
+            state = "full twist"
+        brw = "none: no yaw while lost" if lost.brw is None else f"{lost.brw:.2e} rad/s/sqrt(s)"
+        return (
+            f"{state}; yaw only {counts['yaw_out']} sent, withheld: mast {counts['yaw_mast']}, gaze"
+            f" {counts['yaw_gaze']}, too fast {counts['yaw_fast']}, no brw {counts['yaw_no_brw']};"
+            f" lost episodes {lost.episodes}, gyro bias walk {brw}"
         )
 
     def _features_text(self) -> str:

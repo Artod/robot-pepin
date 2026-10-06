@@ -340,6 +340,11 @@ ekf_filter_node:
     # |v| > 1 m/s always and, under vio_guard, |v - wheels| > 0.2 m/s; VioLost refuses a sustained
     # disagreement. A Mahalanobis gate against a filter that the wheels dominate would refuse the
     # VIO exactly when it disagrees with a slipping wheel.
+    # YAW ONLY WHILE LOST (2026-10-06): the relay keeps sending vyaw (the gyro needs no light)
+    # with vx = vy = 0 at 1e6 variance, cross terms 0: this filter's gain on them is P/(P+1e6),
+    # ~1e-8, i.e. nothing, with no change here (a separate topic would need a twist1 and a board
+    # restart). Under vio_twist_source imu the twist comes at 50 Hz (vio_publish_hz) instead of
+    # the camera's ~10: +40 corrections a second here, est. 28-33 % of a core from 25 %.
     twist0: vo_twist
     twist0_config: [false, false, false,
                     false, false, false,
