@@ -51,8 +51,17 @@
                    before a forward turn, the cart backed 13 cm a second, and the next plan from the
                    new pose began backwards again — 11-15 plans and 1.4-2.1 m of reverse on drives
                    0342/0344/0347, 60 of 61 reversals right after such a plan (scratch/drives_1006c). -->
+              <!-- The plan is kept only while the SHIM drives (the long way): the parker, MPPI in the
+                   last metre, cuts a plan at its first direction change and keeps 1.2 m of it, so a
+                   kept plan still carrying the departure's reverse leg reached it as "0 poses" (0350
+                   failed on one plan in 68 s, 0352 backed 1.03 m to the old turning point), and a
+                   plan the planner ended off the mark was kept to the end (parked 27-41 deg crooked).
+                   Under MPPI a fresh plan comes every second, as before 2026-10-06. -->
               <Fallback name="ReplanOnlyIfNeeded">
                 <ReactiveSequence>
+                  <BlackboardCheckString value_A="{selected_controller}" value_B="FollowPathShim" return_on_mismatch="FAILURE">
+                    <AlwaysSuccess/>
+                  </BlackboardCheckString>
                   <Inverter>
                     <GlobalUpdatedGoal/>
                   </Inverter>

@@ -72,6 +72,10 @@ def _poseimu(t: float, t_g_b: Any, trace: float = 1e-4) -> Any:
 
 
 def _node(**params: Any) -> VisualOdometry:
+    # The formula tests read OpenVINS's covariance through unit scales; the shipped defaults
+    # (1.75 / 2.5 since 2026-10-06, measured on 19 drives) are a knob, pinned in test_knobs.
+    params.setdefault("vio_sigma_scale", 1.0)
+    params.setdefault("vio_yaw_sigma_scale", 1.0)
     with ros_stubs.parameters(vo_input="vio", **params):
         node = VisualOdometry()
     assert node._tf is not None
