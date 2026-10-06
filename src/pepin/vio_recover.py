@@ -264,7 +264,8 @@ class VioWatch:
     the reference — the EKF's velocity carried to the IMU, given with its time, used within
     ``REFERENCE_AGE_S`` of the frame — adds the frame's interval to a run; ``disagree_s`` of run is
     a verdict. A frame that agrees clears the run; one without a fresh reference (the head moving:
-    the keeper publishes no seed then) neither adds nor clears.
+    the keeper publishes no seed then) or taken in a swing (the neck turning the IMU about its pan
+    axis adds a lever-arm velocity the EKF's does not have) neither adds nor clears.
     DARK: a frame with fewer than ``dark_tracks`` persistent tracks adds its interval to a run;
     ``dark_s`` is a verdict. A frame with enough tracks, or held by OpenVINS's zero-velocity update
     (the cart at rest, dark or not; ``dark_at_rest`` judges those too), clears it; a frame taken in
@@ -349,6 +350,7 @@ class VioWatch:
             health.v_i is None
             or reference is None
             or abs(health.t - reference[0]) > REFERENCE_AGE_S
+            or health.gyro > self.swing_rad_s  # the neck's lever arm is in v_I, not in the EKF's
         ):
             return None
         diff = float(np.linalg.norm(np.asarray(health.v_i) - np.asarray(reference[1])))

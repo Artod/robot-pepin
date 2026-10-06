@@ -225,6 +225,15 @@ def test_a_velocity_that_leaves_the_ekfs_is_lost_after_disagree_s_and_not_withou
     assert [stale.observe(h, (h.t - 0.5, np.array(ekf))) for h in frames] == [None] * len(frames)
 
 
+def test_a_head_swing_does_not_disagree_its_lever_arm_is_not_in_the_ekfs_velocity() -> None:
+    # 0329's t 4.0-4.8 replayed: a saccade (5 rad/s) moved the IMU at 0.3-0.8 m/s, the cart at 0.11
+    watch = VioWatch(disagree_m_s=0.2, disagree_s=1.0, grace_s=0.0)
+    frames = [health(i / 10, v_i=(0.0, -0.12, 0.0)) for i in range(5)]
+    frames += [health(0.5 + i / 10, gyro=5.4, v_i=(0.3, -0.7, 0.1)) for i in range(15)]
+    frames += [health(2.0 + i / 10, v_i=(0.0, -0.13, 0.0)) for i in range(10)]
+    assert run(watch, frames, (0.0, -0.11, 0.0)) == []
+
+
 def test_a_runaway_speed_is_lost_after_speed_s() -> None:
     watch = VioWatch(max_speed_m_s=1.0, speed_s=0.3, grace_s=0.0)
     frames = [health(i / 10, speed=0.25) for i in range(5)]
