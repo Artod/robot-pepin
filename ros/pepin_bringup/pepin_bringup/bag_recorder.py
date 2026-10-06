@@ -133,7 +133,16 @@ VIO_TOPICS = (
     "/ov_msckf/health",
     "/vio/seed_twist",
 )
-RING_TOPICS: tuple[str, ...] = (*BAG_TOPICS, *VIO_TOPICS)
+# What the controllers were steering by: the plan as the controller received it, its local plan
+# and RPP's collision arc (2026-10-06: the "white arc" of drive 0337 and the reverse runs of
+# 0342/0344/0347 could not be read from a recording without them).
+PLAN_TOPICS = (
+    "/plan",
+    "/received_global_plan",
+    "/local_plan",
+    "/lookahead_collision_arc",
+)
+RING_TOPICS: tuple[str, ...] = (*BAG_TOPICS, *VIO_TOPICS, *PLAN_TOPICS)
 RING_DIR = "/maps/ring"  # ros/maps/ring on the Mac: beside rec/, gitignored with it
 # The MCAP writer's options for the ring: a 256 KiB chunk instead of rosbag2's 768 KiB, so the
 # newest file is on disk within ~1 s of a message instead of 3-4 s, which is how long a cut waits

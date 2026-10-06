@@ -326,6 +326,13 @@ def test_the_chosen_planner_is_the_only_planner() -> None:
     branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
     assert branch is not None
     first = next(iter(branch))
+    if first.tag == "Fallback":
+        # 2026-10-06: the plan is kept while the goal is the same and the path is still valid; the
+        # Fallback's checks hold no planner, and its last child is the one planner.
+        checks, first = list(first)[:-1], list(first)[-1]
+        assert not [n for c in checks for n in c.iter("ComputePathToPose")], (
+            "a second planner hides behind the validity check"
+        )
     assert first.tag == "ComputePathToPose" and first.get("planner_id") == "{selected_planner}"
     assert not [n for n in tree.iter("ComputePathToPose") if n.get("planner_id") == "GridBased"]
     assert int(branch.get("number_of_retries")) >= 5, "a blocked path is waited out, not given up"

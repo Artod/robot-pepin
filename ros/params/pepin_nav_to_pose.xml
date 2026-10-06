@@ -45,7 +45,21 @@
                    does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
                    over the toes (run 0113, five times in one leg). A refusal is a recovery below,
                    a wait for the person to move, never a smaller robot. -->
-              <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              <!-- 2026-10-06: a plan is KEPT while the goal is the same and the path still passes
+                   the planner's validity check; a new one only when it does not. A fresh plan every
+                   second put the cart on a reverse treadmill: each plan began with 8-39 cm backwards
+                   before a forward turn, the cart backed 13 cm a second, and the next plan from the
+                   new pose began backwards again — 11-15 plans and 1.4-2.1 m of reverse on drives
+                   0342/0344/0347, 60 of 61 reversals right after such a plan (scratch/drives_1006c). -->
+              <Fallback name="ReplanOnlyIfNeeded">
+                <ReactiveSequence>
+                  <Inverter>
+                    <GlobalUpdatedGoal/>
+                  </Inverter>
+                  <IsPathValid path="{path}"/>
+                </ReactiveSequence>
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+              </Fallback>
               <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
                    for START_OCCUPIED, which is precisely the code a footprint-checking planner
                    returns when the cart is parked close to something — so the whole branch was
