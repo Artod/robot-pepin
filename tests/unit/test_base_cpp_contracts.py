@@ -19,7 +19,7 @@ import pytest
 from pepin.base_link import STATE_HZ
 from pepin.camera import quaternion_from_rpy
 from pepin.neck import NeckConfig, NeckPivot, bridge_parameters, camera_pose, joint_angles
-from pepin.wheel_noise import WheelNoiseLaw
+from pepin.wheel_noise import WheelNoise, WheelNoiseLaw
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = REPO / "ros/pepin_base_cpp"
@@ -278,7 +278,8 @@ def test_the_wheel_noise_law_in_c_plus_plus_answers_what_pepin_wheel_noise_answe
 ) -> None:
     """/odom's twist covariance comes from wheel_noise.hpp on the board and the law was fit and is
     documented in pepin.wheel_noise: the repo's config/base.json law, at the launch's rate, gives
-    the same vx and vyaw entries for rest, creep, straights, pivots and arcs both ways."""
+    the same vx and vyaw entries, sample by sample, through rest, creep, straights, pivots and arcs
+    both ways, stops inside and past the hold, and a clock that steps back."""
     binary = _compile("wheel_noise_contract", tmp_path)
     law = WheelNoiseLaw.from_json(REPO / "config/base.json")
     params = law.bridge_parameters(STATE_HZ)
@@ -291,24 +292,37 @@ def test_the_wheel_noise_law_in_c_plus_plus_answers_what_pepin_wheel_noise_answe
             "yaw_floor_rad_s",
             "moving_m_s",
             "moving_rad_s",
+            "hold_s",
             "rate_hz",
         )
     )
-    twists = [
-        (v, w) for v in (0.0, 0.0024, -0.03, 0.12, -0.3) for w in (0.0, 0.0088, -0.052, 0.4, -1.0)
-    ]
+    samples: list[tuple[float, float, float]] = []
+    t = 100.0
+    for v in (0.0, 0.0024, -0.03, 0.12, -0.3):
+        for w in (0.0, 0.0088, -0.052, 0.4, -1.0):
+            samples.append((v, w, t))
+            t += 0.02
+        for gap in (0.5, 1.0, 1.49, 1.0):  # standing: inside the hold, then past it
+            t += gap
+            samples.append((0.0, 0.0, t))
+    samples.append((0.0, 0.0, t - 5.0))  # the clock stepped back
     ran = subprocess.run(
         [str(binary)],
-        input=head + "\n" + "\n".join(f"{v!r} {w!r}" for v, w in twists) + "\n",
+        input=head + "\n" + "\n".join(f"{v!r} {w!r} {t!r}" for v, w, t in samples) + "\n",
         capture_output=True,
         text=True,
         check=False,
     )
     assert ran.returncode == 0, ran.stdout + ran.stderr
     *rows, verdict = ran.stdout.strip().splitlines()
-    assert verdict == "the contract holds" and len(rows) == len(twists)
-    for (v, w), row in zip(twists, rows, strict=True):
-        var_v, var_w, moving = row.split()
-        want = law.sample_variances(v, w, STATE_HZ) or (0.001, 0.01)
-        assert int(moving) == int(law.moving(v, w)), (v, w)
-        assert (float(var_v), float(var_w)) == pytest.approx(want, rel=1e-12), (v, w)
+    assert verdict == "the contract holds" and len(rows) == len(samples)
+    noise = WheelNoise(law, STATE_HZ)
+    held = 0
+    for (v, w, t), row in zip(samples, rows, strict=True):
+        var_v, var_w, on = row.split()
+        got = noise.update(v, w, t)
+        assert int(on) == int(got is not None), (v, w, t)
+        held += int(got is not None and not law.moving(v, w))
+        want = got if got is not None else (0.001, 0.01)
+        assert (float(var_v), float(var_w)) == pytest.approx(want, rel=1e-12), (v, w, t)
+    assert held >= 4, "the hold was exercised"

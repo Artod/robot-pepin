@@ -13,7 +13,7 @@ import pytest
 
 from pepin.flags import load_table
 from pepin.geometry import BaseConfig
-from pepin.wheel_noise import WheelNoiseLaw
+from pepin.wheel_noise import WheelNoise, WheelNoiseLaw
 
 REPO = Path(__file__).resolve().parents[2]
 CPP = REPO / "ros/pepin_base_cpp/src/base_bridge.cpp"
@@ -22,16 +22,16 @@ LAW = WheelNoiseLaw()
 
 
 def test_at_rest_the_law_says_nothing_and_the_constant_stays() -> None:
-    assert LAW.sigmas(0.0, 0.0) is None
-    assert LAW.sample_variances(0.0, 0.0, 50.0) is None
+    noise = WheelNoise(LAW, 50.0)
+    assert noise.update(0.0, 0.0, 10.0) is None
     # A wheel's one-tick jitter on a parked cart (2.4 mm/s, 0.5 deg/s) and a slow creep are rest.
-    assert LAW.sample_variances(0.0024, 0.0088, 50.0) is None
-    assert LAW.sample_variances(-0.029, math.radians(2.9), 50.0) is None
+    assert noise.update(0.0024, 0.0088, 10.02) is None
+    assert noise.update(-0.029, math.radians(2.9), 10.04) is None
 
 
 def test_a_straight_at_0_3_m_s_gets_the_floors() -> None:
-    assert LAW.sigmas(0.3, 0.0) == pytest.approx((0.026, 0.038))
-    var_v, var_w = LAW.sample_variances(0.3, 0.0, 50.0) or (0.0, 0.0)
+    assert LAW.sigmas(0.0) == pytest.approx((0.026, 0.038))
+    var_v, var_w = WheelNoise(LAW, 50.0).update(0.3, 0.0, 10.0) or (0.0, 0.0)
     assert var_v == pytest.approx(50 * 0.026**2) and var_v == pytest.approx(0.0338)
     assert var_w == pytest.approx(50 * 0.038**2) and var_w == pytest.approx(0.0722)
     # 34x and 7x the constant 0.001 / 0.01: what a moving second of these wheels is worth.
@@ -40,10 +40,24 @@ def test_a_straight_at_0_3_m_s_gets_the_floors() -> None:
 
 def test_a_pivot_at_1_rad_s_adds_the_turns_share_in_either_direction() -> None:
     for w in (1.0, -1.0):
-        assert LAW.sigmas(0.0, w) == pytest.approx((0.060, 0.238))
-        var_v, var_w = LAW.sample_variances(0.0, w, 50.0) or (0.0, 0.0)
+        assert LAW.sigmas(w) == pytest.approx((0.060, 0.238))
+        var_v, var_w = WheelNoise(LAW, 50.0).update(0.0, w, 10.0) or (0.0, 0.0)
         assert var_v == pytest.approx(0.18)
         assert var_w == pytest.approx(2.8322)
+
+
+def test_after_a_stop_the_floors_hold_for_two_seconds_then_rest_is_the_constant() -> None:
+    noise = WheelNoise(LAW, 50.0)
+    assert noise.update(0.2, 0.5, 10.0) == pytest.approx((50 * 0.043**2, 50 * 0.138**2))
+    assert noise.update(0.0, 0.0, 11.0) == pytest.approx((0.0338, 0.0722))
+    assert noise.update(0.0, 0.0, 12.0) == pytest.approx((0.0338, 0.0722))
+    assert noise.update(0.0, 0.0, 12.02) is None
+    assert noise.update(0.0, 0.0, 13.0) is None
+    noise.update(0.1, 0.0, 20.0)
+    assert noise.update(0.0, 0.0, 19.0) is None, "a clock gone backwards is rest"
+    noise.update(0.1, 0.0, 21.0)
+    noise.reset()
+    assert noise.update(0.0, 0.0, 21.02) is None, "a reset forgets the motion"
 
 
 def test_motion_starts_at_either_threshold() -> None:
@@ -54,8 +68,8 @@ def test_motion_starts_at_either_threshold() -> None:
 
 def test_the_variance_scales_with_the_stream_rate() -> None:
     """One sample's share of a second: half the rate, half the variance per sample."""
-    at_50 = LAW.sample_variances(0.2, 0.5, 50.0)
-    at_25 = LAW.sample_variances(0.2, 0.5, 25.0)
+    at_50 = WheelNoise(LAW, 50.0).update(0.2, 0.5, 1.0)
+    at_25 = WheelNoise(LAW, 25.0).update(0.2, 0.5, 1.0)
     assert at_50 is not None and at_25 is not None
     assert at_25 == pytest.approx((at_50[0] / 2, at_50[1] / 2))
 
@@ -113,8 +127,13 @@ def test_the_switch_falls_back_to_the_constant_live() -> None:
     state = cpp[cpp.index("void publish_state(const BaseState & state, const LineTime & when)") :]
     state = state[: state.index("\n  }\n")]
     assert 'get_parameter("odom_covariance").as_string() != "constant"' in state, "read per line"
-    assert "wheel_twist_covariance(wheel_law_, wheel_twist_, twist_covariance_)" in state
-    assert "law ?" in state and ": twist_covariance_;" in state, "the constant path kept"
+    gate = "const bool on = wheel_gate_.on(wheel_law_, wheel_twist_, state.stamp_s);"
+    assert gate in state, "the hold fed every line, under either word"
+    assert state.index(gate) < state.index("odom.twist.covariance = law ?")
+    assert "wheel_twist_covariance(wheel_law_, wheel_twist_, twist_covariance_, on)" in state
+    assert "\n      twist_covariance_;" in state, "the constant path kept"
+    forget = cpp[cpp.index("void forget_wheel_twist()") :]
+    assert "wheel_gate_.reset();" in forget[: forget.index("\n  }\n")]
     twist = cpp[cpp.index("BodyTwist odom_twist(const BaseState & state)") :]
     twist = twist[: twist.index("\n  }\n")]
     assert "wheel_twist_ = wheels;" in twist, "the measured twist, never the command"

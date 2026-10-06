@@ -227,8 +227,9 @@ public:
     // HOW SURE /odom's TWIST IS. "law" (the default) sizes vx and vyaw from the MEASURED wheel
     // twist while the wheels move (wheel_noise.hpp: over 1 s, sigma_v = 0.034 |w| + 0.026 m/s and
     // sigma_w = 0.20 |w| + 0.038 rad/s, each 50 Hz sample carrying 50 sigma^2; fit on drives
-    // 0329-0347 against the lidar truth, config/base.json `odometry_noise`) and keeps the constant
-    // at rest; "constant" is 0.001 / 0.01 on every sample, what this node published before
+    // 0329-0347 against the lidar truth, config/base.json `odometry_noise`) and for
+    // `odom_law_hold_s` (2 s, the zupt's settle) after the last moving sample, and keeps the
+    // constant at rest past that; "constant" is 0.001 / 0.01 on every sample, as before
     // 2026-10-06. Read per line, so ``ros2 param set /base_bridge odom_covariance constant``
     // switches back live; any other word is "law". The coefficients are read at start and are
     // read-only (robot.launch.py hands over config/base.json's block: a new fit is a sync and a
@@ -248,6 +249,7 @@ public:
     wheel_law_.yaw_floor_rad_s = law_number("odom_law_yaw_floor_rad_s", wheel_law_.yaw_floor_rad_s);
     wheel_law_.moving_m_s = law_number("odom_law_moving_m_s", wheel_law_.moving_m_s);
     wheel_law_.moving_rad_s = law_number("odom_law_moving_rad_s", wheel_law_.moving_rad_s);
+    wheel_law_.hold_s = law_number("odom_law_hold_s", wheel_law_.hold_s);
     wheel_law_.rate_hz = law_number("odom_law_rate_hz", wheel_law_.rate_hz);
     // THE ZERO-VELOCITY UPDATE (CLAUDE.md rule 19; zupt.hpp has the measurements). On, /zupt
     // carries a twist of exactly zero -- ekf.yaml's odom2 fuses its vx, vy and vyaw -- for as long
@@ -595,9 +597,12 @@ private:
     odom.twist.twist.angular.z = twist.angular;
     const bool law = get_parameter("odom_covariance").as_string() != "constant";
     odom_covariance_law_ = law;
-    // The law reads the wheels' MEASURED twist whatever odom_twist_source publishes.
-    odom.twist.covariance =
-      law ? wheel_twist_covariance(wheel_law_, wheel_twist_, twist_covariance_) : twist_covariance_;
+    // The law reads the wheels' MEASURED twist whatever odom_twist_source publishes; its gate is
+    // fed every line under either word, so a switch to "law" finds the hold already in step.
+    const bool on = wheel_gate_.on(wheel_law_, wheel_twist_, state.stamp_s);
+    odom.twist.covariance = law ?
+      wheel_twist_covariance(wheel_law_, wheel_twist_, twist_covariance_, on) :
+      twist_covariance_;
     odom_publisher_->publish(odom);
     if (!publish_tf_) {
       return;
@@ -659,6 +664,7 @@ private:
   void forget_wheel_twist()
   {
     twist_from_pose_.reset();
+    wheel_gate_.reset();
     rest_witness_.forget();
     still_since_.store(0.0);
   }
@@ -1606,6 +1612,7 @@ private:
   std::atomic<bool> odom_covariance_law_{true};  // ... and this one by the reader thread
   WheelNoiseLaw wheel_law_;  // set once at start, read by the reader thread
   BodyTwist wheel_twist_;    // the last measured wheel twist; reader thread only
+  WheelNoiseGate wheel_gate_;  // ... and the law's rest gate with its hold, the same
   TwistFromPose twist_from_pose_{kStateGapMaxS};  // touched from the reader thread only
   RestWitness rest_witness_{kStateGapMaxS};       // ... and so is this one
   // One encoder tick of wheel travel: pi * wheel_diameter_m / ticks_per_rev of config/base.json

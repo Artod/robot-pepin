@@ -9,9 +9,10 @@ rate much faster, while the speed itself adds nothing measurable. So, while the 
     sigma_w = yaw_per_yaw_rate * |w| + yaw_floor_rad_s (rad/s, 1 s mean)
 
 and each sample of a ``rate_hz`` stream carries ``rate_hz * sigma^2``: a filter that takes the
-samples as independent then holds one second of them to ``sigma``. At rest (both ``|v|`` and
-``|w|`` under their ``moving_*`` thresholds) the law says nothing — the wheels' rest error is
-below the truth's own noise — and the caller keeps its constant covariance.
+samples as independent then holds one second of them to ``sigma``. At rest the law says nothing —
+the wheels' error on a standing cart is below the truth's own noise — and the caller keeps its
+constant covariance; but rest counts only once the wheels have been still for ``hold_s`` (the
+seconds just after a stop are as wrong as moving ones: :class:`WheelNoise`).
 
 ``v`` and ``w`` are the MEASURED wheel twist (the encoders), never the command. The C++ twin is
 ros/pepin_base_cpp/include/pepin_base_cpp/wheel_noise.hpp; tests/unit/test_base_cpp_contracts.py
@@ -36,6 +37,7 @@ class WheelNoiseLaw:
     yaw_floor_rad_s: float = 0.038
     moving_m_s: float = 0.03  # the fit's "moving": |v| at or above this ...
     moving_rad_s: float = 0.052  # ... or |w| at or above this (3 deg/s)
+    hold_s: float = 2.0  # the law stays on this long after the last moving sample
 
     def __post_init__(self) -> None:
         """Every coefficient is a non-negative finite number; a floor of zero is allowed."""
@@ -63,24 +65,13 @@ class WheelNoiseLaw:
         """The wheels' measured twist is motion, not rest."""
         return abs(v) >= self.moving_m_s or abs(w) >= self.moving_rad_s
 
-    def sigmas(self, v: float, w: float) -> tuple[float, float] | None:
-        """The 1 s sigmas (vx m/s, vyaw rad/s) of the wheels at measured ``v``, ``w``; None at
-        rest."""
-        if not self.moving(v, w):
-            return None
+    def sigmas(self, w: float) -> tuple[float, float]:
+        """The law's 1 s sigmas (vx m/s, vyaw rad/s) at the measured yaw rate ``w``."""
         turn = abs(w)
         return (
             self.v_per_yaw_rate * turn + self.v_floor_m_s,
             self.yaw_per_yaw_rate * turn + self.yaw_floor_rad_s,
         )
-
-    def sample_variances(self, v: float, w: float, rate_hz: float) -> tuple[float, float] | None:
-        """Per-sample variances (vx, vyaw) of a ``rate_hz`` stream, ``rate_hz * sigma^2``; None
-        at rest."""
-        s = self.sigmas(v, w)
-        if s is None:
-            return None
-        return rate_hz * s[0] ** 2, rate_hz * s[1] ** 2
 
     def bridge_parameters(self, rate_hz: float) -> dict[str, float]:
         """The base bridge's parameters for this law on a ``rate_hz`` state stream
@@ -92,5 +83,38 @@ class WheelNoiseLaw:
             "odom_law_yaw_floor_rad_s": self.yaw_floor_rad_s,
             "odom_law_moving_m_s": self.moving_m_s,
             "odom_law_moving_rad_s": self.moving_rad_s,
+            "odom_law_hold_s": self.hold_s,
             "odom_law_rate_hz": float(rate_hz),
         }
+
+
+class WheelNoise:
+    """The law applied to each sample of a ``rate_hz`` stream, with its rest gate and hold.
+
+    A sample gets the law while the wheels move and for ``hold_s`` after their last moving sample;
+    otherwise None, and the caller keeps its constant. Over the 19 drives the hold took the seconds
+    that end in a stop from a mean z^2 of 5.9 (the plain gate: the standing samples' tight constant
+    outvoted the stop's real error) to 1.3 (scratch/wheel_law/gate.py).
+    """
+
+    def __init__(self, law: WheelNoiseLaw, rate_hz: float) -> None:
+        """``rate_hz``: the stream's sample rate, one sample's share of a second."""
+        self.law = law
+        self.rate_hz = rate_hz
+        self._last_moving_s: float | None = None
+
+    def reset(self) -> None:
+        """Forget the last motion: the next standing sample is rest at once."""
+        self._last_moving_s = None
+
+    def update(self, v: float, w: float, stamp_s: float) -> tuple[float, float] | None:
+        """Per-sample variances (vx, vyaw) for the measured ``v``, ``w`` at ``stamp_s``, or None
+        for the caller's constant (rest past the hold, or a clock that went backwards)."""
+        if self.law.moving(v, w):
+            self._last_moving_s = stamp_s
+        elif self._last_moving_s is None or not (
+            0.0 <= stamp_s - self._last_moving_s <= self.law.hold_s
+        ):
+            return None
+        s_v, s_w = self.law.sigmas(w)
+        return self.rate_hz * s_v**2, self.rate_hz * s_w**2

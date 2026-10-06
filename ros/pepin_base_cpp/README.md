@@ -168,23 +168,28 @@ at that rate and two atomic stores per IMU sample; no new process, no new thread
 ## Wheel odometry covariance
 
 `odom_covariance` "law" (the default; live, read per line) puts a law of the MEASURED wheel twist
-on /odom's vx and vyaw variances while the wheels move (`|v|` >= 3 cm/s or `|w|` >= 3 deg/s):
-over one second sigma_v = 0.034 `|w|` + 0.026 m/s and sigma_w = 0.20 `|w|` + 0.038 rad/s, and each
-50 Hz sample carries 50 sigma^2 (`wheel_noise.hpp`, the twin of `pepin.wheel_noise`). At rest, and
-under "constant", the message carries 0.001 / 0.01 as before. The coefficients come from
-config/base.json's `odometry_noise` block through robot.launch.py as the read-only
-`odom_law_*` parameters (the block's note has the fit, drives 0329-0347 against the lidar truth).
+on /odom's vx and vyaw variances while the wheels move (`|v|` >= 3 cm/s or `|w|` >= 3 deg/s) and
+for `odom_law_hold_s` (2 s) after their last moving sample: over one second sigma_v = 0.034 `|w|` +
+0.026 m/s and sigma_w = 0.20 `|w|` + 0.038 rad/s, and each 50 Hz sample carries 50 sigma^2
+(`wheel_noise.hpp`, the twin of `pepin.wheel_noise`). At rest past the hold, and under "constant",
+the message carries 0.001 / 0.01 as before. The hold is there because the seconds that end in a
+stop were as wrong as moving ones: under a plain per-sample gate their standing samples' tight
+constant outvoted the stop's error (mean z^2 5.9; 1.3 with the hold, scratch/wheel_law/gate.py).
+The coefficients come from config/base.json's `odometry_noise` block through robot.launch.py as
+the read-only `odom_law_*` parameters (the block's note has the fit, drives 0329-0347 against the
+lidar truth).
 
     ros2 param set /base_bridge odom_covariance constant   # the old covariance, next line
 
 | motion (measured) | vx var | vyaw var |
 |---|---|---|
-| rest | 0.001 | 0.01 |
+| rest (past the hold) | 0.001 | 0.01 |
+| 1 s after a stop | 0.0338 | 0.0722 |
 | straight 0.3 m/s | 0.0338 | 0.0722 |
 | pivot 1 rad/s | 0.180 | 2.83 |
 
 Board cost, AN ESTIMATE: per state line one string parameter read (as `odom_stamp` already does),
-a comparison, four multiply-adds and a 36-double copy, ~1-2 us at 50 Hz: well under 0.1 % of one
+two comparisons, four multiply-adds and a 36-double copy, ~1-2 us at 50 Hz: well under 0.1 % of one
 A53 core, no allocation, no thread; WiFi loss changes nothing (the bridge and the base server are
 both on the board).
 
@@ -209,8 +214,8 @@ skipped without a `c++`).
 - `test/neck_contract.cpp` — the neck's rate cap replayed as a table, then the model fed from
   stdin: `tests/unit/test_base_cpp_contracts.py` writes `config/neck.json` (and variants) in and
   holds every answer to `pepin.neck`'s within 1e-9.
-- `test/wheel_noise_contract.cpp` — the law's defaults on rest, a straight and a pivot, then
-  laws and twists from stdin held to `pepin.wheel_noise` with the repo's config/base.json.
+- `test/wheel_noise_contract.cpp` — the law's defaults on rest, a straight, a pivot and a stop,
+  then a law and stamped twists from stdin held to `pepin.wheel_noise` with config/base.json.
 - `test/protocol_samples.json` — wire lines recorded from the Python bridge this one was ported
   from: the twists and stops `protocol.hpp` must encode byte for byte, and the state lines it must
   parse.
