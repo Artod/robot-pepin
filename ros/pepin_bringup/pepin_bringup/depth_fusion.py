@@ -195,6 +195,7 @@ from pepin_bringup.node_kit import (
     TfLookup,
     Window,
     Worker,
+    camera_static_edges,
     spin_main,
 )
 
@@ -543,6 +544,11 @@ class DepthFusion(Node):
         self._sync = TimeSynchronizer([depth_sub, image_sub], PAIR_QUEUE)
         self._sync.registerCallback(self._on_pair)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._tf.expect_static(
+            self,
+            [*camera_static_edges(), (BASE_FRAME, LASER_FRAME)],
+            lambda: float(self._switches["tf_static_wait_s"]),
+        )
         self._lean = LeanFeed(
             self,
             config.parent,

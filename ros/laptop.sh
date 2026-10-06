@@ -151,6 +151,17 @@ for prio in control real_time interactive_high interactive_low data_high data da
 done
 RMW_ENV=(-e RMW_IMPLEMENTATION=rmw_zenoh_cpp -e PEPIN_RMW=zenoh -e ZENOH_ROUTER_CHECK_ATTEMPTS=0
          -e "ZENOH_CONFIG_OVERRIDE=$(pepin_zenoh_session_override)$ZENOH_QUEUES")
+# PEPIN_ZENOH_DEBUG=1 ros/laptop.sh vslam|nav|vio: the ONE container this command starts logs
+# zenoh-ext's history queries, each query's propagation to a session and that session's final
+# reply, and the liveliness tokens (pepin.static_facts.DEBUG_RUST_LOG; a test keeps the two
+# equal). A node WARNs "tf_static: WAITING" when its static edges are late; then
+#   docker logs pepin-vslam 2>&1 | PYTHONPATH=src python3 -m pepin.static_facts --silent
+# names the session that answers late or never (a router's zid: the same string in that router's
+# PEPIN_ZROUTER_LOG follows the chain). Megabytes a minute: for one restart, not for a drive.
+PEPIN_ZENOH_DEBUG_LOG="zenoh_ext=debug,zenoh::net::routing::dispatcher::queries=trace,zenoh::net::routing::dispatcher::token=debug"
+if [ "${PEPIN_ZENOH_DEBUG:-0}" = 1 ]; then
+    RMW_ENV+=(-e "RUST_LOG=$PEPIN_ZENOH_DEBUG_LOG")
+fi
 # A clock the two halves disagree on is refused BEFORE a container starts, not debugged on the
 # robot — and only where one is started, so `stop` and `logs` still work on a misconfigured shell.
 start_check() { pepin_time_source_check || exit 1; }

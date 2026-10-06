@@ -25,7 +25,7 @@ import time
 import traceback
 import weakref
 from collections import Counter, defaultdict
-from collections.abc import Callable, Iterable, Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
@@ -52,7 +52,8 @@ from pepin.deployment import bridged_qos
 from pepin.depth import UP_LEVEL, Array
 from pepin.flags import Flag, FlagSet
 from pepin.lean import Lean, LeanEstimator, LevelPose
-from pepin.mounts import Mounts
+from pepin.mounts import Mounts, load_camera_mounts
+from pepin.static_facts import StaticWait
 from pepin.telemetry import LatencySummary, LatencyTracker
 from pepin.tsdf import RigidPose
 from pepin_bringup.msgs import (
@@ -427,6 +428,7 @@ class TfLookup:
             else TransformListener(self.buffer, listener_node, spin_thread=True)
         )
         self._on_failure = on_failure
+        self.static_wait: StaticWait | None = None  # set by expect_static
         if self._listener is not None:
             _OPEN_LOOKUPS.add(self)
 
@@ -471,6 +473,41 @@ class TfLookup:
         )
         return None if transform is None else pose_from_transform(transform)
 
+    def expect_static(
+        self, node: Any, edges: Sequence[tuple[str, str]], after_s: Callable[[], float]
+    ) -> StaticWait:
+        """WARN on ``node``'s logger when these ``/tf_static`` edges are not all in the buffer
+        ``after_s()`` seconds (a live knob, ``tf_static_wait_s``) from now, naming the missing
+        ones, the usual cause and the debug recipe (:mod:`pepin.static_facts`); looked at once a
+        second until the last lands, which is logged once at INFO."""
+        wait = StaticWait(tuple(edges), started=time.monotonic(), after_s=after_s())
+        timer: Any = None
+
+        def tick() -> None:
+            out = wait.update(time.monotonic(), self.has_edge, after_s())
+            if out is not None:
+                level, text = out
+                # Two call sites: rclpy refuses a second severity from one line of code
+                # ("Logger severity cannot be changed between calls").
+                if level == "warn":
+                    node.get_logger().warning(text)
+                else:
+                    node.get_logger().info(text)
+            if wait.done and timer is not None:
+                timer.cancel()
+
+        timer = node.create_timer(1.0, tick)
+        self.static_wait = wait
+        return wait
+
+    def has_edge(self, parent: str, child: str) -> bool:
+        """Whether ``parent -> child`` is in the buffer at all (latest; a static edge has no
+        time)."""
+        try:
+            return bool(self.buffer.can_transform(parent, child, Time()))
+        except Exception:  # tf2's own errors: not there
+            return False
+
     def close(self) -> None:
         """Stop the listener's thread, before the node is destroyed under it; a second call does
         nothing."""
@@ -491,6 +528,16 @@ class TfLookup:
             if self._on_failure is not None:
                 self._on_failure(tf_failure_kind(exc), f"{what}: {str(exc).strip()[:160]}")
             return None
+
+
+def camera_static_edges() -> list[tuple[str, str]]:
+    """The camera's ``link -> optical`` edge as camera_stream broadcasts it on ``/tf_static``
+    (config/camera.json's active camera; the default frame names when the file is unreadable)."""
+    try:
+        camera = load_camera_mounts()
+        return [(camera.link_frame, camera.optical_frame)]
+    except (OSError, KeyError, ValueError):
+        return [("camera_link", "camera_optical")]
 
 
 def _time(stamp: Any) -> Any:

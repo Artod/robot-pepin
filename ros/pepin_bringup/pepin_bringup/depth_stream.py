@@ -176,6 +176,7 @@ from pepin_bringup.node_kit import (
     TfLookup,
     Window,
     Worker,
+    camera_static_edges,
     spin_main,
 )
 
@@ -695,6 +696,9 @@ class DepthStream(Node):
             self.create_subscription(CameraInfo, RIGHT_INFO, self._on_right_info, reliable)
             self.create_subscription(Image, RIGHT_IMAGE, self._on_right, newest)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._tf.expect_static(
+            self, camera_static_edges(), lambda: float(self._switches["tf_static_wait_s"])
+        )
         # Every lookup of a frame's path goes through the guard: one that would wait for an
         # edge already dead (the board's TF route gone) is refused instead, and the caller's
         # fallback runs on this frame — the camera pose from the config, the scan uncarried.
