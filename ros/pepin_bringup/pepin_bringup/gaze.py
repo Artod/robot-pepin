@@ -36,11 +36,25 @@ on ``/gaze/stall`` and one log line.
 
 PATH GAZE and REVERSE GAZE (behind ``path_gaze`` and ``reverse_gaze``, :mod:`pepin.path_gaze`)
 run only with a base server that moves the neck while driving: with one that does not, a head
-turned during a pause would drive on turned.
+turned during a pause would drive on turned. Path gaze FOLLOWS in a zone
+(:class:`pepin.path_gaze.PathFollower`: ``path_deadband_deg``, ``path_hyst_s``,
+``path_cooldown_s``, ``path_tail_s``); while it has no aim — reversing before a reverse look, no
+plan point ahead — its look is renewed where it is for up to ``path_hold_s``, so the head does
+not lapse home and back; the next look replaces it or the drive's end lets it go. With
+``glance_dwell_s`` above 0 the reverse look and the stall look are atomic GLANCES
+(:class:`pepin.gaze.Look`'s ``hold_s``): the reverse look waits for ``reverse_frames`` clean
+frames or ``glance_dwell_s`` once settled, the stall look for ``frames`` or its TTL, and only a
+better band takes the head before. After a drive the head goes home at ``return_deg_s``.
 
 A DRIVE'S START (a new goal on either navigator) drops every request but the operator's, so the
 head goes home (or to path gaze) before the wheels turn; a drive's end drops the navigation
-requests.
+requests (a glance under way ends first).
+
+THE LOOKS' FRAMES. Every look that held the head is booked when it lets go
+(:class:`pepin.gaze.HeldLook`): the frames depth_fusion fused (``/fusion/frame``: past the depth
+stream's gaze gate) while it held the head still. The report line counts them by source and
+names every look that wrote none; a drive's end adds one line for the drive: its writes and its
+looks.
 
 Flags (:data:`FLAGS`) and knobs (config/knobs.json's ``gaze`` block), all live: ``ros/flags.sh
 set gaze <name> <value>``; the report line every 30 s carries the counts, the driver, the last
@@ -76,6 +90,8 @@ from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze import (
     DRIVE_REFUSAL,
     DRIVING,
+    IDLE,
+    LATE_S,
     NAVIGATION,
     OPERATOR,
     PERSON,
@@ -86,6 +102,7 @@ from pepin.gaze import (
     GazeSettings,
     HeadReading,
     Look,
+    LookTally,
     NeckTargetHead,
     Outcome,
     Reach,
@@ -98,13 +115,15 @@ from pepin.gaze_link import GAZE_PORT, JsonDoor
 from pepin.marks_audit import scan_points, transform_xy
 from pepin.neck import JOINT_NAMES, NeckConfig
 from pepin.path_gaze import (
+    PathFollower,
     PathGazeLaw,
     ReverseLaw,
     ReverseWatch,
     path_aim,
+    remaining_m,
     reverse_aim,
-    settle,
     tight_rear,
+    time_to_end,
 )
 from pepin.stall_look import (
     Evidence,
@@ -137,6 +156,7 @@ BASE_FRAME = "base_link"
 STALL_SOURCE = "nav.stall"
 PATH_SOURCE = "nav.path"
 REVERSE_SOURCE = "nav.reverse"
+RETURN_SOURCE = "nav.return"  # the slow way home after a drive
 
 STEP_HZ = 20.0
 STATE_HZ = 10.0
@@ -252,6 +272,7 @@ class Gaze(Node):
                 renew_s=lambda: min(
                     float(self._switches["target_renew_s"]), self._cfg.motion.lease_s / 2.0
                 ),
+                return_deg_s=lambda: float(self._switches["return_deg_s"]),
             ),
         )
         self._arbiter = Arbiter(self._head, home_aim(self._cfg), self._settings())
@@ -262,7 +283,12 @@ class Gaze(Node):
         self._driving = False
         self._reverse = ReverseWatch()
         self._path_at = 0.0
-        self._path_aim: Aim | None = None
+        self._follow = PathFollower()
+        self._path_quiet_since: float | None = None
+        self._looks = LookTally()  # the report window's
+        self._drive_looks: LookTally | None = None
+        self._drive_writes = 0
+        self._summary_at: float | None = None
         self._state_key: tuple[Any, ...] = ()
         self._last_stall = "none yet"
         self._stalls: dict[str, int] = {}
@@ -366,6 +392,10 @@ class Gaze(Node):
             pan_clamp_deg=k("path_pan_clamp_deg"),
             near_m=k("path_near_m"),
             near_offset_deg=k("path_near_offset_deg"),
+            hyst_s=k("path_hyst_s"),
+            cooldown_s=k("path_cooldown_s"),
+            tail_s=k("path_tail_s"),
+            hold_s=k("path_hold_s"),
         )
 
     def _reverse_law(self) -> ReverseLaw:
@@ -441,7 +471,12 @@ class Gaze(Node):
         now = self._now()
         if after - before:
             self._driving = True
-            self._path_aim = None
+            self._follow.reset()
+            self._path_quiet_since = None
+            if self._summary_at is not None:
+                self._drive_line()  # the last drive's, before its late looks are all in
+            self._drive_looks = LookTally()
+            self._drive_writes = self._arbiter.counts["writes"]
             gone = self._arbiter.release(
                 now, "the drive's start", keep=lambda r: r.band == OPERATOR
             )
@@ -456,6 +491,21 @@ class Gaze(Node):
             self._arbiter.release(
                 now, "the drive's end", keep=lambda r: not r.source.startswith("nav.")
             )
+            self._return_home(now)
+            self._summary_at = now + LATE_S + 0.25  # the drive's last looks counted first
+
+    def _return_home(self, now: float) -> None:
+        """After a drive, home at ``return_deg_s`` rather than a saccade (0: the arbiter's own
+        saccade home), when the head is off home at all."""
+        if self._knob("return_deg_s") <= 0.0:
+            return
+        target = self._arbiter.state(now).target
+        if target is None or target.off(self._arbiter.home) <= 1e-6:
+            return
+        ttl = self._knob("ttl_idle_s")
+        self._arbiter.submit(
+            Look(RETURN_SOURCE, (), IDLE, 0, 0.0, ttl, speed="return", kind="home"), now
+        )
 
     # ---- the loop ------------------------------------------------------------------------------
     def _step(self) -> None:
@@ -470,6 +520,26 @@ class Gaze(Node):
         if key != self._state_key:  # every change goes out at once, between the 10 Hz lines
             self._state_key = key
             self._state_pub.publish(String(data=state.to_json()))
+        self._book_looks(now)
+
+    def _book_looks(self, now: float) -> None:
+        """The looks that let go, into the report's tally and the drive's; the drive's line once
+        its last looks are counted."""
+        for booked in self._arbiter.take_looks(now):
+            self._looks.add(booked)
+            if self._drive_looks is not None:
+                self._drive_looks.add(booked)
+        if self._summary_at is not None and now >= self._summary_at:
+            self._drive_line()
+
+    def _drive_line(self) -> None:
+        """One line for the drive that ended: its writes and its looks."""
+        if self._drive_looks is not None:
+            writes = self._arbiter.counts["writes"] - self._drive_writes
+            self.get_logger().info(
+                f"gaze: the drive's head: {writes} writes, {self._drive_looks.text()}"
+            )
+        self._drive_looks, self._summary_at = None, None
 
     def _publish_state(self) -> None:
         if self._up:
@@ -484,6 +554,21 @@ class Gaze(Node):
         ttl = self._knob("ttl_driving_s")
         self._arbiter.submit(Look(source, (aim,), DRIVING, 0, ttl, ttl), now)
 
+    def _glance(self, source: str, aim: Aim, now: float) -> None:
+        """A driving look that, with ``glance_dwell_s`` above 0, is an atomic glance of
+        ``reverse_frames`` frames; one under way is only renewed, never re-aimed."""
+        if self._arbiter.glancing(source):
+            self._arbiter.renew(source, now)
+            return
+        same = [r for r in self._arbiter.pending() if r.source == source and r.views == (aim,)]
+        if same:
+            self._arbiter.renew(source, now)
+            return
+        ttl = self._knob("ttl_driving_s")
+        frames = int(self._switches["reverse_frames"])
+        hold = self._knob("glance_dwell_s")
+        self._arbiter.submit(Look(source, (aim,), DRIVING, frames, ttl, ttl, hold_s=hold), now)
+
     def _drive_gaze(self, now: float) -> None:
         """Path gaze or reverse gaze, renewed every ``path_period_s`` while a drive runs."""
         v, w = self._head.twist
@@ -497,18 +582,37 @@ class Gaze(Node):
         if self._switches.on("reverse_gaze") and self._reverse.reversing:
             long_leg = self._reverse.reversing_for(now) >= law.min_s
             if long_leg or self._tight_rear(law):
-                self._hold(REVERSE_SOURCE, reverse_aim(self._reverse.hold(), law, self._reach), now)
+                rear = reverse_aim(self._reverse.hold(), law, self._reach)
+                self._glance(REVERSE_SOURCE, rear, now)
                 return
-        if not self._switches.on("path_gaze") or self._reverse.reversing:
+        if not self._switches.on("path_gaze"):
             return
-        aim = self._path_target(v)
+        target = None if self._reverse.reversing else self._path_target(v)
+        if target is None:
+            self._keep_path(now)  # a mode change, or nothing ahead: the aim stays
+            return
+        wanted, end_in = target
+        fresh = not any(r.source == PATH_SOURCE for r in self._arbiter.pending())
+        aim = self._follow.update(wanted, now, self._path_law(), end_in_s=end_in, fresh=fresh)
         if aim is None:
             return
-        self._path_aim = settle(self._path_aim, aim, self._knob("path_deadband_deg"))
-        self._hold(PATH_SOURCE, self._path_aim, now)
+        self._path_quiet_since = None
+        self._hold(PATH_SOURCE, aim, now)
 
-    def _path_target(self, speed: float) -> Aim | None:
-        """Path gaze's aim from the newest plan and the cart's pose in its frame."""
+    def _keep_path(self, now: float) -> None:
+        """Path gaze has no aim this period: its look is renewed where it is, for up to
+        ``path_hold_s`` (0: it lapses after its TTL, as before)."""
+        hold = self._knob("path_hold_s")
+        if hold <= 0.0:
+            return
+        if self._path_quiet_since is None:
+            self._path_quiet_since = now
+        if now - self._path_quiet_since < hold:
+            self._arbiter.renew(PATH_SOURCE, now)
+
+    def _path_target(self, speed: float) -> tuple[Aim, float] | None:
+        """Path gaze's aim from the newest plan and the cart's pose in its frame, and the
+        seconds to the plan's end at this speed."""
         with self._inputs_lock:
             plan = self._inputs.plan
         if plan is None or len(plan.poses) < 2:
@@ -519,7 +623,7 @@ class Gaze(Node):
         path = np.array([[p.pose.position.x, p.pose.position.y] for p in plan.poses], dtype=float)
         yaw = math.atan2(float(here.rotation[1, 0]), float(here.rotation[0, 0]))
         pose = (float(here.translation[0]), float(here.translation[1]), yaw)
-        return path_aim(
+        aim = path_aim(
             path,
             pose,
             speed,
@@ -528,6 +632,9 @@ class Gaze(Node):
             home=self._arbiter.home,
             reach=self._reach,
         )
+        if aim is None:
+            return None
+        return aim, time_to_end(remaining_m(path, (pose[0], pose[1])), speed)
 
     def _tight_rear(self, law: ReverseLaw) -> bool:
         with self._inputs_lock:
@@ -682,6 +789,8 @@ class Gaze(Node):
         face = self._stall_face()
         if face is not None:
             face.looking()
+        # a glance (glance_dwell_s > 0): its frames or its TTL once settled, nothing cuts it short
+        glance = ttl if self._knob("glance_dwell_s") > 0.0 else 0.0
         look = self._ask(
             Look(
                 STALL_SOURCE,
@@ -691,6 +800,7 @@ class Gaze(Node):
                 0.0,
                 ttl,
                 kind="point",
+                hold_s=glance,
             )
         )
         after = self._column_points(box, frame)
@@ -865,10 +975,11 @@ class Gaze(Node):
             f" requests {c['requests']} (done {c['done']}, denied {c['denied']}, preempted"
             f" {c['preempted']}, expired {c['expired']}); writes {c['writes']}, settled"
             f" {c['settled']}, refused {c['refused']}, timeouts {c['timeouts']};"
-            f" stall looks: {stalls}; last: {self._last_stall}"
+            f" {self._looks.text()}; stall looks: {stalls}; last: {self._last_stall}"
             f"{f'; {self._tf_misses} TF misses' if self._tf_misses else ''};"
             f" flags: {self._switches.state()}"
         )
+        self._looks = LookTally()
 
 
 def _into(pose: RigidPose, point: tuple[float, float, float]) -> tuple[float, float, float]:

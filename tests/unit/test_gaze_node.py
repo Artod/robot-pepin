@@ -1,6 +1,7 @@
 """The gaze node under the ROS stubs: the doors, the stall look end to end, drive starts, path
-gaze, and the topic and service names (literals: they are the contract with the behaviour tree,
-the frame consumers and the tools)."""
+gaze, drive 306 replayed (the baseline preset against the node before it, following, glances,
+the slow way home, the looks' frames), and the topic and service names (literals: they are the
+contract with the behaviour tree, the frame consumers and the tools)."""
 
 from __future__ import annotations
 
@@ -9,6 +10,7 @@ import math
 import threading
 import time
 from collections.abc import Callable, Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -17,6 +19,7 @@ import ros_stubs
 
 ros_stubs.install()
 
+from gaze_replay import Write, replay  # noqa: E402
 from pepin_bringup import gaze as gaze_node  # noqa: E402
 from pepin_bringup.gaze import Gaze  # noqa: E402
 from pepin_bringup.msgs import cloud_from_fields  # noqa: E402
@@ -32,7 +35,7 @@ from ros_stubs import (  # noqa: E402
     Time,
 )
 
-from pepin.gaze import PERSON, Look  # noqa: E402
+from pepin.gaze import PERSON, Aim, HeldLook, Look, Outcome  # noqa: E402
 from pepin.neck import NeckConfig  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
@@ -414,3 +417,123 @@ def test_the_report_line(node: Gaze) -> None:
     line = node.logger.texts("info")[-1]
     assert line.startswith("gaze: driver neck_goto (base server connected), phase home")
     assert "stall looks: none" in line and "flags: stall_look=off" in line
+
+
+# ---- following, glances, the slow way home, the looks' frames (gaze_replay: drive 306) ----------
+PRESETS = json.loads((Path(__file__).resolve().parents[2] / "config/gaze_presets.json").read_text())
+# The writes the node made before the follow-in-zone knobs (64bc0cd), on the same replay
+# (scratch/gaze_follow/baseline_capture.py on that tree): the reverse look, the path look, then
+# home and back at each short reverse, home at the drive's end.
+BEFORE_FOLLOW = (
+    Write(1.0, -150.0, 23.8, None),
+    Write(2.4, 45.0, 48.5, None),
+    Write(3.5, 0.0, 23.8, None),
+    Write(3.8, 45.0, 48.5, None),
+    Write(4.5, 0.0, 23.8, None),
+    Write(5.2, 45.0, 48.5, None),
+    Write(6.7, 0.0, 23.8, None),
+)
+
+
+# 2 s forward, 1.5 s back, 2 s forward, and the same node's writes (scratch/gaze_follow/leg_old.py):
+# the path look lapsed home 0.5 s into the reverse, the reverse look was cut mid-swing by the path
+# look when the cart went forward again.
+LEG_V = (0.1,) * 20 + (-0.1,) * 15 + (0.1,) * 20
+BEFORE_FOLLOW_LEG = (
+    Write(0.0, 45.0, 48.5, None),
+    Write(2.3, 0.0, 23.8, None),
+    Write(3.0, -150.0, 23.8, None),
+    Write(3.6, 45.0, 48.5, None),
+    Write(5.5, 0.0, 23.8, None),
+)
+
+
+def test_the_baseline_preset_makes_exactly_the_writes_of_the_node_before_it(node: Gaze) -> None:
+    assert tuple(replay(node, knobs=PRESETS["baseline"])) == BEFORE_FOLLOW
+
+
+def test_the_baseline_preset_on_a_reverse_leg_is_the_node_before_it_too(node: Gaze) -> None:
+    writes = replay(node, LEG_V, (0.5,) * len(LEG_V), knobs=PRESETS["baseline"])
+    assert tuple(writes) == BEFORE_FOLLOW_LEG
+    drive = node.logger.texts("info")[-1]
+    assert "1 WROTE NO FRAMES: nav.reverse -150/24 deg 0.60 s preempted" in drive, drive
+
+
+def test_the_path_look_is_held_until_the_reverse_look_replaces_it(node: Gaze) -> None:
+    writes = replay(node, LEG_V, (0.5,) * len(LEG_V))
+    assert [(x.t, x.pan_deg, x.speed_deg_s) for x in writes] == [
+        (0.0, 45.0, None),
+        (3.0, -150.0, None),  # no lapse home at 2.5: the reverse look takes the held head
+        (4.05, 45.0, None),  # the glance's swing and dwell first, then the path look
+        (5.5, 0.0, 45.0),
+    ]
+    assert node.logger.texts("info")[-1].endswith("every one wrote frames")
+
+
+def test_the_follow_defaults_hold_the_path_look_through_short_reverses(node: Gaze) -> None:
+    writes = replay(node)  # the knobs' defaults: the follow preset
+    home_tilt = math.degrees(node._arbiter.home.tilt_rad)
+    assert writes == [
+        Write(1.0, -150.0, 23.8, None),  # the reverse glance
+        Write(2.4, 45.0, 48.5, None),  # the path look, held through both short reverses
+        Write(6.7, 0.0, 23.8, 45.0),  # home at return_deg_s once the drive ended
+    ]
+    assert not any(w.home(home_tilt) for w in writes[:-1])
+    drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
+    assert drive == [
+        "gaze: the drive's head: 3 writes, looks nav.path 1 (35 frames), nav.reverse 1"
+        " (7 frames); every one wrote frames"
+    ]
+    node._report()
+    assert "looks nav.path 1 (35 frames), nav.reverse 1 (7 frames)" in node.logger.texts("info")[-1]
+
+
+def test_a_reverse_glance_ends_whole_when_the_leg_ends_under_it(node: Gaze) -> None:
+    """A 1.2 s reverse then forward: the glance starts at 1.0 s, the head is still turning when
+    the leg ends, and the path look waits until the glance has its frames."""
+    v = (-0.1,) * 12 + (0.1,) * 20
+    writes = replay(node, v, (0.5,) * len(v))
+    assert [(x.pan_deg, x.speed_deg_s) for x in writes] == [
+        (-150.0, None),
+        (45.0, None),
+        (0.0, 45.0),
+    ]
+    assert writes[1].t - writes[0].t >= 150.0 / 300.0 + 0.3  # the swing, then its dwell
+    drive = node.logger.texts("info")[-1]
+    assert drive.startswith("gaze: the drive's head: 3 writes") and "nav.reverse 1 (" in drive
+    assert "nav.reverse 1 (0 frames)" not in drive and "every one wrote frames" in drive
+
+
+def test_a_look_that_wrote_no_frames_is_named_in_the_report(node: Gaze) -> None:
+    node._looks.add(HeldLook("1", "nav.path", 4, Aim(0.8, 0.85), 10.0, 10.3, "preempted", None))
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "looks nav.path 1 (0 frames); 1 WROTE NO FRAMES: nav.path +46/49 deg 0.30 s" in line
+    node._report()
+    assert "looks none" in node.logger.texts("info")[-1]  # the window starts over
+
+
+def test_the_stall_look_is_a_glance_capped_by_its_ttl_only_with_glances_on(node: Gaze) -> None:
+    node._switches.set("stall_look", True)
+    asked: list[Look] = []
+
+    def answer(look: Look) -> Outcome:
+        asked.append(look)
+        return Outcome(look.id, look.source, "done", frames_seen=3)
+
+    node._ask = answer  # type: ignore[method-assign]
+    for dwell in (0.3, 0.0):
+        node._switches.set("glance_dwell_s", dwell)
+        blocked_ahead(node)
+        columns(node, column_answer([(0.6, 0.0, 0.3, 12.0)]), column_answer([]))
+        assert stall(node).success
+    assert [(a.frames, a.hold_s) for a in asked if a.views] == [(3, 3.0), (3, 0.0)]
+
+
+def test_no_return_look_when_the_head_is_home_or_the_knob_is_off(node: Gaze) -> None:
+    node._on_nav_status("navigate_to_pose", goals(5))
+    node._on_nav_status("navigate_to_pose", goals())
+    assert node._arbiter.pending() == []  # nothing ever moved the head
+    node._switches.set("return_deg_s", 0.0)
+    node._return_home(0.0)
+    assert node._arbiter.pending() == []
