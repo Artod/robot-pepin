@@ -828,7 +828,13 @@ class VisualOdometry(Node):
         node's name): the nearest thing to an ack the filter gives."""
         nodes = sorted({info.node_name for info in self.get_subscriptions_info_by_topic(VO_TOPIC)})
         ekf = "yes" if EKF_NODE in nodes else "NO"
-        return f"{VO_TOPIC} read by {EKF_NODE}: {ekf} ({len(nodes)} subscriber nodes)"
+        text = f"{VO_TOPIC} read by {EKF_NODE}: {ekf} ({len(nodes)} subscriber nodes)"
+        if self._output_mode() != "twist":
+            return text
+        # Under twist /vo is weightless: an EKF without twist0 (ekf.yaml before 2026-10-05) gives
+        # the VIO no weight at all, and this says so.
+        readers = {info.node_name for info in self.get_subscriptions_info_by_topic(VO_TWIST_TOPIC)}
+        return f"{text}, {VO_TWIST_TOPIC}: {'yes' if EKF_NODE in readers else 'NO'}"
 
     def _odom_text(self) -> str:
         """The EKF's own odom -> base_link now, for a drift read off two report lines; nothing

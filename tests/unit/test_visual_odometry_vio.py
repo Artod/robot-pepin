@@ -464,6 +464,10 @@ def test_the_twist_output_sends_the_base_velocity_with_openvins_own_covariance()
     assert [poses[-1].pose.covariance[i * 6 + i] for i in range(6)] == [1e6] * 6
     w = node._tally.take()
     assert w.counts["no_step"] == 1 and w.counts["twist_out"] == 5
+    node.subscriber_nodes = {VO_TOPIC: ["ekf_filter_node"]}
+    assert node._ekf_text().endswith("/vo_twist: NO"), "an EKF without twist0 gives no weight"
+    node.subscriber_nodes[VO_TWIST_TOPIC] = ["ekf_filter_node"]
+    assert node._ekf_text().endswith("/vo_twist: yes")
     node.close()
 
 
