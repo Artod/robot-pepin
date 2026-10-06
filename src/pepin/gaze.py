@@ -13,6 +13,12 @@ depth frames at each, how long to hold, which band, how long the request may liv
 * a look is answered once the head has settled on the last view and ``frames`` depth frames
   stamped after settling (and after one frame period of blur) were fused; it then holds the head
   ``dwell_s`` more before letting go;
+* a GLANCE (``hold_s`` > 0) is atomic once it holds the head: it is answered at ``frames`` frames
+  or ``hold_s`` after settling, whichever comes first, and until then neither its TTL, nor a
+  release, nor a newcomer of its own band takes the head from it; a better band does;
+* every look that held the head is booked when it lets go (:class:`HeldLook`): how long, how it
+  ended, and the frames fused while it held the head still (late frames are counted for
+  :data:`LATE_S`), for the node's report;
 * the head is BLIND from the write that starts a move until it has settled plus one frame period:
   :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on.
 
@@ -45,7 +51,7 @@ from pepin.neck import (
 )
 
 Kind = Literal["point", "direction", "angles", "scan", "track", "home"]
-Speed = Literal["saccade", "slow"]
+Speed = Literal["saccade", "slow", "return"]  # "return": the slow way home after a drive
 Status = Literal["queued", "granted", "done", "denied", "preempted", "expired"]
 Phase = Literal["home", "still", "saccade", "track", "returning"]
 
@@ -64,6 +70,8 @@ BANDS = {
 }
 STILL_RAD = 2 * RAD_PER_TICK  # two encoder readings this close are one pose (the encoder's jitter)
 RETRY_S = 0.2  # a write the base server refused for now is tried again after this
+FRAMES_KEPT = 1024  # the fused frames' stamps kept: a look held for a minute and more at 10 fps
+LATE_S = 1.5  # a look's frames are counted this long after it let go: the fusion's latency
 # What a person's look is told during a drive by a base server that moves the neck only at rest.
 DRIVE_REFUSAL = (
     "the head does not move during a drive (the base server moves the neck only at rest):"
@@ -138,7 +146,8 @@ def new_id() -> str:
 @dataclass(frozen=True)
 class Look:
     """One request: its views (empty: home), the still frames wanted at each, the hold after the
-    last, the band, the TTL, the speed, and whether it takes the head from its own band."""
+    last, the band, the TTL, the speed, whether it takes the head from its own band, and
+    ``hold_s``: above 0, a glance (answered at ``frames`` or ``hold_s`` after settling, atomic)."""
 
     source: str
     views: tuple[Aim, ...]
@@ -150,6 +159,7 @@ class Look:
     preempt: bool = False
     kind: Kind = "angles"
     id: str = field(default_factory=new_id)
+    hold_s: float = 0.0
 
 
 @dataclass
@@ -226,6 +236,33 @@ class _Held:
     waiting_since: float | None = None
     settled: HeadReading | None = None
     frames_seen: int = 0
+    took_head: float | None = None  # when it first held the head
+    settled_at: float | None = None  # when the arbiter first saw the head settled for it
+    still_from: float | None = None  # its frames are fused after this (board clock)
+    let_go: bool = False  # released while glancing: dropped once answered
+
+
+@dataclass
+class HeldLook:
+    """One look that held the head, booked when it let go: its aim, when it took and left the
+    head, how it ended, and the frames fused while it held the head still."""
+
+    id: str
+    source: str
+    band: int
+    aim: Aim
+    since: float
+    until: float
+    ended: str
+    still_from: float | None  # None: the head never settled for it, so it wrote nothing
+    frames: int = 0
+
+    def text(self) -> str:
+        """``nav.path +38/24 deg 0.31 s preempted``."""
+        pan, tilt = math.degrees(self.aim.pan_rad), math.degrees(self.aim.tilt_rad)
+        return (
+            f"{self.source} {pan:+.0f}/{tilt:.0f} deg {self.until - self.since:.2f} s {self.ended}"
+        )
 
 
 @dataclass
@@ -296,7 +333,9 @@ class Arbiter:
         self._before: _Write | None = None  # the belief before the newest write (a refusal)
         self._retry_at = 0.0
         self._readings: deque[HeadReading] = deque(maxlen=2)
-        self._frames: deque[float] = deque(maxlen=256)
+        self._frames: deque[float] = deque(maxlen=FRAMES_KEPT)
+        self._closing: list[HeldLook] = []  # let go less than LATE_S ago: still counting
+        self._closed: list[HeldLook] = []
         self._phase: Phase = "home"
         self._since = 0.0
         self._outbox: list[tuple[Callable[[Outcome], None], Outcome]] = []
@@ -317,6 +356,9 @@ class Arbiter:
         """One depth frame fused into the volume, at its own stamp (``/fusion/frame``)."""
         with self._lock:
             self._frames.append(stamp)
+            for booked in self._closing:
+                if _claims(booked, stamp):
+                    booked.frames += 1
 
     def submit(
         self, look: Look, now: float, on_done: Callable[[Outcome], None] | None = None
@@ -329,13 +371,30 @@ class Arbiter:
         return answer
 
     def release(self, now: float, by: str, *, keep: Callable[[Look], bool]) -> int:
-        """Drop every request ``keep`` refuses, as preempted ``by``; how many went."""
+        """Drop every request ``keep`` refuses, as preempted ``by``; how many went. A glance under
+        way is not cut: it goes once answered."""
         with self._lock:
-            gone = [h for h in self._held if not keep(h.look)]
-            for held in gone:
-                self._finish(held, "preempted", f"by {by}", now)
+            refused = [h for h in self._held if not keep(h.look)]
+            for held in refused:
+                if self._glancing(held):
+                    held.let_go = True
+                else:
+                    self._finish(held, "preempted", f"by {by}", now)
         self._deliver()
-        return len(gone)
+        return sum(1 for h in refused if not h.let_go)
+
+    def glancing(self, source: str) -> bool:
+        """Whether ``source`` holds the head with a glance not yet answered."""
+        with self._lock:
+            active = self._active
+            return active is not None and active.look.source == source and self._glancing(active)
+
+    def take_looks(self, now: float) -> list[HeldLook]:
+        """The looks that let go of the head more than :data:`LATE_S` ago, once each."""
+        with self._lock:
+            self._close_books(now)
+            taken, self._closed = self._closed, []
+        return taken
 
     def adopt(self, now: float, tol_rad: float) -> bool:
         """Take the head as the encoders say it is when that is more than ``tol_rad`` off what
@@ -367,6 +426,7 @@ class Arbiter:
     def step(self, now: float) -> None:
         """Expire, choose, and drive the head toward the chosen request's view or home."""
         with self._lock:
+            self._close_books(now)
             self._expire(now)
             self._choose(now)
             self._take_refusal(now)
@@ -417,16 +477,24 @@ class Arbiter:
         if look.kind != "home" and not look.views:
             return self._deny(look, "no view to look at", on_done)
         for older in [h for h in self._held if h.look.source == look.source]:
-            self._finish(older, "preempted", f"by a newer request of {look.source}", now)
+            if self._glancing(older):
+                older.let_go = True  # a glance under way ends whole, then the newer one runs
+            else:
+                self._finish(older, "preempted", f"by a newer request of {look.source}", now)
         held = _Held(look, now, on_done)
         self._held.append(held)
         self.counts["requests"] += 1
         status: Status = "granted" if self._best() is held else "queued"
         return Outcome(look.id, look.source, status)
 
+    def _glancing(self, held: _Held) -> bool:
+        """A glance that holds the head and is not answered yet: nothing of its band takes it."""
+        return held.look.hold_s > 0.0 and held is self._active and not held.answered
+
     def _best(self) -> _Held | None:
         """The request that should hold the head: the lowest band; within it the holder, unless
-        a newcomer preempts or the holder is only dwelling after its answer."""
+        a newcomer preempts (never a glance under way) or the holder only dwells after its
+        answer."""
         if not self._held:
             return None
         band = min(h.look.band for h in self._held)
@@ -434,6 +502,8 @@ class Arbiter:
         active = self._active
         if active is None or active not in mine:
             return min(mine, key=lambda h: h.created)
+        if self._glancing(active):
+            return active
         newcomers = [h for h in mine if h is not active]
         for held in newcomers:
             if held.look.preempt:
@@ -447,8 +517,8 @@ class Arbiter:
             age = now - held.created
             if held.answered:
                 if now - held.answered_at >= held.look.dwell_s or age > held.look.ttl_s:
-                    self._drop(held)
-            elif age > held.look.ttl_s:
+                    self._drop(held, now, "done")
+            elif age > held.look.ttl_s and not self._glancing(held):
                 self._finish(held, "expired", f"not done within its {held.look.ttl_s:.1f} s", now)
 
     def _choose(self, now: float) -> None:
@@ -461,6 +531,8 @@ class Arbiter:
         self._active = best
         if best is not None:
             best.view = 0
+            if best.took_head is None:
+                best.took_head = now
 
     # ---- the head ----------------------------------------------------------------------------
     def _current_phase(self) -> Phase:
@@ -503,8 +575,13 @@ class Arbiter:
         held.waiting_since = None
         held.settled = head.settled
         floor = head.settled.stamp + self.settings.frame_period_s
+        if held.settled_at is None:
+            held.settled_at = now
+            took = held.took_head if held.took_head is not None else floor
+            held.still_from = max(floor, took)
         held.frames_seen = sum(1 for stamp in self._frames if stamp > floor)
-        if not home and held.frames_seen < look.frames:
+        glanced = look.hold_s > 0.0 and now - held.settled_at >= look.hold_s
+        if not home and held.frames_seen < look.frames and not glanced:
             return
         if held.view + 1 < len(look.views):
             held.view += 1
@@ -603,12 +680,12 @@ class Arbiter:
         self.counts["done"] += 1
         if held.on_done is not None:
             self._outbox.append((held.on_done, outcome))
-        if held.look.dwell_s <= 0.0:
-            self._drop(held)
+        if held.look.dwell_s <= 0.0 or held.let_go:
+            self._drop(held, now, "done")
 
     def _finish(self, held: _Held, status: Status, reason: str, now: float) -> None:
         """End a request that was not answered as done: status, reason, where the head is."""
-        self._drop(held)
+        self._drop(held, now, status)
         if held.answered:
             return
         head = self._readings[-1] if self._readings else None
@@ -628,11 +705,37 @@ class Arbiter:
         if held.on_done is not None:
             self._outbox.append((held.on_done, outcome))
 
-    def _drop(self, held: _Held) -> None:
+    def _drop(self, held: _Held, now: float, ended: str) -> None:
         if held in self._held:
             self._held.remove(held)
+            self._book(held, now, ended)
         if self._active is held:
             self._active = None
+
+    def _book(self, held: _Held, now: float, ended: str) -> None:
+        """A look that held the head, with the frames already fused while it held it still."""
+        look = held.look
+        if held.took_head is None or not look.views:
+            return
+        booked = HeldLook(
+            look.id,
+            look.source,
+            look.band,
+            look.views[held.view],
+            held.took_head,
+            now,
+            ended,
+            held.still_from,
+        )
+        booked.frames = sum(1 for stamp in self._frames if _claims(booked, stamp))
+        self._closing.append(booked)
+
+    def _close_books(self, now: float) -> None:
+        """Looks let go more than LATE_S ago stop counting frames."""
+        done = [b for b in self._closing if now - b.until > LATE_S]
+        if done:
+            self._closing = [b for b in self._closing if now - b.until <= LATE_S]
+            self._closed.extend(done)
 
     def _deny(self, look: Look, why: str, on_done: Callable[[Outcome], None] | None) -> Outcome:
         outcome = Outcome(look.id, look.source, "denied", reason=why)
@@ -646,6 +749,40 @@ class Arbiter:
             outbox, self._outbox = self._outbox, []
         for callback, outcome in outbox:
             callback(outcome)
+
+
+def _claims(booked: HeldLook, stamp: float) -> bool:
+    """Whether a fused frame at ``stamp`` was taken while ``booked`` held the head still."""
+    return booked.still_from is not None and booked.still_from < stamp <= booked.until
+
+
+class LookTally:
+    """The booked looks of a report window or a drive, by source, for one log line."""
+
+    def __init__(self) -> None:
+        self.looks: list[HeldLook] = []
+
+    def add(self, booked: HeldLook) -> None:
+        """One more look."""
+        self.looks.append(booked)
+
+    def text(self, shown: int = 3) -> str:
+        """``looks nav.path 12 (31 frames), nav.reverse 2 (6 frames); 1 WROTE NO FRAMES: ...``."""
+        if not self.looks:
+            return "looks none"
+        by: dict[str, list[HeldLook]] = {}
+        for booked in self.looks:
+            by.setdefault(booked.source, []).append(booked)
+        parts = ", ".join(
+            f"{source} {len(group)} ({sum(b.frames for b in group)} frames)"
+            for source, group in sorted(by.items())
+        )
+        empty = [b for b in self.looks if b.frames == 0]
+        if not empty:
+            return f"looks {parts}; every one wrote frames"
+        listed = "; ".join(b.text() for b in empty[:shown])
+        more = f" (+{len(empty) - shown} more)" if len(empty) > shown else ""
+        return f"looks {parts}; {len(empty)} WROTE NO FRAMES: {listed}{more}"
 
 
 # ---- geometry: where to point ----------------------------------------------------------------
@@ -922,12 +1059,14 @@ class NeckTargetHead(_BaseLink):
         *,
         slow_deg_s: Callable[[], float],
         renew_s: Callable[[], float],
+        return_deg_s: Callable[[], float] | None = None,
     ) -> None:
         super().__init__()
         self._cfg = cfg
         self._send = send
         self._slow_deg_s = slow_deg_s
         self._renew_s = renew_s
+        self._return_deg_s = return_deg_s
         self._held: dict[str, Any] | None = None
         self._sent_at = 0.0
         self._refusal: Refusal | None = None
@@ -948,7 +1087,8 @@ class NeckTargetHead(_BaseLink):
             return self._quiet(now)
 
     def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
-        """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` else."""
+        """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` for a slow
+        look, ``return_deg_s`` for the way home after a drive."""
         where = aim if aim is not None else home_aim(self._cfg)
         message: dict[str, Any] = {
             "cmd": "neck_target",
@@ -957,6 +1097,8 @@ class NeckTargetHead(_BaseLink):
         }
         if speed == "slow":
             message["speed_deg_s"] = self._slow_deg_s()
+        elif speed == "return" and self._return_deg_s is not None:
+            message["speed_deg_s"] = self._return_deg_s()
         with self._lock:
             self._held = message if hold else None
             self._sent_at = now

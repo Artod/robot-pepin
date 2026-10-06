@@ -700,14 +700,21 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `path_lookahead_s` | number 0.5..5 | 2.0 | path gaze looks at the plan's point this many seconds of the current speed ahead |
 | `gaze` | `path_min_m` | number 0.2..3 | 0.6 | ...but at least this far along the plan |
 | `gaze` | `path_max_m` | number 0.3..5 | 1.5 | ...and at most this far |
-| `gaze` | `path_deadband_deg` | number 0..45 | 8.0 | path gaze moves the head only when the new aim is this far from the held one: saccade and hold, no creeping |
+| `gaze` | `path_deadband_deg` | number 0..45 | 22.0 | the zone path gaze follows in: the held aim stays while the plan's aim is within this of it, saccade and hold, no creeping (8 until 2026-10-05; uv run python ros/tools/gaze_preset.py baseline) |
 | `gaze` | `path_pan_clamp_deg` | number 0..150 | 60.0 | path gaze's pan limit while driving: a goal behind is turned to by the body, not the head |
 | `gaze` | `path_near_m` | number 0.2..3 | 1.0 | a path point nearer than this tilts the head below home |
 | `gaze` | `path_near_offset_deg` | number 0..45 | 15.0 | ...to atan(lens height / distance) less this, so the floor under the point sits in the lower third of the picture |
+| `gaze` | `path_hyst_s` | number 0..3 | 0.3 | a plan aim outside the zone moves the head only after it has stayed outside this long (0: at once, as before 2026-10-05) |
+| `gaze` | `path_cooldown_s` | number 0..10 | 2.0 | path gaze moves the head at most once in this many seconds; a path look that lost the head to another look is aimed at once (0: no cooldown, as before 2026-10-05) |
+| `gaze` | `path_tail_s` | number 0..5 | 0.5 | no new path saccade once the plan's remaining arc at the current speed is this many seconds or less: the drive's end is reached with the head still (0: off, as before 2026-10-05) |
+| `gaze` | `path_hold_s` | number 0..300 | 60.0 | while path gaze has no aim (reversing before a reverse look, no plan point ahead) its look is renewed at its aim for up to this long, instead of lapsing home after ttl_driving_s (0: lapses, as before 2026-10-05) |
 | `gaze` | `reverse_pan_deg` | number 60..156 | 150.0 | reverse gaze's pan toward the rear, on the side the rear swings to |
 | `gaze` | `reverse_tilt_deg` | number 0..63 | 23.8 | reverse gaze's tilt: home's until the body self-filter lands, since deeper looks back see the cart's own top shelf |
 | `gaze` | `reverse_min_s` | number 0..10 | 1.0 | a reverse leg must last this long before the head turns back (unless the rear is tight) |
 | `gaze` | `reverse_rear_m` | number 0..1 | 0.3 | a lethal cell this close behind the hull makes the rear tight: the head turns back from the first reversing twist |
+| `gaze` | `reverse_frames` | integer 0..20 | 3 | the clean (gate-passed, fused) frames the reverse look waits for once settled before the path look may take the head (0: answered on arrival, as before 2026-10-05) |
+| `gaze` | `glance_dwell_s` | number 0..3 | 0.3 | above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s (0: no glance, as before 2026-10-05) |
+| `gaze` | `return_deg_s` | number 0..300 | 45.0 | after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05) |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |
 | `marks_audit` | `match_cells` | number 0.5..5 | 1.5 | how near a beam must land to a cell, in costmap cells, to account for it |

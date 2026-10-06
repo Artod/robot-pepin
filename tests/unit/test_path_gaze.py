@@ -1,9 +1,12 @@
 """Path gaze and reverse gaze (pepin.path_gaze): the point ahead, the clamp, the dead-band, the
+following in a zone (hysteresis, cooldown, tail; the baseline preset is the dead-band), the
 rear's side and the tight rear."""
 
 from __future__ import annotations
 
+import json
 import math
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -12,14 +15,17 @@ import pytest
 from pepin.gaze import Aim, Reach, home_aim
 from pepin.neck import NeckConfig
 from pepin.path_gaze import (
+    PathFollower,
     PathGazeLaw,
     ReverseLaw,
     ReverseWatch,
     lookahead_m,
     path_aim,
+    remaining_m,
     reverse_aim,
     settle,
     tight_rear,
+    time_to_end,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -145,3 +151,103 @@ def test_a_tight_rear_is_a_lethal_cell_just_behind_the_hull() -> None:
     assert tight_rear(grid, origin, res, (0.0, 0.0, 0.0), 0.3)
     assert not tight_rear(grid, origin, res, (0.0, 0.0, math.pi / 2), 0.3)  # facing +y
     assert tight_rear(grid, origin, res, (0.0, 0.0, math.pi), 0.3)  # (0.5, 0) is behind now
+
+
+# ---- following in a zone -------------------------------------------------------------------------
+PRESETS = json.loads((REPO / "config/gaze_presets.json").read_text())
+FOLLOW = PathGazeLaw()
+
+
+def law_of(preset: str) -> PathGazeLaw:
+    """config/gaze_presets.json's set as path gaze's law (the knobs path gaze reads)."""
+    knobs = PRESETS[preset]
+    return replace(
+        PathGazeLaw(),
+        deadband_deg=knobs["path_deadband_deg"],
+        hyst_s=knobs["path_hyst_s"],
+        cooldown_s=knobs["path_cooldown_s"],
+        tail_s=knobs["path_tail_s"],
+        hold_s=knobs["path_hold_s"],
+    )
+
+
+def pan(deg: float) -> Aim:
+    return Aim(math.radians(deg), HOME.tilt_rad)
+
+
+def test_the_baseline_follower_is_the_dead_band_it_replaced() -> None:
+    """At the baseline preset the follower answers settle() on every input, whatever the tail
+    and the hand-overs say."""
+    rng = np.random.default_rng(306)
+    follower, law, current = PathFollower(), law_of("baseline"), None
+    for k in range(400):
+        wanted = pan(float(rng.uniform(-60.0, 60.0)) if k % 7 else float(rng.normal(0.0, 4.0)))
+        held = follower.update(
+            wanted,
+            0.2 * k,
+            law,
+            end_in_s=float(rng.uniform(0.0, 3.0)),
+            fresh=bool(rng.integers(2)),
+        )
+        current = settle(current, wanted, 8.0)
+        assert held == current
+
+
+def test_the_follow_defaults_are_the_knobs_and_the_preset() -> None:
+    assert law_of("follow") == FOLLOW
+    assert (FOLLOW.deadband_deg, FOLLOW.hyst_s, FOLLOW.cooldown_s, FOLLOW.tail_s) == (
+        22.0,
+        0.3,
+        2.0,
+        0.5,
+    )
+
+
+def test_the_head_follows_in_its_zone() -> None:
+    follower = PathFollower()
+    assert follower.update(pan(10), 0.0, FOLLOW) == pan(10)  # the drive's first aim: at once
+    for t, deg in ((0.2, 25), (0.4, -5), (0.6, 31)):  # within 22 deg of 10
+        assert follower.update(pan(deg), t, FOLLOW) == pan(10)
+
+
+def test_a_new_aim_must_stay_out_of_the_zone_for_the_hysteresis() -> None:
+    follower = PathFollower()
+    follower.update(pan(0), 0.0, FOLLOW)
+    assert follower.update(pan(40), 3.0, FOLLOW) == pan(0)  # out since 3.0
+    assert follower.update(pan(5), 3.2, FOLLOW) == pan(0)  # back in: the clock restarts
+    assert follower.update(pan(40), 3.4, FOLLOW) == pan(0)
+    assert follower.update(pan(45), 3.6, FOLLOW) == pan(0)  # 0.2 s out
+    assert follower.update(pan(45), 3.7, FOLLOW) == pan(45)  # 0.3 s out: the newest aim
+
+
+def test_moves_are_a_cooldown_apart() -> None:
+    follower = PathFollower()
+    follower.update(pan(0), 0.0, FOLLOW)
+    follower.update(pan(40), 0.0, FOLLOW)
+    assert follower.update(pan(40), 0.3, FOLLOW) == pan(0)  # out 0.3 s, but 0.3 s since a move
+    assert follower.update(pan(40), 1.9, FOLLOW) == pan(0)
+    assert follower.update(pan(40), 2.0, FOLLOW) == pan(40)
+    assert follower.update(pan(-10), 2.5, FOLLOW) == pan(40)
+    assert follower.update(pan(-10), 3.9, FOLLOW) == pan(40)
+    assert follower.update(pan(-10), 4.0, FOLLOW) == pan(-10)
+
+
+def test_a_path_look_that_lost_the_head_is_aimed_at_once_but_never_in_the_tail() -> None:
+    follower = PathFollower()
+    follower.update(pan(0), 0.0, FOLLOW)
+    assert follower.update(pan(50), 0.1, FOLLOW, fresh=True) == pan(50)  # no hysteresis
+    assert follower.update(pan(-50), 0.2, FOLLOW, fresh=True) == pan(-50)  # no cooldown
+    assert follower.update(pan(0), 5.0, FOLLOW, end_in_s=0.4) == pan(-50)  # the tail: held
+    assert follower.update(pan(-50), 5.1, FOLLOW, end_in_s=0.4, fresh=True) is None
+    follower.reset()
+    assert follower.update(pan(30), 6.0, FOLLOW, end_in_s=0.4) is None  # nothing new in it
+    assert follower.update(pan(30), 6.0, FOLLOW, end_in_s=0.6) == pan(30)
+
+
+def test_the_time_to_the_plans_end() -> None:
+    assert remaining_m(STRAIGHT, (0.0, 0.0)) == pytest.approx(3.95)
+    assert remaining_m(STRAIGHT, (3.0, 0.1)) == pytest.approx(0.95)
+    assert remaining_m(np.zeros((1, 2)), (0.0, 0.0)) == 0.0
+    assert time_to_end(0.95, 0.19) == pytest.approx(5.0)
+    assert time_to_end(0.95, -0.19) == pytest.approx(5.0)
+    assert time_to_end(0.95, 0.01) == math.inf  # standing: no end in sight

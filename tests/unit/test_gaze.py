@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from pepin.gaze import (
+    DRIVING,
     NAVIGATION,
     PERSON,
     RETRY_S,
@@ -24,6 +25,7 @@ from pepin.gaze import (
     GazeSettings,
     HeadReading,
     Look,
+    LookTally,
     NeckTargetHead,
     Outcome,
     Reach,
@@ -571,3 +573,142 @@ def test_either_head_picks_neck_target_once_a_state_line_carries_the_neck() -> N
     assert either.speaks_target and either.take_refusal() is None
     either.keep(1.0)
     assert len(wire.lines) == 2 and either.take_arrival() is None
+
+
+# ---- glances and the looks' books -------------------------------------------------------------
+def glance(
+    source: str = "nav.reverse",
+    aim: Aim = LEFT,
+    frames: int = 3,
+    hold_s: float = 0.3,
+    ttl_s: float = 0.5,
+    band: int = DRIVING,
+) -> Look:
+    return Look(source, (aim,), band, frames, ttl_s, ttl_s, hold_s=hold_s)
+
+
+def test_a_glance_is_answered_at_its_frames_or_at_its_hold_whichever_first() -> None:
+    arb, head, out = arbiter()
+    arb.submit(glance(hold_s=0.3), 0.0, out.append)
+    arb.step(0.0)
+    arrive(arb, head, LEFT, 0.2)
+    arb.step(0.2)
+    arb.frame(0.35)
+    arb.frame(0.45)
+    arb.step(0.45)
+    assert out == []  # two frames, 0.25 s settled
+    arb.step(0.5)
+    assert out[0].status == "done" and out[0].frames_seen == 2  # the hold ran out first
+    arb2, head2, out2 = arbiter()
+    arb2.submit(glance(hold_s=5.0), 0.0, out2.append)
+    arb2.step(0.0)
+    arrive(arb2, head2, LEFT, 0.2)
+    arb2.step(0.2)
+    for stamp in (0.35, 0.45, 0.55):
+        arb2.frame(stamp)
+    arb2.step(0.56)
+    assert out2[0].status == "done" and out2[0].frames_seen == 3  # the frames came first
+
+
+def test_a_glance_under_way_outlives_its_ttl_a_release_and_its_own_band() -> None:
+    arb, head, out = arbiter()
+    arb.submit(glance(ttl_s=0.5), 0.0, out.append)
+    arb.step(0.0)
+    path: list[Outcome] = []
+    arb.submit(look("nav.path", (RIGHT,), DRIVING, 0, 0.5, 0.5, preempt=True), 0.6, path.append)
+    arb.step(0.8)  # its TTL is long gone, the head still turning: kept
+    assert arb.glancing("nav.reverse") and out == [] and len(head.writes) == 1
+    assert arb.release(0.85, "the drive's end", keep=lambda r: False) == 1  # the path look
+    assert path[0].status == "preempted" and arb.glancing("nav.reverse")
+    arrive(arb, head, LEFT, 1.0)
+    arb.step(1.0)
+    for stamp in (1.15, 1.2, 1.25):
+        arb.frame(stamp)
+    arb.step(1.3)
+    assert out[0].status == "done" and out[0].frames_seen == 3
+    assert arb.pending() == [] and not arb.glancing("nav.reverse")  # released once done
+    arb.step(1.35)
+    assert head.writes[-1][0] is None  # home
+
+
+def test_a_better_band_takes_the_head_from_a_glance() -> None:
+    arb, head, out = arbiter()
+    arb.submit(glance(), 0.0, out.append)
+    arb.step(0.0)
+    arb.submit(look("nav.stall", (RIGHT,), NAVIGATION), 0.1)
+    arb.step(0.1)
+    assert out[0].status == "preempted" and head.writes[-1][0] == RIGHT
+
+
+def test_a_newer_request_of_a_glancing_source_waits_for_the_glance() -> None:
+    arb, head, out = arbiter()
+    arb.submit(glance(), 0.0, out.append)
+    arb.step(0.0)
+    arb.submit(glance(aim=RIGHT), 0.1)
+    arb.step(0.1)
+    assert head.writes[-1][0] == LEFT and arb.glancing("nav.reverse")
+    arrive(arb, head, LEFT, 0.3)
+    arb.step(0.3)
+    arb.renew("nav.reverse", 0.5)  # the node renews its source every period
+    arb.step(0.65)  # held 0.35 s: done, and dropped as replaced
+    assert out[0].status == "done"
+    arb.step(0.7)
+    assert head.writes[-1][0] == RIGHT
+
+
+def test_a_look_without_a_hold_is_no_glance() -> None:
+    """hold_s 0 (the baseline): the TTL ends it mid-move and a release cuts it, as before."""
+    arb, _head, out = arbiter()
+    arb.submit(glance(hold_s=0.0), 0.0, out.append)
+    arb.step(0.0)
+    assert not arb.glancing("nav.reverse")
+    arb.step(0.6)
+    assert out[0].status == "expired"
+
+
+def test_every_look_that_held_the_head_is_booked_with_the_frames_it_held_still_for() -> None:
+    arb, head, _out = arbiter()
+    arb.submit(look("nav.path", (LEFT,), DRIVING, 0, 0.5, 0.5), 0.0)
+    arb.step(0.0)
+    arrive(arb, head, LEFT, 0.2)
+    arb.step(0.2)
+    arb.frame(0.25)  # inside the blur period: not still
+    for stamp in (0.35, 0.45, 0.55):
+        arb.frame(stamp)
+    arb.renew("nav.path", 0.4)
+    arb.submit(look("nav.other", (RIGHT,), DRIVING, 0, 0.5, 0.5), 0.6)
+    arb.step(0.6)  # the answered path look yields to its band's newcomer
+    arb.frame(0.58)  # late: taken while the path look still held the head
+    arb.frame(0.65)  # the other look's head is moving
+    arb.submit(look("nav.stall", (HOME,), NAVIGATION), 0.8)
+    arb.step(0.8)  # takes the head from the other look mid-saccade
+    arb.submit(look("llm.look", (), PERSON, kind="home"), 0.9)
+    assert arb.take_looks(1.0) == []  # still counting late frames
+    booked = arb.take_looks(2.5)
+    assert [(b.source, b.frames, b.ended) for b in booked] == [
+        ("nav.path", 4, "preempted"),
+        ("nav.other", 0, "preempted"),
+    ]
+    assert booked[0].still_from == pytest.approx(0.3) and booked[1].still_from is None
+    assert arb.take_looks(3.0) == []  # once each
+    tally = LookTally()
+    assert tally.text() == "looks none"
+    for one in booked:
+        tally.add(one)
+    assert tally.text() == (
+        "looks nav.other 1 (0 frames), nav.path 1 (4 frames); 1 WROTE NO FRAMES:"
+        " nav.other -30/40 deg 0.20 s preempted"
+    )
+    tally.looks = tally.looks[:1]
+    assert tally.text() == "looks nav.path 1 (4 frames); every one wrote frames"
+
+
+def test_the_neck_target_driver_goes_home_slowly_after_a_drive() -> None:
+    wire = Wire()
+    head = NeckTargetHead(
+        CFG, wire.send, slow_deg_s=lambda: 20.0, renew_s=lambda: 0.5, return_deg_s=lambda: 45.0
+    )
+    head.write(None, speed="return", hold=False, now=0.0)
+    assert wire.lines[-1]["speed_deg_s"] == 45.0
+    target_head(wire).write(None, speed="return", hold=False, now=0.0)
+    assert "speed_deg_s" not in wire.lines[-1]  # no return speed given: the board's own
