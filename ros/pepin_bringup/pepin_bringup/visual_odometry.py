@@ -44,16 +44,30 @@ the ``vio`` mode, a per-step model floored at ``vo_sigma_m`` (OpenVINS's own mar
 only grows: it is read as a health signal, re-inits counted); under ``vio`` the ``dynamic`` and
 ``rtabmap`` choices read as ``vio``.
 
+THE OUTPUT under vio is the ``vo_output`` flag: ``pose`` (the default) is the track above on
+``/vo`` with the per-step covariance, which the EKF differences (odom1); ``twist`` sends the same
+admitted step as a BODY VELOCITY on ``/vo_twist`` (vx, vy, vyaw: the SE(2) logarithm of the step
+between two composed base poses, so the neck's own motion stays subtracted, over their stamps'
+difference; :func:`pepin.visual_odometry.se2_twist`), weighed by OpenVINS's OWN velocity
+covariance from ``/ov_msckf/odomimu`` at the pose's stamp, turned into base_link's axes
+(:func:`pepin.visual_odometry.base_twist_covariance`), no floor and no constant; ``/vo`` then
+carries the track with :data:`pepin.visual_odometry.WEIGHTLESS_VARIANCE` so the filter keeps
+differencing it without weight, and nothing is counted twice. A sample whose covariance is
+missing or not a covariance (non-finite, not positive definite) is withheld and counted. The
+covariance's median sigmas are in the report line under either output, so the switch is
+measured before it is made. Under rtabmap's inputs the output is ``pose``.
+
 Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
-a base velocity over ``vio_max_speed_m_s``, or ``vio_wheel_diff_m_s`` from the wheels', is not
-sent), then the three lost rules of :class:`pepin.visual_odometry.VioLost` (the wheels' speed over
-time, motion under ``/zupt``, the features of ``/ov_msckf/points_msckf`` + ``points_slam`` short
-for ``vio_lost_s`` while the base moves, never at rest); a refused sample
-only re-anchors. OpenVINS never resets itself: after ``vio_restart_rejects`` guard rejections in
-a row with the wheels at rest for 2 s this node calls ``/vio/restart`` (pepin_bringup.vio_keeper in
-pepin-vio), logged once; by hand it is ``ros/laptop.sh vio kick``, at rest. The report line adds
-the samples in, out and refused, the stamp-to-receipt latency, whether the board's EKF subscribes
-``/vo``, and the EKF's own odom -> base_link (once the VIO input has been on: the TF listener).
+a base velocity over ``vio_max_speed_m_s`` is not sent, nor, while ``vio_guard`` is on, one
+``vio_wheel_diff_m_s`` from the wheels'), then the three lost rules of
+:class:`pepin.visual_odometry.VioLost` (the wheels' speed over time, motion under ``/zupt``, the
+features of ``/ov_msckf/points_msckf`` + ``points_slam`` short for ``vio_lost_s`` while the base
+moves, never at rest); a refused sample only re-anchors. OpenVINS never resets itself: after
+``vio_restart_rejects`` guard rejections in a row with the wheels at rest for 2 s this node calls
+``/vio/restart`` (pepin_bringup.vio_keeper in pepin-vio), logged once; by hand it is
+``ros/laptop.sh vio kick``, at rest. The report line adds the samples in, out and refused, the
+stamp-to-receipt latency, whether the board's EKF subscribes ``/vo``, and the EKF's own odom ->
+base_link (once the VIO input has been on: the TF listener).
 """
 
 from __future__ import annotations
@@ -64,7 +78,7 @@ import time
 from collections import Counter
 from typing import Any
 
-from geometry_msgs.msg import PoseWithCovarianceStamped
+from geometry_msgs.msg import PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
@@ -74,34 +88,46 @@ from std_srvs.srv import Trigger
 from pepin.depth import rotation_matrix
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
+from pepin.mounts import load_camera_mounts
 from pepin.visual_odometry import (
     PublishCap,
     RestWatch,
+    TwistCovariances,
     VioGuard,
     VioHealth,
     VioLost,
     VoGate,
     VoPose,
     VoTrack,
+    base_twist_covariance,
     body_velocity,
     compose_base_pose,
     homogeneous,
     is_lost,
     planar_covariance,
     scaled_covariance,
+    se2_twist,
+    weightless_covariance,
 )
 from pepin_bringup.gaze_feed import GazeFeed, gate_counts
-from pepin_bringup.msgs import pose_from_transform, stamp_seconds, yaw_of
+from pepin_bringup.msgs import camera_edges, pose_from_transform, stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, Tally, TfLookup, bridged_qos_profile, spin_main
 
 RAW_TOPIC = "/vo/raw"  # rgbd_odometry's own output, on this laptop only
 VO_TOPIC = "/vo"  # what crosses to the board's EKF
+VO_TWIST_TOPIC = "/vo_twist"  # vo_output twist: the EKF's twist0 (pepin.deployment.VO_TWIST_TOPIC)
+VO_OUTPUTS = ("pose", "twist")
 WHEELS_TOPIC = "/odom"  # the board's wheel odometry: the rest signal, over the bridge
 REPORT_S = 30.0
 # The vo_input parameter: what the relay reads. stereo/depth: rtabmap's /vo/raw (the launch
 # starts stereo_odometry or rgbd_odometry beside it); vio: OpenVINS in its own container.
 VO_INPUTS = ("stereo", "depth", "vio")
 VIO_POSE_TOPIC = "/ov_msckf/poseimu"  # the IMU's pose in G per image update (not odomimu)
+# OpenVINS's fast-propagated state per IMU sample (published only while subscribed, from 1 s after
+# init): read for its TWIST covariance alone, the IMU's velocity and angular rate in its own axes.
+# Its pose is an IMU-only prediction since the last update, not poseimu's filtered estimate at the
+# camera time, so poseimu stays the composition's input and the health signal.
+VIO_ODOM_TOPIC = "/ov_msckf/odomimu"
 # The features of OpenVINS's last update, summed for lost rule (c): the MSCKF ones (tracks that
 # ended, none at rest) and the SLAM ones in its state (kept at rest); both come from one call per
 # update (ROS2Visualizer::publish_features).
@@ -195,6 +221,43 @@ FLAGS = FlagSet(
         off_when="'dynamic' is the shipping value; leave it there unless a session is about the"
         " covariance itself",
     ),
+    Flag(
+        "vo_output",
+        "pose",
+        choices=VO_OUTPUTS,
+        description=f"how the VIO reaches the board's EKF: `pose`, the admitted track on {VO_TOPIC}"
+        " with the vo_covariance model, differenced by the EKF (odom1); `twist`, the same admitted"
+        f" step as a body velocity (vx, vy, vyaw) on {VO_TWIST_TOPIC} (twist0) with OpenVINS's own"
+        " velocity covariance from /ov_msckf/odomimu at the pose's stamp turned into base_link's"
+        f" axes, no floor, while {VO_TOPIC} carries the track weightless (1e6). A sample whose"
+        " covariance is missing or not one is withheld and counted. Live; vo_input vio only (under"
+        " rtabmap's inputs it reads as `pose`)",
+        why="pose until the drives measure twist. Under pose the VIO moved the EKF <= 1.7 cm over"
+        " 3.5 m on drives 304/305 (2026-10-05, scratch/vio_ab_1005/moved_1005.py): the 7 cm floor"
+        " differenced at 10 Hz is a velocity variance of 2 * 0.07^2 * 0.1 = 9.8e-4, one wheel"
+        " sample, beside the wheels at 20 Hz, rf2o and the gyro, so the source barely counts."
+        " OpenVINS's VELOCITY covariance is observable and is its own answer; its pose covariance"
+        " in G grows without bound and is never a weight",
+        on_when="a drive whose point is the VIO's weight in the EKF: vo_input vio, OpenVINS"
+        " initialised, the report line's twist sigmas and `cov missing 0` read first under pose",
+        off_when="pose whenever odom -> base_link must be today's, OpenVINS's velocity sigmas read"
+        " implausibly small, or the twist drives do not beat pose against the lidar truth",
+    ),
+    Flag(
+        "vio_guard",
+        True,
+        description="the plausibility guard's wheel rule: a composed base velocity farther than"
+        " vio_wheel_diff_m_s from the wheels' is refused; off, the guard judges the speed alone"
+        " (vio_max_speed_m_s, always on), so the VIO may disagree with slipping wheels",
+        why="on since the guard landed (2026-10-04; vio_wheel_diff_m_s 0.2 since 2026-10-05): 15"
+        " of drives 306/307's 16 refusals fell inside or right after a >= 45 deg head swing,"
+        " OpenVINS's own velocity errors. A switch now because a VIO with weight is worth most"
+        " exactly when it disagrees with the wheels, which this rule refuses",
+        on_when="the default while the VIO's velocity is unproven in motion",
+        off_when="a drive that tests the VIO against wheel slip (carpet, a stall), with vo_output"
+        " twist; VioLost's wheel rule (vio_lost_speed_m_s for vio_lost_s) still catches a sustained"
+        " divergence",
+    ),
     # A pose of a frame taken while the head turned, or the body spun, and the first pose after
     # one, never reach the EKF: each becomes the anchor the next step is measured from, so the
     # pan rtabmap reads as a base yaw is never differenced into the filter (gaze.md 3.4).
@@ -218,6 +281,7 @@ class VisualOdometry(Node):
         self._cap = PublishCap(float(self._switches["vo_publish_hz"]))
         self._rest = RestWatch()
         self._tally = Tally()
+        self._last_window: Any = None  # the report's window, for the twist sigmas
         self._last_xy: tuple[float, float] | None = None  # the frame before this one, for its step
         self._drop: str | None = None  # the last reason, for the report line
         self._hold: str | None = None  # the last reason a pose was not published, for the same
@@ -237,6 +301,11 @@ class VisualOdometry(Node):
         # leaves this laptop; rtabmap writes it RELIABLE.
         local = QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE)
         self._pub = self.create_publisher(Odometry, VO_TOPIC, bridged_qos_profile(VO_TOPIC))
+        self._twist_pub = self.create_publisher(
+            TwistWithCovarianceStamped, VO_TWIST_TOPIC, bridged_qos_profile(VO_TWIST_TOPIC)
+        )
+        self._covariances = TwistCovariances()
+        self._seeded: str | None = None  # the static camera edges put into the buffer
         self._vio_health = VioHealth()
         self._vio_lost = VioLost(
             lost_speed_m_s=float(self._switches["vio_lost_speed_m_s"]),
@@ -247,6 +316,7 @@ class VisualOdometry(Node):
             max_speed_m_s=float(self._switches["vio_max_speed_m_s"]),
             wheel_diff_m_s=float(self._switches["vio_wheel_diff_m_s"]),
             restart_rejects=int(self._switches["vio_restart_rejects"]),
+            wheel_rule=self._switches.on("vio_guard"),
         )
         self._tf: TfLookup | None = None
         self._tf_failure: str | None = None
@@ -291,8 +361,10 @@ class VisualOdometry(Node):
         if self._tf is not None:
             return
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._seed_camera_edges()
         local = self._local
         self.create_subscription(PoseWithCovarianceStamped, VIO_POSE_TOPIC, self._on_vio, local)
+        self.create_subscription(Odometry, VIO_ODOM_TOPIC, self._on_vio_odom, local)
         self.create_subscription(
             PointCloud2, VIO_POINTS_TOPIC, lambda m: self._on_points("msckf", m), local
         )
@@ -306,6 +378,35 @@ class VisualOdometry(Node):
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
         self._restart = self.create_client(Trigger, VIO_RESTART_SERVICE)
+
+    def _seed_camera_edges(self) -> None:
+        """camera_stream's static camera edges (camera_link -> camera_optical -> head_imu) put
+        into this node's TF buffer straight from config/camera.json, through the reader and the
+        builder camera_stream broadcasts them with; the board's neck chain stays live TF.
+
+        Without this the composition waited for /tf_static's replay to a late joiner, and under
+        rmw_zenoh 0.2.10 that replay is held until the subscriber's history query finalises
+        (zenoh-ext delivers a new source's samples only then, and rmw_zenoh sets that query's
+        timeout to u64::MAX): on 2026-10-05 every laptop listener got camera_stream's edges
+        114-125 s after its own start, this one at 18:25:40 for a switch at 18:23:34. The same
+        file and the same numbers: the broadcast, when it lands, rewrites them unchanged."""
+        assert self._tf is not None
+        try:
+            camera = load_camera_mounts()
+        except (OSError, KeyError, ValueError) as exc:
+            self.get_logger().warning(
+                f"config/camera.json unreadable ({exc}): the camera edges wait for /tf_static"
+            )
+            return
+        edges = camera_edges(camera, self.get_clock().now().to_msg())
+        for edge in edges:
+            self._tf.buffer.set_transform_static(edge, "config/camera.json")
+        self._seeded = ", ".join(f"{e.header.frame_id} -> {e.child_frame_id}" for e in edges)
+        if camera.imu is None:
+            self.get_logger().warning(
+                f"config/camera.json's rig has no head_imu block: nothing composes {IMU_FRAME}"
+                f" into {BASE_FRAME}"
+            )
 
     def close(self) -> None:
         """Stop the TF listener's thread (vo_input vio) before the node is destroyed."""
@@ -333,6 +434,8 @@ class VisualOdometry(Node):
             self._guard.wheel_diff_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_restart_rejects":
             self._guard.restart_rejects = int(new)  # type: ignore[call-overload]
+        elif name == "vio_guard":
+            self._guard.wheel_rule = bool(new)
         elif name == "vio_lost_speed_m_s":
             self._vio_lost.lost_speed_m_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_lost_s":
@@ -511,15 +614,61 @@ class VisualOdometry(Node):
         _write_planar_pose(out, published)
         here = (pose.x, pose.y)
         there, self._last_vio_xy = self._last_vio_xy, here
-        step = 0.0 if there is None else math.hypot(here[0] - there[0], here[1] - there[1])
-        if self._covariance_mode() == "constant":
+        # OpenVINS's velocity covariance at this stamp in base_link's axes (R_B_I = R_I_B^T):
+        # the twist's weight, and the report's sigmas under either output.
+        source = self._covariances.nearest(stamp)
+        covariance = None if source is None else base_twist_covariance(source, t_i_b.rotation.T)
+        if covariance is not None:
+            self._tally.sample("sigma_vx", math.sqrt(covariance[0]))
+            self._tally.sample("sigma_vy", math.sqrt(covariance[7]))
+            self._tally.sample("sigma_vyaw", math.sqrt(covariance[35]))
+        if self._output_mode() == "twist":
+            step = self._track.last_step
+            twist = None if step is None else se2_twist(*step)
+            if twist is None:
+                self._tally.count("no_step")  # the first pose after an anchor: no velocity yet
+                return
+            if covariance is None:
+                self._tally.count("cov_missing" if source is None else "cov_bad")
+                return
+            self._publish_twist(msg.header.stamp, twist, covariance)
+            out.pose.covariance = weightless_covariance()
+        elif self._covariance_mode() == "constant":
             out.pose.covariance = planar_covariance(
                 float(self._switches["vo_sigma_m"]), float(self._switches["vo_yaw_sigma_deg"])
             )
         else:
-            out.pose.covariance = self._vio_covariance(step)
+            step_m = 0.0 if there is None else math.hypot(here[0] - there[0], here[1] - there[1])
+            out.pose.covariance = self._vio_covariance(step_m)
         self._pub.publish(out)
         self._tally.count("out")
+
+    def _output_mode(self) -> str:
+        """How the published sample weighs in the EKF: the ``vo_output`` flag under vio; rtabmap's
+        inputs carry no velocity covariance, so they read as ``pose``."""
+        return str(self._switches["vo_output"]) if self._input == "vio" else "pose"
+
+    def _publish_twist(
+        self, stamp: Any, twist: tuple[float, float, float], covariance: list[float]
+    ) -> None:
+        """One body velocity for the EKF's twist0: base_link's vx, vy and vyaw with OpenVINS's own
+        covariance (the other axes weightless)."""
+        msg = TwistWithCovarianceStamped()
+        msg.header.stamp = stamp
+        msg.header.frame_id = BASE_FRAME
+        msg.twist.twist.linear.x, msg.twist.twist.linear.y = twist[0], twist[1]
+        msg.twist.twist.angular.z = twist[2]
+        msg.twist.covariance = covariance
+        self._twist_pub.publish(msg)
+        self._tally.count("twist_out")
+
+    def _on_vio_odom(self, msg: Odometry) -> None:
+        """OpenVINS's odomimu: only its twist covariance is kept, by stamp, for the pose of the
+        same instant."""
+        if self._input != "vio":
+            return
+        self._covariances.add(stamp_seconds(msg.header.stamp), msg.twist.covariance)
+        self._tally.count("odomimu")
 
     def _maybe_restart(self, now: float) -> None:
         """Restart OpenVINS when the guard says so (rejections in a row, the wheels at rest):
@@ -605,6 +754,7 @@ class VisualOdometry(Node):
     def _report(self) -> None:
         """The window's rates, what was dropped and why, the drift at rest and the flags."""
         w = self._tally.take()
+        self._last_window = w
         c = w.counts
         drop = f" (last: {self._drop})" if self._drop else ""
         hold = f" (last: {self._hold})" if self._hold else ""
@@ -639,11 +789,31 @@ class VisualOdometry(Node):
         tf = f" (last: {self._tf_failure})" if counts["tf_miss"] and self._tf_failure else ""
         return (
             f" vio: {counts['rejected']} rejected by the guard, {self._guard.report()};"
+            f" output {self._output_mode()}: {self._twist_text(counts)};"
             f" covariance {self._covariance_mode()}; reinit {counts['vio_reinit']}"
             f" ({self._vio_health.reinits} since the start), {counts['vio_lost']} poses withheld"
             f" as lost, {self._vio_lost.report()}, features {self._features_text()},"
             f" tf_miss {counts['tf_miss']}{tf}; kick at rest:"
             " ros/laptop.sh vio kick;"
+        )
+
+    def _twist_text(self, counts: Counter[str]) -> str:
+        """OpenVINS's velocity sigmas in base_link (the window's medians), the twists sent and
+        the samples withheld for want of a covariance, for the report line."""
+        window = self._last_window
+        sigma = [] if window is None else window.samples.get("sigma_vx", [])
+        if sigma:
+            vx = statistics.median(sigma) * 100.0
+            vy = statistics.median(window.samples["sigma_vy"]) * 100.0
+            vyaw = math.degrees(statistics.median(window.samples["sigma_vyaw"]))
+            sigmas = f"sigma p50 vx {vx:.2f} vy {vy:.2f} cm/s vyaw {vyaw:.2f} deg/s ({len(sigma)})"
+        else:
+            sigmas = "no velocity covariance matched"
+        seeded = self._seeded or "none"
+        return (
+            f"{sigmas}, {counts['twist_out']} twists sent, withheld: cov missing"
+            f" {counts['cov_missing']}, cov bad {counts['cov_bad']}, no step {counts['no_step']};"
+            f" odomimu {counts['odomimu']} in; static edges from config/camera.json: {seeded}"
         )
 
     def _features_text(self) -> str:

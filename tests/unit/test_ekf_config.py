@@ -67,6 +67,20 @@ def test_camera_gives_position_and_yaw_differentially(params: dict[str, Any]) ->
     assert params["odom1_differential"] is True
 
 
+def test_the_vio_twist_is_its_own_input_with_no_gate(params: dict[str, Any]) -> None:
+    """twist0 is /vo_twist: the VIO's body velocity (vx, vy, vyaw) under vo_output twist, its own
+    topic so that no /vo with an empty twist block can clamp the velocity (a zero variance is
+    lifted to 1e-9), queued like odom1 and pinned to the bridged QoS; no rejection threshold (the
+    relay's guard is the gate)."""
+    from pepin.deployment import VO_TWIST_TOPIC, bridged_qos
+
+    assert params["twist0"] == VO_TWIST_TOPIC
+    assert fused(params, "twist0_config") == {"vx", "vy", "vyaw"}
+    assert fused(params, "odom1_config") == {"x", "y", "yaw"}, "odom1 reads no twist"
+    assert bridged_qos(VO_TWIST_TOPIC) == ("reliable", params["twist0_queue_size"])
+    assert "twist0_rejection_threshold" not in params
+
+
 def test_imu_gives_the_yaw_rate_and_nothing_else(params: dict[str, Any]) -> None:
     """imu0 is /imu/data_raw: the gyro's yaw rate alone.
 

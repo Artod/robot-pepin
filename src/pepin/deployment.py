@@ -42,6 +42,11 @@ CONTAINER_STOP_TIMEOUT_S = 30
 # 9 Hz (measured 2026-09-14, scratch/vo_probe.py), and a cart that loses the laptop loses one of
 # three odometry inputs and drives on the wheels and the gyro exactly as it does today.
 VO_TOPIC = "vo"
+# The same source as a BODY VELOCITY (the relay's vo_output twist: vx, vy, vyaw with OpenVINS's own
+# velocity covariance), fused as twist0. Its own topic and message type, so nothing that only knows
+# /vo — today's bags, an older relay, a replay — can put a zero-covariance twist into the filter
+# (robot_localization lifts a zero variance to 1e-9: a hard clamp, not a missing measurement).
+VO_TWIST_TOPIC = "vo_twist"
 
 # LASER ODOMETRY (rf2o, on the board): the cart's planar motion from consecutive scans, scan to
 # scan and against no map at all. It replaces what the lidar tracker used to give the EKF by
@@ -116,6 +121,8 @@ BRIDGED_QOS: dict[str, tuple[str, int]] = {
     # robot_localization subscribes to every odomN with rclcpp's default (RELIABLE) at the
     # depth of its odomN_queue_size, which ros/params/ekf.yaml sets to 10 for /vo.
     f"/{VO_TOPIC}": ("reliable", 10),
+    # twist0 the same way: rclcpp's default RELIABLE at twist0_queue_size 10.
+    f"/{VO_TWIST_TOPIC}": ("reliable", 10),
     # base_bridge.cpp publishes /odom with create_publisher(..., 10): RELIABLE, KEEP_LAST 10.
     "/odom": ("reliable", 10),
     # The head IMU (base_bridge.cpp from head_server's 3340 stream, 200 Hz), read by the

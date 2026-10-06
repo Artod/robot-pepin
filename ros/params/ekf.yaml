@@ -154,6 +154,8 @@ ekf_filter_node:
     # against the lidar unchanged at 0.9/2.1/4.2 cm). So this block fuses a live topic, not a
     # silent one; the wheels and the gyro exactly as they were before is
     # ``ros/flags.sh set visual_odometry vo_publish false``.
+    # Under the relay's `vo_output twist` (VIO only) this pose arrives with 1e6 on its diagonal,
+    # weightless, and the VIO's weight is twist0's (/vo_twist, below).
     odom1: vo
     #
     # YAW (index 5) IS FUSED TOO, AND DIFFERENTIALLY LIKE X AND Y (2026-09-15). Not index 11:
@@ -314,6 +316,37 @@ ekf_filter_node:
     # index is fused) so that turning one on some day does not silently turn the gate off.
     odom3_twist_rejection_threshold: 5.0
     odom3_pose_rejection_threshold: 5.0
+
+    # twist0: THE VIO AS A BODY VELOCITY, /vo_twist (2026-10-05). The relay
+    # (pepin_bringup.visual_odometry, vo_input vio, `vo_output twist`) differences two composed base
+    # poses (SE(2) log of the admitted step, the neck subtracted) into vx, vy, vyaw and stamps them
+    # with OpenVINS's OWN velocity covariance (odomimu's twist block, rotated into base_link): no
+    # floor, no constant. Why: as odom1's differential pose with the 7 cm floor the VIO moved this
+    # filter <= 1.7 cm over 3.5 m (drives 304/305; 2 * 0.07^2 * 0.1 = 9.8e-4 (m/s)^2 per sample,
+    # one wheel sample beside the wheels, rf2o and the gyro). OpenVINS's POSE covariance in its
+    # gravity frame grows without bound (x, y, yaw unobservable) and is never a weight here; its
+    # VELOCITY covariance is observable.
+    # NO DOUBLE COUNTING: under `vo_output twist` the relay keeps /vo (odom1) flowing with 1e6 on
+    # its pose diagonal, weightless; under `pose` (the default) nothing is published here. One live
+    # flag moves the weight between the two inputs with no restart of this filter:
+    #   ros/flags.sh set visual_odometry vo_output twist | pose
+    # WHY A SECOND INPUT AND NOT odom1's twist indices: robot_localization lifts a zero variance to
+    # 1e-9, so any /vo whose twist block is empty -- every bag recorded before this day, an older
+    # relay, rtabmap's own twist in a replay -- would clamp vx/vy/vyaw to its numbers. /vo_twist
+    # exists only where the twist output does. Cost: one more subscription here (silent under
+    # `pose`), and under `twist` two corrections per VIO sample (the weightless pose and the twist,
+    # 10 Hz each) instead of one; not measured on the board yet.
+    # NO REJECTION THRESHOLD (robot_localization's default: none): the relay's guard refuses
+    # |v| > 1 m/s always and, under vio_guard, |v - wheels| > 0.2 m/s; VioLost refuses a sustained
+    # disagreement. A Mahalanobis gate against a filter that the wheels dominate would refuse the
+    # VIO exactly when it disagrees with a slipping wheel.
+    twist0: vo_twist
+    twist0_config: [false, false, false,
+                    false, false, false,
+                    true,  true,  false,
+                    false, false, true,
+                    false, false, false]
+    twist0_queue_size: 10
     # THE CAMERA'S COVARIANCE IS THE MESSAGE'S OWN, AND THERE IS NO OVERRIDE IN THIS FILE
     # (checked 2026-09-16). robot_localization has no per-source covariance parameter at all --
     # it reads pose.covariance off each PoseWithCovarianceStamped it takes -- so nothing here

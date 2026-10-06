@@ -16,11 +16,13 @@ ros_stubs.install()
 import pepin_bringup.visual_odometry as relay  # noqa: E402
 from pepin_bringup.msgs import stamp_from_seconds, yaw_of  # noqa: E402
 from pepin_bringup.visual_odometry import (  # noqa: E402
+    VIO_ODOM_TOPIC,
     VIO_POINTS_TOPIC,
     VIO_POSE_TOPIC,
     VIO_RESTART_SERVICE,
     VIO_SLAM_POINTS_TOPIC,
     VO_TOPIC,
+    VO_TWIST_TOPIC,
     WHEELS_TOPIC,
     ZUPT_TOPIC,
     VisualOdometry,
@@ -407,4 +409,140 @@ def test_a_still_cart_with_no_msckf_features_still_reaches_the_ekf(
     node._report()
     line = node.get_logger().texts("info")[-1]
     assert "features 7 (msckf 0 + slam 7)" in line and "features 0)" in line
+    node.close()
+
+
+# OpenVINS's twist covariance in the IMU's own axes (odomimu): linear then angular, diagonal.
+IMU_LINEAR = (1e-4, 4e-4, 9e-4)
+IMU_ANGULAR = (1e-6, 4e-6, 9e-6)
+
+
+def _odomimu(t: float, linear: Any = IMU_LINEAR, angular: Any = IMU_ANGULAR) -> Any:
+    msg = ros_stubs.Odometry()
+    msg.header.stamp = stamp_from_seconds(T0 + t)
+    msg.header.frame_id, msg.child_frame_id = "global", "imu"
+    msg.twist.covariance = [0.0] * 36
+    for i, value in enumerate((*linear, *angular)):
+        msg.twist.covariance[i * 6 + i] = value
+    return msg
+
+
+def _drive_with_a_panning_head(node: VisualOdometry, pans: list[float]) -> None:
+    """The base drives straight along G's y (G's yaw 90 deg) at 0.2 m/s while the head pans;
+    OpenVINS's odomimu at every IMU sample (5 ms) and poseimu at every 0.1 s."""
+    for i, pan in enumerate(pans):
+        for k in range(-3, 17):
+            node.subs[VIO_ODOM_TOPIC][1](_odomimu(0.1 * i + 0.005 * k))
+        t_g_b = _yaw(math.pi / 2)
+        t_g_b[:3, 3] = (0.5, 0.02 * i, 0.0)
+        _feed(node, 0.1 * i, t_g_b, pan)
+
+
+def test_the_twist_output_sends_the_base_velocity_with_openvins_own_covariance() -> None:
+    """vo_output twist with the head panning 0 -> 0.5 rad while the cart drives straight at
+    0.2 m/s: /vo_twist reads vx 0.2, vy 0, vyaw 0 (the neck's own motion subtracted), weighed by
+    the IMU's velocity covariance turned into base_link through the neck at that stamp — at the
+    last pan, vx cos^2(0.5) * 9e-4 + sin^2(0.5) * 1e-4 = 7.161e-4, vy 2.839e-4, vyaw the IMU's
+    y-rate 4e-6, no floor. /vo carries the track weightless; the first pose has no step."""
+    node = _node()
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_with_a_panning_head(node, [0.1 * i for i in range(6)])
+    twists = node.pubs[VO_TWIST_TOPIC].sent
+    assert len(twists) == 5
+    for msg in twists:
+        assert msg.header.frame_id == "base_link"
+        v = msg.twist.twist
+        assert (v.linear.x, v.linear.y, v.angular.z) == pytest.approx((0.2, 0.0, 0.0), abs=1e-6)
+    last = twists[-1].twist.covariance
+    c2, s2 = math.cos(0.5) ** 2, math.sin(0.5) ** 2
+    assert last[0] == pytest.approx(c2 * 9e-4 + s2 * 1e-4)
+    assert last[7] == pytest.approx(s2 * 9e-4 + c2 * 1e-4)
+    assert last[35] == pytest.approx(4e-6)
+    assert [last[i * 6 + i] for i in (2, 3, 4)] == [1e6] * 3
+    poses = node.pubs[VO_TOPIC].sent
+    assert len(poses) == 5
+    assert [poses[-1].pose.covariance[i * 6 + i] for i in range(6)] == [1e6] * 6
+    w = node._tally.take()
+    assert w.counts["no_step"] == 1 and w.counts["twist_out"] == 5
+    node.close()
+
+
+def test_the_pose_output_sends_no_twist_and_reports_the_sigmas() -> None:
+    """vo_output pose (the default): /vo as before (the 7 cm floor), /vo_twist silent, and the
+    report line carries OpenVINS's base-axis sigmas so the switch is measured before it is made:
+    sqrt(9e-4) = 3.00 cm/s, sqrt(1e-4) = 1.00 cm/s, sqrt(4e-6) rad/s = 0.11 deg/s."""
+    node = _node()
+    _drive_with_a_panning_head(node, [0.0] * 6)
+    assert not node.pubs[VO_TWIST_TOPIC].sent
+    poses = node.pubs[VO_TOPIC].sent
+    assert len(poses) == 6
+    assert math.sqrt(poses[-1].pose.covariance[0]) == pytest.approx(0.07, rel=1e-3)
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "output pose: sigma p50 vx 3.00 vy 1.00 cm/s vyaw 0.11 deg/s (6)" in line
+    assert "0 twists sent" in line and "odomimu 120 in" in line
+    node.close()
+
+
+def test_a_twist_without_its_covariance_is_withheld_and_counted() -> None:
+    """No odomimu near the stamp (before OpenVINS's first second, or not subscribed): cov
+    missing; a zero matrix (no update yet): cov bad. Neither reaches the EKF."""
+    node = _node()
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    for i in range(3):
+        t_g_b = np.eye(4)
+        t_g_b[:3, 3] = (0.02 * i, 0.0, 0.0)
+        node.subs[VIO_POSE_TOPIC][1](_poseimu(0.1 * i, t_g_b))
+    for i in range(3, 6):
+        node.subs[VIO_ODOM_TOPIC][1](_odomimu(0.1 * i, (0.0,) * 3, (0.0,) * 3))
+        t_g_b = np.eye(4)
+        t_g_b[:3, 3] = (0.02 * i, 0.0, 0.0)
+        node.subs[VIO_POSE_TOPIC][1](_poseimu(0.1 * i, t_g_b))
+    assert not node.pubs[VO_TWIST_TOPIC].sent and not node.pubs[VO_TOPIC].sent
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "withheld: cov missing 2, cov bad 3, no step 1" in line
+    node.close()
+
+
+def test_the_output_and_the_guard_switch_live_and_rtabmap_stays_pose() -> None:
+    from pepin.deployment import VO_TWIST_TOPIC as DEPLOYED
+
+    assert f"/{DEPLOYED}" == VO_TWIST_TOPIC, "the flags table needs a literal; the EKF reads this"
+    node = _node()
+    assert node._guard.wheel_rule
+    assert node.set_parameters([ros_stubs.Parameter("vio_guard", value=False)])[0].successful
+    assert not node._guard.wheel_rule, "the wheel rule off, live"
+    assert not node.set_parameters([ros_stubs.Parameter("vo_output", value="velocity")])[
+        0
+    ].successful
+    node.close()
+    with ros_stubs.parameters(vo_input="stereo", vo_output="twist"):
+        stereo = VisualOdometry()
+    assert stereo._output_mode() == "pose", "rtabmap's inputs have no velocity covariance"
+    stereo.close()
+
+
+def test_the_camera_edges_come_from_the_config_not_from_a_late_tf_static() -> None:
+    """Under vio the relay's buffer holds camera_link -> camera_optical -> head_imu from
+    config/camera.json before any /tf_static arrives, built exactly as camera_stream broadcasts
+    them (the same reader, the same builder): Kalibr's T_cam_imu translation to the micrometre."""
+    from pepin_bringup.msgs import camera_edges, pose_from_transform
+
+    from pepin.mounts import load_camera_mounts
+
+    node = _node()
+    buffer = node._tf.buffer  # type: ignore[union-attr]
+    expected = camera_edges(load_camera_mounts(), stamp_from_seconds(T0))
+    assert len(expected) == 2, "the active rig carries a head_imu block"
+    for edge in expected:
+        seeded = buffer.transforms[(edge.header.frame_id, edge.child_frame_id)]
+        a, b = pose_from_transform(seeded), pose_from_transform(edge)
+        assert np.allclose(a.rotation, b.rotation) and np.allclose(a.translation, b.translation)
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert (
+        "static edges from config/camera.json: camera_link -> camera_optical,"
+        " camera_optical -> head_imu" in line
+    )
     node.close()

@@ -552,3 +552,120 @@ def test_no_features_at_rest_is_not_lost_and_the_shortage_counts_from_the_first_
     assert lost.check(6.5, 0.0) is not None and lost.counts["features"] == 1
     lost.features(6.6, 45)
     assert lost.check(6.6, 0.0) is None, "features back"
+
+
+def test_the_guard_wheel_rule_switches_off_and_the_speed_rule_does_not() -> None:
+    """vio_guard off: 0.3 m/s against still wheels (a slip the VIO sees through) passes; 1.5 m/s
+    is still a divergence; on again, the same 0.3 m/s is refused."""
+    from pepin.visual_odometry import VioGuard
+
+    guard = VioGuard(max_speed_m_s=1.0, wheel_diff_m_s=0.2, wheel_rule=False)
+    guard.wheels(0.0, 0.0, 0.0)
+    assert guard.check(0.0, (0.3, 0.0)) is None
+    fast = guard.check(0.1, (1.5, 0.0))
+    assert fast is not None and "1.50 m/s" in fast
+    assert "the wheel rule off" in guard.report()
+    guard.wheel_rule = True
+    assert guard.check(0.2, (0.3, 0.0)) is not None
+    assert guard.counts == {"speed": 1, "wheels": 1}
+
+
+def test_the_track_remembers_the_step_it_admitted_until_an_anchor() -> None:
+    track = VoTrack()
+    a = VoPose(stamp=0.0, x=0.0, y=0.0, yaw=0.0)
+    b = VoPose(stamp=0.1, x=0.02, y=0.0, yaw=0.0)
+    track.advance(a)
+    assert track.last_step is None, "the first pose only anchors"
+    track.advance(b)
+    assert track.last_step == (a, b)
+    track.anchor(b)
+    assert track.last_step is None, "nothing is differenced across an anchor"
+
+
+def test_se2_twist_reads_an_arc_as_its_own_speed_with_no_sideways_leak() -> None:
+    """0.2 m/s forward and 0.5 rad/s for 0.1 s from (1, 2) heading 40 deg: the twist is exactly
+    (0.2, 0, 0.5); the chord in the starting heading (body_velocity) reads 0.19992 forward and
+    5.0 mm/s sideways, v * w * dt / 2."""
+    from pepin.visual_odometry import body_velocity, se2_twist
+
+    v, w, dt, yaw0 = 0.2, 0.5, 0.1, math.radians(40.0)
+    turn = w * dt
+    forward, left = v / w * math.sin(turn), v / w * (1.0 - math.cos(turn))
+    c, s = math.cos(yaw0), math.sin(yaw0)
+    a = VoPose(stamp=10.0, x=1.0, y=2.0, yaw=yaw0)
+    b = VoPose(
+        stamp=10.0 + dt,
+        x=1.0 + c * forward - s * left,
+        y=2.0 + s * forward + c * left,
+        yaw=yaw0 + turn,
+    )
+    twist = se2_twist(a, b)
+    assert twist is not None
+    assert twist == pytest.approx((0.2, 0.0, 0.5), abs=1e-9)
+    chord = body_velocity(a, b)
+    assert chord is not None
+    assert chord[0] == pytest.approx(0.19992, abs=1e-5)
+    assert chord[1] == pytest.approx(0.0049990, abs=1e-6)
+    straight = se2_twist(a, VoPose(stamp=10.5, x=1.0 + 0.15 * c, y=2.0 + 0.15 * s, yaw=yaw0))
+    assert straight == pytest.approx((0.3, 0.0, 0.0), abs=1e-9)
+    spin = se2_twist(a, VoPose(stamp=10.2, x=1.0, y=2.0, yaw=yaw0 - 0.2))
+    assert spin == pytest.approx((0.0, 0.0, -1.0), abs=1e-9)
+    assert se2_twist(b, a) is None, "a stamp that does not advance says nothing"
+
+
+def _imu_covariance(linear: tuple[float, ...], angular: tuple[float, ...]) -> list[float]:
+    """odomimu's twist covariance: diagonal, linear then angular, in the IMU's own axes."""
+    matrix = [0.0] * 36
+    for i, value in enumerate((*linear, *angular)):
+        matrix[i * 6 + i] = value
+    return matrix
+
+
+def test_openvins_velocity_covariance_is_turned_into_base_axes() -> None:
+    """A chip on its side (base x = IMU z, base y = -IMU x, base z = -IMU y): base vx takes the
+    IMU's z variance 9e-4, vy its x variance 1e-4, vyaw its y-rate 4e-6; every other axis 1e6.
+    A 30 deg yaw on top mixes x and y: cos^2 * 4e-4 + sin^2 * 1e-4 = 3.25e-4 on vx and
+    (4e-4 - 1e-4) * sin * cos = 1.299e-4 between them."""
+    from pepin.visual_odometry import WEIGHTLESS_VARIANCE, base_twist_covariance
+
+    chip = np.array([[0.0, 0.0, 1.0], [-1.0, 0.0, 0.0], [0.0, -1.0, 0.0]])
+    source = _imu_covariance((1e-4, 4e-4, 9e-4), (1e-6, 4e-6, 9e-6))
+    base = base_twist_covariance(source, chip)
+    assert base is not None
+    assert (base[0], base[7], base[35]) == pytest.approx((9e-4, 1e-4, 4e-6))
+    assert base[1] == pytest.approx(0.0) and base[5] == pytest.approx(0.0)
+    assert [base[i * 6 + i] for i in (2, 3, 4)] == [WEIGHTLESS_VARIANCE] * 3
+    c, s = math.cos(math.radians(30.0)), math.sin(math.radians(30.0))
+    yawed = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    mixed = base_twist_covariance(_imu_covariance((4e-4, 1e-4, 9e-4), (1e-6,) * 3), yawed)
+    assert mixed is not None
+    assert mixed[0] == pytest.approx(3.25e-4) and mixed[7] == pytest.approx(1.75e-4)
+    assert mixed[1] == pytest.approx(1.299e-4, rel=1e-3) and mixed[6] == mixed[1]
+
+
+def test_a_covariance_that_is_not_one_weighs_nothing() -> None:
+    from pepin.visual_odometry import base_twist_covariance
+
+    eye = np.eye(3)
+    assert base_twist_covariance([0.0] * 36, eye) is None, "OpenVINS before an update"
+    nan = _imu_covariance((math.nan, 1e-4, 1e-4), (1e-6,) * 3)
+    assert base_twist_covariance(nan, eye) is None
+    assert base_twist_covariance(_imu_covariance((1e-4,) * 3, (0.0,) * 3), eye) is None
+    assert base_twist_covariance([1e-4] * 12, eye) is None, "too short"
+
+
+def test_twist_covariances_match_a_pose_by_stamp_and_forget_the_past() -> None:
+    """odomimu at 200 Hz: a pose at 100.0123 takes the 100.010 sample; nothing within 20 ms is
+    nothing; older than 2 s is gone; a stamp going back (a restarted OpenVINS) starts afresh."""
+    from pepin.visual_odometry import TwistCovariances
+
+    buffer = TwistCovariances(match_s=0.02, horizon_s=2.0)
+    for i in range(600):
+        buffer.add(98.0 + 0.005 * i, [float(i)] * 36)
+    found = buffer.nearest(100.0123)
+    assert found is not None and found[0] == 402.0  # 98.0 + 0.005 * 402 = 100.010
+    assert buffer.nearest(100.995 + 0.03) is None, "past the newest by more than 20 ms"
+    assert buffer.nearest(98.5) is None, "beyond the 2 s horizon"
+    buffer.add(50.0, [7.0] * 36)
+    assert buffer.nearest(100.0) is None and buffer.nearest(50.0) == tuple([7.0] * 36)
+    assert buffer.received == 601

@@ -73,7 +73,7 @@ CAMERA_MARK_TOPICS = ("/depth_marks", "/depth_free")
 # the zero-velocity update (/zupt, odom2: the base bridge's at rest, the tracker's on a slip), so a
 # fused pose that went wrong could not be taken apart into what each source said while it happened.
 # bag_to_tape skips them.
-ODOMETRY_TOPICS = ("/vo", "/zupt")
+ODOMETRY_TOPICS = ("/vo", "/vo_twist", "/zupt")  # /vo_twist: the VIO as twist0 (vo_output twist)
 # ...and the head: its IMU (the bridge's /head/imu, 200 Hz) and the mast's sway (/mast/state), so a
 # drive's bag carries what the VIO and the sway number (vio.md section 6) are computed from; the
 # camera itself is the board-side clip (ros/tools/clip_to_bag.py). Neither exists without

@@ -183,6 +183,9 @@ CameraInfo = _msg(
 Twist = _msg("Twist", linear=Vector3, angular=Vector3)
 TwistStamped = _msg("TwistStamped", header=Header, twist=Twist)
 TwistWithCovariance = _msg("TwistWithCovariance", twist=Twist, covariance=lambda: [0.0] * 36)
+TwistWithCovarianceStamped = _msg(
+    "TwistWithCovarianceStamped", header=Header, twist=TwistWithCovariance
+)
 Odometry = _msg(
     "Odometry",
     header=Header,
@@ -958,6 +961,8 @@ def install() -> Any:
             Vector3=Vector3,
             Twist=Twist,
             TwistStamped=TwistStamped,
+            TwistWithCovariance=TwistWithCovariance,
+            TwistWithCovarianceStamped=TwistWithCovarianceStamped,
         ),
         "map_msgs": _module("map_msgs"),
         "map_msgs.msg": _module("map_msgs.msg", OccupancyGridUpdate=OccupancyGridUpdate),

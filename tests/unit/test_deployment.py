@@ -62,7 +62,7 @@ def test_a_cross_machine_topic_carries_one_qos_on_both_sides() -> None:
 
     assert bridged_qos("/imu/data_raw") == ("reliable", 10) == bridged_qos("imu/data_raw")
     assert bridged_qos("/scan") is None
-    assert set(BRIDGED_QOS) == {"/imu/data_raw", "/vo", "/odom", "/head/imu"}
+    assert set(BRIDGED_QOS) == {"/imu/data_raw", "/vo", "/vo_twist", "/odom", "/head/imu"}
     for topic, (reliability, depth) in BRIDGED_QOS.items():
         assert reliability in ("reliable", "best_effort") and depth > 0, topic
 

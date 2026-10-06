@@ -24,7 +24,7 @@ from std_msgs.msg import Header
 from pepin.camera import quaternion_from_rpy
 from pepin.depth import decode_rgb, rotation_matrix
 from pepin.mapping import GridSpec, OccupancyGrid
-from pepin.mounts import Mount
+from pepin.mounts import CameraMounts, Mount
 from pepin.tsdf import RigidPose
 from pepin.worldmap import OccupancyGridFields
 
@@ -107,6 +107,19 @@ def transform_from_mount(parent: str, child: str, mount: Mount, stamp: Any) -> A
     """A static ``parent -> child`` from a :class:`pepin.mounts.Mount`."""
     x, y, z, roll, pitch, yaw = mount.transform()
     return transform_from_rpy(parent, child, (x, y, z), (roll, pitch, yaw), stamp)
+
+
+def camera_edges(camera: CameraMounts, stamp: Any) -> list[Any]:
+    """The camera's static edges below camera_link, from config/camera.json's mounts:
+    ``camera_link -> camera_optical`` and, on a head with a measured IMU, ``camera_optical ->
+    head_imu`` (Kalibr's T_cam_imu). One builder for camera_stream, which broadcasts them, and the
+    VIO relay, which puts them into its own buffer."""
+    edges = [transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp)]
+    if camera.imu is not None:
+        edges.append(
+            transform_from_mount(camera.optical_frame, camera.imu_frame, camera.imu, stamp)
+        )
+    return edges
 
 
 def pose_from_transform(msg: Any) -> RigidPose:

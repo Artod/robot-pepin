@@ -1303,11 +1303,18 @@ def test_the_camera_edge_has_exactly_one_publisher_on_each_side_of_the_switch() 
     kept = next(
         ast.unparse(n)
         for n in ast.walk(camera)
-        if isinstance(n, ast.List) and "camera.optical, stamp" in ast.unparse(n)
+        if isinstance(n, ast.List) and "LASER_FRAME" in ast.unparse(n)
     )
-    assert "LASER_FRAME" in kept and "camera.link, stamp" not in kept, (
+    assert "optical" in kept and "camera.link, stamp" not in kept, (
         "that edge alone goes, not the others"
     )
+    # The edges below camera_link come from the one builder the VIO relay seeds its buffer with.
+    builder = next(
+        ast.unparse(f)
+        for f in ast.walk(sf.tree(f"{NODES}/msgs.py"))
+        if isinstance(f, ast.FunctionDef) and f.name == "camera_edges"
+    )
+    assert "camera.optical, stamp" in builder and "camera.link, stamp" not in builder
     vslam = sf.tree(VSLAM_LAUNCH)
     assert "'static_camera_tf'" in {
         ast.unparse(c.args[0]) for c in sf.calls_to(vslam, "DeclareLaunchArgument")

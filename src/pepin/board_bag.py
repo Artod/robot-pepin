@@ -68,6 +68,7 @@ TOPICS: tuple[str, ...] = (
     "/tof/right",
     "/tof/right/scan",
     "/vo",
+    "/vo_twist",
     "/zupt",
 )
 SPLIT_S = 60  # one MCAP file a minute: the unit the cap deletes, and all a crash can cost

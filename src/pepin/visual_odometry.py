@@ -24,7 +24,10 @@ same gate and track: :func:`compose_base_pose` turns its IMU pose in its own gra
 base_link's through the neck's TF chain, :data:`VIO_STEP_FRACTION` is its per-step covariance
 model (its own marginal covariance only grows and is read as a health signal, :class:`VioHealth`),
 and :class:`VioLost` says when it has diverged (it never resets itself); :class:`VioGuard` refuses
-every single sample no cart of this speed could have made and says when to restart it.
+every single sample no cart of this speed could have made and says when to restart it. As a BODY
+VELOCITY instead of a pose (the relay's ``vo_output twist``), the composed step becomes
+:func:`se2_twist` and its weight is OpenVINS's own velocity covariance, matched by stamp
+(:class:`TwistCovariances`) and turned into base_link's axes (:func:`base_twist_covariance`).
 
 Nothing here is ROS: poses and wheel speeds in, verdicts and a report line out
 (:mod:`pepin_bringup.visual_odometry` is the node around it).
@@ -33,6 +36,7 @@ Nothing here is ROS: poses and wheel speeds in, verdicts and a report line out
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -55,22 +59,29 @@ __all__ = [
     "VIO_RESTART_REST_S",
     "VIO_REST_SPEED_M_S",
     "VIO_STEP_FRACTION",
+    "VIO_TWIST_HORIZON_S",
+    "VIO_TWIST_MATCH_S",
     "VIO_WHEEL_DIFF_M_S",
+    "WEIGHTLESS_VARIANCE",
     "PublishCap",
     "RestDrift",
     "RestWatch",
+    "TwistCovariances",
     "VioGuard",
     "VioHealth",
     "VioLost",
     "VoGate",
     "VoPose",
     "VoTrack",
+    "base_twist_covariance",
     "body_velocity",
     "compose_base_pose",
     "homogeneous",
     "is_lost",
     "planar_covariance",
     "scaled_covariance",
+    "se2_twist",
+    "weightless_covariance",
 ]
 
 # What rtabmap writes on the diagonal of a pose it did not measure: its odometry nodes publish a
@@ -130,6 +141,17 @@ VIO_RESTART_REST_S = 2.0
 # Not sooner than this after the previous restart: the respawn takes 2 s and the initialisation
 # waits for the next motion, and a loop of restarts would starve it of both.
 VIO_RESTART_GAP_S = 10.0
+# The variance that tells robot_localization "no weight" on an axis it is configured to read
+# (planar_covariance's ``unfused``): the twist axes the EKF does not fuse, and a whole pose whose
+# weight has moved to the twist.
+WEIGHTLESS_VARIANCE = 1e6
+# OpenVINS's odomimu comes once per head-IMU sample (200 Hz, 5 ms apart) stamped in the IMU's
+# clock, the same clock as poseimu's camera time + t_d: a velocity covariance is matched to a pose
+# when it is the nearest within four samples. A matching rule, never a weight.
+VIO_TWIST_MATCH_S = 0.02
+# How much odomimu history is kept for that match: poseimu arrives 0.15-0.3 s after its stamp
+# (the update waits for the image), odomimu as the IMU sample lands.
+VIO_TWIST_HORIZON_S = 2.0
 
 
 @dataclass(frozen=True)
@@ -312,6 +334,7 @@ class VoTrack:
 
     def __init__(self) -> None:
         self._from: VoPose | None = None
+        self._step: tuple[VoPose, VoPose] | None = None
         self._x = 0.0
         self._y = 0.0
         self._yaw = 0.0
@@ -319,6 +342,7 @@ class VoTrack:
     def advance(self, pose: VoPose) -> VoPose:
         """Add an admitted pose's step to the running total; returns the pose to publish — the
         same stamp, the summed position and heading."""
+        self._step = None if self._from is None else (self._from, pose)
         if self._from is not None:
             dx, dy = pose.x - self._from.x, pose.y - self._from.y
             c, s = math.cos(self._from.yaw), math.sin(self._from.yaw)
@@ -334,6 +358,13 @@ class VoTrack:
         """A pose the gate refused: the total stands still across it and the next step is
         measured from ``pose`` — the gate's own new anchor (:attr:`VoGate.anchor`)."""
         self._from = pose
+        self._step = None
+
+    @property
+    def last_step(self) -> tuple[VoPose, VoPose] | None:
+        """The step the last :meth:`advance` added, ``(from, to)`` in the source's frame;
+        ``None`` when it only set the anchor or an anchor came after it."""
+        return self._step
 
     @property
     def pose(self) -> tuple[float, float, float]:
@@ -657,12 +688,113 @@ def body_velocity(previous: VoPose, pose: VoPose) -> tuple[float, float] | None:
     return (c * dx + s * dy) / dt, (-s * dx + c * dy) / dt
 
 
+def se2_twist(previous: VoPose, pose: VoPose) -> tuple[float, float, float] | None:
+    """The constant body twist (forward m/s, left m/s, yaw rad/s) that carries ``previous`` to
+    ``pose`` over their stamps' difference: the SE(2) logarithm of the step in ``previous``'s body
+    frame, so a cart on an arc reads its own forward speed with no sideways leak (the chord in
+    the starting heading leaks ``v * w * dt / 2`` sideways); ``None`` when the stamps do not
+    advance."""
+    dt = pose.stamp - previous.stamp
+    if dt <= 0.0:
+        return None
+    dx, dy = pose.x - previous.x, pose.y - previous.y
+    c, s = math.cos(previous.yaw), math.sin(previous.yaw)
+    forward, left = c * dx + s * dy, -s * dx + c * dy
+    turn = _wrapped(pose.yaw - previous.yaw)
+    if abs(turn) < 1e-9:
+        return forward / dt, left / dt, 0.0
+    # The step is V * (vx, vy) * dt with V = [[a, -b], [b, a]]; V^-1 = [[a, b], [-b, a]] / (a^2+b^2)
+    a, b = math.sin(turn) / turn, (1.0 - math.cos(turn)) / turn
+    norm = a * a + b * b
+    return (a * forward + b * left) / norm / dt, (a * left - b * forward) / norm / dt, turn / dt
+
+
+def weightless_covariance() -> list[float]:
+    """A 6x6 row-major covariance that robot_localization fuses with no weight on any axis."""
+    matrix = [0.0] * 36
+    for i in range(6):
+        matrix[i * 6 + i] = WEIGHTLESS_VARIANCE
+    return matrix
+
+
+# The twist axes robot_localization reads for a planar cart: vx, vy and vyaw (indices of the
+# 6x6 linear-then-angular block).
+_PLANAR_TWIST = (0, 1, 5)
+
+
+def base_twist_covariance(imu_covariance: Sequence[float], r_b_i: Any) -> list[float] | None:
+    """OpenVINS's twist covariance turned into base_link's axes, for the three the EKF fuses.
+
+    ``imu_covariance`` is odomimu's 6x6 row-major twist covariance: the IMU's linear velocity
+    and its angular velocity, both in the IMU's own axes (Propagator::fast_state_propagate);
+    ``r_b_i`` is base_link <- head_imu at the same stamp. The result is
+    ``R6 C R6^T``, ``R6 = diag(R_B_I, R_B_I)``, kept on vx, vy and vyaw with their cross terms
+    and :data:`WEIGHTLESS_VARIANCE` on every other axis. ``None`` when the source is not a
+    covariance: too short, a non-finite entry, or a kept 3x3 block that is not positive definite
+    (OpenVINS before its first update, a zero matrix)."""
+    if len(imu_covariance) < 36:
+        return None
+    source = np.asarray(list(imu_covariance)[:36], dtype=float).reshape(6, 6)
+    if not np.all(np.isfinite(source)):
+        return None
+    rotation = np.zeros((6, 6))
+    rotation[:3, :3] = np.asarray(r_b_i, dtype=float)
+    rotation[3:, 3:] = rotation[:3, :3]
+    base = rotation @ source @ rotation.T
+    block = base[np.ix_(_PLANAR_TWIST, _PLANAR_TWIST)]
+    block = 0.5 * (block + block.T)
+    if not np.all(np.linalg.eigvalsh(block) > 0.0):
+        return None
+    matrix = weightless_covariance()
+    for a, i in enumerate(_PLANAR_TWIST):
+        for b, j in enumerate(_PLANAR_TWIST):
+            matrix[i * 6 + j] = float(block[a, b])
+    return matrix
+
+
+class TwistCovariances:
+    """OpenVINS's velocity covariances by stamp (odomimu, one per IMU sample), kept for
+    ``horizon_s`` so the pose of the same instant can find its own: :meth:`nearest` is the one
+    closest to a stamp, within ``match_s``. A stamp that goes backwards (a restarted OpenVINS)
+    starts the history again."""
+
+    def __init__(
+        self, match_s: float = VIO_TWIST_MATCH_S, horizon_s: float = VIO_TWIST_HORIZON_S
+    ) -> None:
+        self.match_s = match_s
+        self.horizon_s = horizon_s
+        self._items: deque[tuple[float, tuple[float, ...]]] = deque()
+        self.received = 0
+
+    def add(self, stamp: float, covariance: Sequence[float]) -> None:
+        """One odomimu twist covariance (6x6 row-major) at its stamp, seconds."""
+        items = self._items
+        if items and stamp < items[-1][0]:
+            items.clear()
+        items.append((stamp, tuple(float(v) for v in covariance)))
+        while items and items[0][0] < stamp - self.horizon_s:
+            items.popleft()
+        self.received += 1
+
+    def nearest(self, stamp: float) -> tuple[float, ...] | None:
+        """The covariance whose stamp is closest to ``stamp`` within ``match_s``, or ``None``."""
+        best: tuple[float, tuple[float, ...]] | None = None
+        for item in reversed(self._items):
+            gap = abs(item[0] - stamp)
+            if gap <= self.match_s and (best is None or gap < abs(best[0] - stamp)):
+                best = item
+            if item[0] < stamp - self.match_s:
+                break
+        return None if best is None else best[1]
+
+
 class VioGuard:
     """The plausibility guard on the VIO's output: a composed base velocity faster than
     ``max_speed_m_s``, or farther than ``wheel_diff_m_s`` from the wheels' (forward speed, no
     sideways motion), is a diverged filter and the sample is not sent. Unlike :class:`VioLost`
     it judges every sample on its own, without a duration, so a divergence of metres per second
-    never reaches the gate.
+    never reaches the gate. ``wheel_rule`` False (the relay's ``vio_guard`` off) judges the speed
+    alone: the VIO may then disagree with slipping wheels, and only a divergence is refused.
 
     It also says when to restart the VIO: ``restart_rejects`` implausible samples in a row while
     the wheels have said rest for ``rest_s`` (OpenVINS never resets itself, and its static
@@ -676,9 +808,11 @@ class VioGuard:
         restart_rejects: int = VIO_RESTART_REJECTS,
         rest_s: float = VIO_RESTART_REST_S,
         restart_gap_s: float = VIO_RESTART_GAP_S,
+        wheel_rule: bool = True,
     ) -> None:
         self.max_speed_m_s = max_speed_m_s  # live: vio_max_speed_m_s
         self.wheel_diff_m_s = wheel_diff_m_s  # live: vio_wheel_diff_m_s
+        self.wheel_rule = wheel_rule  # live: the relay's vio_guard flag
         self.restart_rejects = restart_rejects  # live: vio_restart_rejects
         self.rest_s = rest_s
         self.restart_gap_s = restart_gap_s
@@ -719,7 +853,7 @@ class VioGuard:
         wheels = self._wheels
         if speed > self.max_speed_m_s:
             reason, rule = f"{speed:.2f} m/s (over {self.max_speed_m_s:.2f})", "speed"
-        elif wheels is not None and now - wheels[0] <= WITNESS_FRESH_S:
+        elif self.wheel_rule and wheels is not None and now - wheels[0] <= WITNESS_FRESH_S:
             diff = math.hypot(forward - wheels[1], left)
             if diff > self.wheel_diff_m_s:
                 reason = (
@@ -759,9 +893,10 @@ class VioGuard:
         """The rejections by rule, the run in a row and the restarts, for the report line."""
         last = f" (last: {self.last})" if self.last else ""
         restart = f" (last: {self.last_restart})" if self.last_restart else ""
+        rule = "" if self.wheel_rule else ", the wheel rule off"
         return (
             f"guard rejected {sum(self.counts.values())} (speed {self.counts['speed']}, wheels"
-            f" {self.counts['wheels']}){last}, {self.consecutive} in a row, restarts"
+            f" {self.counts['wheels']}{rule}){last}, {self.consecutive} in a row, restarts"
             f" {self.restarts}{restart}"
         )
 

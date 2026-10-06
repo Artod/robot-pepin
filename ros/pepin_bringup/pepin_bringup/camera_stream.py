@@ -90,7 +90,12 @@ from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.mjpeg import STAMP_MODES, capture_time, has_grab, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
-from pepin_bringup.msgs import image_from_array, stamp_from_seconds, transform_from_mount
+from pepin_bringup.msgs import (
+    camera_edges,
+    image_from_array,
+    stamp_from_seconds,
+    transform_from_mount,
+)
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, Window, spin_main
 from pepin_bringup.stereo_frames import (
     LEFT_IMAGE_TOPIC,
@@ -461,17 +466,16 @@ class CameraStream(Node):
         """
         stamp = self.get_clock().now().to_msg()
         camera = load_camera_mounts(config_dir, self._cfg.name)
+        # camera_link -> camera_optical, and the head IMU glued to the module: Kalibr's T_cam_imu
+        # as the static camera_optical -> head_imu (config/camera.json's head_imu), the edge the
+        # VIO relay composes base_link through (it seeds its own buffer from the same builder).
+        # Without the block no head_imu edge is published.
+        optical, *imu = camera_edges(camera, stamp)
         transforms = [
-            transform_from_mount(camera.link_frame, camera.optical_frame, camera.optical, stamp),
+            optical,
             transform_from_mount("base_link", LASER_FRAME, load_lidar_mount(config_dir), stamp),
+            *imu,
         ]
-        # The head IMU, glued to the module: Kalibr's T_cam_imu as the static
-        # camera_optical -> head_imu (config/camera.json's head_imu), the edge the VIO relay
-        # composes base_link through. Without the block nothing is published.
-        if camera.imu is not None:
-            transforms.append(
-                transform_from_mount(camera.optical_frame, camera.imu_frame, camera.imu, stamp)
-            )
         if self._switches.on("static_camera_tf"):
             transforms.insert(
                 0, transform_from_mount("base_link", camera.link_frame, camera.link, stamp)
