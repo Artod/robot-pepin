@@ -14,14 +14,17 @@ The controller itself can drive its lines: Allwinner's TWI Line Control Register
 (the board's kernel has no STRICT_DEVMEM), clocks SCL until the slave lets SDA go (nine clocks at
 most, at 1 kHz), and ends with a STOP so every slave starts from idle.
 
-On the board, as root::
+On the board, as root (/opt/pepin/pepin is not installed in the /opt/pepin venv: the same
+working directory and PYTHONPATH as the pepin-* units)::
 
-    /opt/pepin/bin/python -m pepin.i2c_recover check     # the lines, who holds the bus open
+    cd /opt/pepin && PYTHONPATH=/opt/pepin /opt/pepin/bin/python -m pepin.i2c_recover check
     systemctl stop pepin-tof
-    /opt/pepin/bin/python -m pepin.i2c_recover recover   # nine clocks and a STOP
-    systemctl start pepin-tof                            # tof_init re-addresses the sensors
+    cd /opt/pepin && PYTHONPATH=/opt/pepin /opt/pepin/bin/python -m pepin.i2c_recover recover
+    systemctl start pepin-tof    # tof_init re-addresses the sensors
 
-``recover`` refuses while a process holds ``/dev/i2c-2`` open (``--force`` overrides): the
+``check`` reads the lines 50 times over about 50 ms and calls a line held only when it is low in
+every read: on a live bus (the IMU at 100 Hz, three ToF) one read can land mid-transfer with SCL
+low. ``recover`` refuses while a process holds ``/dev/i2c-2`` open (``--force`` overrides): the
 driver's own timeout handling resets the controller and would cut the clocks short.
 """
 
@@ -50,6 +53,10 @@ SCL_STATE = 1 << 5
 RELEASED = SDA_CTL | SCL_CTL  # both lines back to the controller, their control bits high
 HALF_PERIOD_S = 0.0005  # 1 kHz: slow enough for any slave and any wiring
 MAX_CLOCKS = 9  # a byte and its acknowledge: a slave mid-byte is free after at most nine
+# check: 50 reads 1 ms apart span ~50 ms, five IMU periods (100 Hz); a transfer at 400 kHz lasts
+# well under a millisecond, so a live bus cannot keep a line low through all of them.
+CHECK_READS = 50
+CHECK_INTERVAL_S = 0.001
 
 
 class LineControl(Protocol):
@@ -86,6 +93,66 @@ class Lines:
                 "help, a power cycle (or XSHUT for the ToF at 0x31/0x32) can"
             )
         return "SDA held low with SCL high: a slave stuck mid-byte; nine clocks free it"
+
+
+@dataclass(frozen=True)
+class Sampled:
+    """The lines over a window of register reads; a line is held only if low in every read."""
+
+    values: tuple[int, ...]
+    window_s: float
+
+    @property
+    def sda_low(self) -> int:
+        """Reads that saw SDA low."""
+        return sum(1 for v in self.values if not v & SDA_STATE)
+
+    @property
+    def scl_low(self) -> int:
+        """Reads that saw SCL low."""
+        return sum(1 for v in self.values if not v & SCL_STATE)
+
+    @property
+    def held(self) -> bool:
+        """SCL low in every read, or SDA low in every read with SCL high in every one."""
+        n = len(self.values)
+        return n > 0 and (self.scl_low == n or (self.sda_low == n and self.scl_low == 0))
+
+    def verdict(self) -> str:
+        """What the reads mean for the bus: idle, held, or busy with transfers."""
+        n = len(self.values)
+        if self.held or (self.sda_low == 0 and self.scl_low == 0):
+            return Lines.of(self.values[0]).verdict()
+        return (
+            f"busy: SDA low in {self.sda_low}, SCL low in {self.scl_low} of {n} reads; "
+            "transfers in flight, nothing held"
+        )
+
+    def line(self, status: str) -> str:
+        """One line for the operator: the first read, runtime status, the window, a verdict."""
+        first = self.values[0] if self.values else 0
+        return (
+            f"TWI_LCR 0x{first:02x} (runtime {status}, {len(self.values)} reads over "
+            f"{self.window_s * 1000:.0f} ms): {self.verdict()}"
+        )
+
+
+def sample(
+    lcr: LineControl,
+    reads: int = CHECK_READS,
+    interval_s: float = CHECK_INTERVAL_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> Sampled:
+    """``reads`` reads of the register ``interval_s`` apart, with the window they really spanned."""
+    if reads < 1:
+        raise ValueError(f"reads must be at least 1, not {reads}")
+    start = clock()
+    values = [lcr.read()]
+    for _ in range(reads - 1):
+        sleep(interval_s)
+        values.append(lcr.read())
+    return Sampled(tuple(values), clock() - start)
 
 
 @dataclass(frozen=True)
@@ -242,11 +309,10 @@ def main(argv: list[str] | None = None) -> int:
     print(f"{ADAPTER} open in: {', '.join(users) if users else 'no process'}")
     base = int(DEVICE.split(".")[0], 16)
     with awake(device_dir) as status, DevMemLcr(base) as lcr:
-        value = lcr.read()
-        lines = Lines.of(value)
-        print(f"TWI_LCR 0x{value:02x} (runtime {status}): {lines.verdict()}")
+        lines = sample(lcr)
+        print(lines.line(status))
         if args.action == "check":
-            return 0 if lines.sda and lines.scl else 1
+            return 1 if lines.held else 0
         if users and not args.force:
             print("refused: stop them first (systemctl stop pepin-tof; the bridge closes the bus "
                   "itself once its IMU is lost) or pass --force")  # fmt: skip
