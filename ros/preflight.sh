@@ -1,10 +1,11 @@
 #!/bin/bash
-# Is the cart ready for a goal? Eight short lines, one fact each, OK or FAIL first: the pose and
+# Is the cart ready for a goal? Nine short lines, one fact each, OK or FAIL first: the pose and
 # the lidar from the goal server's `where` (127.0.0.1:3337, Nav2 on this Mac), the planner it
 # picked, the last snapshot and recognition reports of the laptop's mapping, the three ToF sensors
 # reaching the laptop (ros/tools/tof_check.py: a rate and a reading each), the Foxglove bridge,
-# and one plan from the planner (ros/tools/planner_check.py: a plan, never motion). Nothing here
-# commands motion.
+# the board's clock against the laptop's (its chrony) with the stamp -> receipt p50 of the key
+# streams here (ros/tools/stream_latency.py, 2 s in pepin-macnav), and one plan from the planner
+# (ros/tools/planner_check.py: a plan, never motion). Nothing here commands motion.
 #   ros/preflight.sh [--no-plan]   --no-plan during a drive: the planner is not asked for a plan
 set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -39,6 +40,13 @@ rec="$(grep '\[rtabmap_frame\]: rtabmap frame:' <<<"$LOG" | tail -2 \
 if grep -qE '^[1-9]' <<<"$rec"; then say OK recognise "$rec"; else say FAIL recognise "$rec"; fi
 fg="$("$HERE/foxglove.sh" check 2>&1 | grep -cE '^FAIL fg\.[345] ')"
 if [ "$fg" = 0 ]; then say OK foxglove "bridge answers"; else say FAIL foxglove "no handshake"; fi
+BOARD="${BOARD:-${PEPIN_HOST:-10.0.0.187}}"
+chrony="$(ssh -o ConnectTimeout=3 -o BatchMode=yes "root@$BOARD" chronyc -c tracking 2>/dev/null | head -1)"
+myip="$(ipconfig getifaddr "$(route -n get "$BOARD" 2>/dev/null | awk '/interface:/ {print $2}')" 2>/dev/null)"
+lat="$(docker exec pepin-macnav /pepin_entrypoint.sh timeout -s KILL 10 python3 /tools/stream_latency.py 2 --chrony "$chrony" --laptop-ip "$myip" 2>&1 | grep -E '^(OK|FAIL) ' | tail -1)"
+if [ "${lat%% *}" = OK ]; then say OK time "${lat#OK }"
+elif [ -n "$lat" ]; then say FAIL time "${lat#FAIL }"
+else say FAIL time "no answer from ros/tools/stream_latency.py in pepin-macnav"; fi
 if [ "$NOPLAN" != --no-plan ]; then
     plan="$(docker exec pepin-vslam /pepin_entrypoint.sh timeout -s KILL 60 python3 /tools/planner_check.py 2>&1 | tail -1)"
     if grep -q 'planner: OK' <<<"$plan"; then
