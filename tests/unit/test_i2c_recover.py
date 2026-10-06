@@ -1,5 +1,6 @@
 """The I2C bus recovery: nine clocks and a STOP through the TWI line control register, against a
-simulated bus whose slave holds SDA low for a number of clocks (pepin.i2c_recover)."""
+simulated bus whose slave holds SDA low for a number of clocks; the check's verdict over a window
+of register reads, against a scripted register (pepin.i2c_recover)."""
 
 from __future__ import annotations
 
@@ -17,9 +18,11 @@ from pepin.i2c_recover import (
     SDA_EN,
     SDA_STATE,
     Lines,
+    Sampled,
     awake,
     clock_out,
     holders,
+    sample,
 )
 
 
@@ -130,3 +133,98 @@ def test_awake_holds_the_controller_on_and_puts_the_setting_back(tmp_path: Path)
         assert (power / "control").read_text() == "on"
         assert status == "active"
     assert (power / "control").read_text() == "auto"
+
+
+IDLE = 0x3A  # TWI_LCR_IDLE_STATUS: both lines high, both handed to the controller
+SCL_LOW = 0x1A  # what the single-read check saw on the live board, 2026-10-05 21:27
+SDA_LOW = 0x2A
+BOTH_LOW = 0x0A
+
+
+class ScriptedLcr:
+    """A line register that answers reads from a script, cycling it; a check never writes."""
+
+    def __init__(self, values: list[int]) -> None:
+        self.values = values
+        self.reads = 0
+
+    def read(self) -> int:
+        value = self.values[self.reads % len(self.values)]
+        self.reads += 1
+        return value
+
+    def write(self, value: int) -> None:
+        raise AssertionError(f"the check wrote 0x{value:02x} to the register")
+
+
+class FakeClock:
+    """A monotonic clock that only moves when slept on."""
+
+    def __init__(self) -> None:
+        self.now = 100.0
+        self.sleeps: list[float] = []
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+    def clock(self) -> float:
+        return self.now
+
+
+def _check(values: list[int]) -> tuple[Sampled, ScriptedLcr]:
+    lcr = ScriptedLcr(values)
+    fake = FakeClock()
+    return sample(lcr, sleep=fake.sleep, clock=fake.clock), lcr
+
+
+def test_check_reads_the_register_fifty_times_a_millisecond_apart() -> None:
+    lcr = ScriptedLcr([IDLE])
+    fake = FakeClock()
+    result = sample(lcr, sleep=fake.sleep, clock=fake.clock)
+    assert lcr.reads == 50 and len(result.values) == 50
+    assert fake.sleeps == [0.001] * 49
+    assert result.window_s == pytest.approx(0.049)
+
+
+def test_check_on_an_idle_bus_says_idle() -> None:
+    result, _ = _check([IDLE])
+    assert not result.held
+    assert result.line("active") == (
+        "TWI_LCR 0x3a (runtime active, 50 reads over 49 ms): idle: SDA and SCL high"
+    )
+
+
+def test_check_calls_scl_held_low_when_every_read_agrees() -> None:
+    result, _ = _check([SCL_LOW])
+    assert result.held and result.scl_low == 50
+    assert "SCL held low" in result.line("active")
+
+
+def test_check_calls_sda_held_low_when_every_read_has_it_low_under_a_high_clock() -> None:
+    result, _ = _check([SDA_LOW])
+    assert result.held
+    assert "stuck mid-byte" in result.verdict()
+
+
+@pytest.mark.parametrize(
+    "script",
+    [
+        [SCL_LOW] + [IDLE] * 49,  # the board's false alarm: the one read landed mid-transfer
+        [IDLE, SCL_LOW, BOTH_LOW, SDA_LOW, IDLE, IDLE, IDLE, IDLE],  # transfers in flight
+        [SCL_LOW] * 49 + [IDLE],  # one high read is enough: the clock moves
+        [SDA_LOW] * 49 + [BOTH_LOW],  # SDA always low, but the clock is being driven
+    ],
+)
+def test_check_on_a_busy_bus_is_alive_not_held(script: list[int]) -> None:
+    result, _ = _check(script)
+    assert not result.held
+    verdict = result.verdict()
+    assert verdict.startswith("busy: ")
+    assert f"SCL low in {result.scl_low} of 50 reads" in verdict
+    assert result.line("active").startswith(f"TWI_LCR 0x{script[0]:02x} (runtime active, 50 reads")
+
+
+def test_check_needs_at_least_one_read() -> None:
+    with pytest.raises(ValueError):
+        sample(ScriptedLcr([IDLE]), reads=0)

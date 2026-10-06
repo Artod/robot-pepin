@@ -213,16 +213,20 @@ all on a parked cart with the stack running, none at a restart: 2026-09-25 08:23
 2026-10-04 11:32 (begun by an arbitration loss reading 0x68; power cycle at 15:03), 2026-10-05
 08:38 (ended at 14:35:52 by a pepin-tof restart: tof_init's XSHUT reset of 0x31/0x32).
 
-Freeing it, cheapest first (as root on the board):
+Freeing it, cheapest first (as root on the board; `/opt/pepin/pepin` is not installed in the
+`/opt/pepin` venv, so the working directory and `PYTHONPATH` are the units' own):
 
 ```bash
-/opt/pepin/bin/python -m pepin.i2c_recover check     # SDA/SCL from the controller's line register; who has the bus open
+# SDA/SCL from the controller's line register (50 reads over ~50 ms); who has the bus open
+cd /opt/pepin && PYTHONPATH=/opt/pepin /opt/pepin/bin/python -m pepin.i2c_recover check
 systemctl stop pepin-tof
-/opt/pepin/bin/python -m pepin.i2c_recover recover   # nine clocks on SCL and a STOP (TWI_LCR, through /dev/mem)
-systemctl start pepin-tof                            # tof_init: XSHUT-resets 0x31/0x32, re-addresses all three
+# nine clocks on SCL and a STOP (TWI_LCR, through /dev/mem)
+cd /opt/pepin && PYTHONPATH=/opt/pepin /opt/pepin/bin/python -m pepin.i2c_recover recover
+systemctl start pepin-tof    # tof_init: XSHUT-resets 0x31/0x32, re-addresses all three
 ```
 
-`recover` refuses while anything holds `/dev/i2c-2` open (`--force` overrides); the bridge closes
+`check` calls a line held only when it is low in every read; a live bus (the IMU at 100 Hz, three
+ToF) reads `busy`, exit 0. `recover` refuses while anything holds `/dev/i2c-2` open (`--force` overrides); the bridge closes
 it by itself once five IMU reads in a row have failed. A bus still held after both steps (SCL low,
 or 0x30 or 0x68 hung beyond clocks) needs the power cycle. The bridge's minute probe finds the IMU
 again with no restart.
