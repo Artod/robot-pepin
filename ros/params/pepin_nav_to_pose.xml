@@ -59,9 +59,7 @@
                    Under MPPI a fresh plan comes every second, as before 2026-10-06. -->
               <Fallback name="ReplanOnlyIfNeeded">
                 <ReactiveSequence>
-                  <BlackboardCheckString value_A="{selected_controller}" value_B="FollowPathShim" return_on_mismatch="FAILURE">
-                    <AlwaysSuccess/>
-                  </BlackboardCheckString>
+                  <ScriptCondition code="selected_controller == 'FollowPathShim'"/>
                   <Inverter>
                     <GlobalUpdatedGoal/>
                   </Inverter>
