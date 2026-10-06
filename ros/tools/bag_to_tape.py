@@ -14,8 +14,9 @@ What differs from a live tape, and cannot be otherwise:
 
 - the records with no stamp of their own (``cmd``, ``nav``) are dated by the bag's receive time
   instead of the recorder's ``time.time()`` — the same clock, one hop later;
-- there is no prelude: a bag starts when the goal's word does, a tape starts 15 seconds earlier
-  (``pepin.tape.RunTape``);
+- the prelude: a bag the goal's own recorder wrote starts when the goal's word does, a tape 15
+  seconds earlier (``pepin.tape.RunTape``), and a bag cut from the ring (``goal_bag ring``)
+  ``preroll_s`` earlier, its latched ``/tf_static`` stamped at its start;
 - the ``loc`` rows are composed from ``/tf`` (``map -> odom``, ``odom -> base_link``) at 5 Hz,
   the rate of the live recorder's ``/pose`` rows and the same composition.
 

@@ -20,6 +20,9 @@ oldest first while the directory holds more than ``cap_gb`` or the card has less
 free; the file being written is never touched. A card that stays under the floor with nothing
 left to delete (something else is filling it) stops the recorder until there is room again.
 
+The laptop's ring (``pepin_bringup.bag_recorder``, flag ``goal_bag ring``) is this supervisor
+with its own topics, the hidden ones, a smaller MCAP chunk and an age limit as well.
+
 Run in the board's container (robot.launch.py, ``board_bag:=true``)::
 
     python3 -m pepin.board_bag --dir /maps/board_rec
@@ -92,8 +95,16 @@ def bag_name(now: float) -> str:
     return time.strftime("%Y%m%d_%H%M%S", time.gmtime(now)) + "Z"
 
 
-def record_command(output: Path, qos_overrides: Path | None = None) -> list[str]:
-    """The ``ros2 bag record`` command line for one recording directory."""
+def record_command(
+    output: Path,
+    qos_overrides: Path | None = None,
+    topics: Sequence[str] = TOPICS,
+    *,
+    hidden: bool = False,
+    storage_config: Path | None = None,
+) -> list[str]:
+    """The ``ros2 bag record`` command line for one recording directory; ``hidden`` adds the
+    hidden topics (Nav2's action status), ``storage_config`` the MCAP writer's options file."""
     command = [
         "ros2",
         "bag",
@@ -109,9 +120,13 @@ def record_command(output: Path, qos_overrides: Path | None = None) -> list[str]
         "--polling-interval",
         str(POLL_MS),
     ]
+    if hidden:
+        command.append("--include-hidden-topics")
+    if storage_config is not None:
+        command += ["--storage-config-file", str(storage_config)]
     if qos_overrides is not None:
         command += ["--qos-profile-overrides-path", str(qos_overrides)]
-    return [*command, *TOPICS]
+    return [*command, *topics]
 
 
 @dataclass(frozen=True)
@@ -151,9 +166,13 @@ def prune(
     floor_bytes: int,
     free_bytes: Callable[[], int],
     active: Path | None = None,
+    *,
+    keep_s: float | None = None,
+    now: float | None = None,
 ) -> Pruned:
-    """Delete minute files oldest first while ``root`` holds more than ``cap_bytes`` or the card
-    has less than ``floor_bytes`` free; never the newest file of ``active`` (the recording being
+    """Delete minute files oldest first while ``root`` holds more than ``cap_bytes``, the card
+    has less than ``floor_bytes`` free or (with ``keep_s``) the file was last written more than
+    ``keep_s`` before ``now``; never the newest file of ``active`` (the recording being
     written), and a recording directory left with no minute file goes with its last one."""
     files = splits(root)
     held = sum(split.size for split in files)
@@ -164,8 +183,11 @@ def prune(
     )
     deleted, deleted_bytes = 0, 0
     free = free_bytes()
+    oldest = float("-inf")
+    if keep_s is not None:
+        oldest = (time.time() if now is None else now) - keep_s
     for split in files:
-        if held <= cap_bytes and free >= floor_bytes:
+        if held <= cap_bytes and free >= floor_bytes and split.mtime >= oldest:
             break
         if split == open_file:
             continue
@@ -220,16 +242,29 @@ class Supervisor:
         start: Callable[[Sequence[str]], Process] = spawn,
         free_bytes: Callable[[], int] | None = None,
         clock: Callable[[], float] = time.time,
+        topics: Sequence[str] = TOPICS,
+        hidden: bool = False,
+        storage_config: Path | None = None,
+        keep_s: float | None = None,
+        label: str = "board bag",
     ) -> None:
         """``start`` launches a command, ``free_bytes`` answers the card's free space and
-        ``clock`` names a new recording (all three are the real ones on the board)."""
+        ``clock`` names a new recording and dates the files (all three are the real ones on the
+        board); ``topics``, ``hidden`` and ``storage_config`` go to :func:`record_command`,
+        ``keep_s`` is :func:`prune`'s age limit and ``label`` begins every log line.
+        ``cap_bytes``, ``floor_bytes`` and ``keep_s`` are attributes a caller may change."""
         self._root = root
-        self._cap = cap_bytes
-        self._floor = floor_bytes
+        self.cap_bytes = cap_bytes
+        self.floor_bytes = floor_bytes
+        self.keep_s = keep_s
         self._qos = qos_overrides
         self._start = start
         self._free = free_bytes or (lambda: shutil.disk_usage(root).free)
         self._clock = clock
+        self._topics = tuple(topics)
+        self._hidden = hidden
+        self._storage_config = storage_config
+        self._label = label
         self._process: Process | None = None
         self._said_at = float("-inf")
         self.active: Path | None = None
@@ -243,36 +278,48 @@ class Supervisor:
     def step(self) -> None:
         """One pass: enforce the cap, then start a recorder if none runs and there is room, or
         stop the one that runs when even an emptied directory leaves the card under the floor."""
+        label = self._label
         if self._process is not None and self._process.poll() is not None:
-            logger.warning("board bag: the recorder exited with %s", self._process.returncode)
+            logger.warning("%s: the recorder exited with %s", label, self._process.returncode)
             self._process, self.active = None, None
         self._root.mkdir(parents=True, exist_ok=True)
-        pruned = prune(self._root, self._cap, self._floor, self._free, self.active)
+        now = self._clock()
+        pruned = prune(
+            self._root,
+            self.cap_bytes,
+            self.floor_bytes,
+            self._free,
+            self.active,
+            keep_s=self.keep_s,
+            now=now,
+        )
         self.last = pruned
         if pruned.deleted:
             logger.info(
-                "board bag: deleted %d oldest minute files (%.0f MB); %.2f GB held, %.1f GB free",
+                "%s: deleted %d oldest minute files (%.0f MB); %.2f GB held, %.1f GB free",
+                label,
                 pruned.deleted,
                 pruned.deleted_bytes / 1e6,
                 pruned.held_bytes / GB,
                 pruned.free_bytes / GB,
             )
-        now = self._clock()
         if now - self._said_at >= STATUS_EVERY_S:
             self._said_at = now
             logger.info(
-                "board bag: %s; %.2f GB held, %.1f GB free",
+                "%s: %s; %.2f GB held, %.1f GB free",
+                label,
                 f"recording to {self.active}" if self.recording else "not recording",
                 pruned.held_bytes / GB,
                 pruned.free_bytes / GB,
             )
-        room = pruned.free_bytes >= self._floor
+        room = pruned.free_bytes >= self.floor_bytes
         if not room and self.recording:
             logger.error(
-                "board bag: %.1f GB free, under the %.1f GB floor with nothing left to delete:"
+                "%s: %.1f GB free, under the %.1f GB floor with nothing left to delete:"
                 " recording stopped until there is room",
+                label,
                 pruned.free_bytes / GB,
-                self._floor / GB,
+                self.floor_bytes / GB,
             )
             self.stop()
         elif room and not self.recording:
@@ -281,15 +328,24 @@ class Supervisor:
     def _begin(self) -> None:
         """Start a recorder on a new directory."""
         output = self._root / bag_name(self._clock())
-        self._process = self._start(record_command(output, self._qos))
+        command = record_command(
+            output,
+            self._qos,
+            self._topics,
+            hidden=self._hidden,
+            storage_config=self._storage_config,
+        )
+        self._process = self._start(command)
         self.active = output
         logger.info(
-            "board bag: recording %d topics to %s, a file every %d s, cap %.0f GB, floor %.0f GB",
-            len(TOPICS),
+            "%s: recording %d topics to %s, a file every %d s, cap %.1f GB, floor %.1f GB%s",
+            self._label,
+            len(self._topics),
             output,
             SPLIT_S,
-            self._cap / GB,
-            self._floor / GB,
+            self.cap_bytes / GB,
+            self.floor_bytes / GB,
+            "" if self.keep_s is None else f", kept {self.keep_s / 3600:.1f} h",
         )
 
     def stop(self) -> None:
@@ -302,7 +358,7 @@ class Supervisor:
             process.wait(timeout=STOP_TIMEOUT_S)
             return
         except subprocess.TimeoutExpired:
-            logger.warning("board bag: the recorder did not close on SIGINT; terminating")
+            logger.warning("%s: the recorder did not close on SIGINT; terminating", self._label)
         process.terminate()
         try:
             process.wait(timeout=3.0)

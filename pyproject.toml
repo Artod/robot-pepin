@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "lerobot[feetech]>=0.6.0",
+    "mcap>=1.5.0",
     "numpy>=1.26",
     "rerun-sdk>=0.37.0",
 ]
