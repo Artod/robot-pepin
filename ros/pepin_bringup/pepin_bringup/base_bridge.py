@@ -65,6 +65,29 @@ FLAGS = FlagSet(
         " reports extrapolation into the past after the switch; live, the next state line",
     ),
     Flag(
+        "odom_covariance",
+        "law",
+        choices=("law", "constant"),
+        description="what /odom's twist covariance says about vx and vyaw: `law` sizes both from"
+        " the wheels' MEASURED twist while they move (pepin.wheel_noise, config/base.json"
+        " odometry_noise: over 1 s sigma_v = 0.034 |w| + 0.026 m/s, sigma_w = 0.20 |w| + 0.038"
+        " rad/s, 50 sigma^2 per 50 Hz sample) and for 2 s after their last moving sample, and"
+        " keeps 0.001 / 0.01 at rest past that; `constant` is 0.001 / 0.01 on every sample, as"
+        " before 2026-10-06",
+        why="law, because the constant was 3.7x (vx) and 2.7x (vyaw) too sure of a moving"
+        " second and its error is not constant: against the lidar truth of drives 0329-0347"
+        " (479 moving seconds, scratch/wheel_law/law2.py) the law's likelihood ratio over one"
+        " constant is 25 (vx) and 169 (vyaw), and its per-bin mean z^2 stays 0.73-1.25 / 0.80-1.19"
+        " where the best constant's runs 0.71-1.66 / 0.24-2.93; at rest the wheels' error is"
+        " under the truth's own noise, so rest keeps the constant (after a 2 s hold: without it"
+        " the seconds ending in a stop scored mean z^2 5.9, with it 1.3). Not yet replayed"
+        " through the EKF: while moving, the VIO's twist now outweighs the wheels' vx ~40:1"
+        " instead of ~1:1",
+        on_when="always, once a replay or a drive shows the EKF's distance no worse with it",
+        off_when="the moment the EKF's speed follows a wrong VIO (a reset, a dark scene) more"
+        " than it did, or Nav2's speed tracking gets worse; live, the next state line (50 Hz)",
+    ),
+    Flag(
         "head_imu_publish",
         True,
         description="the head IMU's samples (head_server's TCP 3340 stream, under the launch's"

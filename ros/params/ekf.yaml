@@ -43,6 +43,10 @@ ekf_filter_node:
     # the gyro exists to correct — the heading comes out right and the path is still drawn along
     # the wrong one (found 2026-09-08). Speed plus gyro yaw rate is honest dead reckoning.
     odom0: odom
+    # THE TWIST COVARIANCE FOLLOWS THE MOTION since 2026-10-06 (base_bridge `odom_covariance` law,
+    # pepin.wheel_noise): while the wheels move and 2 s after, vx 50 (0.034 |w| + 0.026)^2 and
+    # vyaw 50 (0.20 |w| + 0.038)^2 per 50 Hz sample, fit against the lidar truth of drives
+    # 0329-0347; the 0.001 / 0.01 named below are what it keeps at rest and what `constant` restores.
     # vx from the wheels, and vy too: a differential-drive cart cannot move sideways, so the
     # wheels' vy = 0 is a real measurement. Without it vy was unobservable — nothing pulled it
     # back — and one bad VO sample on 2026-09-14 flew odom -> base_link 43 km at 60 m/s.
