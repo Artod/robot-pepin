@@ -16,8 +16,10 @@ from pathlib import Path
 
 import pytest
 
+from pepin.base_link import STATE_HZ
 from pepin.camera import quaternion_from_rpy
 from pepin.neck import NeckConfig, NeckPivot, bridge_parameters, camera_pose, joint_angles
+from pepin.wheel_noise import WheelNoiseLaw
 
 REPO = Path(__file__).resolve().parents[2]
 PACKAGE = REPO / "ros/pepin_base_cpp"
@@ -27,6 +29,7 @@ CONTRACTS = (
     "head_imu_contract",
     "mast_contract",
     "imu_probe_contract",
+    "wheel_noise_contract",
 )
 
 
@@ -267,3 +270,45 @@ def test_the_mast_filter_in_c_plus_plus_answers_what_pepin_mast_answers(tmp_path
         want = [*out.theta, *out.omega]
         for g, w in zip(got, want, strict=True):
             assert (math.isnan(g) and math.isnan(w)) or g == pytest.approx(w, abs=1e-9), command
+
+
+@pytest.mark.slow
+def test_the_wheel_noise_law_in_c_plus_plus_answers_what_pepin_wheel_noise_answers(
+    tmp_path: Path,
+) -> None:
+    """/odom's twist covariance comes from wheel_noise.hpp on the board and the law was fit and is
+    documented in pepin.wheel_noise: the repo's config/base.json law, at the launch's rate, gives
+    the same vx and vyaw entries for rest, creep, straights, pivots and arcs both ways."""
+    binary = _compile("wheel_noise_contract", tmp_path)
+    law = WheelNoiseLaw.from_json(REPO / "config/base.json")
+    params = law.bridge_parameters(STATE_HZ)
+    head = " ".join(
+        repr(params[f"odom_law_{k}"])
+        for k in (
+            "v_per_yaw_rate",
+            "v_floor_m_s",
+            "yaw_per_yaw_rate",
+            "yaw_floor_rad_s",
+            "moving_m_s",
+            "moving_rad_s",
+            "rate_hz",
+        )
+    )
+    twists = [
+        (v, w) for v in (0.0, 0.0024, -0.03, 0.12, -0.3) for w in (0.0, 0.0088, -0.052, 0.4, -1.0)
+    ]
+    ran = subprocess.run(
+        [str(binary)],
+        input=head + "\n" + "\n".join(f"{v!r} {w!r}" for v, w in twists) + "\n",
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    *rows, verdict = ran.stdout.strip().splitlines()
+    assert verdict == "the contract holds" and len(rows) == len(twists)
+    for (v, w), row in zip(twists, rows, strict=True):
+        var_v, var_w, moving = row.split()
+        want = law.sample_variances(v, w, STATE_HZ) or (0.001, 0.01)
+        assert int(moving) == int(law.moving(v, w)), (v, w)
+        assert (float(var_v), float(var_w)) == pytest.approx(want, rel=1e-12), (v, w)

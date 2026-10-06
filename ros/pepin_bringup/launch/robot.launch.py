@@ -64,6 +64,7 @@ from pepin.head_imu import HeadImuConfig, camera_from_imu
 from pepin.mounts import Mounts
 from pepin.neck import JOINT_NAMES, NeckConfig, bridge_parameters
 from pepin.sensor_timing import imu_timing
+from pepin.wheel_noise import WheelNoiseLaw
 
 # Our own Python nodes come back by themselves after this pause (a code change is one kicked
 # process: ros/board.sh kick <node>).
@@ -200,6 +201,7 @@ def base_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "max_linear_m_s": BASE_MAX_LINEAR_M_S,
                     "max_angular_rad_s": BASE_MAX_ANGULAR_RAD_S,
                     **imu_parameters(),
+                    **wheel_noise_parameters(),
                     **neck_parameters(),
                     **head_imu_parameters(head_on),
                 }
@@ -239,6 +241,17 @@ def imu_parameters() -> dict[str, float]:
         return imu_timing().bridge_parameters()
     except (OSError, KeyError, ValueError) as exc:
         print(f"[robot.launch] no IMU timing ({exc}): /imu/data_raw is stamped at the read")
+        return {}
+
+
+def wheel_noise_parameters() -> dict[str, float]:
+    """The wheels' noise law for /odom's twist covariance from config/base.json's odometry_noise
+    block (pepin.wheel_noise) at the state lines' rate, read anew at every (re)spawn; without the
+    file the bridge keeps its own defaults (the same fit) and this says so."""
+    try:
+        return WheelNoiseLaw.from_json(config_file("base.json")).bridge_parameters(STATE_HZ)
+    except (OSError, KeyError, ValueError) as exc:
+        print(f"[robot.launch] no wheel noise law ({exc}): the bridge's defaults")
         return {}
 
 

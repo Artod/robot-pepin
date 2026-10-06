@@ -15,6 +15,7 @@ that node is in git history before 2026-10-02. Its live switches are described i
 - `include/pepin_base_cpp/twist_from_pose.hpp` — the twist the wheels measured, off two poses.
 - `include/pepin_base_cpp/gyro_bias.hpp` — the gyro's zero, and the wheels' word on rest.
 - `include/pepin_base_cpp/zupt.hpp` — when the cart is certainly still, for the EKF's /zupt.
+- `include/pepin_base_cpp/wheel_noise.hpp` — /odom's twist covariance from the measured motion.
 - `include/pepin_base_cpp/neck.hpp` — the neck's ticks as joint angles and the camera's pose.
 - `src/base_bridge.cpp` — the node: /odom, TF, the /cmd_vel sink, the 5 Hz resend, the neck.
 
@@ -164,6 +165,29 @@ ros2 param get /base_bridge zupt_rate_hz              # what is in force
 Board cost: one Odometry message per tick while parked (10 Hz by default, 100 at most), a timer
 at that rate and two atomic stores per IMU sample; no new process, no new thread.
 
+## Wheel odometry covariance
+
+`odom_covariance` "law" (the default; live, read per line) puts a law of the MEASURED wheel twist
+on /odom's vx and vyaw variances while the wheels move (`|v|` >= 3 cm/s or `|w|` >= 3 deg/s):
+over one second sigma_v = 0.034 `|w|` + 0.026 m/s and sigma_w = 0.20 `|w|` + 0.038 rad/s, and each
+50 Hz sample carries 50 sigma^2 (`wheel_noise.hpp`, the twin of `pepin.wheel_noise`). At rest, and
+under "constant", the message carries 0.001 / 0.01 as before. The coefficients come from
+config/base.json's `odometry_noise` block through robot.launch.py as the read-only
+`odom_law_*` parameters (the block's note has the fit, drives 0329-0347 against the lidar truth).
+
+    ros2 param set /base_bridge odom_covariance constant   # the old covariance, next line
+
+| motion (measured) | vx var | vyaw var |
+|---|---|---|
+| rest | 0.001 | 0.01 |
+| straight 0.3 m/s | 0.0338 | 0.0722 |
+| pivot 1 rad/s | 0.180 | 2.83 |
+
+Board cost, AN ESTIMATE: per state line one string parameter read (as `odom_stamp` already does),
+a comparison, four multiply-adds and a 36-double copy, ~1-2 us at 50 Hz: well under 0.1 % of one
+A53 core, no allocation, no thread; WiFi loss changes nothing (the bridge and the base server are
+both on the board).
+
 ## Build and switch
 
 `ros/Dockerfile` apt-installs `nlohmann-json3-dev` and colcon-builds this package next to
@@ -185,6 +209,8 @@ skipped without a `c++`).
 - `test/neck_contract.cpp` — the neck's rate cap replayed as a table, then the model fed from
   stdin: `tests/unit/test_base_cpp_contracts.py` writes `config/neck.json` (and variants) in and
   holds every answer to `pepin.neck`'s within 1e-9.
+- `test/wheel_noise_contract.cpp` — the law's defaults on rest, a straight and a pivot, then
+  laws and twists from stdin held to `pepin.wheel_noise` with the repo's config/base.json.
 - `test/protocol_samples.json` — wire lines recorded from the Python bridge this one was ported
   from: the twists and stops `protocol.hpp` must encode byte for byte, and the state lines it must
   parse.

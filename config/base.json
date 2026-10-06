@@ -13,6 +13,15 @@
     "direction": 1
   },
   "track_width_note": "the EFFECTIVE track for yaw, not the ruler's: the wheels' contact centres are 0.515 m apart (ruler, 2026-10-06), but on 19 lidar-truth drives (0329-0347) the cart turned 0.929 [0.892, 0.960] of what (dR - dL) / 0.505 said (|dtheta|-weighted median of 357 turning seconds, drive-bootstrap CI; the base gyro agrees with the lidar to 0.997), so T = 0.505 / 0.929 = 0.544 [0.526, 0.566] m: pivots 0.907, inner wheel stopped 0.932, wide arcs 0.963 (slip and caster scrub grow as the turn tightens). Straight-line distance 0.980 [0.946, 1.013] and the two wheels' difference (-0.1 [-2.4, +2.0] deg per metre) are inside their CIs: the wheel diameter is unchanged. Re-integrated on the same drives, the heading error over 5 s windows went p50 4.4 -> 3.5 deg, drive-end p50 24.7 -> 16.6 deg. The same number shapes the commands (pepin.kinematics, pepin.base.wheel_ceiling): a commanded yaw rate now asks the wheels for ~8 % more differential speed (expected to land the turn, not yet driven), and the ceiling slows a fast arc a little sooner. The stalls (one wheel spinning, the cart still: 0337, 0341) are not in it: they are slip, for the gyro and the twist covariance to answer.",
+  "odometry_noise": {
+    "v_per_yaw_rate": 0.034,
+    "v_floor_m_s": 0.026,
+    "yaw_per_yaw_rate": 0.20,
+    "yaw_floor_rad_s": 0.038,
+    "moving_m_s": 0.03,
+    "moving_rad_s": 0.052,
+    "note": "the wheels' twist error as a law of the measured motion (pepin.wheel_noise; the base bridge's /odom twist covariance under odom_covariance law): while the wheels move (|v| >= moving_m_s or |w| >= moving_rad_s) the 1 s sigma of their mean vx is v_per_yaw_rate |w| + v_floor_m_s (m/s) and of their mean vyaw yaw_per_yaw_rate |w| + yaw_floor_rad_s (rad/s), and each 50 Hz sample carries 50 sigma^2; at rest the constant 0.001 / 0.01. ML fit on 479 moving seconds of drives 0329-0347 against the lidar truth, truth lag-corrected per drive, track 0.544: b 0.034 [0.011, 0.058], c 0.026 [0.018, 0.035], d 0.20 [0.07, 0.29], f 0.038 [0.025, 0.055] (drive-bootstrap CIs); the |v| terms were not significant (a 0.014 [0, 0.089], LR 0.6; e 0.000 [0, 0.12], LR 0.0) and are left out. Likelihood ratio against one constant: 25 (vx), 169 (vyaw); per-bin mean z^2 0.73-1.25 / 0.80-1.19 under the law against 0.71-1.66 / 0.24-2.93 under the constant. Rest seconds: the wheels' error is under the truth's own noise (0.73 vs 0.89 cm/s, 0.48 vs 0.43 deg/s)."
+  },
   "max_speed_m_s": 0.45,
   "max_yaw_rate_rad_s": 1.0,
   "max_wheel_speed_m_s": 0.30,
