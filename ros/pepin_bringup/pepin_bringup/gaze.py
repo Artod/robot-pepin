@@ -38,13 +38,16 @@ PATH GAZE and REVERSE GAZE (behind ``path_gaze`` and ``reverse_gaze``, :mod:`pep
 run only with a base server that moves the neck while driving: with one that does not, a head
 turned during a pause would drive on turned. Path gaze FOLLOWS in a zone
 (:class:`pepin.path_gaze.PathFollower`: ``path_deadband_deg``, ``path_hyst_s``,
-``path_cooldown_s``, ``path_tail_s``); while it has no aim — reversing before a reverse look, no
-plan point ahead — its look is renewed where it is for up to ``path_hold_s``, so the head does
-not lapse home and back; the next look replaces it or the drive's end lets it go. With
-``glance_dwell_s`` above 0 the reverse look and the stall look are atomic GLANCES
-(:class:`pepin.gaze.Look`'s ``hold_s``): the reverse look waits for ``reverse_frames`` clean
-frames or ``glance_dwell_s`` once settled, the stall look for ``frames`` or its TTL, and only a
-better band takes the head before. After a drive the head goes home at ``return_deg_s``.
+``path_cooldown_s``, and no new saccade in the plan's last ``path_tail_m`` or ``path_tail_s``);
+while it has no aim — reversing before a reverse look, no plan point ahead — its look is renewed
+where it is for up to ``path_hold_s``, so the head does not lapse home and back; the next look
+replaces it or the drive's end lets it go. With ``glance_dwell_s`` above 0 the reverse look and
+the stall look are atomic GLANCES (:class:`pepin.gaze.Look`'s ``hold_s``): the reverse look waits
+for ``reverse_frames`` clean frames or ``glance_dwell_s`` once settled, the stall look for
+``frames`` or its TTL, and only a better band takes the head before; the reverse glance takes
+the head from the path look at once, even mid-swing (``preempt``: drive 0330's path look,
+swinging 210 deg as the cart backed again, held the head against it until its 0.5 s TTL ran
+out). After a drive the head goes home at ``return_deg_s``.
 
 A DRIVE'S START (a new goal on either navigator) drops every request but the operator's, so the
 head goes home (or to path gaze) before the wheels turn; a drive's end drops the navigation
@@ -395,6 +398,7 @@ class Gaze(Node):
             hyst_s=k("path_hyst_s"),
             cooldown_s=k("path_cooldown_s"),
             tail_s=k("path_tail_s"),
+            tail_m=k("path_tail_m"),
             hold_s=k("path_hold_s"),
         )
 
@@ -556,7 +560,9 @@ class Gaze(Node):
 
     def _glance(self, source: str, aim: Aim, now: float) -> None:
         """A driving look that, with ``glance_dwell_s`` above 0, is an atomic glance of
-        ``reverse_frames`` frames; one under way is only renewed, never re-aimed."""
+        ``reverse_frames`` frames that takes the head from the path look at once, even mid-swing
+        (a path look holds the head against its band until it has arrived, and path gaze has no
+        aim while the cart reverses); one under way is only renewed, never re-aimed."""
         if self._arbiter.glancing(source):
             self._arbiter.renew(source, now)
             return
@@ -567,7 +573,8 @@ class Gaze(Node):
         ttl = self._knob("ttl_driving_s")
         frames = int(self._switches["reverse_frames"])
         hold = self._knob("glance_dwell_s")
-        self._arbiter.submit(Look(source, (aim,), DRIVING, frames, ttl, ttl, hold_s=hold), now)
+        look = Look(source, (aim,), DRIVING, frames, ttl, ttl, preempt=hold > 0.0, hold_s=hold)
+        self._arbiter.submit(look, now)
 
     def _drive_gaze(self, now: float) -> None:
         """Path gaze or reverse gaze, renewed every ``path_period_s`` while a drive runs."""
@@ -591,9 +598,11 @@ class Gaze(Node):
         if target is None:
             self._keep_path(now)  # a mode change, or nothing ahead: the aim stays
             return
-        wanted, end_in = target
+        wanted, left, end_in = target
         fresh = not any(r.source == PATH_SOURCE for r in self._arbiter.pending())
-        aim = self._follow.update(wanted, now, self._path_law(), end_in_s=end_in, fresh=fresh)
+        aim = self._follow.update(
+            wanted, now, self._path_law(), end_in_s=end_in, left_m=left, fresh=fresh
+        )
         if aim is None:
             return
         self._path_quiet_since = None
@@ -610,9 +619,9 @@ class Gaze(Node):
         if now - self._path_quiet_since < hold:
             self._arbiter.renew(PATH_SOURCE, now)
 
-    def _path_target(self, speed: float) -> tuple[Aim, float] | None:
-        """Path gaze's aim from the newest plan and the cart's pose in its frame, and the
-        seconds to the plan's end at this speed."""
+    def _path_target(self, speed: float) -> tuple[Aim, float, float] | None:
+        """Path gaze's aim from the newest plan and the cart's pose in its frame, the metres of
+        plan left and the seconds to its end at this speed."""
         with self._inputs_lock:
             plan = self._inputs.plan
         if plan is None or len(plan.poses) < 2:
@@ -634,7 +643,8 @@ class Gaze(Node):
         )
         if aim is None:
             return None
-        return aim, time_to_end(remaining_m(path, (pose[0], pose[1])), speed)
+        left = remaining_m(path, (pose[0], pose[1]))
+        return aim, left, time_to_end(left, speed)
 
     def _tight_rear(self, law: ReverseLaw) -> bool:
         with self._inputs_lock:

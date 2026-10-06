@@ -12,11 +12,14 @@ does not creep.
 
 FOLLOWING (:class:`PathFollower`): the held aim stays while the plan's aim is within the zone
 (``deadband_deg``) of it; one that leaves the zone moves the head only after it has stayed out
-``hyst_s``, ``cooldown_s`` after the previous move at the soonest, and never in the drive's last
-``tail_s`` (:func:`time_to_end`). Every move costs the visual odometry samples (drive 306: a
->= 45 deg swing at ~300 deg/s lost OpenVINS 4.7-6.5 of them) and writes no frame while it
-lasts. A path look that does not hold the head (another look had it) is aimed at once. All
-four at 0 are :func:`settle` exactly.
+``hyst_s``, ``cooldown_s`` after the previous move at the soonest, and never in the drive's
+TAIL: the plan's last ``tail_m`` (:func:`remaining_m`), or its last ``tail_s`` at the current
+speed (:func:`time_to_end`). The distance is what binds while parking: the controller slows
+toward the goal, so the time at the current speed grows as the end nears (drive 0330: 0.16 m
+left at 0.06 m/s read 2.5 s, and a 40 deg saccade went out 0.5 s before the end). Every move
+costs the visual odometry samples (drive 306: a >= 45 deg swing at ~300 deg/s lost OpenVINS
+4.7-6.5 of them) and writes no frame while it lasts. A path look that does not hold the head
+(another look had it) is aimed at once. All five at 0 are :func:`settle` exactly.
 
 REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that has lasted
 ``min_s``, or any reverse with lethal cells within ``rear_m`` behind the hull
@@ -55,6 +58,7 @@ class PathGazeLaw:
     hyst_s: float = 0.3
     cooldown_s: float = 2.0
     tail_s: float = 0.5
+    tail_m: float = 0.35
     hold_s: float = 60.0
 
 
@@ -139,13 +143,17 @@ class PathFollower:
         law: PathGazeLaw,
         *,
         end_in_s: float = math.inf,
+        left_m: float = math.inf,
         fresh: bool = False,
     ) -> Aim | None:
-        """The aim to hold now for the plan's ``wanted``; ``None`` in the drive's tail when the
+        """The aim to hold now for the plan's ``wanted``, ``left_m`` of plan and ``end_in_s``
+        seconds at the current speed from the plan's end; ``None`` in the drive's tail when the
         path look holds nothing. ``fresh``: the path look does not hold the head, so a move
         waits for neither the hysteresis nor the cooldown (and in the tail is not made)."""
         current = self.aim
-        tail = law.tail_s > 0.0 and end_in_s <= law.tail_s
+        tail = (law.tail_s > 0.0 and end_in_s <= law.tail_s) or (
+            law.tail_m > 0.0 and left_m <= law.tail_m
+        )
         if tail and fresh:
             return None  # a head elsewhere is not brought back in the last seconds either
         if current is not None and current.off(wanted) <= math.radians(law.deadband_deg):

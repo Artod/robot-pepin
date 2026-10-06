@@ -137,6 +137,8 @@
       "note": "path gaze moves the head at most once in this many seconds; a path look that lost the head to another look is aimed at once (0: no cooldown, as before 2026-10-05)"},
     "path_tail_s": {"default": 0.5, "range": [0.0, 5.0],
       "note": "no new path saccade once the plan's remaining arc at the current speed is this many seconds or less: the drive's end is reached with the head still (0: off, as before 2026-10-05)"},
+    "path_tail_m": {"default": 0.35, "range": [0.0, 2.0],
+      "note": "...nor once the plan's remaining arc is this short, whatever the speed: parking slows the cart, so the seconds alone read the end as far off (drive 0330: 0.16 m at 0.06 m/s read 2.5 s, a 40 deg saccade 0.5 s before the end) (0: off, as before 2026-10-06)"},
     "path_hold_s": {"default": 60.0, "range": [0.0, 300.0],
       "note": "while path gaze has no aim (reversing before a reverse look, no plan point ahead) its look is renewed at its aim for up to this long, instead of lapsing home after ttl_driving_s (0: lapses, as before 2026-10-05)"},
     "reverse_pan_deg": {"default": 150.0, "range": [60.0, 156.0],
@@ -150,7 +152,7 @@
     "reverse_frames": {"default": 3, "range": [0, 20],
       "note": "the clean (gate-passed, fused) frames the reverse look waits for once settled before the path look may take the head (0: answered on arrival, as before 2026-10-05)"},
     "glance_dwell_s": {"default": 0.6, "range": [0.0, 3.0],
-      "note": "above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s (0: no glance, as before 2026-10-05)"},
+      "note": "above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s; the reverse glance takes the head from the path look at once, even mid-swing (0: no glance, the reverse look waits for a path look to arrive, as before 2026-10-05)"},
     "return_deg_s": {"default": 45.0, "range": [0.0, 300.0],
       "note": "after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05)"}
   },

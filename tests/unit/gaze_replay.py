@@ -4,28 +4,45 @@ to every neck_target at 300 deg/s answers through /neck/state, depth_fusion fuse
 0.1 s. What comes out is every neck write the arbiter made, so two builds or two knob sets can
 be compared write for write.
 
-Only names the gaze node has had since 2026-10-05 are used here, so the same replay runs on an
-older checkout (scratch/gaze_follow/baseline_capture.py).
+:func:`replay` drives a fixed plan with a list of twists (only names the gaze node has had since
+2026-10-05 are used, so it runs on an older checkout: scratch/gaze_follow/baseline_capture.py);
+:func:`replay_tape` replays a whole taped drive (:class:`Tape`): its twists, plans, poses, local
+costmaps and stall looks, each at its own time.
 """
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
+import numpy as np
 import ros_stubs
 
 ros_stubs.install()
 
 from pepin_bringup import gaze as gaze_node  # noqa: E402
-from ros_stubs import GoalStatus, GoalStatusArray, Header, Path_, PoseStamped, Time  # noqa: E402
+from ros_stubs import (  # noqa: E402
+    GoalStatus,
+    GoalStatusArray,
+    Header,
+    OccupancyGrid,
+    Path_,
+    PoseStamped,
+    Time,
+)
+
+from pepin.gaze import NAVIGATION, Aim, Look  # noqa: E402
+from pepin.tsdf import RigidPose  # noqa: E402
 
 T0 = 1_000_000.0  # the replay's clock at the drive's start
 TICK_S = 0.05  # the node's step period
 HEAD_DEG_S = 300.0  # the neck's measured top speed (config/neck.json motion)
 FRAME_EVERY = 2  # a fused frame every second tick: 10 Hz
 NAV = "navigate_to_pose"
+FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 
 # Drive 306 (2026-10-05 19:36:35.1-41.7Z, the tape's cmd rows at 10 Hz, t+4.5 to t+11.1 s): the
 # end of the reverse out of home, forward 0.9 s, a 0.6 s reverse, forward 0.3 s, a 1.1 s reverse,
@@ -58,6 +75,7 @@ class Write:
     pan_deg: float
     tilt_deg: float
     speed_deg_s: float | None
+    source: str = ""  # the request that made it (replay_tape only)
 
     def home(self, home_tilt_deg: float) -> bool:
         """Whether it sends the head home."""
@@ -153,3 +171,167 @@ def replay(
 def _ticks() -> dict[str, int]:
     """A state line's neck encoders: their presence picks the neck_target driver."""
     return {"pan_ticks": 2048, "tilt_ticks": 2311}
+
+
+@dataclass(frozen=True)
+class Tape:
+    """A drive's inputs to the gaze node, from its tape (tests/fixtures/drive_<run>_gaze.json):
+    seconds from the goal's acceptance; ``writes`` are the real head's, for comparison."""
+
+    end_s: float
+    first_plan: list[list[float]]
+    cmd: list[list[float]]
+    plan: list[list[Any]]
+    map_pose: list[list[float]]
+    odom_pose: list[list[float]]
+    costmap: list[list[Any]]
+    stall: list[list[float]]
+    writes: list[list[Any]]
+
+    @classmethod
+    def load(cls, run: str) -> Tape:
+        """``tests/fixtures/drive_<run>_gaze.json``."""
+        data = json.loads((FIXTURES / f"drive_{run}_gaze.json").read_text())
+        return cls(**{k: v for k, v in data.items() if not k.startswith("_")})
+
+
+class TapeTf:
+    """TF as the tape had it at the replay's clock: map and odom -> base_link, the newest row at
+    or before that time (the first one before it)."""
+
+    def __init__(self, tape: Tape, clock: list[float]) -> None:
+        self._rows = {"map": np.array(tape.map_pose), "odom": np.array(tape.odom_pose)}
+        self._clock = clock
+
+    def pose(
+        self, target: str, source: str, stamp: Any = None, timeout_s: float = 0.0
+    ) -> RigidPose | None:
+        """``target <- source`` now; None for any pair but map or odom <- base_link."""
+        rows = self._rows.get(target)
+        if rows is None or source != "base_link":
+            return None
+        i = max(int(np.searchsorted(rows[:, 0], self._clock[0] - T0, side="right")) - 1, 0)
+        _t, x, y, yaw = rows[i]
+        c, s = math.cos(yaw), math.sin(yaw)
+        rotation = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+        return RigidPose(rotation, np.array([x, y, 0.0]))
+
+    def close(self) -> None:
+        """Nothing to close."""
+
+
+def grid(origin_x: float, origin_y: float, runs: list[int]) -> Any:
+    """A taped local costmap: 60 x 60 cells of 0.05 m in odom, lethal along ``runs`` (start,
+    length pairs of the flat index), free elsewhere."""
+    msg = OccupancyGrid()
+    msg.header.frame_id = "odom"
+    msg.info.resolution = 0.05
+    msg.info.width = msg.info.height = 60
+    msg.info.origin.position.x, msg.info.origin.position.y = origin_x, origin_y
+    data = np.zeros(60 * 60, dtype=int)
+    for start, length in zip(runs[::2], runs[1::2], strict=True):
+        data[start : start + length] = 100
+    msg.data = list(data)
+    return msg
+
+
+def replay_tape(
+    node: Any,
+    tape: Tape,
+    *,
+    knobs: dict[str, Any] | None = None,
+    after_s: float = 3.0,
+    frame_every: int = FRAME_EVERY,
+    head_deg_s: float = HEAD_DEG_S,
+) -> list[Write]:
+    """Drive the node through a taped drive with path gaze, reverse gaze and the stall look on,
+    ``knobs`` set live: every input at its own time (a stall look submitted as the node's
+    ``_stall`` submits it, without the columns), a frame every ``frame_every`` ticks, a head of
+    ``head_deg_s``, the drive's end at ``end_s``, then ``after_s`` at rest; every write it made,
+    with the source that made it."""
+    clock = [T0]
+    node._now = lambda: clock[0]
+    node._tf = TapeTf(tape, clock)
+    flags = {"path_gaze": True, "reverse_gaze": True, "stall_look": True}
+    for name, value in {**flags, **(knobs or {})}.items():
+        node._switches.set(name, value)
+    head = [0.0, math.degrees(node._arbiter.home.tilt_rad)]
+    sent = node._link.sent
+    writes: list[Write] = []
+    events: list[tuple[float, str, Any]] = sorted(
+        [(row[0], "a plan", row[1]) for row in tape.plan]
+        + [(row[0], "b grid", row) for row in tape.costmap]
+        + [(row[0], "c stall", row) for row in tape.stall]
+        + [(tape.end_s, "d end", None)],
+        key=lambda event: (event[0], event[1]),
+    )
+    cmd = np.array(tape.cmd)
+    node._on_plan(plan(tuple((x, y) for x, y in tape.first_plan)))
+    node._link.on_message({"type": "state", "moving": False, "v": 0.0, "w": 0.0, **_ticks()})
+    node._on_nav_status(NAV, goals(9))
+    driving = True
+    for k in range(round((tape.end_s + after_s) / TICK_S)):
+        t = clock[0] - T0
+        while events and events[0][0] <= t:
+            _at, what, row = events.pop(0)
+            if what == "a plan":
+                node._on_plan(plan(tuple((x, y) for x, y in row)))
+            elif what == "b grid":
+                node._on_costmap(grid(row[1], row[2], row[3]))
+            elif what == "c stall":
+                node._arbiter.submit(_stall_look(node, Aim(row[1], row[2])), clock[0])
+            else:
+                node._on_nav_status(NAV, goals())  # the drive's end
+                driving = False
+        i = int(np.searchsorted(cmd[:, 0], t, side="right")) - 1
+        v, w = (float(cmd[i, 1]), float(cmd[i, 2])) if driving and i >= 0 else (0.0, 0.0)
+        node._link.on_message({"type": "state", "moving": driving, "v": v, "w": w, **_ticks()})
+        before = node._arbiter.counts["writes"]
+        node._step()
+        if node._arbiter.counts["writes"] > before:
+            last = sent[-1]
+            writes.append(
+                Write(
+                    round(t, 2),
+                    round(math.degrees(last["pan_rad"]), 1),
+                    round(math.degrees(last["tilt_rad"]), 1),
+                    last.get("speed_deg_s"),
+                    node._arbiter.state(clock[0]).source,
+                )
+            )
+        _follow(head, sent, head_deg_s)
+        clock[0] += TICK_S
+        joints = gaze_node.JointState()
+        joints.header.stamp = stamp(clock[0])
+        joints.name = ["neck_pan", "head_tilt"]
+        joints.position = [math.radians(head[0]), math.radians(head[1])]
+        node._on_neck(joints)
+        if k % frame_every == 0:
+            node._on_frame(Header(stamp=stamp(clock[0])))
+    return writes
+
+
+def _stall_look(node: Any, aim: Aim) -> Look:
+    """The stall look as the node's ``_stall`` asks it, at a taped aim."""
+    ttl = float(node._knob("ttl_navigation_s"))
+    return Look(
+        gaze_node.STALL_SOURCE,
+        (aim,),
+        NAVIGATION,
+        int(node._switches["frames"]),
+        0.0,
+        ttl,
+        kind="point",
+        hold_s=ttl if node._knob("glance_dwell_s") > 0.0 else 0.0,
+    )
+
+
+def _follow(head: list[float], sent: list[dict[str, Any]], top_deg_s: float) -> None:
+    """One tick of the head toward the newest neck_target, at its speed or ``top_deg_s``."""
+    targets = [m for m in sent if m.get("cmd") == "neck_target"]
+    if not targets:
+        return
+    goal = (math.degrees(targets[-1]["pan_rad"]), math.degrees(targets[-1]["tilt_rad"]))
+    step = (targets[-1].get("speed_deg_s") or top_deg_s) * TICK_S
+    for axis in (0, 1):
+        head[axis] += max(-step, min(step, goal[axis] - head[axis]))

@@ -19,7 +19,7 @@ import ros_stubs
 
 ros_stubs.install()
 
-from gaze_replay import Write, replay  # noqa: E402
+from gaze_replay import T0, Tape, Write, replay, replay_tape  # noqa: E402
 from pepin_bringup import gaze as gaze_node  # noqa: E402
 from pepin_bringup.gaze import Gaze  # noqa: E402
 from pepin_bringup.msgs import cloud_from_fields  # noqa: E402
@@ -90,14 +90,20 @@ class FaceSink:
         self.said.append(("close",))
 
 
-@pytest.fixture
-def node(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gaze]:
+def build(monkeypatch: pytest.MonkeyPatch) -> Gaze:
+    """A gaze node on a fake link, a fake face and a TF with every frame on top of the other."""
     monkeypatch.setattr(gaze_node, "JsonLineLink", FakeLink)
     face = FaceSink()
     monkeypatch.setattr(gaze_node, "face_client", lambda host: face)  # never the board's head
     with ros_stubs.parameters(http_port=0):
         built = Gaze()
     built._tf = FakeTf()  # type: ignore[assignment]
+    return built
+
+
+@pytest.fixture
+def node(monkeypatch: pytest.MonkeyPatch) -> Iterator[Gaze]:
+    built = build(monkeypatch)
     yield built
     built.close()
 
@@ -537,3 +543,70 @@ def test_no_return_look_when_the_head_is_home_or_the_knob_is_off(node: Gaze) -> 
     node._switches.set("return_deg_s", 0.0)
     node._return_home(0.0)
     assert node._arbiter.pending() == []
+
+
+# ---- drive 0330 replayed (gaze_replay.replay_tape, tests/fixtures/drive_0330_gaze.json) ----------
+# At the live drive's frame rate (3.3-6.2 fused fps while driving: a frame every 4th tick, 5 Hz) and
+# head speed (-60 -> +150 deg in 0.98-1.03 s, latency included: 210 deg/s). On the tree before the
+# path_tail_m knob and the preempting reverse glance (scratch/gaze_night/old) this replay makes the
+# live drive's 18 writes: the path look -60/48 expired after 0.80 s (live 0.70 s) and the tail's
+# saccade at +40.8 s (live +41.5 s).
+TAPE_0330 = Tape.load("0330")
+LIVE_0330: dict[str, Any] = {"frame_every": 4, "head_deg_s": 210.0}
+FOLLOW_0330 = [
+    (0.0, "nav.path", -60.0),  # the tape's first plan (live: -14/66 from the one before it)
+    (0.4, "nav.stall", -3.8),
+    (1.5, "nav.path", -60.0),
+    (3.6, "nav.stall", -4.3),
+    (4.7, "nav.path", -60.0),
+    (6.6, "nav.reverse", 150.0),
+    (9.2, "nav.path", -60.0),
+    (11.4, "nav.reverse", 150.0),
+    (13.1, "nav.path", -60.0),  # the cart stood 1.4 s between two backups
+    (13.6, "nav.reverse", 150.0),  # ...and backed again: the glance takes the swinging head
+    (14.8, "nav.path", -31.2),
+    (17.6, "nav.path", -53.5),
+    (26.2, "nav.reverse", 150.0),
+    (27.9, "nav.path", -53.5),
+    (31.2, "nav.path", -21.4),
+    (37.2, "nav.path", 10.6),
+    (42.0, "nav.return", 0.0),  # no saccade in the last metres: held to the end, then home
+]
+
+
+def short(writes: list[Write]) -> list[tuple[float, str, float]]:
+    return [(w.t, w.source, w.pan_deg) for w in writes]
+
+
+@pytest.mark.slow
+def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
+    assert short(writes) == FOLLOW_0330
+    path = [b for b in node._looks.looks if b.source == "nav.path"]
+    assert path[-1].until - T0 == pytest.approx(TAPE_0330.end_s)  # held to the drive's end
+    drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
+    assert drive[0].startswith("gaze: the drive's head: 17 writes,")
+    before = build(monkeypatch)  # the metres off: the seconds alone, as before
+    old = replay_tape(before, TAPE_0330, knobs={"path_tail_m": 0.0}, **LIVE_0330)
+    before.close()
+    assert [w for w in old if w.t < 40.0] == [w for w in writes if w.t < 40.0]  # nothing earlier
+    assert [(w.t, w.source, w.pan_deg, w.tilt_deg) for w in old if 40.0 <= w.t < 42.0] == [
+        (40.8, "nav.path", -23.1, 65.6)  # 0.10 m of plan left at 0.15 m/s and slowing
+    ]
+
+
+@pytest.mark.slow
+def test_drive_0330_a_swinging_path_look_is_replaced_by_the_reverse_look_not_expired(
+    node: Gaze,
+) -> None:
+    replay_tape(node, TAPE_0330, **LIVE_0330)
+    looks = node._looks.looks
+    assert [b.text() for b in looks if b.ended == "expired"] == []
+    swung = next(b for b in looks if b.source == "nav.path" and abs(b.since - T0 - 13.1) < 1e-6)
+    assert (round(swung.until - T0, 2), swung.ended) == (13.6, "preempted")
+    taker = next(b for b in looks if abs(b.since - swung.until) < 1e-6)
+    assert taker.source == "nav.reverse" and taker.frames >= 2
+    # Every path look held the head until another look took it or the drive ended.
+    assert {b.ended for b in looks if b.source == "nav.path"} == {"preempted"}

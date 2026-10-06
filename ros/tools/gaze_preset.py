@@ -9,9 +9,9 @@
                                                       saccade home after the drive
     uv run python ros/tools/gaze_preset.py follow     the knobs' defaults: a 22 deg zone, 0.3 s
                                                       hysteresis, 2 s cooldown, no saccade in
-                                                      the last 0.5 s, the aim held through a
-                                                      mode change, glances of 3 frames or 0.3 s,
-                                                      home at 45 deg/s
+                                                      the plan's last 0.5 s or 0.35 m, the aim
+                                                      held through a mode change, glances of 3
+                                                      frames or 0.6 s, home at 45 deg/s
     uv run python ros/tools/gaze_preset.py show       both sets beside the knobs' defaults; no
                                                       node touched
 

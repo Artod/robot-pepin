@@ -167,6 +167,7 @@ def law_of(preset: str) -> PathGazeLaw:
         hyst_s=knobs["path_hyst_s"],
         cooldown_s=knobs["path_cooldown_s"],
         tail_s=knobs["path_tail_s"],
+        tail_m=knobs["path_tail_m"],
         hold_s=knobs["path_hold_s"],
     )
 
@@ -187,6 +188,7 @@ def test_the_baseline_follower_is_the_dead_band_it_replaced() -> None:
             0.2 * k,
             law,
             end_in_s=float(rng.uniform(0.0, 3.0)),
+            left_m=float(rng.uniform(0.0, 1.0)),
             fresh=bool(rng.integers(2)),
         )
         current = settle(current, wanted, 8.0)
@@ -195,12 +197,13 @@ def test_the_baseline_follower_is_the_dead_band_it_replaced() -> None:
 
 def test_the_follow_defaults_are_the_knobs_and_the_preset() -> None:
     assert law_of("follow") == FOLLOW
-    assert (FOLLOW.deadband_deg, FOLLOW.hyst_s, FOLLOW.cooldown_s, FOLLOW.tail_s) == (
-        22.0,
-        0.3,
-        2.0,
-        0.5,
-    )
+    assert (
+        FOLLOW.deadband_deg,
+        FOLLOW.hyst_s,
+        FOLLOW.cooldown_s,
+        FOLLOW.tail_s,
+        FOLLOW.tail_m,
+    ) == (22.0, 0.3, 2.0, 0.5, 0.35)
 
 
 def test_the_head_follows_in_its_zone() -> None:
@@ -242,6 +245,27 @@ def test_a_path_look_that_lost_the_head_is_aimed_at_once_but_never_in_the_tail()
     follower.reset()
     assert follower.update(pan(30), 6.0, FOLLOW, end_in_s=0.4) is None  # nothing new in it
     assert follower.update(pan(30), 6.0, FOLLOW, end_in_s=0.6) == pan(30)
+
+
+def test_the_plans_last_metres_are_the_tail_whatever_the_speed() -> None:
+    """Drive 0330's end: 0.16 m of plan left at 0.06 m/s reads 2.5 s, far outside the 0.5 s
+    tail; the metres alone hold the aim."""
+    follower = PathFollower()
+    follower.update(pan(2), 0.0, FOLLOW, end_in_s=5.6, left_m=1.68)
+    end_in = time_to_end(0.16, 0.06)
+    assert end_in > FOLLOW.tail_s
+    for t in (3.0, 3.3, 3.6, 6.0):  # out of the zone, past the hysteresis and the cooldown
+        assert follower.update(pan(-38), t, FOLLOW, end_in_s=end_in, left_m=0.16) == pan(2)
+    assert follower.update(pan(-38), 6.2, FOLLOW, end_in_s=math.inf, left_m=0.13) == pan(2)
+    assert follower.update(pan(-38), 6.4, FOLLOW, end_in_s=end_in, left_m=0.16, fresh=True) is None
+    # out of the tail (a replan longer by a few cm): the hysteresis starts there
+    assert follower.update(pan(-38), 6.6, FOLLOW, end_in_s=end_in, left_m=0.36) == pan(2)
+    assert follower.update(pan(-38), 6.9, FOLLOW, end_in_s=end_in, left_m=0.36) == pan(-38)
+    off = replace(FOLLOW, tail_m=0.0)  # the knob at 0: the seconds alone, as before
+    follower.reset()
+    follower.update(pan(2), 0.0, off)
+    assert follower.update(pan(-38), 3.0, off, end_in_s=end_in, left_m=0.16) == pan(2)
+    assert follower.update(pan(-38), 3.4, off, end_in_s=end_in, left_m=0.16) == pan(-38)
 
 
 def test_the_time_to_the_plans_end() -> None:

@@ -91,6 +91,7 @@ NAMED = {
     ("gaze", "path_hyst_s"): PathGazeLaw().hyst_s,
     ("gaze", "path_cooldown_s"): PathGazeLaw().cooldown_s,
     ("gaze", "path_tail_s"): PathGazeLaw().tail_s,
+    ("gaze", "path_tail_m"): PathGazeLaw().tail_m,
     ("gaze", "path_hold_s"): PathGazeLaw().hold_s,
     ("gaze", "reverse_pan_deg"): ReverseLaw().pan_deg,
     ("gaze", "reverse_tilt_deg"): ReverseLaw().tilt_deg,
