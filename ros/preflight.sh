@@ -1,10 +1,12 @@
 #!/bin/bash
-# Is the cart ready for a goal? Nine short lines, one fact each, OK or FAIL first: the pose and
+# Is the cart ready for a goal? Ten short lines, one fact each, OK or FAIL first: the pose and
 # the lidar from the goal server's `where` (127.0.0.1:3337, Nav2 on this Mac), the planner it
 # picked, the last snapshot and recognition reports of the laptop's mapping, the three ToF sensors
 # reaching the laptop (ros/tools/tof_check.py: a rate and a reading each), the Foxglove bridge,
 # the board's clock against the laptop's (its chrony) with the stamp -> receipt p50 of the key
-# streams here (ros/tools/stream_latency.py, 2 s in pepin-macnav), and one plan from the planner
+# streams here (ros/tools/stream_latency.py, 2 s in pepin-macnav), the laptop nodes still waiting
+# for their /tf_static edges (their "tf_static: WAITING" WARNs of the last 3 min, read by
+# pepin.static_facts; no new node is started for it), and one plan from the planner
 # (ros/tools/planner_check.py: a plan, never motion). Nothing here commands motion.
 #   ros/preflight.sh [--no-plan]   --no-plan during a drive: the planner is not asked for a plan
 set -uo pipefail
@@ -47,6 +49,11 @@ lat="$(docker exec pepin-macnav /pepin_entrypoint.sh timeout -s KILL 10 python3 
 if [ "${lat%% *}" = OK ]; then say OK time "${lat#OK }"
 elif [ -n "$lat" ]; then say FAIL time "${lat#FAIL }"
 else say FAIL time "no answer from ros/tools/stream_latency.py in pepin-macnav"; fi
+ts="$(for c in pepin-vslam pepin-macnav pepin-vio; do docker logs --since 3m "$c" 2>&1; done \
+    | PYTHONPATH="$HERE/../src" python3 -m pepin.static_facts)"
+if [ "${ts%% *}" = OK ]; then say OK tf_static "${ts#OK }"
+elif [ -n "$ts" ]; then say FAIL tf_static "${ts#FAIL }"
+else say FAIL tf_static "no answer from pepin.static_facts"; fi
 if [ "$NOPLAN" != --no-plan ]; then
     plan="$(docker exec pepin-vslam /pepin_entrypoint.sh timeout -s KILL 60 python3 /tools/planner_check.py 2>&1 | tail -1)"
     if grep -q 'planner: OK' <<<"$plan"; then

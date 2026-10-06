@@ -68,6 +68,7 @@ from pepin.marks_audit import (
     scan_points,
     transform_xy,
 )
+from pepin.mounts import LASER_FRAME
 from pepin_bringup.msgs import cloud_from_points, scan_arrays, stamp_seconds
 from pepin_bringup.node_kit import Switches, Tally, TfLookup, Worker, spin_main
 
@@ -143,6 +144,9 @@ class MarksAudit(Node):
         self._marks: LaserScan | None = None  # ...and the newest slice of the volume
         self._verdict: MarksVerdict | None = None  # the last frame's, for the report line
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
+        self._tf.expect_static(
+            self, [(BASE_FRAME, LASER_FRAME)], lambda: float(self._switches["tf_static_wait_s"])
+        )
         self._worker = Worker(self._audit, name="marks_audit", on_error=self._on_work_error).start()
         # One deep: the grid arrives once a second and only the newest one describes the room the
         # operator is looking at. Plain RELIABLE, volatile — what run_recorder has read this topic

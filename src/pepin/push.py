@@ -102,6 +102,7 @@ PER_CALL = (
     "pepin.push",
     "pepin.red_button",
     "pepin.speed",
+    "pepin.static_facts",  # ros/preflight.sh's tf_static line, over container logs
     "pepin.teleop",
     "pepin_bringup.teleop_keys",
 )
