@@ -294,7 +294,10 @@ FLAGS = FlagSet(
         " twists/s, vx vs the wheels z p50 1.58/1.45, p90 3.7/4.1 (the live step: 1.20/1.24,"
         " 2.9/3.9); sideways |vy| p50 2.2/1.7 cm/s (step 1.0/0.7); the yaw rate vs the base gyro"
         " 1.1/1.0 deg/s, z 1.2/1.1 (step 1.3/0.7 deg/s); at rest vx z p50 0.6/1.1 (step"
-        " 0.12/0.03). odomimu's velocity follows its own poseimu track in the median (angle"
+        " 0.12/0.03). In the dark (the live relay's lost stretches, the gaze gate replayed) the"
+        " yaw rate it would now send alone reads against the base gyro z p50 0.48/0.29, p90"
+        " 1.24/0.85 under step, 1.41/1.36 and 6.2/4.2 under imu (dark_yaw_offline.py)."
+        " odomimu's velocity follows its own poseimu track in the median (angle"
         " -1.5/+0.1 deg, speed ratio 0.97/1.00) with a p10-p90 spread of -29..+13 deg over 0.1 s"
         " (odomimu_direction.py). Differencing odomimu's POSES instead is out: every update moves"
         " them (|dp/dt - v| p99 2.2-2.5 m/s at 20 ms, odomimu_steps.py)",
