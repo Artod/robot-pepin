@@ -64,11 +64,13 @@ fi
 if [ "${1:-}" = vio ]; then
     # OpenVINS pinned (ros/Dockerfile.vio: master 2025-11-30 + PR #500), its simulator as the gate;
     # 10-20 min (estimate). PEPIN_VIO_MASK=1 adds the per-frame mask patch; PEPIN_VIO_EXECUTOR=0
-    # builds upstream's executor code (Dockerfile.vio's EXECUTOR).
+    # builds upstream's executor code (Dockerfile.vio's EXECUTOR); PEPIN_VIO_RESET=0 leaves out the
+    # in-process reset (Dockerfile.vio's RESET).
     BASE="${PEPIN_VIO_BASE:-pepin-laptop:xfeat}"
     watched_build pepin-laptop:vio "$BASE" -f "$HERE/Dockerfile.vio" \
         --build-arg "MASK=${PEPIN_VIO_MASK:-0}" \
         --build-arg "EXECUTOR=${PEPIN_VIO_EXECUTOR:-1}" \
+        --build-arg "RESET=${PEPIN_VIO_RESET:-1}" \
         ${PEPIN_VIO_JOBS:+--build-arg "JOBS=$PEPIN_VIO_JOBS"} "$HERE"
     docker run --rm --network none --entrypoint cat pepin-laptop:vio /opt/openvins/SHAS
     exit 0
