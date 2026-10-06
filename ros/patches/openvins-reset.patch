@@ -1,0 +1,894 @@
+--- a/ov_msckf/cmake/ROS2.cmake
++++ b/ov_msckf/cmake/ROS2.cmake
+@@ -9,6 +9,8 @@
+ find_package(geometry_msgs REQUIRED)
+ find_package(sensor_msgs REQUIRED)
+ find_package(nav_msgs REQUIRED)
++find_package(std_srvs REQUIRED)
++find_package(diagnostic_msgs REQUIRED)
+ find_package(cv_bridge REQUIRED)
+ find_package(image_transport REQUIRED)
+ find_package(ov_core REQUIRED)
+@@ -44,6 +46,8 @@
+         geometry_msgs
+         sensor_msgs
+         nav_msgs
++        std_srvs
++        diagnostic_msgs
+         cv_bridge
+         image_transport
+         ov_core
+--- a/ov_msckf/package.xml
++++ b/ov_msckf/package.xml
+@@ -45,6 +45,8 @@
+     <depend condition="$ROS_VERSION == 2">geometry_msgs</depend>
+     <depend condition="$ROS_VERSION == 2">sensor_msgs</depend>
+     <depend condition="$ROS_VERSION == 2">nav_msgs</depend>
++    <depend condition="$ROS_VERSION == 2">std_srvs</depend>
++    <depend condition="$ROS_VERSION == 2">diagnostic_msgs</depend>
+     <depend condition="$ROS_VERSION == 2">cv_bridge</depend>
+     <depend condition="$ROS_VERSION == 2">image_transport</depend>
+     <depend condition="$ROS_VERSION == 2">ov_core</depend>
+--- a/ov_msckf/src/core/VioManager.h
++++ b/ov_msckf/src/core/VioManager.h
+@@ -27,6 +27,7 @@
+ #include <atomic>
+ #include <boost/filesystem.hpp>
+ #include <fstream>
++#include <functional>
+ #include <memory>
+ #include <mutex>
+ #include <string>
+@@ -95,6 +96,41 @@
+    */
+   void initialize_with_gt(Eigen::Matrix<double, 17, 1> imustate);
+ 
++  /**
++   * @brief A warm seed for a manager made by an in-process reset (ros/patches/openvins-reset.patch).
++   *
++   * Asked at every frame while the manager is not initialised, after the frame was tracked and before the
++   * standard initialiser: given the frame's time, it answers true with the IMU state [q_GtoI, p_IinG, v_IinG, b_gyro,
++   * b_accel], its 15x15 covariance and the time (camera clock, before the frame) they hold at, or false to leave the
++   * frame to the standard initialiser.
++   */
++  using WarmSeed =
++      std::function<bool(double timestamp, double &seed_time, Eigen::Matrix<double, 16, 1> &imustate, Eigen::Matrix<double, 15, 15> &covariance)>;
++
++  /// Set (or clear, with an empty function) the warm seed asked before the standard initialiser.
++  void set_warm_seed(WarmSeed seed) { warm_seed = std::move(seed); }
++
++  /**
++   * @brief Initialise the IMU state from a seed with its own covariance, on a FRESH state (no clones, no SLAM features).
++   * @param timestamp Camera-clock time the seed holds at (before the next frame, so that frame gets a clone)
++   * @param imustate [q_GtoI, p_IinG, v_IinG, b_gyro, b_accel]
++   * @param covariance The IMU block's covariance in the state's order (q, p, v, bg, ba)
++   */
++  void initialize_with_seed(double timestamp, const Eigen::Matrix<double, 16, 1> &imustate, const Eigen::Matrix<double, 15, 15> &covariance);
++
++  /// Whether the standard initialiser's thread is running (a manager must not be destroyed while it does)
++  bool init_thread_running() const { return thread_init_running; }
++
++  /// Whether the last frame was a zero-velocity update
++  bool last_was_zupt() const { return did_zupt_update; }
++
++  /// Features the tracker holds in the last frame of camera cam_id, seen in at least min_frames of its frames (a
++  /// picture's persistent tracks: noise corners in a dark frame rarely survive the tracker's RANSAC for long)
++  int num_tracked(size_t cam_id = 0, size_t min_frames = 1);
++
++  /// SLAM features in the state
++  int num_slam();
++
+   /// If we are initialized or not
+   bool initialized() { return is_initialized_vio && timelastupdate != -1; }
+ 
+@@ -196,6 +232,9 @@
+ 
+   /// Boolean if we are initialized or not
+   bool is_initialized_vio = false;
++
++  /// The warm seed of a manager made by an in-process reset (empty: the standard initialiser only)
++  WarmSeed warm_seed;
+ 
+   /// Our MSCKF feature updater
+   std::shared_ptr<UpdaterMSCKF> updaterMSCKF;
+--- a/ov_msckf/src/core/VioManagerHelper.cpp
++++ b/ov_msckf/src/core/VioManagerHelper.cpp
+@@ -24,6 +24,7 @@
+ #include "feat/Feature.h"
+ #include "feat/FeatureDatabase.h"
+ #include "feat/FeatureInitializer.h"
++#include "track/TrackBase.h"
+ #include "types/LandmarkRepresentation.h"
+ #include "utils/print.h"
+ 
+@@ -75,6 +76,66 @@
+   PRINT_DEBUG(GREEN "[INIT]: position = %.4f, %.4f, %.4f\n" RESET, state->_imu->pos()(0), state->_imu->pos()(1), state->_imu->pos()(2));
+ }
+ 
++void VioManager::initialize_with_seed(double timestamp, const Eigen::Matrix<double, 16, 1> &imustate,
++                                      const Eigen::Matrix<double, 15, 15> &covariance) {
++
++  // The IMU state and its covariance; on a fresh state the rest of the covariance is block-diagonal already
++  Eigen::VectorXd value = imustate;
++  state->_imu->set_value(value);
++  state->_imu->set_fej(value);
++  std::vector<std::shared_ptr<ov_type::Type>> order = {state->_imu};
++  Eigen::MatrixXd cov = covariance;
++  StateHelper::set_initial_covariance(state, cov, order);
++
++  // The state time, before the frame being processed so that frame gets the first clone
++  state->_timestamp = timestamp;
++  startup_time = timestamp;
++
++  // What try_to_initialize does after a successful initialisation: measurements older than the seed go, the tracker
++  // grows from init_max_features to num_pts, and the zero-velocity update is skipped while moving
++  trackFEATS->get_feature_database()->cleanup_measurements(state->_timestamp);
++  trackFEATS->set_num_features(std::floor((double)params.num_pts / (double)params.state_options.num_cameras));
++  if (trackARUCO != nullptr) {
++    trackARUCO->get_feature_database()->cleanup_measurements(state->_timestamp);
++  }
++  has_moved_since_zupt = state->_imu->vel().norm() > params.zupt_max_velocity;
++  {
++    std::lock_guard<std::mutex> lck(camera_queue_init_mtx);
++    camera_queue_init.clear();
++  }
++  PRINT_INFO(GREEN "[init]: warm seed at %.3f: q_GtoI = %.4f, %.4f, %.4f, %.4f | v = %.3f, %.3f, %.3f | bg = %.4f, %.4f, %.4f | ba = %.4f, "
++                   "%.4f, %.4f\n" RESET,
++             timestamp, state->_imu->quat()(0), state->_imu->quat()(1), state->_imu->quat()(2), state->_imu->quat()(3), state->_imu->vel()(0),
++             state->_imu->vel()(1), state->_imu->vel()(2), state->_imu->bias_g()(0), state->_imu->bias_g()(1), state->_imu->bias_g()(2),
++             state->_imu->bias_a()(0), state->_imu->bias_a()(1), state->_imu->bias_a()(2));
++}
++
++int VioManager::num_tracked(size_t cam_id, size_t min_frames) {
++  auto last_ids = trackFEATS->get_last_ids();
++  auto it = last_ids.find(cam_id);
++  if (it == last_ids.end()) {
++    return 0;
++  }
++  if (min_frames <= 1) {
++    return (int)it->second.size();
++  }
++  int count = 0;
++  auto db = trackFEATS->get_feature_database();
++  for (size_t id : it->second) {
++    std::shared_ptr<Feature> feat = db->get_feature(id);
++    if (feat == nullptr) {
++      continue;
++    }
++    auto times = feat->timestamps.find(cam_id);
++    if (times != feat->timestamps.end() && times->second.size() >= min_frames) {
++      count++;
++    }
++  }
++  return count;
++}
++
++int VioManager::num_slam() { return (int)state->_features_SLAM.size(); }
++
+ bool VioManager::try_to_initialize(const ov_core::CameraData &message) {
+ 
+   // Directly return if the initialization thread is running
+@@ -89,6 +150,18 @@
+   // If the thread was a success, then return success!
+   if (thread_init_success) {
+     return true;
++  }
++
++  // A manager made by an in-process reset asks its warm seed first (ros/patches/openvins-reset.patch): kept
++  // biases, gravity from the accelerometer, a velocity from outside; when it declines, the standard initialiser
++  if (warm_seed) {
++    double seed_time = -1;
++    Eigen::Matrix<double, 16, 1> imustate = Eigen::Matrix<double, 16, 1>::Zero();
++    Eigen::Matrix<double, 15, 15> covariance = Eigen::Matrix<double, 15, 15>::Zero();
++    if (warm_seed(message.timestamp, seed_time, imustate, covariance)) {
++      initialize_with_seed(seed_time, imustate, covariance);
++      return true;
++    }
+   }
+ 
+   // Run the initialization in a second thread so it can go as slow as it desires
+--- a/ov_msckf/src/ros/ROS2Visualizer.cpp
++++ b/ov_msckf/src/ros/ROS2Visualizer.cpp
+@@ -29,12 +29,56 @@
+ #include "state/StateHelper.h"
+ #include "utils/dataset_reader.h"
+ #include "utils/print.h"
++#include "utils/quat_ops.h"
+ #include "utils/sensor_data.h"
+ 
++#include <cmath>
++#include <cstdarg>
++#include <cstdio>
++
+ using namespace ov_core;
+ using namespace ov_type;
+ using namespace ov_msckf;
+ 
++namespace {
++
++/// How much IMU history the reset keeps (s): a new manager's static window (init_window_time + 0.1) and the seed's
++const double IMU_RING_KEEP_S = 3.0;
++
++/// How much bias history the reset keeps (s): beyond seed_bias_max_age_s's range
++const double BIAS_KEEP_S = 300.0;
++
++/// The rotation from a gravity frame (z up) to the IMU whose accelerometer reads gravity_inI at rest: R_GtoI's third
++/// column is the measured up; the yaw is arbitrary (the VIO's global yaw is unobservable). ov_init::InitializerHelper::
++/// gram_schmidt, as StaticInitializer uses it.
++Eigen::Matrix3d gravity_aligned(const Eigen::Vector3d &gravity_inI) {
++  Eigen::Vector3d z_axis = gravity_inI / gravity_inI.norm();
++  Eigen::Vector3d e_1(1.0, 0.0, 0.0);
++  Eigen::Vector3d e_2(0.0, 1.0, 0.0);
++  Eigen::Vector3d x_axis = (std::fabs(e_1.dot(z_axis)) < std::fabs(e_2.dot(z_axis))) ? z_axis.cross(e_1) : z_axis.cross(e_2);
++  x_axis = x_axis / x_axis.norm();
++  Eigen::Vector3d y_axis = z_axis.cross(x_axis);
++  y_axis = y_axis / y_axis.norm();
++  Eigen::Matrix3d R_GtoI;
++  R_GtoI.block(0, 0, 3, 1) = x_axis;
++  R_GtoI.block(0, 1, 3, 1) = y_axis;
++  R_GtoI.block(0, 2, 3, 1) = z_axis;
++  return R_GtoI;
++}
++
++/// printf into a string (the reset's log lines and answers)
++std::string format(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
++std::string format(const char *fmt, ...) {
++  char buffer[512];
++  va_list args;
++  va_start(args, fmt);
++  std::vsnprintf(buffer, sizeof(buffer), fmt, args);
++  va_end(args);
++  return std::string(buffer);
++}
++
++} // namespace
++
+ ROS2Visualizer::ROS2Visualizer(std::shared_ptr<rclcpp::Node> node, std::shared_ptr<VioManager> app, std::shared_ptr<Simulator> sim)
+     : _node(node), _app(app), _sim(sim), thread_update_running(false), run_visualize_thread(true) {
+ 
+@@ -66,6 +110,36 @@
+   pub_points_sim = node->create_publisher<sensor_msgs::msg::PointCloud2>("points_sim", 2);
+   PRINT_DEBUG("Publishing: %s\n", pub_points_sim->get_topic_name());
+ 
++  // The in-process reset (ros/patches/openvins-reset.patch): ~/reset (std_srvs/Trigger) makes a new manager, seeded
++  // warm from /vio/seed_twist (the IMU's velocity in its own axes, pepin_bringup.vio_keeper) and the old filter's
++  // biases; ~/health says per processed frame what the keeper's failure rules read
++  pub_health = node->create_publisher<diagnostic_msgs::msg::DiagnosticStatus>("health", 10);
++  srv_reset = node->create_service<std_srvs::srv::Trigger>(
++      "reset", [this](const std::shared_ptr<std_srvs::srv::Trigger::Request>, std::shared_ptr<std_srvs::srv::Trigger::Response> response) {
++        std::string answer;
++        request_reset("the service", answer);
++        response->success = true;
++        response->message = answer;
++      });
++  sub_velocity_seed = node->create_subscription<geometry_msgs::msg::TwistWithCovarianceStamped>(
++      "/vio/seed_twist", 10, [this](const geometry_msgs::msg::TwistWithCovarianceStamped::SharedPtr msg) {
++        VelocitySeed seed;
++        seed.timestamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
++        seed.v_I << msg->twist.twist.linear.x, msg->twist.twist.linear.y, msg->twist.twist.linear.z;
++        for (int r = 0; r < 3; r++) {
++          for (int c = 0; c < 3; c++) {
++            seed.covariance(r, c) = msg->twist.covariance[6 * r + c];
++          }
++        }
++        std::lock_guard<std::mutex> lck(velocity_seed_mtx);
++        velocity_seeds.push_back(seed);
++        while (!velocity_seeds.empty() && velocity_seeds.front().timestamp < seed.timestamp - 3.0) {
++          velocity_seeds.pop_front();
++        }
++      });
++  PRINT_INFO("reset service %s, health on %s, velocity seed from /vio/seed_twist\n", srv_reset->get_service_name(),
++             pub_health->get_topic_name());
++
+   // Our tracking image
+   it_pub_tracks = it.advertise("trackhist", 2);
+   PRINT_DEBUG("Publishing: %s\n", it_pub_tracks.getTopic().c_str());
+@@ -156,7 +230,11 @@
+     thread_visualize = std::make_shared<std::thread>([this] {
+       rclcpp::Rate loop_rate(20);
+       while (rclcpp::ok() && run_visualize_thread) {
+-        publish_images();
++        {
++          // _app is swapped by a reset under this lock
++          std::lock_guard<std::mutex> lck(app_mtx);
++          publish_images();
++        }
+         loop_rate.sleep();
+       }
+     });
+@@ -267,8 +345,10 @@
+   // rT0_1 = boost::posix_time::microsec_clock::local_time();
+ 
+   // publish current image (only if not multi-threaded)
+-  if (!_app->get_params().use_multi_threading_pubs)
++  if (!_app->get_params().use_multi_threading_pubs) {
++    std::lock_guard<std::mutex> lck(app_mtx);
+     publish_images();
++  }
+ 
+   // Return if we have not inited
+   if (!_app->initialized())
+@@ -305,8 +385,8 @@
+ 
+ void ROS2Visualizer::visualize_odometry(double timestamp) {
+ 
+-  // Return if we have not inited and a second has passes
+-  if (!_app->initialized() || (timestamp - _app->initialized_time()) < 1)
++  // Return if we have not inited and odomimu_delay_s has not passed (upstream: 1 s)
++  if (!_app->initialized() || (timestamp - _app->initialized_time()) < param("odomimu_delay_s", 1.0))
+     return;
+ 
+   // Get fast propagate state at the desired timestamp
+@@ -322,7 +402,7 @@
+     // Our odometry message
+     nav_msgs::msg::Odometry odomIinM;
+     odomIinM.header.stamp = ROSVisualizerHelper::get_time_from_seconds(timestamp);
+-    odomIinM.header.frame_id = "global";
++    odomIinM.header.frame_id = global_frame();
+ 
+     // The POSE component (orientation and position)
+     odomIinM.pose.pose.orientation.x = state_plus(0);
+@@ -480,6 +560,21 @@
+   message.wm << msg->angular_velocity.x, msg->angular_velocity.y, msg->angular_velocity.z;
+   message.am << msg->linear_acceleration.x, msg->linear_acceleration.y, msg->linear_acceleration.z;
+ 
++  // A pending reset is made at the first IMU sample that finds no update running (it feeds the ring to the new manager)
++  if (reset_pending) {
++    std::string answer;
++    try_reset(answer);
++  }
++
++  // The last samples, for a reset's new manager, the warm seed's gravity and the health's gyro
++  {
++    std::lock_guard<std::mutex> lck(imu_ring_mtx);
++    imu_ring.push_back(message);
++    while (!imu_ring.empty() && imu_ring.front().timestamp < message.timestamp - IMU_RING_KEEP_S) {
++      imu_ring.pop_front();
++    }
++  }
++
+   // send it to our VIO system
+   _app->feed_measurement_imu(message);
+   visualize_odometry(message.timestamp);
+@@ -512,10 +607,27 @@
+       // We are able to process if we have at least one IMU measurement greater than the camera time
+       double timestamp_imu_inC = message.timestamp - _app->get_state()->_calib_dt_CAMtoIMU->value()(0);
+       while (!camera_queue.empty() && camera_queue.at(0).timestamp < timestamp_imu_inC) {
++        // A frame long after the filter's last one (camera_stream restarted, a hole in a replay) is a lost picture: the
++        // filter would propagate across the whole gap, and its zero-velocity check would build a dense 6(n-1)-square
++        // matrix over every IMU sample in it (24000 rows for 20 s). Reset first; the next IMU sample makes it.
++        double frame_gap = camera_queue.at(0).timestamp - _app->get_state()->_timestamp;
++        if (_app->initialized() && frame_gap > param("reset_frame_gap_s", 2.0)) {
++          if (!reset_pending) {
++            {
++              std::lock_guard<std::mutex> lck_why(seed_note_mtx);
++              reset_why = format("a frame %.1f s after the filter's last", frame_gap);
++            }
++            PRINT_WARNING(YELLOW "[reset]: a frame %.1f s after the filter's last: reset at the next IMU sample\n" RESET, frame_gap);
++            reset_pending = true;
++          }
++          break;
++        }
+         auto rT0_1 = boost::posix_time::microsec_clock::local_time();
+         double update_dt = 100.0 * (timestamp_imu_inC - camera_queue.at(0).timestamp);
+         _app->feed_measurement_camera(camera_queue.at(0));
+         visualize();
++        take_bias_snapshot();
++        publish_health(camera_queue.at(0).timestamp);
+         camera_queue.pop_front();
+         auto rT0_2 = boost::posix_time::microsec_clock::local_time();
+         double time_total = (rT0_2 - rT0_1).total_microseconds() * 1e-6;
+@@ -640,7 +752,7 @@
+   // Create pose of IMU (note we use the bag time)
+   geometry_msgs::msg::PoseWithCovarianceStamped poseIinM;
+   poseIinM.header.stamp = ROSVisualizerHelper::get_time_from_seconds(timestamp_inI);
+-  poseIinM.header.frame_id = "global";
++  poseIinM.header.frame_id = global_frame();
+   poseIinM.pose.pose.orientation.x = state->_imu->quat()(0);
+   poseIinM.pose.pose.orientation.y = state->_imu->quat()(1);
+   poseIinM.pose.pose.orientation.z = state->_imu->quat()(2);
+@@ -1038,4 +1150,398 @@
+     sensor_msgs::msg::Image::SharedPtr exl_msg2 = cv_bridge::CvImage(header, "bgr8", depthmap_viz).toImageMsg();
+     it_pub_loop_img_depth_color.publish(exl_msg2);
+   }
++}
++
++//===================================================================================
++// In-process reset and warm seed (ros/patches/openvins-reset.patch)
++//===================================================================================
++
++bool ROS2Visualizer::request_reset(const std::string &why, std::string &answer) {
++  {
++    std::lock_guard<std::mutex> lck(seed_note_mtx);
++    reset_why = why;
++  }
++  reset_pending = true;
++  return try_reset(answer);
++}
++
++bool ROS2Visualizer::try_reset(std::string &answer) {
++
++  // No update thread inside (it holds the queue's lock while it feeds _app), no visualize thread reading _app; the
++  // executor's callbacks (IMU, cameras, this service) are one mutually exclusive group, so none of them runs either
++  std::lock_guard<std::mutex> lck_queue(camera_queue_mtx);
++  std::lock_guard<std::mutex> lck_app(app_mtx);
++  if (_app->init_thread_running()) {
++    answer = "pending: the initialiser's thread is running; made at the first IMU sample that finds it done";
++    return false;
++  }
++
++  // A new manager from the same parsed options (ModalAI voxl-open-vins-server's hard reset): new state, trackers,
++  // feature database, propagator, updaters and initialiser; fed the last IMU samples so its propagator and its static
++  // window start full
++  VioManagerOptions params = _app->get_params();
++  // Its fallback initialiser is dynamic (in motion) only with seed_dyn_init: the config's init_dyn_use is the cold start's
++  params.init_options.init_dyn_use = param("seed_dyn_init", params.init_options.init_dyn_use ? 1.0 : 0.0) > 0.5;
++  auto fresh = std::make_shared<VioManager>(params);
++  double last_imu = -1;
++  {
++    std::lock_guard<std::mutex> lck(imu_ring_mtx);
++    for (const auto &sample : imu_ring) {
++      fresh->feed_measurement_imu(sample);
++    }
++    if (!imu_ring.empty()) {
++      last_imu = imu_ring.back().timestamp;
++    }
++  }
++  bool warm = param("seed_warm", 1.0) > 0.5;
++  if (warm) {
++    VioManager *manager = fresh.get(); // the seed is owned by the manager it seeds
++    fresh->set_warm_seed(
++        [this, manager](double timestamp, double &seed_time, Eigen::Matrix<double, 16, 1> &imustate, Eigen::Matrix<double, 15, 15> &covariance) {
++          return warm_seed(manager, timestamp, seed_time, imustate, covariance);
++        });
++  }
++  _app = fresh;
++  epoch++;
++  reset_pending = false;
++  warm_armed = warm;
++  reset_imu_time = last_imu;
++  reset_first_frame = -1;
++  was_initialized = false;
++  std::string why;
++  {
++    std::lock_guard<std::mutex> lck(seed_note_mtx);
++    seed_note = warm ? "armed" : "seed_warm off: the standard initialiser";
++    why = reset_why;
++  }
++  answer = format("reset %d made (%s) at IMU time %.3f: %s", epoch.load(), why.c_str(), last_imu,
++                  warm ? "warm seed armed" : "the standard initialiser");
++  PRINT_INFO(YELLOW "[reset]: %s; poses now in %s\n" RESET, answer.c_str(), global_frame().c_str());
++  return true;
++}
++
++bool ROS2Visualizer::warm_seed(VioManager *manager, double timestamp, double &seed_time, Eigen::Matrix<double, 16, 1> &imustate,
++                               Eigen::Matrix<double, 15, 15> &covariance) {
++  if (!warm_armed) {
++    return false;
++  }
++  auto note = [this](const std::string &text) {
++    std::lock_guard<std::mutex> lck(seed_note_mtx);
++    seed_note = text;
++  };
++  auto disarm = [&](const std::string &why) {
++    warm_armed = false;
++    note("no warm seed: " + why + "; the standard initialiser");
++    PRINT_WARNING(YELLOW "[reset]: no warm seed: %s; the standard initialiser (static at rest%s)\n" RESET, why.c_str(),
++                  manager->get_params().init_options.init_dyn_use ? ", dynamic in motion" : "");
++    return false;
++  };
++  if (reset_first_frame < 0) {
++    reset_first_frame = timestamp;
++  }
++  double t_off = manager->get_state()->_calib_dt_CAMtoIMU->value()(0);
++  double t_imu = timestamp + t_off;
++
++  // The biases: the newest healthy snapshot taken seed_bias_lag_s before the reset (a divergence corrupts them before
++  // anyone calls it one), at most seed_bias_max_age_s old at this frame; past that age the standard initialiser alone
++  BiasSnapshot snap;
++  bool have = false;
++  {
++    std::lock_guard<std::mutex> lck(bias_mtx);
++    double cut = reset_imu_time - param("seed_bias_lag_s", 2.0);
++    for (auto it = bias_snapshots.rbegin(); it != bias_snapshots.rend(); ++it) {
++      if (it->timestamp <= cut) {
++        snap = *it;
++        have = true;
++        break;
++      }
++    }
++  }
++  if (!have) {
++    return disarm("no healthy bias snapshot before the reset");
++  }
++  double age = t_imu - snap.timestamp;
++  double max_age = param("seed_bias_max_age_s", 60.0);
++  if (age > max_age) {
++    return disarm(format("the biases are %.0f s old (over %.0f)", age, max_age));
++  }
++  Eigen::Vector3d bg = snap.bias.head<3>();
++  Eigen::Vector3d ba = snap.bias.tail<3>();
++
++  // A picture first: persistent tracks (a seed into the dark would only propagate the IMU, which is what diverged)
++  int min_features = (int)param("seed_min_features", 15.0);
++  size_t track_frames = (size_t)std::max(1.0, param("seed_track_frames", 3.0));
++  int tracked = manager->num_tracked(0, track_frames);
++  if (tracked < min_features) {
++    note(format("waiting: %d tracks of %d+ frames (under %d)", tracked, (int)track_frames, min_features));
++    return false;
++  }
++
++  // Gravity in the IMU's frame at the frame's time: the window's specific force (kept ba removed), each sample turned
++  // into the end's frame by the bias-corrected gyro, averaged (a pan or a turn moves gravity in the IMU's axes; the
++  // cart's vibration averages out); its spread over sqrt(n) plus seed_accel_allow_m_s2 of unmodelled acceleration,
++  // over g, is the tilt's sigma
++  double window = param("seed_accel_window_s", 0.5);
++  std::vector<ov_core::ImuData> samples;
++  double t_before = -1;
++  {
++    std::lock_guard<std::mutex> lck(imu_ring_mtx);
++    for (const auto &sample : imu_ring) {
++      if (sample.timestamp > t_imu - window && sample.timestamp <= t_imu) {
++        samples.push_back(sample);
++      }
++      if (sample.timestamp < t_imu - 1e-4) {
++        t_before = sample.timestamp;
++      }
++    }
++  }
++  if (samples.size() < 10 || t_before < 0) {
++    note(format("waiting: %d IMU samples in the %.2f s before the frame", (int)samples.size(), window));
++    return false;
++  }
++  double w_max = 0.0;
++  Eigen::Matrix3d C = Eigen::Matrix3d::Identity(); // sample i's frame -> the end's frame
++  std::vector<Eigen::Vector3d> turned(samples.size());
++  turned.back() = samples.back().am - ba;
++  for (int i = (int)samples.size() - 2; i >= 0; i--) {
++    Eigen::Vector3d w = samples.at(i).wm - bg;
++    w_max = std::max(w_max, w.norm());
++    double dt = samples.at(i + 1).timestamp - samples.at(i).timestamp;
++    C = C * ov_core::exp_so3(-w * dt);
++    turned.at(i) = C * (samples.at(i).am - ba);
++  }
++  double w_limit = param("seed_gyro_max_rad_s", 1.0);
++  if (w_max > w_limit) {
++    note(format("waiting: turning (%.2f rad/s, over %.2f)", w_max, w_limit));
++    return false;
++  }
++  Eigen::Vector3d f = Eigen::Vector3d::Zero();
++  for (const auto &a : turned) {
++    f += a;
++  }
++  f /= (double)turned.size();
++  double spread = 0.0;
++  for (const auto &a : turned) {
++    spread += (a - f).squaredNorm();
++  }
++  spread = std::sqrt(spread / (double)(turned.size() - 1));
++  double gravity = manager->get_params().gravity_mag;
++  double g_tol = param("seed_g_tol_m_s2", 0.5);
++  if (std::fabs(f.norm() - gravity) > g_tol) {
++    note(format("waiting: |f| %.2f m/s^2 is %.2f from gravity (over %.2f)", f.norm(), f.norm() - gravity, g_tol));
++    return false;
++  }
++  Eigen::Matrix3d R_GtoI = gravity_aligned(f);
++  double sigma_tilt = (spread / std::sqrt((double)turned.size()) + param("seed_accel_allow_m_s2", 0.3)) / gravity;
++
++  // The velocity from outside: the EKF's twist carried to the IMU in its own axes (pepin_bringup.vio_keeper), near the frame
++  VelocitySeed seed;
++  {
++    std::lock_guard<std::mutex> lck(velocity_seed_mtx);
++    for (const auto &candidate : velocity_seeds) {
++      if (seed.timestamp < 0 || std::fabs(candidate.timestamp - t_imu) < std::fabs(seed.timestamp - t_imu)) {
++        seed = candidate;
++      }
++    }
++  }
++  if (seed.timestamp < 0) {
++    note("waiting: no velocity on /vio/seed_twist");
++    return false;
++  }
++  double v_age = t_imu - seed.timestamp;
++  double v_max_age = param("seed_vel_max_age_s", 0.2);
++  if (std::fabs(v_age) > v_max_age) {
++    note(format("waiting: the velocity seed is %.2f s from the frame (over %.2f)", v_age, v_max_age));
++    return false;
++  }
++  Eigen::Vector3d v_G = R_GtoI.transpose() * seed.v_I;
++  double sigma_v = param("seed_sigma_v_m_s", 0.03);
++  Eigen::Matrix3d P_v = R_GtoI.transpose() * seed.covariance * R_GtoI;
++  P_v = 0.5 * (P_v + P_v.transpose()) + sigma_v * sigma_v * Eigen::Matrix3d::Identity();
++
++  // The state [q_GtoI, p_IinG, v_IinG, bg, ba] and its covariance (q, p, v, bg, ba): the position and the yaw are the
++  // new frame's gauge (the relay re-anchors), the biases' covariance their snapshot's plus the random walk since
++  imustate.block(0, 0, 4, 1) = ov_core::rot_2_quat(R_GtoI);
++  imustate.block(4, 0, 3, 1) = Eigen::Vector3d::Zero();
++  imustate.block(7, 0, 3, 1) = v_G;
++  imustate.block(10, 0, 3, 1) = bg;
++  imustate.block(13, 0, 3, 1) = ba;
++  covariance.setZero();
++  double sigma_q = std::max(param("seed_sigma_q_rad", 0.02), sigma_tilt);
++  double sigma_p = param("seed_sigma_p_m", 0.05);
++  covariance.block(0, 0, 3, 3) = sigma_q * sigma_q * Eigen::Matrix3d::Identity();
++  covariance.block(3, 3, 3, 3) = sigma_p * sigma_p * Eigen::Matrix3d::Identity();
++  covariance.block(6, 6, 3, 3) = P_v;
++  Eigen::Matrix<double, 6, 6> P_b = snap.covariance;
++  const auto &noises = manager->get_params().imu_noises;
++  P_b.block(0, 0, 3, 3) += noises.sigma_wb * noises.sigma_wb * std::max(age, 0.0) * Eigen::Matrix3d::Identity();
++  P_b.block(3, 3, 3, 3) += noises.sigma_ab * noises.sigma_ab * std::max(age, 0.0) * Eigen::Matrix3d::Identity();
++  double inflation = param("seed_bias_inflation", 1.0);
++  P_b *= inflation * inflation;
++  double floor_bg = param("seed_sigma_bg_floor", 0.005);
++  double floor_ba = param("seed_sigma_ba_floor", 0.02);
++  for (int i = 0; i < 3; i++) {
++    P_b(i, i) = std::max(P_b(i, i), floor_bg * floor_bg);
++    P_b(3 + i, 3 + i) = std::max(P_b(3 + i, 3 + i), floor_ba * floor_ba);
++  }
++  covariance.block(9, 9, 6, 6) = 0.5 * (P_b + P_b.transpose());
++
++  // At the last IMU sample before the frame (camera clock), so the frame gets the first clone
++  seed_time = std::min(t_before - t_off, timestamp - 1e-3);
++  warm_armed = false;
++  warm_seeds++;
++  std::string text = format("warm %.2f s after the reset's first frame: %d tracks, biases %.1f s old (bg %.4f ba %.3f), |v| %.3f m/s "
++                            "(seed %+.2f s from the frame, sigma %.3f), tilt sigma %.1f deg (spread %.2f, %d samples), gyro %.2f",
++                            timestamp - reset_first_frame, tracked, age, bg.norm(), ba.norm(), seed.v_I.norm(), v_age,
++                            std::sqrt(P_v.trace() / 3.0), sigma_q * 180.0 / M_PI, spread, (int)turned.size(), w_max);
++  note(text);
++  PRINT_INFO(GREEN "[reset]: %s\n" RESET, text.c_str());
++  return true;
++}
++
++void ROS2Visualizer::take_bias_snapshot() {
++  if (!_app->initialized()) {
++    return;
++  }
++  std::shared_ptr<State> state = _app->get_state();
++  int used = (int)_app->get_good_features_MSCKF().size() + _app->num_slam();
++  bool zupt = _app->last_was_zupt();
++  if (!zupt && used < (int)param("snapshot_min_features", 20.0)) {
++    return;
++  }
++  Eigen::Matrix<double, 6, 1> bias;
++  bias << state->_imu->bias_g(), state->_imu->bias_a();
++  // ModalAI's gate on a kept bias (|bg| 0.2 rad/s, |ba| 1.0 m/s^2, sigmas 0.05 and 0.5): beyond it, the divergence's
++  if (bias.head<3>().norm() > 0.2 || bias.tail<3>().norm() > 1.0) {
++    return;
++  }
++  std::vector<std::shared_ptr<ov_type::Type>> vars = {state->_imu->bg(), state->_imu->ba()};
++  Eigen::MatrixXd P = StateHelper::get_marginal_covariance(state, vars);
++  if (P.rows() != 6 || P.cols() != 6 || !P.allFinite()) {
++    return;
++  }
++  if (std::sqrt(P.block(0, 0, 3, 3).trace() / 3.0) > 0.05 || std::sqrt(P.block(3, 3, 3, 3).trace() / 3.0) > 0.5) {
++    return;
++  }
++  BiasSnapshot snap;
++  snap.timestamp = state->_timestamp + state->_calib_dt_CAMtoIMU->value()(0);
++  snap.bias = bias;
++  snap.covariance = P;
++  std::lock_guard<std::mutex> lck(bias_mtx);
++  // about two a second: the newest replaces the last one while the one before that is under 0.5 s older
++  // (replacing while the LAST was younger than 0.5 s kept one entry moving forward for good, 2026-10-06)
++  size_t n = bias_snapshots.size();
++  if (n >= 2 && snap.timestamp - bias_snapshots.at(n - 2).timestamp < 0.5) {
++    bias_snapshots.back() = snap;
++  } else {
++    bias_snapshots.push_back(snap);
++  }
++  while (!bias_snapshots.empty() && bias_snapshots.front().timestamp < snap.timestamp - BIAS_KEEP_S) {
++    bias_snapshots.pop_front();
++  }
++}
++
++void ROS2Visualizer::publish_health(double timestamp) {
++  std::shared_ptr<State> state = _app->get_state();
++  bool init = _app->initialized();
++  if (init && !was_initialized && epoch > 0) {
++    std::lock_guard<std::mutex> lck(seed_note_mtx);
++    if (seed_note.rfind("warm", 0) != 0) {
++      standard_inits++;
++      seed_note = "standard initialiser";
++    }
++  }
++  was_initialized = init;
++
++  // The camera's rotation since the last frame: the largest bias-corrected gyro rate (a head swing blurs the picture)
++  double t_off = state->_calib_dt_CAMtoIMU->value()(0);
++  double t_imu = timestamp + t_off;
++  Eigen::Vector3d bg = Eigen::Vector3d::Zero();
++  double bias_age = -1;
++  {
++    std::lock_guard<std::mutex> lck(bias_mtx);
++    if (!bias_snapshots.empty()) {
++      bg = bias_snapshots.back().bias.head<3>();
++      bias_age = t_imu - bias_snapshots.back().timestamp;
++    }
++  }
++  if (init) {
++    bg = state->_imu->bias_g();
++  }
++  double gyro = 0.0;
++  {
++    std::lock_guard<std::mutex> lck(imu_ring_mtx);
++    double from = (last_health_imu_time > 0 && last_health_imu_time < t_imu) ? last_health_imu_time : t_imu - 0.1;
++    for (const auto &sample : imu_ring) {
++      if (sample.timestamp > from && sample.timestamp <= t_imu) {
++        gyro = std::max(gyro, (sample.wm - bg).norm());
++      }
++    }
++  }
++  last_health_imu_time = t_imu;
++
++  diagnostic_msgs::msg::DiagnosticStatus msg;
++  msg.name = "ov_msckf";
++  msg.hardware_id = global_frame();
++  msg.level = init ? diagnostic_msgs::msg::DiagnosticStatus::OK : diagnostic_msgs::msg::DiagnosticStatus::WARN;
++  std::string seed;
++  {
++    std::lock_guard<std::mutex> lck(seed_note_mtx);
++    seed = seed_note;
++  }
++  msg.message = init ? "initialized" : ("initialising" + (seed.empty() ? std::string() : ": " + seed));
++  auto value = [&msg](const std::string &key, const std::string &text) {
++    diagnostic_msgs::msg::KeyValue pair;
++    pair.key = key;
++    pair.value = text;
++    msg.values.push_back(pair);
++  };
++  value("t", format("%.6f", timestamp));
++  value("epoch", std::to_string(epoch.load()));
++  value("initialized", init ? "1" : "0");
++  value("tracked", std::to_string(_app->num_tracked(0)));
++  value("persistent", std::to_string(_app->num_tracked(0, (size_t)std::max(1.0, param("seed_track_frames", 3.0)))));
++  value("msckf", std::to_string(init ? (int)_app->get_good_features_MSCKF().size() : 0));
++  value("slam", std::to_string(init ? _app->num_slam() : 0));
++  value("zupt", (init && _app->last_was_zupt()) ? "1" : "0");
++  value("gyro", format("%.4f", gyro));
++  if (init) {
++    value("speed", format("%.4f", state->_imu->vel().norm()));
++    // the IMU's velocity in its own axes (R_GtoI v_IinG), held against the EKF's by the keeper
++    Eigen::Vector3d v_I = state->_imu->Rot() * state->_imu->vel();
++    value("v_I", format("%.4f,%.4f,%.4f", v_I(0), v_I(1), v_I(2)));
++    std::vector<std::shared_ptr<ov_type::Type>> vars = {state->_imu->pose()->p()};
++    Eigen::MatrixXd P = StateHelper::get_marginal_covariance(state, vars);
++    value("pos_sigma", format("%.4f", std::sqrt(std::max(P.trace(), 0.0))));
++    value("bg", format("%.5f", state->_imu->bias_g().norm()));
++    value("ba", format("%.4f", state->_imu->bias_a().norm()));
++  }
++  value("bias_age", format("%.1f", bias_age));
++  value("resets", std::to_string(epoch.load()));
++  value("warm_seeds", std::to_string(warm_seeds.load()));
++  value("standard_inits", std::to_string(standard_inits.load()));
++  value("seed", seed);
++  pub_health->publish(msg);
++}
++
++double ROS2Visualizer::param(const std::string &name, double fallback) {
++  rclcpp::Parameter parameter;
++  if (!_node->get_parameter(name, parameter)) {
++    return fallback;
++  }
++  switch (parameter.get_type()) {
++  case rclcpp::ParameterType::PARAMETER_DOUBLE:
++    return parameter.as_double();
++  case rclcpp::ParameterType::PARAMETER_INTEGER:
++    return (double)parameter.as_int();
++  case rclcpp::ParameterType::PARAMETER_BOOL:
++    return parameter.as_bool() ? 1.0 : 0.0;
++  default:
++    return fallback;
++  }
++}
++
++std::string ROS2Visualizer::global_frame() const {
++  int n = epoch.load();
++  return (n == 0) ? std::string("global") : "global_" + std::to_string(n);
+ }
+--- a/ov_msckf/src/ros/ROS2Visualizer.h
++++ b/ov_msckf/src/ros/ROS2Visualizer.h
+@@ -57,7 +57,14 @@
+ 
+ #include <tf2_ros/transform_broadcaster.h>
+ 
++#include <diagnostic_msgs/msg/diagnostic_status.hpp>
++#include <geometry_msgs/msg/twist_with_covariance_stamped.hpp>
++#include <std_srvs/srv/trigger.hpp>
++
++#include "utils/sensor_data.h"
++
+ #include <atomic>
++#include <deque>
+ #include <fstream>
+ #include <memory>
+ #include <mutex>
+@@ -142,6 +149,16 @@
+   void callback_stereo(const sensor_msgs::msg::Image::ConstSharedPtr msg0, const sensor_msgs::msg::Image::ConstSharedPtr msg1, int cam_id0,
+                        int cam_id1);
+ 
++  /**
++   * @brief Ask for an in-process reset (ros/patches/openvins-reset.patch): a new VioManager from the same parsed options,
++   * fed the last IMU samples and swapped in while no update runs; with seed_warm it seeds itself from the old filter's
++   * biases, the accelerometer's gravity and the velocity on /vio/seed_twist, else the standard initialiser starts it.
++   * @param why Logged with the reset
++   * @param answer What happened, for the service's answer
++   * @return True when the reset was made now, false when it is pending (retried at every IMU sample)
++   */
++  bool request_reset(const std::string &why, std::string &answer);
++
+ protected:
+   /// Publish the current state
+   void publish_state();
+@@ -157,6 +174,71 @@
+ 
+   /// Publish loop-closure information of current pose and active track information
+   void publish_loopclosure_information();
++
++  //===================================================================================
++  // In-process reset and warm seed (ros/patches/openvins-reset.patch)
++  //===================================================================================
++
++  /// The swap itself, on the executor's thread with the camera queue locked (no update inside); false when not possible yet
++  bool try_reset(std::string &answer);
++
++  /// The warm seed of a reset manager, asked by it at every frame until it initialises (update thread)
++  bool warm_seed(ov_msckf::VioManager *manager, double timestamp, double &seed_time, Eigen::Matrix<double, 16, 1> &imustate,
++                 Eigen::Matrix<double, 15, 15> &covariance);
++
++  /// A bias snapshot from the running filter when its last update was healthy (update thread)
++  void take_bias_snapshot();
++
++  /// One health message per processed frame on ~/health (update thread)
++  void publish_health(double timestamp);
++
++  /// A double parameter of this node, read at the moment of use (live: ros2 param set)
++  double param(const std::string &name, double fallback);
++
++  /// The gravity frame the poses are in: "global", then "global_<n>" after the n-th reset (each reset is a new frame)
++  std::string global_frame() const;
++
++  /// Held while _app is swapped, and by the visualize thread while it reads _app
++  std::mutex app_mtx;
++
++  /// The last IMU samples (seed_imu_keep_s), fed to a new manager and read for the seed's gravity and the gyro of health
++  std::deque<ov_core::ImuData> imu_ring;
++  std::mutex imu_ring_mtx;
++
++  /// The running filter's biases (IMU clock) and their 6x6 marginal covariance, at its healthy updates
++  struct BiasSnapshot {
++    double timestamp;
++    Eigen::Matrix<double, 6, 1> bias;
++    Eigen::Matrix<double, 6, 6> covariance;
++  };
++  std::deque<BiasSnapshot> bias_snapshots;
++  std::mutex bias_mtx;
++
++  /// The velocity seed: the IMU's velocity in its own axes and its covariance (/vio/seed_twist, pepin_bringup.vio_keeper)
++  struct VelocitySeed {
++    double timestamp = -1;
++    Eigen::Vector3d v_I = Eigen::Vector3d::Zero();
++    Eigen::Matrix3d covariance = Eigen::Matrix3d::Identity();
++  };
++  std::deque<VelocitySeed> velocity_seeds; // the last 3 s, the nearest to a frame is taken
++  std::mutex velocity_seed_mtx;
++
++  /// Reset bookkeeping: pending request, epoch (resets made), seeds, the reset's IMU time and first frame, the last seed outcome
++  std::atomic<bool> reset_pending{false};
++  std::string reset_why; // under seed_note_mtx
++  std::atomic<int> epoch{0};
++  std::atomic<int> warm_seeds{0};
++  std::atomic<int> standard_inits{0};
++  std::atomic<bool> warm_armed{false};
++  double reset_imu_time = -1;
++  double reset_first_frame = -1;
++  double last_health_imu_time = -1;
++  bool was_initialized = false;
++  std::string seed_note;
++  std::mutex seed_note_mtx;
++  rclcpp::Service<std_srvs::srv::Trigger>::SharedPtr srv_reset;
++  rclcpp::Subscription<geometry_msgs::msg::TwistWithCovarianceStamped>::SharedPtr sub_velocity_seed;
++  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticStatus>::SharedPtr pub_health;
+ 
+   /// Global node handler
+   std::shared_ptr<rclcpp::Node> _node;

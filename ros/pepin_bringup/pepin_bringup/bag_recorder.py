@@ -124,8 +124,15 @@ BAG_STOP_TIMEOUT_S = 15.0
 # per-image pose the relay reads and the IMU-rate prediction, so a replay can be held against the
 # VIO as it ran. odomimu is published only while somebody subscribes (OpenVINS's subscriber
 # check), so the ring is what makes OpenVINS compute it: ~170 Odometry messages a second,
-# ~7 MB a minute of the ring's ~26 (pepin.ring; scratch/ring_recorder/topic_sizes.py).
-VIO_TOPICS = ("/ov_msckf/poseimu", "/ov_msckf/odomimu")
+# ~7 MB a minute of the ring's ~26 (pepin.ring; scratch/ring_recorder/topic_sizes.py). With them
+# its health per frame (openvins-reset.patch: the keeper's verdicts are read from it) and the
+# keeper's velocity seed, so a reset is replayed with what decided it.
+VIO_TOPICS = (
+    "/ov_msckf/poseimu",
+    "/ov_msckf/odomimu",
+    "/ov_msckf/health",
+    "/vio/seed_twist",
+)
 RING_TOPICS: tuple[str, ...] = (*BAG_TOPICS, *VIO_TOPICS)
 RING_DIR = "/maps/ring"  # ros/maps/ring on the Mac: beside rec/, gitignored with it
 # The MCAP writer's options for the ring: a 256 KiB chunk instead of rosbag2's 768 KiB, so the

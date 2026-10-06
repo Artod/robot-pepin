@@ -18,6 +18,13 @@ default) the static initialisation starts from ~1 s of stillness, no motion need
 ``--dyn-init`` it may also start in motion). pepin_bringup.vio_keeper (always started) does the
 same on ``/vio/restart``, which the relay's guard calls after a run of implausible samples at rest.
 
+THE IN-PROCESS RESET (ros/patches/openvins-reset.patch, built in by Dockerfile.vio's RESET=1):
+OpenVINS serves ``/ov_msckf/reset`` (a new filter in the same process, seeded warm on the first
+frame with a picture) and publishes ``/ov_msckf/health`` per frame; pepin_bringup.vio_keeper judges
+that health and calls the reset (its ``vio_recover`` flag; the process restart is the fallback).
+The seed's numbers are config/knobs.json's ``vio_keeper`` block (pepin.vio_recover.OPENVINS_KNOBS
+and ``seed_warm``), passed here at OpenVINS's start; the keeper pushes their live values.
+
 ``feed`` (default false: OpenVINS reads camera_stream's topics, every frame) true puts
 pepin_bringup.vio_feed between them: the eye pairs a fast head did not smear reach it on
 ``/vio/image`` + ``/vio/right/image`` (OpenVINS's two image topics remapped there). Off by
@@ -31,6 +38,7 @@ lost wake-up (ros/patches/rmw_zenoh-lost-wakeup.patch, in every image): kept as 
 
 import os
 from pathlib import Path
+from typing import Any
 
 from launch import LaunchDescription
 from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction
@@ -38,6 +46,22 @@ from launch.substitutions import LaunchConfiguration
 from launch_ros.actions import Node
 
 RESPAWN = {"respawn": True, "respawn_delay": 2.0}
+
+
+def seed_parameters() -> dict[str, Any]:
+    """The warm seed's knobs and flag at their config/knobs.json (and FLAGS) defaults, as OpenVINS's
+    parameters; empty when the library is not importable (OpenVINS then uses its own defaults)."""
+    try:
+        from pepin.flags import load_knobs
+        from pepin.vio_recover import OPENVINS_FLAGS, OPENVINS_KNOBS
+    except ImportError:
+        return {}
+    knobs = load_knobs("vio_keeper")
+    values: dict[str, Any] = {name: knobs[name] for name in OPENVINS_KNOBS if name in knobs}
+    values.update(OPENVINS_FLAGS)  # vio_keeper's FLAGS defaults
+    return values
+
+
 DEFAULT_CONFIG = "/maps/vio/estimator_config.yaml"
 EXECUTORS = ("single", "multi")
 # camera_stream's two eyes and the gated pairs pepin_bringup.vio_feed republishes them as
@@ -86,6 +110,9 @@ def _describe(context):  # type: ignore[no-untyped-def]
                 # upstream keeps every update's pose and republishes the whole path each update;
                 # nothing here reads /ov_msckf/pathimu (openvins-executor.patch's switch)
                 "publish_path": False,
+                # the in-process reset's warm seed (openvins-reset.patch; ignored by an image
+                # built without it)
+                **seed_parameters(),
             }
         ],
         # The config's rostopics are camera_stream's; with the feed they are remapped onto its

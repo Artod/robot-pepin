@@ -206,6 +206,10 @@ OccupancyGridUpdate = _msg(
 Bool = _msg("Bool", data=False)
 Float32 = _msg("Float32", data=0.0)
 String = _msg("String", data="")
+KeyValue = _msg("KeyValue", key="", value="")
+DiagnosticStatus = _msg(
+    "DiagnosticStatus", level=0, name="", message="", hardware_id="", values=list
+)
 TFMessage = _msg("TFMessage", transforms=list)
 UUID = _msg("UUID", uuid=lambda: [0] * 16)
 GoalInfo = _msg("GoalInfo", goal_id=UUID, stamp=Time)
@@ -995,6 +999,10 @@ def install() -> Any:
             "action_msgs.msg", GoalStatus=GoalStatus, GoalStatusArray=GoalStatusArray
         ),
         "action_msgs.srv": _module("action_msgs.srv", CancelGoal=CancelGoal),
+        "diagnostic_msgs": _module("diagnostic_msgs"),
+        "diagnostic_msgs.msg": _module(
+            "diagnostic_msgs.msg", DiagnosticStatus=DiagnosticStatus, KeyValue=KeyValue
+        ),
         "std_srvs": _module("std_srvs"),
         "std_srvs.srv": _module("std_srvs.srv", Trigger=Trigger, Empty=Empty),
         "tf2_msgs": _module("tf2_msgs"),

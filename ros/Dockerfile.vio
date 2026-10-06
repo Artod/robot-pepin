@@ -29,16 +29,30 @@
 # on the zenoh bench) was rmw_zenoh's lost wake-up, fixed by ros/patches/rmw_zenoh-lost-wakeup.patch
 # (the COPY at the end): with it the stock OpenVINS ran 10 of 10 bench runs clean (night of
 # 2026-10-04). single stays a parameter as the fallback. EXECUTOR=0 builds upstream's code.
+#
+# RESET=1 (default, on top of EXECUTOR=1) applies patches/openvins-reset.patch: the IN-PROCESS
+# RESET. ~/reset (std_srvs/Trigger) builds a new VioManager from the same parsed options and swaps
+# it in while no update runs (ModalAI voxl-open-vins-server's hard reset), fed the last 3 s of IMU;
+# the new filter is seeded WARM on the first frame with persistent tracks: the old filter's biases
+# from its last healthy update, gravity from the accelerometer window turned by the gyro, the
+# velocity of /vio/seed_twist (pepin_bringup.vio_keeper: the EKF's twist at the head IMU), each with
+# its covariance; else OpenVINS's own initialiser. A frame more than reset_frame_gap_s after the
+# filter's last resets it too. ~/health (diagnostic_msgs/DiagnosticStatus) says per frame what the
+# keeper's rules read; poseimu and odomimu name their gravity frame global, then global_<n> after
+# the n-th reset. Every number is a parameter read at the moment of use (config/knobs.json's
+# vio_keeper block; vio.launch.py and the keeper set them).
 ARG BASE=pepin-laptop:xfeat
 FROM ${BASE}
 ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b
 ARG OV_PR500=0bd027a997f3ca911b3df504d20b00b60f371b31
 ARG MASK=0
 ARG EXECUTOR=1
+ARG RESET=1
 # Few jobs on purpose: the Docker VM also runs the live stack (Dockerfile.xfeat's reasoning).
 ARG JOBS=2
 COPY patches/openvins-frame-mask.patch /opt/openvins/patches/openvins-frame-mask.patch
 COPY patches/openvins-executor.patch /opt/openvins/patches/openvins-executor.patch
+COPY patches/openvins-reset.patch /opt/openvins/patches/openvins-reset.patch
 RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
     && cd /ws_vio/src/open_vins \
     && git fetch -q origin pull/500/head \
@@ -46,10 +60,13 @@ RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
     && git merge-base --is-ancestor "$OV_MASTER" HEAD \
     && if [ "$MASK" = 1 ]; then git apply /opt/openvins/patches/openvins-frame-mask.patch; fi \
     && if [ "$EXECUTOR" = 1 ]; then git apply /opt/openvins/patches/openvins-executor.patch; fi \
+    && if [ "$EXECUTOR" = 1 ] && [ "$RESET" = 1 ]; then \
+           git apply /opt/openvins/patches/openvins-reset.patch; fi \
     && { echo "open_vins master $OV_MASTER (2025-11-30)"; \
          echo "PR #500 head $OV_PR500 (Jazzy/24.04, Ceres 2.2 fix)"; \
          echo "frame mask patch: $MASK"; \
          echo "executor patch: $EXECUTOR"; \
+         echo "reset patch: $RESET"; \
          echo "built tree $(git rev-parse HEAD)$(git diff --quiet || echo ' + patch')"; } \
        > /opt/openvins/SHAS \
     && rm -rf .git

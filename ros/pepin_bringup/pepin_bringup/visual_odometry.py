@@ -670,7 +670,7 @@ class VisualOdometry(Node):
         self._tally.count("in")
         stamp = stamp_seconds(msg.header.stamp)
         self._tally.sample("latency_ms", (time.time() - stamp) * 1000.0)
-        if self._vio_health.observe(msg.pose.covariance):
+        if self._vio_health.observe(msg.pose.covariance, msg.header.frame_id):
             self._tally.count("vio_reinit")
             self._last_vio = None
             self._reanchor(None)  # a new gravity frame: nothing differences across it
