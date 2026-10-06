@@ -514,9 +514,9 @@ def test_the_output_and_the_guard_switch_live_and_rtabmap_stays_pose() -> None:
 
     assert f"/{DEPLOYED}" == VO_TWIST_TOPIC, "the flags table needs a literal; the EKF reads this"
     node = _node()
-    assert node._guard.wheel_rule
-    assert node.set_parameters([ros_stubs.Parameter("vio_guard", value=False)])[0].successful
-    assert not node._guard.wheel_rule, "the wheel rule off, live"
+    assert not node._guard.wheel_rule, "off by default since 2026-10-05"
+    assert node.set_parameters([ros_stubs.Parameter("vio_guard", value=True)])[0].successful
+    assert node._guard.wheel_rule, "the wheel rule on, live"
     assert not node.set_parameters([ros_stubs.Parameter("vo_output", value="velocity")])[
         0
     ].successful

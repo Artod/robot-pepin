@@ -464,7 +464,7 @@ def test_the_path_look_is_held_until_the_reverse_look_replaces_it(node: Gaze) ->
     assert [(x.t, x.pan_deg, x.speed_deg_s) for x in writes] == [
         (0.0, 45.0, None),
         (3.0, -150.0, None),  # no lapse home at 2.5: the reverse look takes the held head
-        (4.05, 45.0, None),  # the glance's swing and dwell first, then the path look
+        (4.1, 45.0, None),  # the glance's swing and 0.6 s dwell first, then the path look
         (5.5, 0.0, 45.0),
     ]
     assert node.logger.texts("info")[-1].endswith("every one wrote frames")

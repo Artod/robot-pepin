@@ -245,14 +245,15 @@ FLAGS = FlagSet(
     ),
     Flag(
         "vio_guard",
-        True,
+        False,
         description="the plausibility guard's wheel rule: a composed base velocity farther than"
         " vio_wheel_diff_m_s from the wheels' is refused; off, the guard judges the speed alone"
         " (vio_max_speed_m_s, always on), so the VIO may disagree with slipping wheels",
-        why="on since the guard landed (2026-10-04; vio_wheel_diff_m_s 0.2 since 2026-10-05): 15"
-        " of drives 306/307's 16 refusals fell inside or right after a >= 45 deg head swing,"
-        " OpenVINS's own velocity errors. A switch now because a VIO with weight is worth most"
-        " exactly when it disagrees with the wheels, which this rule refuses",
+        why="off since 2026-10-05 (Artem): a VIO with weight is worth most exactly when it"
+        " disagrees with the wheels, which this rule refused. On from the guard's landing"
+        " (2026-10-04) until then: 15 of drives 306/307's 16 refusals fell inside or right"
+        " after a >= 45 deg head swing, OpenVINS's own velocity errors, which the velocity"
+        " covariance now carries instead",
         on_when="the default while the VIO's velocity is unproven in motion",
         off_when="a drive that tests the VIO against wheel slip (carpet, a stall), with vo_output"
         " twist; VioLost's wheel rule (vio_lost_speed_m_s for vio_lost_s) still catches a sustained"

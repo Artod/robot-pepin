@@ -149,7 +149,7 @@
       "note": "a lethal cell this close behind the hull makes the rear tight: the head turns back from the first reversing twist"},
     "reverse_frames": {"default": 3, "range": [0, 20],
       "note": "the clean (gate-passed, fused) frames the reverse look waits for once settled before the path look may take the head (0: answered on arrival, as before 2026-10-05)"},
-    "glance_dwell_s": {"default": 0.3, "range": [0.0, 3.0],
+    "glance_dwell_s": {"default": 0.6, "range": [0.0, 3.0],
       "note": "above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s (0: no glance, as before 2026-10-05)"},
     "return_deg_s": {"default": 45.0, "range": [0.0, 300.0],
       "note": "after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05)"}
