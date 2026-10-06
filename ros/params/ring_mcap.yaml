@@ -1,0 +1,5 @@
+# The MCAP writer's options for the always-on ring (pepin_bringup.bag_recorder, goal_bag ring;
+# `ros2 bag record --storage-config-file`). A 256 KiB chunk instead of rosbag2's 768 KiB: the file
+# being written is on disk within ~1 s of a message at a drive's rates instead of 3-4 s, and a
+# goal's bag is cut that much sooner after the goal. Uncompressed, as every bag here.
+chunkSize: 262144

@@ -26,6 +26,9 @@ RUN python3 -m pip install -q --break-system-packages --no-cache-dir torch torch
 # The stall look's behaviour tree node (ros/pepin_gaze_bt: AskGaze, which bt_navigator loads as
 # pepin_ask_gaze_bt_node; nav.launch.py cuts the look out of the tree on an image without it).
 FROM ${BASE}
+# The MCAP library the bag recorder's ring cuts a goal's bag with (pepin.bag_slice, flag goal_bag
+# ring; the node refuses the ring without it). The version uv.lock pins.
+RUN python3 -m pip install -q --break-system-packages --no-cache-dir "mcap==1.5.0"
 COPY pepin_gaze_bt /ws/src/pepin_gaze_bt
 RUN . /opt/ros/jazzy/setup.sh && cd /ws \
     && colcon build --packages-select pepin_gaze_bt --cmake-args -DCMAKE_BUILD_TYPE=Release \

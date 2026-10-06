@@ -53,6 +53,7 @@ PARAMS_HALVES: dict[str, tuple[str, ...]] = {
     "nav2_params.yaml": ("laptop",),
     "ekf.yaml": ("board",),
     "rosbag_qos.yaml": ("laptop",),
+    "ring_mcap.yaml": ("laptop",),  # bag_recorder's ring (goal_bag ring) in pepin-macnav
     "calib_qos.yaml": ("laptop",),  # ros/calib_record.sh's recorder in pepin-vslam
     "pepin_nav_to_pose.xml": ("laptop",),
 }

@@ -187,11 +187,18 @@ PEPIN_VSLAM_CONTAINER="${PEPIN_VSLAM_CONTAINER:-pepin-vslam}"
 # One run's bag turned into the tape every analysis script reads (ros/tools/bag_to_tape.py). It
 # runs in the laptop's ROS container, because rosbag2_py and rclpy's deserialisation live there
 # and never on the Mac itself; with that container down, the command to run later is printed
-# instead of a drive's cleanup failing.
+# instead of a drive's cleanup failing. A bag cut from the ring (bag_recorder's goal_bag ring)
+# appears whole, renamed into place, tail_s and ~1 s after the goal's end: waited for here, up to
+# PEPIN_BAG_WAIT_S (a per-goal bag is closed before the goal's end is reported, so at once).
 pepin_bag_to_tape() {  # <bag directory under ros/maps/rec>
-    local name convert
+    local name convert waited=0
     name="$(basename "$1")"
     convert="/pepin_entrypoint.sh python3 /tools/bag_to_tape.py /maps/rec/$name --force"
+    while [ ! -f "$PEPIN_ROS_DIR/maps/rec/$name/metadata.yaml" ] && [ "$waited" -lt "${PEPIN_BAG_WAIT_S:-30}" ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    [ "$waited" -eq 0 ] || echo "waited ${waited} s for the bag $name"
     if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$PEPIN_VSLAM_CONTAINER"; then
         echo "!! $PEPIN_VSLAM_CONTAINER is down, so the bag is not converted yet. Later:"
         echo "   docker exec $PEPIN_VSLAM_CONTAINER $convert"

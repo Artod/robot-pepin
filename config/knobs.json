@@ -1,5 +1,17 @@
 {
   "_note": "Config knobs: numbers each node reads at start and keeps as live ROS parameters (ros/flags.sh get|set NODE KNOB). Feature flags live in each node's FLAGS table; see ros/README.md, Feature flags.",
+  "bag_recorder": {
+    "ring_keep_h": {"default": 6.0, "range": [0.1, 168.0],
+      "note": "goal_bag ring: a ring file last written longer ago than this (hours) is deleted at the next pass (every 10 s); 6 h is ~9 GB at the ~26 MB a minute estimated from drive bags"},
+    "ring_keep_gb": {"default": 10.0, "range": [0.5, 500.0],
+      "note": "goal_bag ring: the oldest ring files go while the ring holds more than this (GB), whatever their age; the file being written never goes"},
+    "ring_floor_gb": {"default": 15.0, "range": [1.0, 500.0],
+      "note": "goal_bag ring: ring files go while the Mac's disk has less than this free (GB), and the ring's recorder stops while even an empty ring leaves it under"},
+    "preroll_s": {"default": 15.0, "range": [0.0, 120.0],
+      "note": "goal_bag ring: a goal's bag begins this many seconds before the goal's word (the JSONL tape's prelude, pepin.tape.PRELUDE_S); a cold OpenVINS replay needs at least init_window_time (1 s) of rest in it"},
+    "tail_s": {"default": 2.0, "range": [0.0, 60.0],
+      "note": "goal_bag ring: a goal's bag ends this many seconds after the goal ended (the cart settling); the bag is cut this long and ~1 s after the end"}
+  },
   "camera_stream": {
     "scale": {"default": 0.5, "range": [0.0, 1.0],
       "note": "the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason"},

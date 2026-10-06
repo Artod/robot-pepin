@@ -581,6 +581,7 @@ minute, and every live flag on it back to its default.
 
 | node | flag | kind | default | live | description |
 | --- | --- | --- | --- | --- | --- |
+| `bag_recorder` | `goal_bag` | choice: record, ring | record | yes | how a goal's bag is made. record: one `ros2 bag record` of BAG_TOPICS per goal, started on the goal's word and closed at its end (its first message 0.3-0.4 s after the word). ring: one `ros2 bag record` of RING_TOPICS (BAG_TOPICS and OpenVINS's /ov_msckf/poseimu and /ov_msckf/odomimu) runs as long as this node, a file a minute under ring_dir pruned by the knobs ring_keep_h, ring_keep_gb and ring_floor_gb, and a goal's bag is cut out of it, [goal - preroll_s, end + tail_s], into the same /maps/rec/<run>/ (pepin.ring, pepin.bag_slice), whole once the ring is written past the window (tail_s and ~1 s after the goal). A change starts or stops the ring at once; a run keeps the way it began |
 | `base_bridge` | `imu_publish` | bool | on | yes | the MPU6050's readings leave the bridge as /imu/data_raw, where the EKF fuses index 11 (the yaw rate) and nothing else; off, the chip is still read and its bias still estimated, but no message is published |
 | `base_bridge` | `odom_publish` | bool | on | yes | the base server's state line leaves the bridge as /odom and, while publish_tf is on, as the odom -> base_link transform; off, the wheels are still read and still commanded, and both go silent together — a transform still broadcast from a silent /odom is a state no sensor failure produces |
 | `base_bridge` | `odom_stamp` | choice: encoder, arrival | encoder | yes | what /odom and odom -> base_link are dated by: the state line's encoder read carried onto the ROS clock (`encoder`, the stamp /neck/state of the same line carries) or the moment the line reached the bridge (`arrival`); a line older than 0.5 s is dated on arrival either way |
@@ -647,6 +648,11 @@ the node restarts. Where the code already names the number, a unit test holds th
 
 | node | knob | kind | default | note |
 | --- | --- | --- | --- | --- |
+| `bag_recorder` | `ring_keep_h` | number 0.1..168 | 6.0 | goal_bag ring: a ring file last written longer ago than this (hours) is deleted at the next pass (every 10 s); 6 h is ~9 GB at the ~26 MB a minute estimated from drive bags |
+| `bag_recorder` | `ring_keep_gb` | number 0.5..500 | 10.0 | goal_bag ring: the oldest ring files go while the ring holds more than this (GB), whatever their age; the file being written never goes |
+| `bag_recorder` | `ring_floor_gb` | number 1..500 | 15.0 | goal_bag ring: ring files go while the Mac's disk has less than this free (GB), and the ring's recorder stops while even an empty ring leaves it under |
+| `bag_recorder` | `preroll_s` | number 0..120 | 15.0 | goal_bag ring: a goal's bag begins this many seconds before the goal's word (the JSONL tape's prelude, pepin.tape.PRELUDE_S); a cold OpenVINS replay needs at least init_window_time (1 s) of rest in it |
+| `bag_recorder` | `tail_s` | number 0..60 | 2.0 | goal_bag ring: a goal's bag ends this many seconds after the goal ended (the cart settling); the bag is cut this long and ~1 s after the end |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason |
 | `camera_stream` | `camera_stamp_lag_s` | number 0..0.3 | 0.09 | camera_stamp grab only: every grab stamp is dated this many seconds earlier, to the exposure the V4L2 capture stamp sits behind (about one frame period at 10 fps whatever the light: a buffered frame, not the exposure); the send fallback is left alone. Measured with the head's gyro against the pictures' own motion (image flow vs /head/imu, scratch/vio_night/cam_imu_lag.py): 90/90 ms by day, 92/95 ms at night (2026-10-04); with 0.09 live the residual read +1 ms. config/camera.json's head_imu.time_offset_s is measured against the stamps at this knob's default, and ros/laptop.sh vio reads the live value at its start: restart the VIO after a change |
 | `contact_scan` | `max_range` | number 0.1..10 | 2.0 | metres past which a column is called clear instead of ended; the costmap's contact_layer.obstacle_max_range must match it |
@@ -757,7 +763,7 @@ roads end in the same file, `ros/maps/rec/NNNN_<utc>Z_<goal>.jsonl`.
 | who writes | `pepin_bringup.run_recorder`, beside Nav2 in `pepin-macnav` | `ros2 bag record` (MCAP, no compression), started by `pepin_bringup.bag_recorder` |
 | what lands there | the tape itself | `NNNN_<utc>Z_<goal>/` (MCAP) |
 | the tape | already written | made by `ros/tools/bag_to_tape.py` in `pepin-vslam`, which `ros/goto.sh` runs for you |
-| prelude | the 15 s before the goal (`pepin.tape.RunTape`) | none: the bag begins with the goal |
+| prelude | the 15 s before the goal (`pepin.tape.RunTape`) | none under `goal_bag record`; `preroll_s` (15 s) under `goal_bag ring` |
 
 Both answer the same protocol (`pepin.runlink`): the goal server publishes `{"cmd": "start",
 "name": ...}` on `pepin/run` and reads the run's number and path back from the latched
@@ -772,6 +778,21 @@ live recorder's own functions (`pepin.tape_rows`); the `loc` records are compose
 # by hand, if a bag was left without its conversion:
 docker exec pepin-vslam /pepin_entrypoint.sh python3 /tools/bag_to_tape.py /maps/rec/0251_... --force
 ```
+
+### The ring (`bag_recorder`'s `goal_bag ring`, off by default)
+
+Under `PEPIN_RECORDER=bag`, `ros/flags.sh set bag_recorder goal_bag ring` makes the bag recorder
+keep ONE `ros2 bag record` running for as long as it lives: the bag's topics plus OpenVINS's
+`/ov_msckf/poseimu` and `/ov_msckf/odomimu`, one uncompressed MCAP file a minute (256 KiB chunks,
+[`params/ring_mcap.yaml`](params/ring_mcap.yaml)) under `ros/maps/ring/<UTC start>/`, the oldest
+files deleted past `ring_keep_h` (6 h), `ring_keep_gb` (10 GB) or under `ring_floor_gb` (15 GB)
+free. A goal only marks its start and end: its bag is cut out of the ring,
+`[goal - preroll_s, end + tail_s]` (15 s, 2 s), into the same `ros/maps/rec/NNNN_<utc>Z_<goal>/`
+(`pepin.ring`, `pepin.bag_slice`, the `mcap` library: `ros2 bag` has no cut), with the latched
+`/tf_static` and the last global costmap carried to its start. The bag appears whole about
+`tail_s` + 1 s after the goal ends; `ros/goto.sh` waits for it before converting. Needs `mcap` in
+the image (`ros/laptop-build.sh gaze`); without it the switch is refused. `goal_bag record` stops
+the ring and makes each goal's bag the proven way.
 
 ### The board's own recording (`board_bag`, off by default)
 
