@@ -99,6 +99,9 @@ def build(monkeypatch: pytest.MonkeyPatch) -> Gaze:
     with ros_stubs.parameters(http_port=0):
         built = Gaze()
     built._tf = FakeTf()  # type: ignore[assignment]
+    # The tapes' head went home at 45 deg/s, the knob's default from 2026-10-05 to 2026-10-07;
+    # the pins below hold that write. The default is a saccade now (the test that sets 0 covers it).
+    built._switches.set("return_deg_s", 45.0)
     return built
 
 
@@ -242,8 +245,8 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
     assert node._switches.on("stall_look") and node._switches.on("path_gaze")
     assert node._switches.on("reverse_gaze")
     assert int(node._switches["frames"]) == 3
-    line = node.logger.texts("info")[-1]
-    assert line.startswith("gaze up:") and "stall_look=on" in line
+    line = next(t for t in node.logger.texts("info") if t.startswith("gaze up:"))
+    assert "stall_look=on" in line
 
 
 def test_the_recoveries_it_watches_are_the_behaviour_servers_and_the_trees() -> None:

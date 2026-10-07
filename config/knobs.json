@@ -187,8 +187,8 @@
       "note": "the clean (gate-passed, fused) frames the reverse look waits for once settled before the path look may take the head (0: answered on arrival, as before 2026-10-05)"},
     "glance_dwell_s": {"default": 0.6, "range": [0.0, 3.0],
       "note": "above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s; the reverse glance takes the head from the path look at once, even mid-swing, and with reverse_hold_s it is cut at the first forward command (0: no glance, the reverse look waits for a path look to arrive, as before 2026-10-05)"},
-    "return_deg_s": {"default": 45.0, "range": [0.0, 300.0],
-      "note": "after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05)"},
+    "return_deg_s": {"default": 0.0, "range": [0.0, 300.0],
+      "note": "after a drive the head goes home at this speed, with neck_target; 0: a saccade at the board's top speed. 45 (2026-10-05 to 2026-10-06) made the way home gentle but cost 0.4 s of blind time per drive on eleven tapes, the only thing the speed changes (gaze_ahead headspeed.py); Artem 2026-10-07: fast"},
     "gate_dark_patience_s": {"default": 1.5, "range": [0.0, 30.0],
       "note": "a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL"}
   },

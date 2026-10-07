@@ -29,7 +29,7 @@
     "path_hold_s": 60.0,
     "reverse_frames": 3,
     "glance_dwell_s": 0.6,
-    "return_deg_s": 45.0,
+    "return_deg_s": 0.0,
     "reverse_min_m": 0.15,
     "reverse_recovery": 1,
     "reverse_hold_s": 1.5,
