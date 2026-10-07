@@ -6,170 +6,217 @@
   turns, then backs up; the round robin below is the last resort. An image without the AskGaze
   plugin (pepin_gaze_bt) gets this tree with the element named StallLook cut out
   (nav.launch.py), and every AskGaze must stand inside it.
+  The controller FollowPath drives with is the one the current plan was made under
+  (plan_controller), never the selector's latest word: a controller change is a fresh plan first,
+  and the new controller gets its first goal together with that plan.
 -->
 <root BTCPP_format="4" main_tree_to_execute="MainTree">
   <BehaviorTree ID="MainTree">
-    <RecoveryNode number_of_retries="20" name="NavigateRecovery">
-      <PipelineSequence name="NavigateWithReplanning">
-        <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
-        <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
-        <!-- Which goal checker ends the drive goes with the controller (the goal server publishes
-             both, latched): the RPP pair ends on position alone (xy_only) and the heading is the
-             goal server's pivot; MPPI turns to the heading itself and is held to it
-             (general_goal_checker). -->
-        <GoalCheckerSelector selected_goal_checker="{selected_goal_checker}" default_goal_checker="xy_only_goal_checker" topic_name="goal_checker_selector"/>
-        <!-- The local costmap must be a picture of NOW, not a memory of everything that ever
-             stood here. Its obstacle layer only forgets a cell when a laser beam passes through
-             it, and our tracker keeps correcting map->odom, so every wall gets re-marked a few
-             centimetres away each time: run 0002 carried 388 lethal cells that no scan of the
-             whole run supported, 82 of them within 0.8 m of the cart, and they are what the
-             controller kept refusing to drive into. The lidar refills the real ones in 0.1 s. -->
-        <RateController hz="0.2">
-          <ClearEntireCostmap name="ForgetStaleObstacles" service_name="local_costmap/clear_entirely_local_costmap"/>
-        </RateController>
-        <!-- The same forgetting for the planner's costmap, slower. The ToF layers live here too now
-             (that is how a plan routes around what they see), but nothing ever re-observes a cell
-             the cart has driven past, so without this every ToF return would leave a permanent
-             cairn across the flat. Ten seconds: the global costmap rebuilds at 2 Hz, and it is
-             also the only thing that removes a dynamic ring marked farther out than the lidar's
-             raytrace range, so a ghost stays short-lived and the plan mostly whole. -->
-        <RateController hz="0.1">
-          <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
-        </RateController>
-        <!-- A fresh plan every second, from where the cart stands: MPPI may leave the line to pass
-             a person, and the next plan starts under its wheels. -->
-        <RateController hz="1.0">
-          <RecoveryNode number_of_retries="5" name="ComputePathToPose">
-              <!-- The chosen planner is the only planner. The NavFn fallback that used to sit here
-                   took over whenever Hybrid-A* refused — and Hybrid refuses exactly when the cart
-                   does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
-                   over the toes (run 0113, five times in one leg). A refusal is a recovery below,
-                   a wait for the person to move, never a smaller robot. -->
-              <!-- 2026-10-06: a plan is KEPT while the goal is the same and the path still passes
-                   the planner's validity check; a new one only when it does not. A fresh plan every
-                   second put the cart on a reverse treadmill: each plan began with 8-39 cm backwards
-                   before a forward turn, the cart backed 13 cm a second, and the next plan from the
-                   new pose began backwards again — 11-15 plans and 1.4-2.1 m of reverse on drives
-                   0342/0344/0347, 60 of 61 reversals right after such a plan (scratch/drives_1006c). -->
-              <!-- The plan is kept only while the SHIM drives (the long way): the parker, MPPI in the
-                   last metre, cuts a plan at its first direction change and keeps 1.2 m of it, so a
-                   kept plan still carrying the departure's reverse leg reached it as "0 poses" (0350
-                   failed on one plan in 68 s, 0352 backed 1.03 m to the old turning point), and a
-                   plan the planner ended off the mark was kept to the end (parked 27-41 deg crooked).
-                   Under MPPI a fresh plan comes every second, as before 2026-10-06. -->
-              <Fallback name="ReplanOnlyIfNeeded">
-                <ReactiveSequence>
-                  <ScriptCondition code="selected_controller == 'FollowPathShim'"/>
-                  <Inverter>
-                    <GlobalUpdatedGoal/>
-                  </Inverter>
-                  <IsPathValid path="{path}"/>
-                </ReactiveSequence>
-                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-              </Fallback>
-              <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
-                   for START_OCCUPIED, which is precisely the code a footprint-checking planner
-                   returns when the cart is parked close to something — so the whole branch was
-                   skipped and the goal died in four seconds without a wheel turning (runs 0023 and
-                   0025, "Goal failed" 65 ms after "Start occupied"). A planner failure gets the
-                   same three answers a person would try: forget what may be stale, retreat, or
-                   turn so the hull sits differently. Any one of them is enough, so they are a
-                   fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
-              <Sequence>
-                <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
-                <!-- RoundRobin, not Fallback: a Fallback always stops at the first child that
-                     succeeds, so a retreat that worked was repeated on every retry and walked the
-                     cart backwards across the room (run 0027, four reverses and a lost tracker).
-                     Each retry gets a DIFFERENT answer instead. Waiting is second, not first: the
-                     tracker searches the whole map by itself when the fit drops, so a pose being
-                     fixed needs no help from here, while a cart parked on the furniture does. -->
-                <RoundRobin name="PlannerRecoveryActions">
-                  <!-- Retreat first: a start the planner refuses is a cart parked on the map's own
-                       furniture (the front edge inside one cell of it), and two seconds of waiting
-                       do not move it. -->
-                  <Wait wait_duration="2"/>
-                  <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_error_code}"/>
-                  <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
-                </RoundRobin>
-              </Sequence>
-            </RecoveryNode>
-        </RateController>
-        <RecoveryNode number_of_retries="1" name="FollowPath">
-          <FollowPath path="{path}" controller_id="{selected_controller}" goal_checker_id="{selected_goal_checker}" error_code_id="{follow_path_error_code}"/>
-          <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
-               ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
-               0.20 m from the printer it cannot legally rotate at all, and no tuning changes that
-               arithmetic — 0.25 m of retreat makes the turn free. This branch fires on the
-               controller's own error, seconds before the global round robin would get there. -->
-          <Sequence>
-            <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
-            <!-- The stall look (pepin_bringup.gaze, its stall_look flag): before the costmaps are
-                 cleared, the head looks at the camera-only and unexplained marks blocking the
-                 hull in the plan's first metre, holds for a few still frames so the volume carves
-                 a phantom or confirms a thing, and comes home; the clears and the replan below
-                 then read the volume as it is now. AskGaze waits exactly as long as the look and
-                 succeeds at once with the flag off or the arbiter away, so the tree is then the
-                 one before. FAILURE means the blocker is under the bumper, in the frame's last
-                 rows: back up 0.10 m and ask again, and nothing here ever fails the recovery. -->
-            <Fallback name="StallLook">
-              <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
-              <ForceSuccess>
-                <Sequence>
-                  <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
-                  <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
+    <Sequence name="Start">
+      <!-- Every goal starts with no plan of its own: the blackboard outlives a goal, and a path kept
+           from the last one (the same mark sent twice, a retry after a failure) passed the keep
+           check below although it started where the cart was before. -->
+      <Script code="plan_controller := ''; plan_due := true"/>
+      <RecoveryNode number_of_retries="20" name="NavigateRecovery">
+        <PipelineSequence name="NavigateWithReplanning">
+          <ControllerSelector selected_controller="{selected_controller}" default_controller="FollowPath" topic_name="controller_selector"/>
+          <PlannerSelector selected_planner="{selected_planner}" default_planner="GridBased" topic_name="planner_selector"/>
+          <!-- Which goal checker ends the drive goes with the controller (the goal server publishes
+               both, latched): the RPP pair ends on position alone (xy_only) and the heading is the
+               goal server's pivot; MPPI turns to the heading itself and is held to it
+               (general_goal_checker). -->
+          <GoalCheckerSelector selected_goal_checker="{selected_goal_checker}" default_goal_checker="xy_only_goal_checker" topic_name="goal_checker_selector"/>
+          <!-- The local costmap must be a picture of NOW, not a memory of everything that ever
+               stood here. Its obstacle layer only forgets a cell when a laser beam passes through
+               it, and our tracker keeps correcting map->odom, so every wall gets re-marked a few
+               centimetres away each time: run 0002 carried 388 lethal cells that no scan of the
+               whole run supported, 82 of them within 0.8 m of the cart, and they are what the
+               controller kept refusing to drive into. The lidar refills the real ones in 0.1 s. -->
+          <RateController hz="0.2">
+            <ClearEntireCostmap name="ForgetStaleObstacles" service_name="local_costmap/clear_entirely_local_costmap"/>
+          </RateController>
+          <!-- The same forgetting for the planner's costmap, slower. The ToF layers live here too now
+               (that is how a plan routes around what they see), but nothing ever re-observes a cell
+               the cart has driven past, so without this every ToF return would leave a permanent
+               cairn across the flat. Ten seconds: the global costmap rebuilds at 2 Hz, and it is
+               also the only thing that removes a dynamic ring marked farther out than the lidar's
+               raytrace range, so a ghost stays short-lived and the plan mostly whole. -->
+          <RateController hz="0.1">
+            <ClearEntireCostmap name="ForgetGlobalGhosts" service_name="global_costmap/clear_entirely_global_costmap"/>
+          </RateController>
+          <!-- A fresh plan every second, from where the cart stands: MPPI may leave the line to pass
+               a person, and the next plan starts under its wheels. The second only makes a plan
+               due; the plan itself is made below, at once also when the controller changed. -->
+          <RateController hz="1.0" name="PlanEverySecond">
+            <Script code="plan_due := true"/>
+          </RateController>
+          <!-- 2026-10-06: the plan the controller follows is made under that controller. At the
+               goal server's handover to MPPI (the last metre) FollowPath used to pass the new
+               controller id at its next tick (50 ms) with the plan kept under the shim, up to a
+               second before the 1 Hz plan came: MPPI cut that plan at the departure's reverse
+               leg, found nothing within prune_distance and aborted, "Resulting plan has 0 poses"
+               (5 of 32 handovers on 2026-10-06: 0350, 0352, 0354, 0361, 0362; 0361 spun 90 deg
+               at the base and took 25 s more). Now a controller change makes the plan due at
+               once (one BT tick + one plan, ~0.1-0.2 s, the shim driving on meanwhile), and
+               FollowPath reads plan_controller, set with the plan: the new controller and the
+               fresh plan reach the controller server as one goal. -->
+          <Fallback name="PlanWhenDue">
+            <ScriptCondition code="!plan_due &amp;&amp; plan_controller == selected_controller"/>
+            <RecoveryNode number_of_retries="5" name="ComputePathToPose">
+                <!-- The chosen planner is the only planner. The NavFn fallback that used to sit here
+                     took over whenever Hybrid-A* refused — and Hybrid refuses exactly when the cart
+                     does not fit: NavFn then squeezed a 12 cm disc through the gap and the wheel went
+                     over the toes (run 0113, five times in one leg). A refusal is a recovery below,
+                     a wait for the person to move, never a smaller robot. -->
+                <!-- 2026-10-06: a plan is KEPT while the goal is the same and the path still passes
+                     the planner's validity check; a new one only when it does not. A fresh plan every
+                     second put the cart on a reverse treadmill: each plan began with 8-39 cm backwards
+                     before a forward turn, the cart backed 13 cm a second, and the next plan from the
+                     new pose began backwards again — 11-15 plans and 1.4-2.1 m of reverse on drives
+                     0342/0344/0347, 60 of 61 reversals right after such a plan (scratch/drives_1006c). -->
+                <!-- The plan is kept only while the SHIM drives (the long way): the parker, MPPI in the
+                     last metre, cuts a plan at its first direction change and keeps 1.2 m of it, so a
+                     kept plan still carrying the departure's reverse leg reached it as "0 poses" (0350
+                     failed on one plan in 68 s, 0352 backed 1.03 m to the old turning point), and a
+                     plan the planner ended off the mark was kept to the end (parked 27-41 deg crooked).
+                     Under MPPI a fresh plan comes every second, as before 2026-10-06; a plan made
+                     under another controller is never kept. -->
+                <Sequence name="PlanForTheController">
+                  <Fallback name="ReplanOnlyIfNeeded">
+                    <!-- GlobalUpdatedGoal first: it answers SUCCESS the first time it is ever
+                         ticked and on every new goal, and that word must be spent on the goal's
+                         first plan, not one second into the drive. -->
+                    <ReactiveSequence>
+                      <Inverter>
+                        <GlobalUpdatedGoal/>
+                      </Inverter>
+                      <ScriptCondition code="selected_controller == 'FollowPathShim' &amp;&amp; plan_controller == selected_controller"/>
+                      <IsPathValid path="{path}"/>
+                    </ReactiveSequence>
+                    <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+                  </Fallback>
+                  <Script code="plan_due := false; plan_controller := selected_controller"/>
                 </Sequence>
-              </ForceSuccess>
+                <!-- No WouldAPlannerRecoveryHelp here, deliberately. That condition answers FAILURE
+                     for START_OCCUPIED, which is precisely the code a footprint-checking planner
+                     returns when the cart is parked close to something — so the whole branch was
+                     skipped and the goal died in four seconds without a wheel turning (runs 0023 and
+                     0025, "Goal failed" 65 ms after "Start occupied"). A planner failure gets the
+                     same three answers a person would try: forget what may be stale, retreat, or
+                     turn so the hull sits differently. Any one of them is enough, so they are a
+                     fallback, not a sequence: a retreat blocked by a wall must not end the goal. -->
+                <Sequence>
+                  <ClearEntireCostmap name="ClearGlobalCostmap-Context" service_name="global_costmap/clear_entirely_global_costmap"/>
+                  <!-- RoundRobin, not Fallback: a Fallback always stops at the first child that
+                       succeeds, so a retreat that worked was repeated on every retry and walked the
+                       cart backwards across the room (run 0027, four reverses and a lost tracker).
+                       Each retry gets a DIFFERENT answer instead. Waiting is second, not first: the
+                       tracker searches the whole map by itself when the fit drops, so a pose being
+                       fixed needs no help from here, while a cart parked on the furniture does. -->
+                  <RoundRobin name="PlannerRecoveryActions">
+                    <!-- Retreat first: a start the planner refuses is a cart parked on the map's own
+                         furniture (the front edge inside one cell of it), and two seconds of waiting
+                         do not move it. -->
+                    <Wait wait_duration="2"/>
+                    <Spin spin_dist="0.5" time_allowance="8" error_code_id="{spin_error_code}"/>
+                    <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
+                  </RoundRobin>
+                </Sequence>
+              </RecoveryNode>
+          </Fallback>
+          <RecoveryNode number_of_retries="1" name="FollowPath">
+            <FollowPath path="{path}" controller_id="{plan_controller}" goal_checker_id="{selected_goal_checker}" error_code_id="{follow_path_error_code}"/>
+            <Fallback name="ControllerRecovery">
+              <!-- INVALID_PATH (103) is a plan the controller could not use, not a blocked cart: MPPI's
+                   "Resulting plan has 0 poses" (a plan whose part within prune_distance lies past its
+                   first direction change), RPP's empty transformed plan, the server's "Path is
+                   empty". Nothing is in the way, so no look, no clearing and no wait: a fresh plan
+                   from where the cart stands and FollowPath again. Before 2026-10-06 the code was
+                   not in WouldAControllerRecoveryHelp's set (100, 104, 105, 106), the branch below
+                   was skipped, and the round robin cleared, backed and spun (0350: one plan in
+                   68 s, 21 aborts, 93 behaviours, FAILED). -->
+              <Sequence name="ReplanOnInvalidPath">
+                <AreErrorCodesPresent error_code="{follow_path_error_code}" error_codes_to_check="103"/>
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+                <Script code="plan_controller := selected_controller"/>
+              </Sequence>
+              <!-- Back up before anything else, right where the controller failed: base_link sits 0.30 m
+                   ahead of the rear corners, so the cart sweeps 0.41 m when it turns in place. Parked
+                   0.20 m from the printer it cannot legally rotate at all, and no tuning changes that
+                   arithmetic — 0.25 m of retreat makes the turn free. This branch fires on the
+                   controller's own error, seconds before the global round robin would get there. -->
+              <Sequence name="LookAndReplan">
+                <WouldAControllerRecoveryHelp error_code="{follow_path_error_code}"/>
+                <!-- The stall look (pepin_bringup.gaze, its stall_look flag): before the costmaps are
+                     cleared, the head looks at the camera-only and unexplained marks blocking the
+                     hull in the plan's first metre, holds for a few still frames so the volume carves
+                     a phantom or confirms a thing, and comes home; the clears and the replan below
+                     then read the volume as it is now. AskGaze waits exactly as long as the look and
+                     succeeds at once with the flag off or the arbiter away, so the tree is then the
+                     one before. FAILURE means the blocker is under the bumper, in the frame's last
+                     rows: back up 0.10 m and ask again, and nothing here ever fails the recovery. -->
+                <Fallback name="StallLook">
+                  <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
+                  <ForceSuccess>
+                    <Sequence>
+                      <BackUp backup_dist="0.10" backup_speed="0.05" time_allowance="5" error_code_id="{backup_code_id}"/>
+                      <AskGaze service_name="/gaze/stall_look" timeout_s="10.0"/>
+                    </Sequence>
+                  </ForceSuccess>
+                </Fallback>
+                <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-FollowPath" service_name="global_costmap/clear_entirely_global_costmap"/>
+                <!-- Wait first (a person on the path; never a retreat half-way), then plan again from
+                     where the cart stands: a miss beside a mark is a manoeuvre MPPI cannot invent,
+                     and Hybrid draws it. -->
+                <Wait wait_duration="1"/>
+                <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
+                <Script code="plan_controller := selected_controller"/>
+              </Sequence>
             </Fallback>
-            <ClearEntireCostmap name="ClearLocalCostmap-Context" service_name="local_costmap/clear_entirely_local_costmap"/>
-            <ClearEntireCostmap name="ClearGlobalCostmap-FollowPath" service_name="global_costmap/clear_entirely_global_costmap"/>
-            <!-- Wait first (a person on the path; never a retreat half-way), then plan again from
-                 where the cart stands: a miss beside a mark is a manoeuvre MPPI cannot invent,
-                 and Hybrid draws it. -->
-            <Wait wait_duration="1"/>
-            <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
-          </Sequence>
-        </RecoveryNode>
-      </PipelineSequence>
-      <!-- No WouldA...RecoveryHelp gate in front of the round robin: those conditions answer
-           FAILURE for the codes a footprint-checking planner or a boxed-in controller actually
-           return (START_OCCUPIED among them), and the whole recovery was skipped for exactly the
-           situations it exists for. Every manoeuvre below is collision-checked on its own. -->
-      <Sequence>
-        <ReactiveFallback name="RecoveryFallback">
-          <GoalUpdated/>
-          <RoundRobin name="RecoveryActions">
-            <Sequence name="ClearingActions">
-              <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
-              <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
-            </Sequence>
-            <!-- Tried in turn, one per failed attempt, twenty attempts before giving up: a wheel
-                 on a carpet edge or a caster set sideways needs variety and persistence, not a
-                 spin and a shrug. Every move is short and collision-checked against the costmap. -->
-            <!-- time_allowance on every move: the rear is unsensed, and a retreat that has not covered its
-                 distance in twice its nominal time is pushing something (a box, run 0087: 10-20 s per push). -->
-            <BackUp backup_dist="0.20" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
-            <Sequence name="Rock">
-              <BackUp backup_dist="0.10" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
-              <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="4"/>
-            </Sequence>
-            <Spin spin_dist="1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
-            <Sequence name="RockLeft">
-              <Spin spin_dist="0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
-              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
-            </Sequence>
-            <Sequence name="RockRight">
-              <Spin spin_dist="-0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
-              <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
-            </Sequence>
-            <Sequence name="LongRetreat">
-              <BackUp backup_dist="0.35" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
-              <Wait wait_duration="1.0"/>
-            </Sequence>
-            <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="4"/>
-            <Spin spin_dist="-1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
-          </RoundRobin>
-        </ReactiveFallback>
-      </Sequence>
-    </RecoveryNode>
+          </RecoveryNode>
+        </PipelineSequence>
+        <!-- No WouldA...RecoveryHelp gate in front of the round robin: those conditions answer
+             FAILURE for the codes a footprint-checking planner or a boxed-in controller actually
+             return (START_OCCUPIED among them), and the whole recovery was skipped for exactly the
+             situations it exists for. Every manoeuvre below is collision-checked on its own. -->
+        <Sequence>
+          <ReactiveFallback name="RecoveryFallback">
+            <GoalUpdated/>
+            <RoundRobin name="RecoveryActions">
+              <Sequence name="ClearingActions">
+                <ClearEntireCostmap name="ClearLocalCostmap-Subtree" service_name="local_costmap/clear_entirely_local_costmap"/>
+                <ClearEntireCostmap name="ClearGlobalCostmap-Subtree" service_name="global_costmap/clear_entirely_global_costmap"/>
+              </Sequence>
+              <!-- Tried in turn, one per failed attempt, twenty attempts before giving up: a wheel
+                   on a carpet edge or a caster set sideways needs variety and persistence, not a
+                   spin and a shrug. Every move is short and collision-checked against the costmap. -->
+              <!-- time_allowance on every move: the rear is unsensed, and a retreat that has not covered its
+                   distance in twice its nominal time is pushing something (a box, run 0087: 10-20 s per push). -->
+              <BackUp backup_dist="0.20" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
+              <Sequence name="Rock">
+                <BackUp backup_dist="0.10" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
+                <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="4"/>
+              </Sequence>
+              <Spin spin_dist="1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
+              <Sequence name="RockLeft">
+                <Spin spin_dist="0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
+                <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
+              </Sequence>
+              <Sequence name="RockRight">
+                <Spin spin_dist="-0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
+                <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
+              </Sequence>
+              <Sequence name="LongRetreat">
+                <BackUp backup_dist="0.35" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
+                <Wait wait_duration="1.0"/>
+              </Sequence>
+              <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="4"/>
+              <Spin spin_dist="-1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
+            </RoundRobin>
+          </ReactiveFallback>
+        </Sequence>
+      </RecoveryNode>
+    </Sequence>
   </BehaviorTree>
 </root>

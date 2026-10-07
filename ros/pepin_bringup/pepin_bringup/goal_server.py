@@ -117,8 +117,9 @@ FLAGS = FlagSet(
         " shim_mppi drives each goal on rpp_shim and hands it to mppi for the rest of that goal"
         " once the cart is within the knob park_distance_m of the goal (PARKERS)"
         " (ros/goto.sh controller NAME)."
-        " Published latched on controller_selector and goal_checker_selector, so a change is"
-        " read by the behaviour tree at its next tick",
+        " Published latched on controller_selector and goal_checker_selector; the behaviour"
+        " tree plans at once on a controller change and hands FollowPath the new controller"
+        " together with that plan",
         why="the six legs of 2026-09-23 all stopped 12-60 deg short of the mark's heading:"
         " the reversing RPP cannot rotate in place, the tree ended the drive on position"
         " (xy_only_goal_checker), and the pivot that finishes the heading lives here in"
@@ -217,8 +218,8 @@ FOLLOWERS = {
 # DRIVE ON ONE CONTROLLER, PARK ON ANOTHER (flag values listed here): a goal starts on the pair
 # FOLLOWERS names and hands over to this one once map -> base_link is within the knob
 # park_distance_m of the goal (straight line), for the rest of that goal; the next goal starts on
-# FOLLOWERS' pair again. The tree's FollowPath passes the new controller id to the controller
-# server at its next tick, which swaps the plugin in place on the same goal.
+# FOLLOWERS' pair again. The tree plans at once on the new controller id and FollowPath passes
+# it with that plan to the controller server, which swaps the plugin in place on the same goal.
 PARKERS = {"shim_mppi": ("FollowPathMPPI", "general_goal_checker")}
 
 

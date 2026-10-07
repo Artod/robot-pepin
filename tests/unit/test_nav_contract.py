@@ -326,6 +326,10 @@ def test_the_chosen_planner_is_the_only_planner() -> None:
     branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
     assert branch is not None
     first = next(iter(branch))
+    if first.tag == "Sequence":
+        # 2026-10-06 (evening): the plan, then the controller it was made under (plan_controller).
+        assert [c.tag for c in first] == ["Fallback", "Script"]
+        first = next(iter(first))
     if first.tag == "Fallback":
         # 2026-10-06: the plan is kept while the goal is the same and the path is still valid; the
         # Fallback's checks hold no planner, and its last child is the one planner.
@@ -336,6 +340,125 @@ def test_the_chosen_planner_is_the_only_planner() -> None:
     assert first.tag == "ComputePathToPose" and first.get("planner_id") == "{selected_planner}"
     assert not [n for n in tree.iter("ComputePathToPose") if n.get("planner_id") == "GridBased"]
     assert int(branch.get("number_of_retries")) >= 5, "a blocked path is waited out, not given up"
+
+
+# nav2_msgs/action/FollowPath (Nav2 1.3.12): the codes FollowPath's error_code_id carries.
+FOLLOW_PATH_CODES = {
+    100: "UNKNOWN",
+    101: "INVALID_CONTROLLER",
+    102: "TF_ERROR",
+    103: "INVALID_PATH",
+    104: "PATIENCE_EXCEEDED",
+    105: "FAILED_TO_MAKE_PROGRESS",
+    106: "NO_VALID_CONTROL",
+    107: "CONTROLLER_TIMED_OUT",
+}
+# What Nav2 1.3.12's WouldAControllerRecoveryHelp answers SUCCESS for: the plugin itself, ticked
+# with each code under BT.CPP 4.9 (2026-10-06).
+WOULD_A_CONTROLLER_RECOVERY_HELP = {100, 104, 105, 106}
+
+
+def _parent_map(tree: ET.ElementTree) -> dict[ET.Element, ET.Element]:
+    return {child: parent for parent in tree.iter() for child in parent}
+
+
+def _ancestors(node: ET.Element, parents: dict[ET.Element, ET.Element]) -> list[ET.Element]:
+    out = []
+    while node in parents:
+        node = parents[node]
+        out.append(node)
+    return out
+
+
+def test_the_plan_is_recomputed_when_the_controller_changes() -> None:
+    """At the shim -> MPPI handover FollowPath passed the new controller id at its next tick with
+    the plan kept under the shim, up to a second before the 1 Hz plan: MPPI cut it at the
+    departure's reverse leg and aborted, "0 poses" (5 of 32 handovers on 2026-10-06; 0361 spun at
+    the base). FollowPath now follows the controller its plan was made under, a controller change
+    plans at once (not at the 1 Hz rate), and no plan made under another controller is kept."""
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    parents = _parent_map(tree)
+    follows = list(tree.iter("FollowPath"))
+    assert follows and all(n.get("controller_id") == "{plan_controller}" for n in follows)
+    # Every plan is stamped with the controller it was made under, in the same sequence.
+    plans = list(tree.iter("ComputePathToPose"))
+    assert len(plans) == 3, "the planning branch, the INVALID_PATH replan, the look's replan"
+    for plan in plans:
+        sequence = next(a for a in _ancestors(plan, parents) if a.tag == "Sequence")
+        last = list(sequence)[-1]
+        assert last.tag == "Script", sequence.attrib
+        assert "plan_controller := selected_controller" in last.get("code", "")
+    # The planning branch is gated by "nothing due and the same controller", not by a rate: the
+    # 1 Hz RateController only makes a plan due.
+    branch = tree.find(".//RecoveryNode[@name='ComputePathToPose']")
+    assert branch is not None
+    assert not [a for a in _ancestors(branch, parents) if a.tag == "RateController"]
+    gate = parents[branch]
+    assert gate.tag == "Fallback" and list(gate)[-1] is branch
+    condition = gate[0]
+    assert condition.tag == "ScriptCondition"
+    assert condition.get("code") == "!plan_due && plan_controller == selected_controller"
+    every_second = next(
+        n for n in tree.iter("RateController") if n.get("name") == "PlanEverySecond"
+    )
+    assert float(every_second.get("hz")) == 1.0
+    assert [(c.tag, c.get("code")) for c in every_second] == [("Script", "plan_due := true")]
+    pipeline = parents[gate]
+    assert list(pipeline).index(every_second) < list(pipeline).index(gate), "due, then planned"
+    assert list(pipeline)[-1].get("name") == "FollowPath", "the plan before FollowPath's tick"
+    stamp = list(branch.find("Sequence[@name='PlanForTheController']"))[-1]
+    assert stamp.get("code") == "plan_due := false; plan_controller := selected_controller"
+    # The keep check: the goal first (its first answer is the goal's first plan), then only the
+    # shim's own plan, then validity.
+    keep = branch.find(".//Fallback[@name='ReplanOnlyIfNeeded']/ReactiveSequence")
+    assert keep is not None
+    assert [c.tag for c in keep] == ["Inverter", "ScriptCondition", "IsPathValid"]
+    assert keep[0][0].tag == "GlobalUpdatedGoal"
+    assert keep[1].get("code") == (
+        "selected_controller == 'FollowPathShim' && plan_controller == selected_controller"
+    )
+
+
+def test_every_goal_starts_without_a_plan() -> None:
+    """bt_navigator keeps the tree and its blackboard from goal to goal: the same mark sent twice
+    (a retry after a failure) passed the keep check with the last goal's path, which started where
+    the cart stood before. The tree's first act is to forget whose plan it holds."""
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    root = tree.find("BehaviorTree")
+    assert root is not None
+    start = list(root)
+    assert len(start) == 1 and start[0].tag == "Sequence"
+    first, rest = start[0][0], list(start[0])[1:]
+    assert first.tag == "Script" and first.get("code") == "plan_controller := ''; plan_due := true"
+    assert [n.get("name") for n in rest] == ["NavigateRecovery"]
+
+
+def test_code_103_replans_at_once_and_the_stall_look_keeps_its_codes() -> None:
+    """INVALID_PATH (MPPI's "0 poses", RPP's empty transformed plan) is a plan the controller could
+    not use, not a blocked cart, and WouldAControllerRecoveryHelp does not let it through: 0350
+    ran 21 aborts and 93 behaviours on one plan. 103 gets a fresh plan at once, no look, no
+    clears, no wait; 100/104/105/106 keep the stall look, the clears, the wait and the replan."""
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    recovery = tree.find(".//RecoveryNode[@name='FollowPath']")
+    assert recovery is not None
+    follow, branches = list(recovery)
+    assert follow.tag == "FollowPath" and branches.tag == "Fallback"
+    replan, look = list(branches)
+    assert replan.get("name") == "ReplanOnInvalidPath" and look.get("name") == "LookAndReplan"
+    gate = replan[0]
+    assert gate.tag == "AreErrorCodesPresent"
+    assert gate.get("error_code") == follow.get("error_code_id") == "{follow_path_error_code}"
+    replanned = {int(c) for c in gate.get("error_codes_to_check", "").split(";")}
+    assert replanned == {103} and FOLLOW_PATH_CODES[103] == "INVALID_PATH"
+    assert [c.tag for c in replan] == ["AreErrorCodesPresent", "ComputePathToPose", "Script"]
+    assert look[0].tag == "WouldAControllerRecoveryHelp"
+    assert look[0].get("error_code") == "{follow_path_error_code}"
+    assert look.find("Fallback[@name='StallLook']") is not None, "the stall look stays"
+    # The two branches split the codes: none twice, and what neither takes (101 a wrong id, 102
+    # TF, 107 a stale local costmap) goes to the round robin as before.
+    assert not replanned & WOULD_A_CONTROLLER_RECOVERY_HELP
+    assert replanned | WOULD_A_CONTROLLER_RECOVERY_HELP == {100, 103, 104, 105, 106}
+    assert set(FOLLOW_PATH_CODES) - replanned - WOULD_A_CONTROLLER_RECOVERY_HELP == {101, 102, 107}
 
 
 def test_the_planners_buy_a_berth_with_cost_not_with_walls() -> None:
