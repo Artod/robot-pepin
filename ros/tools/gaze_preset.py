@@ -17,7 +17,10 @@
                                                       leg's start when the plan (>= 0.15 m) or
                                                       a recovery announces it and let go at the
                                                       first forward command (a stand held up to
-                                                      1.5 s), home at 45 deg/s
+                                                      1.5 s), straight ahead unless the plan
+                                                      bends more than 30 deg off the nose, the
+                                                      parking spot from the parker's hand-over,
+                                                      home at 45 deg/s
     uv run python ros/tools/gaze_preset.py show       both sets beside the knobs' defaults; no
                                                       node touched
 
