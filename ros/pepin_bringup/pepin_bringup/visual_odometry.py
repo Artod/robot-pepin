@@ -30,7 +30,10 @@ differences the stream it receives would otherwise get the whole discontinuity i
 The gaze gate (``gaze_gate`` and the ``gate_*`` knobs, :mod:`pepin.gaze_gate`) withholds the
 same way: a pose of a frame taken during a head saccade (``/gaze/state``) or a body yaw above
 ``gate_yaw_dps``, and the first pose after one, only re-anchor — the EKF coasts on the wheels and
-the gyro across them.
+the gyro across them. The mast's sway is judged by ``gate_sway_dps`` / ``gate_sway_deg`` under
+rtabmap's inputs (a blurred depth registration) and by ``vio_gate_sway_dps`` /
+``vio_gate_sway_deg`` under ``vio`` (OpenVINS's velocity rides the IMU and the composition
+subtracts the sway: :data:`pepin.visual_odometry.VIO_GATE_SWAY_DPS` for the measurement).
 
 THE INPUT is the ``vo_input`` flag, passed at start by vslam.launch.py and live between the
 launched rtabmap input and ``vio`` (``ros/flags.sh set visual_odometry vo_input vio``; back with
@@ -64,22 +67,28 @@ odomimu's own velocity state and bias-corrected gyro carried into base_link thro
 sample processed :data:`pepin.visual_odometry.VIO_IMU_LAG_S` behind the newest so its TF is
 already there, judged by the last poseimu's verdict and by the gaze gate at its own stamp. Both
 sources carry ``vio_sigma_scale`` on vx and vy and ``vio_yaw_sigma_scale`` on vyaw (1.0: no
-fudge until drives measure one). LOST SPLITS THE TWIST: while the lost rules hold, vx and vy are
-withheld (``WEIGHTLESS_VARIANCE`` on both, 0 as the value: robot_localization's twist0 fuses them
-with a gain of ~1e-8) and the yaw rate keeps flowing -- the gyro needs no light -- with its
-variance grown by the bias walk since the last visual update,
+fudge until drives measure one), and vx and vy also the COASTING multiplier
+(:class:`pepin.visual_odometry.Coasting`, the ``vio_coast_*`` knobs): the sigma grows with the
+seconds since OpenVINS's last update that used ``vio_min_features`` (``/ov_msckf/health``), the
+time its velocity has ridden the accelerometer alone. LOST SPLITS THE TWIST: while the lost rules
+hold, vx and vy are withheld (``WEIGHTLESS_VARIANCE`` on both, 0 as the value:
+robot_localization's twist0 fuses them with a gain of ~1e-8) and the yaw rate keeps flowing --
+the gyro needs no light -- with its variance grown by the bias walk since the last visual update,
 ``sigma_yaw(t)^2 = (vio_yaw_sigma_scale * sigma_reported)^2 + gyro_random_walk^2 * t``
 (:class:`pepin.visual_odometry.YawOnly`, the walk from config/head_imu.json), unless the mast
-sways beyond ``gate_sway_dps`` / ``gate_sway_deg`` or the gaze gate holds the stamp (withheld and
-counted). The guard's divergence still withholds everything.
+sways beyond ``vio_gate_sway_dps`` / ``vio_gate_sway_deg`` or the gaze gate holds the stamp
+(withheld and counted). The guard's divergence still withholds everything.
 
 Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
 a base velocity over ``vio_max_speed_m_s`` is not sent, nor, while ``vio_guard`` is on, one
 ``vio_wheel_diff_m_s`` from the wheels'), then the three lost rules of
-:class:`pepin.visual_odometry.VioLost` (the wheels' speed over time, motion under ``/zupt``, the
-features of ``/ov_msckf/points_msckf`` + ``points_slam`` short for ``vio_lost_s`` while the base
-moves, never at rest); a refused sample only re-anchors. OpenVINS never resets itself: after
-``vio_restart_rejects`` guard rejections in a row with the wheels at rest for 2 s this node calls
+:class:`pepin.visual_odometry.VioLost` (the wheels' speed over time, motion under ``/zupt``, fewer
+than ``vio_min_features`` features for ``vio_lost_s`` while the base moves, never at rest); a
+refused sample only re-anchors. ``vio_lost_rule`` says which features: ``tracked``, the tracker's
+persistent tracks from ``/ov_msckf/health`` (the keeper's dark count), or ``used``, the ones
+OpenVINS's last update used (``/ov_msckf/points_msckf`` + ``points_slam``). OpenVINS never
+resets itself: after ``vio_restart_rejects`` guard rejections in a row with the wheels at rest for
+2 s this node calls
 ``/vio/restart`` (pepin_bringup.vio_keeper in pepin-vio), logged once; by hand it is
 ``ros/laptop.sh vio kick``, at rest. The report line adds the samples in, out and refused, the
 stamp-to-receipt latency, whether the board's EKF subscribes ``/vo``, and the EKF's own odom ->
@@ -94,6 +103,7 @@ import time
 from collections import Counter
 from typing import Any
 
+from diagnostic_msgs.msg import DiagnosticStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -106,7 +116,10 @@ from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE, SWAYING
 from pepin.head_imu import HeadImuConfig
 from pepin.mounts import load_camera_mounts
+from pepin.vio_recover import Health, health_values
 from pepin.visual_odometry import (
+    VIO_LOST_RULES,
+    Coasting,
     ImuQueue,
     ImuState,
     NeckBaseline,
@@ -166,12 +179,17 @@ VIO_ODOM_TOPIC = "/ov_msckf/odomimu"
 # update (ROS2Visualizer::publish_features).
 VIO_POINTS_TOPIC = "/ov_msckf/points_msckf"
 VIO_SLAM_POINTS_TOPIC = "/ov_msckf/points_slam"
+# OpenVINS's health per processed frame (ros/patches/openvins-reset.patch, published whether or not
+# anyone listens): its `persistent` tracks are lost rule (c)'s count under vio_lost_rule tracked.
+VIO_HEALTH_TOPIC = "/ov_msckf/health"
 ZUPT_TOPIC = "/zupt"  # the board's zero-velocity update: published only while it says rest
 IMU_FRAME = "head_imu"  # camera_stream's static camera_optical -> head_imu (config/camera.json)
 BASE_FRAME = "base_link"
 ODOM_FRAME = "odom"  # the frame rtabmap's /vo/raw carries (odom_frame_id), kept for the EKF
 TF_TIMEOUT_S = 0.05  # how long a pose waits for the neck chain at its stamp
 VIO_RESTART_SERVICE = "/vio/restart"  # pepin_bringup.vio_keeper, in pepin-vio beside OpenVINS
+# The sway thresholds: rtabmap's inputs read the gate's own, vo_input vio its VIO pair.
+SWAY_KNOBS = ("gate_sway_dps", "gate_sway_deg", "vio_gate_sway_dps", "vio_gate_sway_deg")
 EKF_NODE = "ekf_filter_node"  # the board's robot_localization (robot.launch.py), /vo's reader
 
 FLAGS = FlagSet(
@@ -323,6 +341,31 @@ FLAGS = FlagSet(
         " twist; VioLost's wheel rule (vio_lost_speed_m_s for vio_lost_s) still catches a sustained"
         " divergence",
     ),
+    Flag(
+        "vio_lost_rule",
+        "used",
+        choices=VIO_LOST_RULES,
+        description="which features the lost rule counts (fewer than vio_min_features for"
+        " vio_lost_s while the base moves, never at rest): `used`, the features OpenVINS's last"
+        " update used, /ov_msckf/points_msckf + points_slam; `tracked`, the tracker's persistent"
+        f" tracks on {VIO_HEALTH_TOPIC} (features seen in 3+ frames, the count the keeper's dark"
+        " rule reads). Under tracked the yaw-only bias walk counts from the last sample whose"
+        " update used vio_min_features, not from the last one that passed. The wheel and rest"
+        " rules and the guard are the same under both. Live",
+        why="used, measured twice. Against tracked on drives 0343-0347 and 0355-0363 replayed"
+        " through the relay's classes (scratch/vio_lost_rule/replay.py, sway gate 6 deg/s, no"
+        " coasting law): the twists tracked adds are the ones OpenVINS coasts on the IMU through,"
+        " vx sigma multiplier 1.76 [1.42, 2.59], 19.5 % of them more than 0.2 m/s off the lidar"
+        " truth. Again on drives 0331-0363 under vio_gate_sway_dps 20 and the vio_coast_* law"
+        " (scratch/vio_push/verdict.py): the law makes their sigma honest (vx s50 0.81 [0.62,"
+        " 1.14], s90 1.34) but not their values (11.3 % off by > 0.2 m/s and 5.3 % sent inside a"
+        " divergence, against 1.1 % and 1.1 % for used's; yaw rate s50 1.42), and so weighted"
+        " they add 4.5 % to the VIO's vx information for 25 % more twists (5.26 -> 6.55 per"
+        " moving second)",
+        on_when="tracked for a drive that measures the coasting samples themselves (their sigma is"
+        " honest under the coasting law, their values are not)",
+        off_when="used whenever the EKF must have the VIO's honest twists only",
+    ),
     # A pose of a frame taken while the head turned, or the body spun, and the first pose after
     # one, never reach the EKF: each becomes the anchor the next step is measured from, so the
     # pan rtabmap reads as a base yaw is never differenced into the filter (gaze.md 3.4).
@@ -350,14 +393,15 @@ class VisualOdometry(Node):
         self._last_xy: tuple[float, float] | None = None  # the frame before this one, for its step
         self._drop: str | None = None  # the last reason, for the report line
         self._hold: str | None = None  # the last reason a pose was not published, for the same
+        sway_dps, sway_deg = self._sway_knobs()
         self._gaze = GazeFeed(
             self,
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),
             stamp_end=float(self._switches["gate_stamp_end"]),
-            sway_dps=float(self._switches["gate_sway_dps"]),
-            sway_deg=float(self._switches["gate_sway_deg"]),
+            sway_dps=sway_dps,
+            sway_deg=sway_deg,
         )
         self._after_gate = False  # the last pose was gated: this one only anchors the next step
         # Both of these cross the bridge, so their QoS is not this node's to choose: it is
@@ -383,6 +427,13 @@ class VisualOdometry(Node):
             lost_speed_m_s=float(self._switches["vio_lost_speed_m_s"]),
             lost_s=float(self._switches["vio_lost_s"]),
             min_features=int(self._switches["vio_min_features"]),
+            rule=str(self._switches["vio_lost_rule"]),
+        )
+        self._coasting = Coasting(
+            per_s=float(self._switches["vio_coast_per_s"]),
+            free_s=float(self._switches["vio_coast_free_s"]),
+            max_multiplier=float(self._switches["vio_coast_max"]),
+            min_features=int(self._switches["vio_min_features"]),
         )
         self._guard = VioGuard(
             max_speed_m_s=float(self._switches["vio_max_speed_m_s"]),
@@ -394,6 +445,7 @@ class VisualOdometry(Node):
         self._tf_failure: str | None = None
         self._restart: Any = None  # the /vio/restart client, made with the VIO's subscriptions
         self._points: dict[str, int] = {}  # the latest feature count of each cloud (msckf, slam)
+        self._health: Health | None = None  # OpenVINS's last frame health (its tracks)
         self._last_vio: VoPose | None = None  # the previous composed pose, for the VIO's speed
         self._last_vio_xy: tuple[float, float] | None = None  # the last published, for its step
         self._local = local
@@ -418,6 +470,20 @@ class VisualOdometry(Node):
 
     def _source(self) -> str:
         return VIO_POSE_TOPIC if self._input == "vio" else RAW_TOPIC
+
+    def _sway_knobs(self) -> tuple[float, float]:
+        """The mast-sway thresholds the gate judges frames by (deg/s, deg): ``vio_gate_sway_*``
+        under vo_input vio, ``gate_sway_*`` under rtabmap's inputs."""
+        prefix = "vio_gate_" if self._input == "vio" else "gate_"
+        return float(self._switches[prefix + "sway_dps"]), float(
+            self._switches[prefix + "sway_deg"]
+        )
+
+    def _apply_sway(self) -> None:
+        """The input's sway thresholds onto the gate (a live knob, an input switch)."""
+        dps, deg = self._sway_knobs()
+        self._gaze.set("gate_sway_dps", dps)
+        self._gaze.set("gate_sway_deg", deg)
 
     def _publish_hz(self) -> float:
         """The cap's rate: vio_publish_hz under vio (the wheels' 50), vo_publish_hz otherwise."""
@@ -462,6 +528,7 @@ class VisualOdometry(Node):
         self.create_subscription(
             PointCloud2, VIO_SLAM_POINTS_TOPIC, lambda m: self._on_points("slam", m), local
         )
+        self.create_subscription(DiagnosticStatus, VIO_HEALTH_TOPIC, self._on_health, local)
         self.create_subscription(
             Odometry,
             ZUPT_TOPIC,
@@ -536,6 +603,17 @@ class VisualOdometry(Node):
             self._vio_lost.lost_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_min_features":
             self._vio_lost.min_features = int(new)  # type: ignore[call-overload]
+            self._coasting.min_features = int(new)  # type: ignore[call-overload]
+        elif name == "vio_lost_rule":
+            self._vio_lost.rule = str(new)
+        elif name == "vio_coast_per_s":
+            self._coasting.per_s = float(new)  # type: ignore[arg-type]
+        elif name == "vio_coast_free_s":
+            self._coasting.free_s = float(new)  # type: ignore[arg-type]
+        elif name == "vio_coast_max":
+            self._coasting.max_multiplier = float(new)  # type: ignore[arg-type]
+        elif name in SWAY_KNOBS:
+            self._apply_sway()
         elif name in GATE_KNOBS:
             self._gaze.set(name, float(new))  # type: ignore[arg-type]
         elif name == "gaze_gate":
@@ -555,6 +633,7 @@ class VisualOdometry(Node):
             )
         if new == "vio":
             self._vio_up()
+        self._apply_sway()
         self._gate = self._new_gate()
         self._track.anchor(None)
         self._rest.restart()
@@ -708,7 +787,7 @@ class VisualOdometry(Node):
                 self._step_yaw_only(msg.header.stamp, last, pose, t_i_b.rotation.T)
             return
         self._vio_verdict = "ok"
-        self._yaw_only.visual(stamp)
+        self._yaw_only.visual(stamp, self._vio_lost.updated(now))
         published = self._admit(pose, lost=False)
         if published is None:
             return
@@ -737,7 +816,7 @@ class VisualOdometry(Node):
                 if covariance is None:
                     self._tally.count("cov_missing" if source is None else "cov_bad")
                     return
-                self._publish_twist(msg.header.stamp, twist, self._scaled(covariance))
+                self._publish_twist(msg.header.stamp, twist, self._scaled(covariance, stamp))
             out.pose.covariance = weightless_covariance()
         elif self._covariance_mode() == "constant":
             out.pose.covariance = planar_covariance(
@@ -762,11 +841,14 @@ class VisualOdometry(Node):
             return "none"
         return str(self._switches["vio_twist_source"])
 
-    def _scaled(self, covariance: list[float]) -> list[float]:
-        """The twist covariance with vio_sigma_scale on vx and vy, vio_yaw_sigma_scale on vyaw."""
+    def _scaled(self, covariance: list[float], stamp: float) -> list[float]:
+        """The twist covariance with vio_sigma_scale times the coasting multiplier at ``stamp``
+        on vx and vy, vio_yaw_sigma_scale on vyaw."""
+        coast = self._coasting.multiplier(stamp)
+        self._tally.sample("coast", coast)
         return scaled_twist_covariance(
             covariance,
-            float(self._switches["vio_sigma_scale"]),
+            float(self._switches["vio_sigma_scale"]) * coast,
             float(self._switches["vio_yaw_sigma_scale"]),
         )
 
@@ -778,6 +860,7 @@ class VisualOdometry(Node):
         self._neck.reset()
         if full:
             self._yaw_only.reset()
+            self._coasting.reset()
             self._vio_verdict = None
 
     def _step_yaw_only(self, stamp_msg: Any, last: VoPose, pose: VoPose, r_b_i: Any) -> None:
@@ -798,8 +881,8 @@ class VisualOdometry(Node):
         self, stamp_msg: Any, judged: tuple[float, ...], yaw_rate: float, covariance: list[float]
     ) -> None:
         """The yaw rate alone while the VIO is lost (vx, vy weightless), unless a stamp in
-        ``judged`` is gated -- the mast swaying beyond gate_sway_dps / gate_sway_deg (counted as
-        mast) or the head blind / the body spinning (gaze) -- or it turns faster than
+        ``judged`` is gated -- the mast swaying beyond vio_gate_sway_dps / vio_gate_sway_deg
+        (counted as mast) or the head blind / the body spinning (gaze) -- or it turns faster than
         vo_max_turn. Its variance: (vio_yaw_sigma_scale * sigma_reported)^2 + brw^2 * t."""
         if not self._switches.on("vo_publish"):
             self._tally.count("withheld")
@@ -866,7 +949,7 @@ class VisualOdometry(Node):
         if too_fast or abs(twist[2]) > math.radians(float(self._switches["vo_max_turn"])):
             self._tally.count("imu_fast")
             return
-        self._publish_twist(stamp_msg, twist, self._scaled(covariance))
+        self._publish_twist(stamp_msg, twist, self._scaled(covariance, sample.stamp))
 
     def _publish_twist(
         self, stamp: Any, twist: tuple[float, float, float], covariance: list[float]
@@ -951,6 +1034,17 @@ class VisualOdometry(Node):
         self._points[kind] = int(msg.width) * int(msg.height)
         self._vio_lost.features(time.monotonic(), sum(self._points.values()))
 
+    def _on_health(self, msg: DiagnosticStatus) -> None:
+        """OpenVINS's health of its last frame: its persistent tracks are lost rule (c)'s count
+        under ``vio_lost_rule tracked``. An unreadable message is counted and changes nothing."""
+        health = Health.parse(health_values(msg.values), str(msg.hardware_id))
+        if health is None:
+            self._tally.count("health_bad")
+            return
+        self._health = health
+        self._vio_lost.tracked(time.monotonic(), health.persistent)
+        self._coasting.update(health.t, health.used)
+
     def _on_zupt(self, _msg: Odometry) -> None:
         """The board says the cart is at rest (wheels, gyro and command witnessed)."""
         self._vio_lost.zupt(time.monotonic())
@@ -1027,7 +1121,7 @@ class VisualOdometry(Node):
             f" output {self._output_mode()}: {self._twist_text(counts)};"
             f" covariance {self._covariance_mode()}; reinit {counts['vio_reinit']}"
             f" ({self._vio_health.reinits} since the start), {counts['vio_lost']} poses withheld"
-            f" as lost, {self._vio_lost.report()}, features {self._features_text()},"
+            f" as lost, {self._vio_lost.report()}, {self._features_text(counts)},"
             f" tf_miss {counts['tf_miss']}{tf}; kick at rest:"
             " ros/laptop.sh vio kick;"
         )
@@ -1060,11 +1154,28 @@ class VisualOdometry(Node):
             f" yaw x{float(self._switches['vio_yaw_sigma_scale']):g}"
         )
         if source != "imu":
-            return f"; source step (per camera frame), {scales}"
+            return f"; source step (per camera frame), {scales}; {self._coast_text()}"
         return (
             f"; source imu at {float(self._switches['vio_publish_hz']):g} Hz, {scales}, held"
             f" {counts['imu_held']} (no verdict / rejected), gated {counts['imu_gated']}, too fast"
-            f" {counts['imu_fast']}, tf miss {counts['imu_tf_miss']}"
+            f" {counts['imu_fast']}, tf miss {counts['imu_tf_miss']}; {self._coast_text()}"
+        )
+
+    def _coast_text(self) -> str:
+        """The coasting law and what it did in the report window: ``coasting x1.00 p50, x1.62
+        max, 3 of 40 inflated (1 + 0.5 per s past 0.15 s, cap 2.25)``."""
+        c = self._coasting
+        law = f"1 + {c.per_s:g} per s past {c.free_s:g} s, cap {c.max_multiplier:g}"
+        if c.per_s <= 0.0:
+            return "coasting law off"
+        window = self._last_window
+        seen = [] if window is None else window.samples.get("coast", [])
+        if not seen:
+            return f"coasting ({law}): no twist"
+        inflated = sum(1 for m in seen if m > 1.0)
+        return (
+            f"coasting x{statistics.median(seen):.2f} p50, x{max(seen):.2f} max, {inflated} of"
+            f" {len(seen)} inflated ({law})"
         )
 
     def _yaw_only_text(self, counts: Counter[str]) -> str:
@@ -1086,12 +1197,18 @@ class VisualOdometry(Node):
             f" lost episodes {lost.episodes}, gyro bias walk {brw}"
         )
 
-    def _features_text(self) -> str:
-        """The last feature counts: ``57 (msckf 0 + slam 57)``, or ``none heard``."""
-        if not self._points:
-            return "none heard"
-        parts = " + ".join(f"{k} {n}" for k, n in sorted(self._points.items()))
-        return f"{sum(self._points.values())} ({parts})"
+    def _features_text(self, counts: Counter[str]) -> str:
+        """The lost rule's counts: ``features rule tracked: tracked 35 (of 78), used 24 (msckf 0 +
+        slam 24)``; ``none heard`` for a source not heard yet, unreadable health counted."""
+        h = self._health
+        tracked = "none heard" if h is None else f"{h.persistent} (of {h.tracked})"
+        if self._points:
+            parts = " + ".join(f"{k} {n}" for k, n in sorted(self._points.items()))
+            used = f"{sum(self._points.values())} ({parts})"
+        else:
+            used = "none heard"
+        bad = f", health unreadable {counts['health_bad']}" if counts["health_bad"] else ""
+        return f"features rule {self._vio_lost.rule}: tracked {tracked}, used {used}{bad}"
 
     def _ekf_text(self) -> str:
         """Whether the board's EKF subscribes /vo, from the graph (rmw_zenoh carries the remote

@@ -101,9 +101,13 @@ SWING_RAD_S = 1.0
 # The disagreement rule: OpenVINS's velocity at the IMU farther than this from the EKF's (the
 # keeper's seed: the board EKF's twist carried to the IMU, only while the head is still) for
 # DISAGREE_S of frames with a reference. The replayed divergences ran 0.2 -> 0.5 m/s off within 1 s;
-# healthy filters stayed within 0.02-0.17 of the wheels.
+# healthy filters stayed within 0.02-0.17 of the wheels. 0.7 s, not 1.0: over drives 0331-0363
+# (scratch/vio_push/keeper.py, the keeper replayed on its own seeds, its 17 live resets matched)
+# 0.6-0.8 s also caught 0361 +25.4 (0.3-0.9 m/s off the lidar truth for 3 s; the run reached 0.7 s
+# between two saccades and one frame at 0.17 m/s cleared it) and 0349 +26.6, with no reset outside
+# a divergence; 0.5 s added one (0351 +134.0), a lower threshold (0.15 m/s) one at 1.0 s.
 DISAGREE_M_S = 0.2
-DISAGREE_S = 1.0
+DISAGREE_S = 0.7
 # A reference velocity farther than this from the frame's time says nothing about it, seconds.
 REFERENCE_AGE_S = 0.3
 # The runaway rule: OpenVINS's own IMU speed over this for SPEED_S. The cart's cap is 0.30 m/s and a

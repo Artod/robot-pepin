@@ -229,8 +229,8 @@
   "vio_keeper": {
     "vio_disagree_m_s": {"default": 0.2, "range": [0.0, 10.0],
       "note": "the disagreement rule: a frame whose OpenVINS velocity at the IMU (/ov_msckf/health v_I) is farther than this (m/s) from the EKF's carried to the IMU (/vio/seed_twist, sent only while the head is still, used within 0.3 s) adds its interval to a run; 0 turns the rule off. Replayed divergences ran 0.2 -> 0.5 m/s off within 1 s, healthy filters within 0.02-0.17 of the wheels (scratch/vio_recover r4)"},
-    "vio_disagree_s": {"default": 1.0, "range": [0.1, 30.0],
-      "note": "the disagreement rule: this many seconds of disagreeing frames (frames without a fresh reference not counted) make OpenVINS lost"},
+    "vio_disagree_s": {"default": 0.7, "range": [0.1, 30.0],
+      "note": "the disagreement rule: this many seconds of disagreeing frames (frames without a fresh reference, or taken in a swing, not counted) make OpenVINS lost. 0.7 since 2026-10-06 (scratch/vio_push/keeper.py, the keeper replayed on its own seeds over drives 0331-0363, its 17 live resets matched): 0.6-0.8 also reset 0361 +25.4 (0.3-0.9 m/s off the truth for 3 s, its run cut at 0.8 s by one frame at 0.17) and 0349 +26.6, with no reset outside a divergence; 0.5 adds one (0351 +134.0), 1.0 missed both"},
     "vio_dark_tracks": {"default": 10, "range": [0, 500],
       "note": "the dark rule: a frame with fewer persistent tracks than this (the left eye's features seen in seed_track_frames frames, /ov_msckf/health) adds its interval to a run, unless OpenVINS held it with its zero-velocity update (vio_dark_at_rest) or the camera was swinging (vio_swing_rad_s); 0 turns the rule off. Not the features the update used: 0-8 in good light with the gaze moving (drives 0329/0330 replayed), while the tracker kept 20-45 persistent tracks in the dimmest stretch"},
     "vio_dark_s": {"default": 1.0, "range": [0.1, 30.0],
@@ -312,7 +312,7 @@
     "vio_lost_s": {"default": 1.0, "range": [0.1, 10.0],
       "note": "vo_input vio: how long the wheel disagreement, or a feature count under vio_min_features while the base moves, must last before the VIO is lost, seconds"},
     "vio_min_features": {"default": 20, "range": [0, 500],
-      "note": "vo_input vio: fewer features than this in OpenVINS's last update (/ov_msckf/points_msckf + points_slam) for vio_lost_s while the base moves (/zupt silent) marks the VIO lost; never at rest (no track ends there: points_msckf is 0 with the head still); 0 turns the rule off"},
+      "note": "vo_input vio: fewer features than this for vio_lost_s while the base moves (/zupt silent) marks the VIO lost, never at rest; which features is vio_lost_rule: used, the ones OpenVINS's last update used (/ov_msckf/points_msckf + points_slam; 0 at rest with the head still, 0-8 in a head swing), or tracked, the tracker's persistent tracks on /ov_msckf/health (20-45 while moving outside a swing; drives 0343-0363 moving: 7 % of the frames under 20 outside a swing, 2.8 % under 10); under tracked also the update count the yaw-only bias walk restarts at; 0 turns the rule off"},
     "vio_max_speed_m_s": {"default": 1.0, "range": [0.1, 10.0],
       "note": "vo_input vio, the guard: a composed base velocity between two OpenVINS samples faster than this (m/s) is not sent (the wheels top out at 0.32; a diverged OpenVINS runs at metres per second)"},
     "vio_wheel_diff_m_s": {"default": 0.2, "range": [0.05, 5.0],
@@ -330,6 +330,16 @@
     "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
     "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
-      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
+      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"},
+    "vio_gate_sway_dps": {"default": 20.0, "range": [0.0, 360.0],
+      "note": "vo_input vio: the mast-sway rate (deg/s) over which a pose's frame is withheld, in place of gate_sway_dps (rtabmap's inputs and the depth consumers keep theirs): OpenVINS's velocity rides the IMU and the composition subtracts the sway through TF. Drives 0331-0363 replayed (scratch/vio_push/gate.py): the twists the 6 deg/s gate withheld scored a vx sigma multiplier 1.05 / 1.19 / 1.27 at 6-10 / 10-15 / 15-20 deg/s, 1.68 at 20-30, 3.0 beyond (the passed 0.80); at 20 / 1 the full twists per moving second 2.71 -> 5.26, the added ones s50 1.04, 1.2 % of them off the truth by > 0.2 m/s, 1.1 % of all sent (0.9 % before; scratch/vio_push/verdict.py); 0 is off"},
+    "vio_gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
+      "note": "vo_input vio: the mast-sway angle (deg) over which a pose's frame is withheld, in place of gate_sway_deg; the 12 moving frames over 1 deg of drives 0331-0363 scored a vx multiplier 2.74, so it stays at the gate's 1; 0 is off"},
+    "vio_coast_per_s": {"default": 0.5, "range": [0.0, 10.0],
+      "note": "vo_input vio, vo_output twist: vx and vy sigma x min(1 + this * max(age - vio_coast_free_s, 0), vio_coast_max), age = seconds since OpenVINS's last update that used vio_min_features (/ov_msckf/health msckf + slam); the coasting filter's velocity drifts faster than its covariance says (drives 0331-0363, scratch/vio_push/coast_fit.py: vx s90 1.14 fresh, 1.86 at 1.0-1.5 s, 2.31 at 1.5-2.5 s, 2.57 past 4 s; with the law 1.05-1.27 per bin); 0 is off"},
+    "vio_coast_free_s": {"default": 0.15, "range": [0.0, 10.0],
+      "note": "vo_input vio: the coasting age (s) under which the sigma is not inflated: the update of the frame before (a pose is judged before its own frame's health arrives)"},
+    "vio_coast_max": {"default": 2.25, "range": [1.0, 10.0],
+      "note": "vo_input vio: the coasting multiplier's ceiling (the s90 past 2.5 s, 2.36-2.57, over the fresh 1.14)"}
   }
 }

@@ -4,6 +4,7 @@ into base_link, gated and tracked like rtabmap's, published with the per-step `v
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from itertools import pairwise
 from typing import Any
 
@@ -16,6 +17,7 @@ ros_stubs.install()
 import pepin_bringup.visual_odometry as relay  # noqa: E402
 from pepin_bringup.msgs import stamp_from_seconds, yaw_of  # noqa: E402
 from pepin_bringup.visual_odometry import (  # noqa: E402
+    VIO_HEALTH_TOPIC,
     VIO_ODOM_TOPIC,
     VIO_POINTS_TOPIC,
     VIO_POSE_TOPIC,
@@ -416,7 +418,8 @@ def test_a_still_cart_with_no_msckf_features_still_reaches_the_ekf(
     assert len(node.pubs[VO_TOPIC].sent) == 30, "nothing withheld at rest"
     node._report()
     line = node.get_logger().texts("info")[-1]
-    assert "features 7 (msckf 0 + slam 7)" in line and "features 0)" in line
+    assert "used 7 (msckf 0 + slam 7)" in line and "features 0)" in line
+    assert "features rule used: tracked none heard" in line
     node.close()
 
 
@@ -571,19 +574,52 @@ def _arc(t: float, speed: float = 0.2, turn: float = 0.3) -> Any:
     return m
 
 
+def _health(t: float, persistent: int, used: int = 0) -> Any:
+    """OpenVINS's health of the frame at ``t`` (ros/patches/openvins-reset.patch's keys)."""
+    msg = ros_stubs.DiagnosticStatus()
+    msg.hardware_id = "global"
+    values = {
+        "t": f"{T0 + t:.6f}",
+        "epoch": "0",
+        "initialized": "1",
+        "tracked": str(persistent + 30),
+        "persistent": str(persistent),
+        "msckf": "0",
+        "slam": str(used),
+        "zupt": "0",
+        "gyro": "0.01",
+    }
+    for key, value in values.items():
+        msg.values.append(ros_stubs.KeyValue(key=key, value=value))
+    return msg
+
+
+def _in_the_dark(t: float) -> int:
+    return 50 if t < 1.0 else 0
+
+
 def _drive_into_the_dark(
-    node: VisualOdometry, clock: _Clock, seconds: float = 4.0, sway: tuple[float, float] = (0, 0)
+    node: VisualOdometry,
+    clock: _Clock,
+    seconds: float = 4.0,
+    sway: tuple[float, float] = (0, 0),
+    used: Callable[[float], int] = _in_the_dark,
+    tracked: Callable[[float], int] | None = None,
+    sway_rad_s: float = 0.2,
 ) -> None:
     """The cart drives an arc (0.2 m/s, 0.3 rad/s) with the head still; 50 features for the
-    first second, then none (the dark kitchen of 2026-10-05); odomimu around every pose;
-    /mast/state swaying at 0.2 rad/s (11.5 deg/s) inside ``sway`` (seconds). vio_lost_s 0.95:
-    ten 0.1 s ticks of the test's clock sum to 0.99999, not 1.0."""
+    first second, then none (the dark kitchen of 2026-10-05) -- ``used`` and ``tracked`` (health,
+    none by default) give other counts by time; odomimu around every pose; /mast/state swaying
+    at ``sway_rad_s`` (0.2: 11.5 deg/s) inside ``sway`` (seconds). vio_lost_s 0.95: ten 0.1 s
+    ticks of the test's clock sum to 0.99999, not 1.0."""
     assert node.set_parameters([ros_stubs.Parameter("vio_lost_s", value=0.95)])[0].successful
     for i in range(round(seconds * 10)):
         t = 0.1 * i
         clock.now += 0.1
         _wheels(node, 0.2)
-        node.subs[VIO_POINTS_TOPIC][1](_cloud(50 if t < 1.0 else 0))
+        node.subs[VIO_POINTS_TOPIC][1](_cloud(used(t)))
+        if tracked is not None:
+            node.subs[VIO_HEALTH_TOPIC][1](_health(t, tracked(t), used(t)))
         for k in range(-3, 17):
             node.subs[VIO_ODOM_TOPIC][1](_odomimu(t + 0.005 * k))
         for k in range(5):
@@ -593,7 +629,7 @@ def _drive_into_the_dark(
                 mast.header.stamp = stamp_from_seconds(T0 + s)
                 mast.name = ["mast_roll", "mast_pitch", "mast_yaw"]
                 mast.position = [0.001, 0.0, 0.0]
-                mast.velocity = [0.2, 0.0, 0.0]
+                mast.velocity = [sway_rad_s, 0.0, 0.0]
                 node.subs["/mast/state"][1](mast)
         _feed(node, t, _arc(t), 0.0)
 
@@ -631,17 +667,98 @@ def test_lost_in_the_dark_sends_the_yaw_rate_alone_and_its_sigma_grows(
     node.close()
 
 
+def test_the_tracked_rule_keeps_the_whole_twist_while_the_tracks_hold(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A plain wall (drives 0343-0363): OpenVINS's update uses no feature from t 1.0 while the
+    tracker keeps 40 persistent tracks. Under vio_lost_rule used the features rule withholds the
+    twist from t 2.0 (yaw only); under tracked every pose sends the whole twist, and the report
+    names the rule and both counts."""
+    for rule, full_n, yaw_n in (("used", 19, 20), ("tracked", 39, 0)):
+        clock = _Clock()
+        monkeypatch.setattr(relay, "time", clock)
+        node = _node(vio_lost_rule=rule)
+        assert node._vio_lost.rule == rule
+        assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+        _drive_into_the_dark(node, clock, tracked=lambda _t: 40)
+        twists = node.pubs[VO_TWIST_TOPIC].sent
+        full = [m for m in twists if m.twist.covariance[0] < 1.0]
+        yaw = [m for m in twists if m.twist.covariance[0] >= 1e6]
+        assert (len(full), len(yaw)) == (full_n, yaw_n), rule
+        node._report()
+        line = node.get_logger().texts("info")[-1]
+        assert f"features rule {rule}: tracked 40 (of 70), used 0 (msckf 0)" in line
+        node.close()
+
+
+def test_the_rule_switches_live_and_the_threshold_is_the_knob(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vio_lost_rule and vio_min_features are live: 15 tracks are lost under the shipped 20 and
+    not under 10; switched to used mid-drive, the empty updates count from the switch."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node(vio_lost_rule="tracked", vio_min_features=10)
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock, seconds=3.0, tracked=lambda _t: 15)
+    assert node._vio_lost.counts["features"] == 0, "15 tracks are enough under 10"
+    assert node.set_parameters([ros_stubs.Parameter("vio_min_features", value=20)])[0].successful
+    _drive_into_the_dark(node, clock, seconds=1.5, tracked=lambda _t: 15)
+    assert node._vio_lost.counts["features"] == 1
+    assert "15 tracked features (under 20)" in str(node._vio_lost.last)
+    assert node.set_parameters([ros_stubs.Parameter("vio_lost_rule", value="used")])[0].successful
+    assert node._vio_lost.rule == "used"
+    refused = node.set_parameters([ros_stubs.Parameter("vio_lost_rule", value="both")])
+    assert not refused[0].successful, "used or tracked"
+    node.close()
+
+
+def test_under_the_tracked_rule_the_bias_walk_counts_from_the_last_fed_update(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vio_lost_rule tracked: the update uses 50 features until t 1.0 and none after, the
+    tracks hold 40 until t 2.0 and fall to 3 (the dark). The whole twist flows to t 2.9; lost from
+    t 3.0, the yaw rate alone, its bias walk counted from the last pose whose update used
+    features (t 0.9), not from the last that passed (t 2.9): at t 3.0, 4e-6 + BRW^2 * 2.1."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node(vio_lost_rule="tracked")
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock, tracked=lambda t: 40 if t < 2.0 else 3)
+    twists = node.pubs[VO_TWIST_TOPIC].sent
+    full = [m for m in twists if m.twist.covariance[0] < 1.0]
+    yaw = [m for m in twists if m.twist.covariance[0] >= 1e6]
+    assert len(full) == 29 and len(yaw) == 10, "t 0.1-2.9 whole, t 3.0-3.9 yaw only"
+    assert yaw[0].twist.covariance[35] == pytest.approx(4e-6 + BRW**2 * 2.1, rel=1e-9)
+    assert yaw[-1].twist.covariance[35] == pytest.approx(4e-6 + BRW**2 * 3.0, rel=1e-9)
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "yaw only since 3.0 s" in line and "(3 tracked features (under 20) for" in line
+    node.close()
+
+
+def test_an_unreadable_health_message_is_counted_and_changes_nothing() -> None:
+    node = _node(vio_lost_rule="tracked")
+    bad = ros_stubs.DiagnosticStatus()
+    bad.values.append(ros_stubs.KeyValue(key="t", value="not a number"))
+    node.subs[VIO_HEALTH_TOPIC][1](bad)
+    assert node._vio_lost.feature_count is None
+    node._report()
+    assert "health unreadable 1" in node.get_logger().texts("info")[-1]
+    node.close()
+
+
 def test_the_mast_swaying_withholds_the_yaw_rate_while_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same dark drive with the mast swaying at 11.5 deg/s (over gate_sway_dps 6) from t 2.5
-    to 3.0: those yaw rates are withheld and counted as mast (a pose is judged at both ends of
-    its step, so the one after the sway goes too); the rest still flow."""
+    """The same dark drive with the mast swaying at 22.9 deg/s (over vio_gate_sway_dps 20) from
+    t 2.5 to 3.0: those yaw rates are withheld and counted as mast (a pose is judged at both ends
+    of its step, so the one after the sway goes too); the rest still flow."""
     clock = _Clock()
     monkeypatch.setattr(relay, "time", clock)
     node = _node()
     assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
-    _drive_into_the_dark(node, clock, sway=(2.45, 3.0))
+    _drive_into_the_dark(node, clock, sway=(2.45, 3.0), sway_rad_s=0.4)
     yaw = [m for m in node.pubs[VO_TWIST_TOPIC].sent if m.twist.covariance[0] >= 1e6]
     w = node._tally.take()
     assert 5 <= w.counts["yaw_mast"] <= 7
@@ -649,6 +766,74 @@ def test_the_mast_swaying_withholds_the_yaw_rate_while_lost(
     stamps = [round(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0, 1) for m in yaw]
     assert not any(2.5 <= s <= 3.0 for s in stamps), "nothing inside the sway"
     node.close()
+
+
+def test_under_vio_the_sway_gate_is_the_vio_pair_and_rtabmaps_inputs_keep_the_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mast swaying at 11.5 deg/s from t 0.25 to 0.8 (over gate_sway_dps 6, under
+    vio_gate_sway_dps 20): under vio every pose of the lit drive sends its whole twist; with
+    vio_gate_sway_dps set live to 6 the swaying ones are withheld as gaze_swaying. A stereo relay
+    judges by gate_sway_dps / gate_sway_deg."""
+    for dps, withheld in ((None, False), (6.0, True)):
+        clock = _Clock()
+        monkeypatch.setattr(relay, "time", clock)
+        node = _node()
+        assert node._gaze.gate.sway_dps == 20.0 and node._gaze.gate.sway_deg == 1.0
+        assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+        if dps is not None:
+            change = ros_stubs.Parameter("vio_gate_sway_dps", value=dps)
+            assert node.set_parameters([change])[0].successful
+            assert node._gaze.gate.sway_dps == dps
+        _drive_into_the_dark(node, clock, seconds=1.0, sway=(0.25, 0.8))
+        counts = node._tally.take().counts
+        full = [m for m in node.pubs[VO_TWIST_TOPIC].sent if m.twist.covariance[0] < 1.0]
+        assert (counts["gaze_swaying"] > 0) == withheld, dps
+        assert (len(full) == 9) != withheld, "t 0.1-0.9 whole unless the sway withholds"
+        node.close()
+    with ros_stubs.parameters(vo_input="stereo"):
+        stereo = VisualOdometry()
+    assert stereo._sway_knobs() == (6.0, 1.0), "rtabmap's inputs: the gate's own pair"
+    assert stereo._gaze.gate.sway_dps == 6.0
+    change = ros_stubs.Parameter("vio_gate_sway_dps", value=30.0)
+    assert stereo.set_parameters([change])[0].successful
+    assert stereo._gaze.gate.sway_dps == 6.0, "the VIO pair does not reach a stereo relay"
+    stereo.close()
+
+
+def test_a_coasting_filter_sends_its_twist_with_the_sigma_the_law_grows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vio_lost_rule tracked on a plain wall: the update uses 50 features until t 1.0 and none
+    after while 40 tracks hold, so every pose sends its whole twist. Before t 1.0 the vx variance
+    is the IMU's own (9e-4 through the chip's axes: base x = IMU z); from then the sigma grows by
+    the coasting law, at t 2.0 (age 1.1 s since the frame at 0.9) x(1 + 0.5 * 0.95) = x1.475, at
+    t 3.9 the cap x2.25; the yaw rate's variance stays the IMU's 4e-6. No health heard: x1."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node(vio_lost_rule="tracked")
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock, tracked=lambda _t: 40)
+    full = {
+        round(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0, 1): m.twist.covariance
+        for m in node.pubs[VO_TWIST_TOPIC].sent
+        if m.twist.covariance[0] < 1.0
+    }
+    assert len(full) == 39
+    assert full[0.5][0] == pytest.approx(9e-4), "fresh: the update of the frame before"
+    assert full[2.0][0] == pytest.approx(9e-4 * 1.475**2, rel=1e-6)
+    assert full[2.0][7] == pytest.approx(1e-4 * 1.475**2, rel=1e-6), "vy alike (base y = IMU x)"
+    assert full[3.9][0] == pytest.approx(9e-4 * 2.25**2, rel=1e-6), "the cap"
+    assert full[3.9][35] == pytest.approx(4e-6), "the yaw rate is not inflated"
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "inflated (1 + 0.5 per s past 0.15 s, cap 2.25)" in line
+    assert node.set_parameters([ros_stubs.Parameter("vio_coast_per_s", value=0.0)])[0].successful
+    assert node._coasting.multiplier(T0 + 3.9) == 1.0, "0 is off, live"
+    node.close()
+    quiet = _node()
+    assert quiet._coasting.multiplier(T0 + 10.0) == 1.0, "no health heard: nothing measured"
+    quiet.close()
 
 
 def _imu_state(t: float, pan_rate: float) -> tuple[Any, Any]:
