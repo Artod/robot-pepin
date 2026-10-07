@@ -975,6 +975,37 @@ def test_a_saccade_frame_never_reaches_the_network_and_is_counted(build: Build) 
     assert "gaze gate off" in node.logger.texts("info")[-1]
 
 
+def _brightness(node: DepthStream, stamp: Any, level: float) -> None:
+    """camera_stream's /camera/brightness for the frame stamped ``stamp``."""
+    msg = ros_stubs.Illuminance(header=ros_stubs.Header(stamp=stamp), illuminance=level)
+    node.subs["/camera/brightness"][1](msg)
+
+
+def test_a_frame_too_dark_never_reaches_the_network_and_is_told_to_the_gaze(build: Build) -> None:
+    """gate_dark (on by default): a frame under the floor is dropped at the door like a saccade
+    frame — no depth, no fan, no mark, no carve — counted as dark, and told on /depth/dark at
+    its own stamp; a lit frame passes; off live, the dark frame passes as before."""
+    node, _net = build()
+    node._worker.stop()
+    _brightness(node, _stamp(5), 4.0)
+    node._on_image(_image(_stamp(5)))
+    assert not node._worker.waiting, "a dark frame is dropped at the door"
+    sent = node.pubs["/depth/dark"].sent
+    assert [(m.stamp.sec, m.stamp.nanosec) for m in sent] == [(1_005, 250_000_000)]
+    _brightness(node, _stamp(6), 80.0)
+    node._on_image(_image(_stamp(6)))
+    assert node._worker.waiting, "a lit frame goes to the network"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "gaze gate: 0 blind, 0 spinning, 1 dark of 2 frames" in line
+    assert "dark gate under 10 grey until 12" in line and "gate_dark=on" in line
+    node._worker.clear()
+    assert node.set_parameters([Param("gate_dark", False)])[0].successful
+    _brightness(node, _stamp(7), 4.0)
+    node._on_image(_image(_stamp(7)))
+    assert node._worker.waiting and len(sent) == 1, "off: the dark frame passes, untold"
+
+
 def test_the_saccades_in_the_report_line_are_the_blind_count_s_own_window(build: Build) -> None:
     """The first live look (2026-10-02): the window holding the look said '15 blind ... 2
     saccades', and the windows after it '0 blind ... 2 saccades' — a count per window beside a

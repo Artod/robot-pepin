@@ -76,7 +76,11 @@
     "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
     "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
-      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
+      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"},
+    "gate_dark_floor": {"default": 10.0, "range": [0.0, 255.0],
+      "note": "gate_dark: a frame whose mean luma (/camera/brightness, camera_stream's 1/8 subsample of the whole stereo frame, 0-255) is under this is dropped as dark, and so is every frame after it until one reaches this plus gate_dark_hyst. 10 sits above the bench's collapse and under every frame of the 2026-10-06 evening drives (darkest 11.1): manual 8.3 ms on a dark doorway (mean estimated <= 8 from the lit-room ladder: 8.3 ms gives 0.145 of the auto picture, the auto doorway 57) left RTAB-Map 0-1 stereo inliers and made 156 camera-only births in 20 s against 10-30 under auto; 33 ms (<= 18) 45 inliers, 96 births; 67 ms (<= 21) 138, 34. On the 16 evening drives frames at 11-30 grey made 1.3-2.8 camera-only births per integrated frame against 4.1-4.6 above 40, the lidar's own births falling alike (0.7-1.9 vs 1.8-2.7): no excess from the dim frames, so the floor is not set at the dim room (scratch/depth_dark_floor/floor.py, replay.py)"},
+    "gate_dark_hyst": {"default": 2.0, "range": [0.0, 50.0],
+      "note": "gate_dark: grey levels above gate_dark_floor a frame must reach before the dark ends, so a picture hovering at the floor does not flicker in and out (frame to frame the brightness moves p50 0.25-0.65 grey on the evening drives, p99 6.5-28 on turns)"}
   },
   "gaze": {
     "frames": {"default": 3, "range": [0, 20],
@@ -164,7 +168,9 @@
     "glance_dwell_s": {"default": 0.6, "range": [0.0, 3.0],
       "note": "above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s; the reverse glance takes the head from the path look at once, even mid-swing, and with reverse_hold_s it is cut at the first forward command (0: no glance, the reverse look waits for a path look to arrive, as before 2026-10-05)"},
     "return_deg_s": {"default": 45.0, "range": [0.0, 300.0],
-      "note": "after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05)"}
+      "note": "after a drive the head goes home at this speed, with neck_target (0: a saccade at the board's top speed, as before 2026-10-05)"},
+    "gate_dark_patience_s": {"default": 1.5, "range": [0.0, 30.0],
+      "note": "a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL"}
   },
   "goal_server": {
     "park_distance_m": {"default": 1.0, "range": [0.0, 10.0],
@@ -206,7 +212,11 @@
     "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
     "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
-      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
+      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"},
+    "gate_dark_floor": {"default": 10.0, "range": [0.0, 255.0],
+      "note": "gate_dark: a frame whose mean luma (/camera/brightness, camera_stream's 1/8 subsample of the whole stereo frame, 0-255) is under this is dropped as dark, and so is every frame after it until one reaches this plus gate_dark_hyst. 10 sits above the bench's collapse and under every frame of the 2026-10-06 evening drives (darkest 11.1): manual 8.3 ms on a dark doorway (mean estimated <= 8 from the lit-room ladder: 8.3 ms gives 0.145 of the auto picture, the auto doorway 57) left RTAB-Map 0-1 stereo inliers and made 156 camera-only births in 20 s against 10-30 under auto; 33 ms (<= 18) 45 inliers, 96 births; 67 ms (<= 21) 138, 34. On the 16 evening drives frames at 11-30 grey made 1.3-2.8 camera-only births per integrated frame against 4.1-4.6 above 40, the lidar's own births falling alike (0.7-1.9 vs 1.8-2.7): no excess from the dim frames, so the floor is not set at the dim room (scratch/depth_dark_floor/floor.py, replay.py)"},
+    "gate_dark_hyst": {"default": 2.0, "range": [0.0, 50.0],
+      "note": "gate_dark: grey levels above gate_dark_floor a frame must reach before the dark ends, so a picture hovering at the floor does not flicker in and out (frame to frame the brightness moves p50 0.25-0.65 grey on the evening drives, p99 6.5-28 on turns)"}
   },
   "vio_feed": {
     "gate_exposure_s": {"default": 0.035, "range": [0.0, 0.2],

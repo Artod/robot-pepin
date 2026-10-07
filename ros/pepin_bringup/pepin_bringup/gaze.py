@@ -68,7 +68,9 @@ THE LOOKS' FRAMES. Every look that held the head is booked when it lets go
 (:class:`pepin.gaze.HeldLook`): the frames depth_fusion fused (``/fusion/frame``: past the depth
 stream's gaze gate) while it held the head still. The report line counts them by source and
 names every look that wrote none; a drive's end adds one line for the drive: its writes and its
-looks.
+looks. A look whose frames depth_stream's gate has been dropping as too dark (``/depth/dark``) for
+``gate_dark_patience_s`` without a fused one between gives up as "dark, no frames" (expired,
+counted as dark in the report line) instead of holding the head for its whole TTL.
 
 Flags (:data:`FLAGS`) and knobs (config/knobs.json's ``gaze`` block), all live: ``ros/flags.sh
 set gaze <name> <value>``; the report line every 30 s carries the counts, the driver, the last
@@ -125,6 +127,7 @@ from pepin.gaze import (
     home_aim,
     look_from_json,
 )
+from pepin.gaze_gate import DARK_FRAME_TOPIC
 from pepin.gaze_link import GAZE_PORT, JsonDoor
 from pepin.marks_audit import scan_points, transform_xy
 from pepin.neck import JOINT_NAMES, NeckConfig
@@ -320,6 +323,7 @@ class Gaze(Node):
         self._column = self.create_client(GetPointMapROI, COLUMN_SERVICE)
         self.create_subscription(JointState, NECK_TOPIC, self._on_neck, reliable)
         self.create_subscription(Header, FRAME_TOPIC, self._on_frame, reliable)
+        self.create_subscription(Header, DARK_FRAME_TOPIC, self._on_dark_frame, reliable)
         self.create_subscription(Path, PLAN_TOPIC, self._on_plan, 1)
         self.create_subscription(OccupancyGrid, COSTMAP_TOPIC, self._on_costmap, 1)
         self.create_subscription(
@@ -408,6 +412,7 @@ class Gaze(Node):
                 k("ttl_driving_s"),
                 k("ttl_idle_s"),
             ),
+            dark_patience_s=k("gate_dark_patience_s"),
         )
 
     def _path_law(self) -> PathGazeLaw:
@@ -464,6 +469,10 @@ class Gaze(Node):
     def _on_frame(self, msg: Header) -> None:
         if self._up:
             self._arbiter.frame(stamp_seconds(msg.stamp))
+
+    def _on_dark_frame(self, msg: Header) -> None:
+        if self._up:
+            self._arbiter.dark_frame(stamp_seconds(msg.stamp))
 
     def _on_plan(self, msg: Path) -> None:
         if self._up:
@@ -1080,12 +1089,13 @@ class Gaze(Node):
         state = self._arbiter.state(self._now())
         link = "connected" if self._link.connected else "DOWN"
         stalls = ", ".join(f"{word} {n}" for word, n in sorted(self._stalls.items())) or "none"
+        dark = f" of which dark, no frames {c['dark']}" if c["dark"] else ""
         self.get_logger().info(
             f"gaze: driver {'neck_target' if self._head.speaks_target else 'neck_goto'}"
             f" (base server {link}), phase {state.phase}"
             f"{' ' + state.source if state.source else ''}, driving {self._driving};"
             f" requests {c['requests']} (done {c['done']}, denied {c['denied']}, preempted"
-            f" {c['preempted']}, expired {c['expired']}); writes {c['writes']}, settled"
+            f" {c['preempted']}, expired {c['expired']}{dark}); writes {c['writes']}, settled"
             f" {c['settled']}, refused {c['refused']}, timeouts {c['timeouts']};"
             f" {self._looks.text()}; stall looks: {stalls}; last: {self._last_stall}"
             f"{f'; {self._tf_misses} TF misses' if self._tf_misses else ''};"

@@ -12,6 +12,7 @@ import json
 import math
 from typing import Any
 
+import numpy as np
 import pytest
 import ros_stubs
 
@@ -23,16 +24,21 @@ from pepin_bringup.visual_odometry import RAW_TOPIC, VO_TOPIC, VisualOdometry  #
 from pepin.flags import load_table  # noqa: E402
 from pepin.gaze_gate import (  # noqa: E402
     BLIND,
+    BRIGHTNESS_TOPIC,
+    DARK,
+    GATE_DARK,
     GAZE_GATE,
     GAZE_STATE_TOPIC,
     MAST_STATE_TOPIC,
     SPINNING,
     STATE_STALE_S,
     SWAYING,
+    DarkLog,
     FrameGate,
     GazeState,
     YawLog,
     board_seconds,
+    frame_brightness,
 )
 
 NODES = "ros/pepin_bringup/pepin_bringup"
@@ -368,3 +374,91 @@ def test_the_feed_subscribes_the_mast_only_for_the_sway_gate_and_routes_the_new_
     feed.set("gate_sway_deg", 1.0)
     assert feed.gate.sway_deg == 1.0 and "sway gate 10 deg/s / 1 deg" in feed.text()
     assert gate_counts({"gaze_swaying": 2}, 9) == "0 blind, 0 spinning, 2 swaying of 9 frames"
+
+
+# ---- the darkness rule -----------------------------------------------------------------------
+def test_a_frame_under_the_floor_stays_dark_until_one_climbs_past_floor_plus_hysteresis() -> None:
+    """The walk along the series: under 10 grey goes dark, the dark lasts until a frame reaches
+    12, so a picture hovering at 10-12 does not flicker; each spell is counted once."""
+    log = DarkLog(floor=10.0, hyst=2.0)
+    levels = (50.0, 9.9, 10.5, 11.9, 12.0, 11.0, 10.0, 9.0, 13.0)
+    verdicts = [log.observe(T0 + 0.1 * i, v) for i, v in enumerate(levels)]
+    assert verdicts == [False, True, True, True, False, False, False, True, False]
+    assert log.episodes == 2 and log.last == 13.0 and not log.in_dark
+    assert log.dark(T0 + 0.1) is True and log.dark(T0 + 0.4) is False
+    assert log.dark(T0 + 0.15) is None, "a frame is judged by its own sample, never a neighbour"
+    assert log.observe(T0 + 0.5, 1.0) is None, "out of order: refused"
+    assert log.observe(T0 + 9.0, float("nan")) is None, "not a number: refused"
+    log.floor = 20.0  # live: from the next sample on
+    assert log.observe(T0 + 10.0, 15.0) is True and log.dark(T0 + 0.8) is False
+
+
+def test_the_dark_verdict_is_per_consumer_last_in_line_and_an_unheard_frame_passes() -> None:
+    """dark_on is the owning node's gate_dark: a node without it (the VIO's relay) passes a dark
+    frame; with it the frame is DARK, unless a saccade already blinds it (counted once, as
+    blind); a frame whose brightness never arrived passes and is counted in the report."""
+    for on in (False, True):
+        gate = FrameGate(exposure_s=0.0, settle_s=0.1, dark_on=on)
+        gate.observe_brightness(T0 + 0.5, 4.0)
+        gate.observe_brightness(T0 + 1.2, 4.0)
+        assert gate.verdict(T0 + 0.5, 0.0) == (DARK if on else None)
+        saccade(gate)
+        assert gate.verdict(T0 + 1.2, 0.0) == BLIND, "the head rule first"
+        assert gate.verdict(T0 + 2.6, 0.0) is None, "no brightness for this stamp: passes"
+    text = gate.text(0.0)
+    assert "dark gate under 10 grey until 12: 1 dark spells in this window" in text
+    assert "brightness 4 (dark), 1 frames without a brightness (passed)" in text
+    again = gate.text(0.0)
+    assert "0 dark spells in this window" in again and "without a brightness" not in again
+    assert "dark gate" not in FrameGate().text(0.0), "a node without the rule says nothing of it"
+    assert FrameGate().dark_on is False, "off unless a node turns it on"
+
+
+def test_the_report_names_the_dark_frames_like_the_sway_ones() -> None:
+    counts = {"gaze_blind": 2, "gaze_dark": 7}
+    assert gate_counts(counts, 30) == "2 blind, 0 spinning, 7 dark of 30 frames"
+    assert "dark" not in gate_counts({"gaze_blind": 1}, 5)
+
+
+def test_the_brightness_is_the_whole_frame_s_luma_on_a_subsample() -> None:
+    frame = np.zeros((600, 1600, 3), np.uint8)
+    frame[:, :800] = (0, 0, 255)  # the left eye pure red in BGR, the right black
+    assert frame_brightness(frame) == pytest.approx(0.5 * 0.299 * 255.0)
+    assert frame_brightness(np.full((64, 64), 37, np.uint8)) == 37.0
+
+
+def test_only_the_dark_rule_s_nodes_carry_it_and_the_visual_odometry_never_does() -> None:
+    from pathlib import Path
+
+    repo = Path(__file__).resolve().parents[2]
+    for node in ("depth_stream", "sensor_pack"):
+        assert load_table(repo / NODES / f"{node}.py").flag("gate_dark") == GATE_DARK, node
+    names = {f.name for f in load_table(repo / NODES / "visual_odometry.py")}
+    assert "gate_dark" not in names, "OpenVINS keeps its tracks in the dark (41 of 54-68)"
+    assert GATE_DARK.default is True
+
+
+def test_the_feed_subscribes_the_brightness_only_under_the_rule_and_routes_its_knobs() -> None:
+    node = ros_stubs.Node("probe")
+    feed = GazeFeed(
+        node, exposure_s=0.0, settle_s=0.1, yaw_dps=0.0, sway_dps=0.0, sway_deg=0.0, clock=Clock()
+    )
+    assert BRIGHTNESS_TOPIC not in node.subs, "the rule off: the subscriptions it always had"
+    feed.set_dark(True)
+    assert BRIGHTNESS_TOPIC in node.subs, "subscribed the moment the flag comes on"
+    feed.set("gate_dark_floor", 30.0)
+    feed.set("gate_dark_hyst", 5.0)
+    assert (feed.gate.dark.floor, feed.gate.dark.hyst) == (30.0, 5.0)
+    msg = ros_stubs.Illuminance(
+        header=ros_stubs.Header(stamp=ros_stubs.Time(sec=100, nanosec=0)), illuminance=25.0
+    )
+    node.subs[BRIGHTNESS_TOPIC][1](msg)
+    assert feed.verdict(100.0) == DARK
+    feed.set_dark(False)
+    assert feed.verdict(100.0) is None
+
+
+def test_the_visual_odometry_never_listens_to_the_brightness() -> None:
+    with ros_stubs.parameters():
+        node = VisualOdometry()
+    assert BRIGHTNESS_TOPIC not in node.subs and node._gaze.gate.dark_on is False

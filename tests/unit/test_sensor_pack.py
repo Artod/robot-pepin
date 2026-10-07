@@ -224,6 +224,7 @@ def test_the_node_reads_five_topics_and_writes_one(build: Build) -> None:
         "/camera/camera_info",
         "/scan",
         "/gaze/state",  # the gaze gate's one signal; /imu/data_raw only with gate_yaw_dps > 0
+        "/camera/brightness",  # the darkness rule (gate_dark, on by default since 2026-10-06)
     }
     assert set(node.pubs) == {"/rtabmap/sensor_data", "/sensor_pack/state", "/sensor_pack/place"}
     assert (IMAGE_TOPIC, DEPTH_TOPIC, CAMERA_INFO_TOPIC, SCAN_TOPIC) == (
@@ -826,3 +827,25 @@ def test_a_saccade_picture_is_never_a_member_and_the_camera_stays_carried(build:
     node._report()
     line = node.logger.texts("info")[-1]
     assert "gaze gate: 7 blind, 0 spinning of" in line and "gaze_gate=on" in line
+
+
+def test_a_picture_too_dark_is_never_a_member_and_is_counted_dark(build: Build) -> None:
+    """gate_dark: the picture under the floor is heard but never packed; the next lit one is."""
+    node = build(pack_hz=15.0)
+    _warm(node)
+    before = len(sent(node))
+    for offset, level in ((0.35, 4.0), (0.45, 80.0)):
+        msg = ros_stubs.Illuminance(
+            header=ros_stubs.Header(stamp=_stamp(offset)), illuminance=level
+        )
+        node.subs["/camera/brightness"][1](msg)
+    frame(node, 0.35)
+    scan(node, 0.42)
+    assert not [m for m in sent(node)[before:] if m.left_camera_info], "no dark member"
+    frame(node, 0.45)
+    scan(node, 0.52)
+    pictures = [m for m in sent(node)[before:] if m.left_camera_info]
+    assert pictures and pictures[0].left.header.stamp.nanosec == _stamp(0.45).nanosec
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert ", 1 dark of" in line and "gate_dark=on" in line

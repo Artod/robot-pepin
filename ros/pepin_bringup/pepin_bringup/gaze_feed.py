@@ -3,7 +3,8 @@
 
 A module of its own, not a piece of :mod:`pepin_bringup.node_kit`: only the gated camera
 consumers (depth_stream, sensor_pack, visual_odometry) import it, so a change here kicks those
-three and nothing on the board.
+three and nothing on the board. The darkness rule's ``/camera/brightness`` is subscribed only by a
+node that turns the rule on (``gate_dark``: depth_stream and sensor_pack, never the VIO's relay).
 """
 
 from __future__ import annotations
@@ -13,16 +14,20 @@ from collections.abc import Callable, Mapping
 from typing import Any
 
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import Imu, JointState
+from sensor_msgs.msg import Illuminance, Imu, JointState
 from std_msgs.msg import String
 
 from pepin.gaze_gate import (
+    BRIGHTNESS_TOPIC,
+    DARK_FLOOR,
+    DARK_HYST,
     GAZE_STATE_TOPIC,
     MAST_JOINTS,
     MAST_STATE_TOPIC,
     STAMP_END,
     SWAY_DEG,
     SWAY_DPS,
+    DarkLog,
     FrameGate,
     GazeState,
 )
@@ -40,7 +45,8 @@ class GazeFeed:
     ``/imu/data_raw`` is subscribed only once ``gate_yaw_dps`` is above zero, so a node with the
     yaw gate off carries exactly the subscriptions it had. Only readings in base_link (the C++
     bridge's) are used: a reading in another frame is counted and ignored, never guessed at.
-    ``/mast/state`` likewise only once ``gate_sway_dps`` or ``gate_sway_deg`` is above zero.
+    ``/mast/state`` likewise only once ``gate_sway_dps`` or ``gate_sway_deg`` is above zero, and
+    ``/camera/brightness`` (camera_stream's per-frame mean luma) once the darkness rule is on.
     """
 
     def __init__(
@@ -53,6 +59,9 @@ class GazeFeed:
         stamp_end: float = STAMP_END,
         sway_dps: float = SWAY_DPS,
         sway_deg: float = SWAY_DEG,
+        dark_on: bool = False,
+        dark_floor: float = DARK_FLOOR,
+        dark_hyst: float = DARK_HYST,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._node = node
@@ -64,9 +73,12 @@ class GazeFeed:
             stamp_end=stamp_end >= 0.5,
             sway_dps=sway_dps,
             sway_deg=sway_deg,
+            dark_on=dark_on,
+            dark=DarkLog(dark_floor, dark_hyst),
         )
         self._imu = False
         self._mast = False
+        self._brightness = False
         self.bad_mast = 0  # /mast/state messages without the three sway joints
         self.bad_states = 0  # messages that were not a state (counted for the report line)
         self.foreign_imu = 0  # IMU readings outside base_link, ignored
@@ -78,9 +90,16 @@ class GazeFeed:
         )
         self._listen_imu()
         self._listen_mast()
+        self._listen_brightness()
+
+    def set_dark(self, on: bool) -> None:
+        """The darkness rule turned on or off live (the owning node's ``gate_dark``)."""
+        self.gate.dark_on = on
+        self._listen_brightness()
 
     def set(self, name: str, value: float) -> None:
-        """One of :data:`pepin.gaze_gate.GATE_KNOBS` changed live."""
+        """One of :data:`pepin.gaze_gate.GATE_KNOBS` or :data:`pepin.gaze_gate.DARK_KNOBS`
+        changed live."""
         if name == "gate_exposure_s":
             self.gate.exposure_s = float(value)
         elif name == "gate_settle_s":
@@ -96,6 +115,10 @@ class GazeFeed:
         elif name == "gate_sway_deg":
             self.gate.sway_deg = float(value)
             self._listen_mast()
+        elif name == "gate_dark_floor":
+            self.gate.dark.floor = float(value)
+        elif name == "gate_dark_hyst":
+            self.gate.dark.hyst = float(value)
 
     def verdict(self, stamp: float) -> str | None:
         """Why the frame stamped ``stamp`` (board seconds) is for nothing, or ``None``."""
@@ -126,6 +149,20 @@ class GazeFeed:
             QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
         )
         self._mast = True
+
+    def _listen_brightness(self) -> None:
+        if self._brightness or not self.gate.dark_on:
+            return
+        self._node.create_subscription(
+            Illuminance,
+            BRIGHTNESS_TOPIC,
+            self._on_brightness,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
+        )
+        self._brightness = True
+
+    def _on_brightness(self, msg: Any) -> None:
+        self.gate.observe_brightness(stamp_seconds(msg.header.stamp), float(msg.illuminance))
 
     def _on_mast(self, msg: Any) -> None:
         names = list(msg.name)
@@ -160,12 +197,13 @@ class GazeFeed:
 
 def gate_counts(counts: Mapping[str, int], frames: int) -> str:
     """``12 blind, 3 spinning of 300 frames``: what a node's gate dropped in a report window,
-    from its tally's ``gaze_blind`` and ``gaze_spinning`` counts (and ``gaze_swaying``, named
-    only when the sway gate dropped something)."""
+    from its tally's ``gaze_blind`` and ``gaze_spinning`` counts (and ``gaze_swaying`` and
+    ``gaze_dark``, named only when the sway or the darkness rule dropped something)."""
     blind, spinning = counts.get("gaze_blind", 0), counts.get("gaze_spinning", 0)
-    swaying = counts.get("gaze_swaying", 0)
+    swaying, dark = counts.get("gaze_swaying", 0), counts.get("gaze_dark", 0)
     sway = f", {swaying} swaying" if swaying else ""
-    return f"{blind} blind, {spinning} spinning{sway} of {frames} frames"
+    darkness = f", {dark} dark" if dark else ""
+    return f"{blind} blind, {spinning} spinning{sway}{darkness} of {frames} frames"
 
 
 __all__ = ["GazeFeed", "gate_counts"]
