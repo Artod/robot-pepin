@@ -177,7 +177,7 @@ EKF_NODE = "ekf_filter_node"  # the board's robot_localization (robot.launch.py)
 FLAGS = FlagSet(
     Flag(
         "vo_input",
-        "stereo",
+        "vio",
         choices=VO_INPUTS,
         description="what the relay reads: `stereo` or `depth`, rtabmap's /vo/raw from the"
         " odometry node vslam.launch.py started (its own vo_input argument); `vio`, OpenVINS's"
@@ -186,12 +186,12 @@ FLAGS = FlagSet(
         " OpenVINS restarted at rest after vio_restart_rejects rejections in a row. Live between"
         " the launched rtabmap input and vio: the gate and the track's anchor restart, the"
         " published track carries on",
-        why="stereo since 2026-10-02 (the night deploy). vio is measured head-only on the parked"
-        " cart (2026-10-04, scratch/vio_day/live1, live2): orientation inside slow head moves"
-        " 0.8-1.6 deg, translation error 1.0-1.4 cm p50, rest drift 0.15 cm/min and 0.064"
-        " deg/min; the first fast pan diverged it (7.7 m, then km) and it never re-initialised,"
-        " which the guard and the restart exist for. Never in motion, never into the EKF before"
-        " this flag",
+        why="vio since 2026-10-06 (Artem: freeze the new baseline): 40 drives of 2026-10-05/06"
+        " with OpenVINS into the EKF, 9-10 poses/s, rest creep 0-7 mm/min, the in-process reset"
+        " back in 0.8-2 s after a loss (drives 0355-0371); stereo was the 2026-10-02 default while"
+        " vio was measured head-only (2026-10-04: orientation 0.8-1.6 deg inside slow head moves,"
+        " translation 1.0-1.4 cm p50, rest drift 0.15 cm/min). The measured odometry gain of the"
+        " VIO is still ~0 %: it is in for honesty and the lidar-loss case, not for drift",
         on_when="a static test or a drive whose point is the VIO: ros/laptop.sh vio up and"
         " initialised (one head pan), the guard's line in the report reading 0 rejected at rest",
         off_when="stereo whenever odom -> base_link must be today's: a drive that measures"
@@ -256,7 +256,7 @@ FLAGS = FlagSet(
     ),
     Flag(
         "vo_output",
-        "pose",
+        "twist",
         choices=VO_OUTPUTS,
         description=f"how the VIO reaches the board's EKF: `pose`, the admitted track on {VO_TOPIC}"
         " with the vo_covariance model, differenced by the EKF (odom1); `twist`, the same admitted"
@@ -265,10 +265,12 @@ FLAGS = FlagSet(
         f" axes, no floor, while {VO_TOPIC} carries the track weightless (1e6). A sample whose"
         " covariance is missing or not one is withheld and counted. Live; vo_input vio only (under"
         " rtabmap's inputs it reads as `pose`)",
-        why="pose until the drives measure twist. Under pose the VIO moved the EKF <= 1.7 cm over"
-        " 3.5 m on drives 304/305 (2026-10-05, scratch/vio_ab_1005/moved_1005.py): the 7 cm floor"
-        " differenced at 10 Hz is a velocity variance of 2 * 0.07^2 * 0.1 = 9.8e-4, one wheel"
-        " sample, beside the wheels at 20 Hz, rf2o and the gyro, so the source barely counts."
+        why="twist since 2026-10-06 (Artem: freeze the new baseline) after 35 drives on it: the"
+        " VIO's twists are honest with the 1.75/2.5 sigma scales (per-sample multiplier vx 0.92,"
+        " yaw 1.00, scratch/drives_1006e), rest creep 0-7 mm/min, no EKF rejections. Under pose"
+        " the VIO moved the EKF <= 1.7 cm over 3.5 m on drives 304/305 (2026-10-05,"
+        " scratch/vio_ab_1005/moved_1005.py): the 7 cm floor differenced at 10 Hz is a velocity"
+        " variance of 2 * 0.07^2 * 0.1 = 9.8e-4, one wheel sample, so the source barely counted."
         " OpenVINS's VELOCITY covariance is observable and is its own answer; its pose covariance"
         " in G grows without bound and is never a weight",
         on_when="a drive whose point is the VIO's weight in the EKF: vo_input vio, OpenVINS"

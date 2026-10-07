@@ -237,11 +237,12 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
         "/backup/_action/status",
         "/drive_on_heading/_action/status",
     } <= set(node.subs)
-    assert not node._switches.on("stall_look") and not node._switches.on("path_gaze")
-    assert not node._switches.on("reverse_gaze")
+    # on by default since 2026-10-06 (24 drives with them live)
+    assert node._switches.on("stall_look") and node._switches.on("path_gaze")
+    assert node._switches.on("reverse_gaze")
     assert int(node._switches["frames"]) == 3
     line = node.logger.texts("info")[-1]
-    assert line.startswith("gaze up:") and "stall_look=off" in line
+    assert line.startswith("gaze up:") and "stall_look=on" in line
 
 
 def test_the_recoveries_it_watches_are_the_behaviour_servers_and_the_trees() -> None:
@@ -279,6 +280,7 @@ def test_the_state_goes_out_on_a_change(node: Gaze) -> None:
 
 # ---- the stall look ------------------------------------------------------------------------------
 def test_stall_look_off_answers_at_once(node: Gaze) -> None:
+    node._switches.set("stall_look", False)  # on by default since 2026-10-06
     answer = stall(node)
     assert answer.success and answer.message == "stall_look off: nothing looked at"
     assert link(node).sent == []
@@ -439,7 +441,7 @@ def test_the_report_line(node: Gaze) -> None:
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.startswith("gaze: driver neck_goto (base server connected), phase home")
-    assert "stall looks: none" in line and "flags: stall_look=off" in line
+    assert "stall looks: none" in line and "flags: stall_look=on" in line
 
 
 # ---- following, glances, the slow way home, the looks' frames (gaze_replay: drive 306) ----------

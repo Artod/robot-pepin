@@ -79,7 +79,8 @@ def test_sigint_mid_run_closes_the_bag_and_exits_cleanly_through_the_race(
     real = bag_recorder.BagRecorderNode
 
     def factory() -> Any:
-        nodes.append(real())
+        with ros_stubs.parameters(goal_bag="record"):  # ring is the default since 2026-10-06
+            nodes.append(real())
         return nodes[-1]
 
     state = {"up": True}
@@ -112,7 +113,8 @@ def test_the_last_word_is_dropped_when_the_context_is_already_down(
     """The status word after the bag closes has nobody to reach once the context is gone; that
     publish failing must not end the way out before the node is destroyed. With the context
     still up the same failure is real and is raised."""
-    node = bag_recorder.BagRecorderNode()
+    with ros_stubs.parameters(goal_bag="record"):  # ring is the default since 2026-10-06
+        node = bag_recorder.BagRecorderNode()
     node.start("home")
 
     def dead(_msg: Any) -> None:

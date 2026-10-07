@@ -262,7 +262,7 @@ POSES = (  # (t, x, yaw): a cart creeping 1 cm a frame while the head pans 0.3 r
 
 
 def _drive(gate_on: bool) -> tuple[VisualOdometry, list[Any]]:
-    with ros_stubs.parameters(gaze_gate=gate_on):
+    with ros_stubs.parameters(gaze_gate=gate_on, vo_input="stereo"):
         node = VisualOdometry()
     node.subs[GAZE_STATE_TOPIC][1](
         ros_stubs.String(data=json.dumps({"phase": "saccade", "blind": True, "since": T0 + 0.18}))

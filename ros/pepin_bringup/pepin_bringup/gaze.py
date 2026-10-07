@@ -190,46 +190,52 @@ EXECUTOR_THREADS = 4  # the stall look blocks one while the subscriptions keep c
 FLAGS = FlagSet(
     Flag(
         "stall_look",
-        False,
+        True,
         description="when the controller fails, the behaviour tree's AskGaze asks for a look"
         " at the camera-only and unexplained marks blocking the hull in the plan's first"
         " stall_ahead_m: the head saccades to their voxel centroid, holds for 'frames' still"
         " frames so the volume carves a phantom or confirms a thing, comes home, and the tree"
         " clears and replans; off, AskGaze answers at once and the tree runs as before",
-        why="off until the floor test of the proof of concept has measured it (a pillow under"
-        " the nose, a person who stood in the path and left, the printer's phantom island:"
-        " stall to wheels moving, recoveries per drive, carved against confirmed, false carves)."
-        " The case for it: on run 0568 80 of 87 reversals came from the tree's blind recoveries"
-        " (critic.md), and the volume carves a phantom at 1 m in 0.27 s of frames"
-        " (config/fusion.json)",
+        why="on since 2026-10-06 (Artem: freeze the new baseline) after 24 drives with it live"
+        " (0348-0371, scratch/drives_1006f/econ_out.txt): 36 stall looks, 11 changed the costmap"
+        " (2 carved, 9 partly), 25 confirmed a thing, 0 false carves seen; the printer's phantoms"
+        " in the dark were cleared by one (0355). Off until then for the floor test (a pillow, a"
+        " person who left, the printer island). The case for it: on run 0568 80 of 87 reversals"
+        " came from the tree's blind recoveries (critic.md), and the volume carves a phantom at"
+        " 1 m in 0.27 s of frames (config/fusion.json)",
         on_when="for the stall-look floor test, then on every drive once it passes",
         off_when="a look that makes the stall worse (the head slow to come home, a carve of"
         " something real): off, and the tree is exactly the one before",
     ),
     Flag(
         "path_gaze",
-        False,
+        True,
         description="while a drive runs, the head looks along the plan path_lookahead_s ahead"
         " (pan clamped to path_pan_clamp_deg, a dead-band of path_deadband_deg); only with a"
         " base server that moves the neck while driving (neck_target), otherwise idle",
-        why="default by design, unmeasured: the arithmetic (design gaze 4.3) says 4-6 saccades of"
-        " ~0.5 s on a 30 s drive, under 10 % of frames blind and dropped by the gaze gate, but no"
-        " drive has measured that, nor the phantoms carved along the path before arrival",
+        why="on since 2026-10-06 (Artem: freeze the new baseline) after 24 drives with the follow"
+        " preset (0348-0371): 4-10 path looks a drive, 36-106 frames of them fused, 6-18 head"
+        " writes a drive (26 on 306 before the preset); the design's arithmetic (gaze 4.3) said"
+        " 4-6 saccades of ~0.5 s on a 30 s drive. Cost measured: each >= 45 deg swing costs"
+        " OpenVINS 4.7-6.5 velocity samples (306/307)",
         on_when="with the board's neck_target base server and the frame gates in place",
         off_when="a drive that loses VO or paints the volume wrong while the head moves",
     ),
     Flag(
         "reverse_gaze",
-        False,
+        True,
         description="a reverse leg the plan announces (reverse_min_m) or a recovery drives"
         " (reverse_recovery) turns the head reverse_pan_deg toward the side the rear swings to"
         " at its first reversing command, any other after reverse_min_s, any with the rear tight"
         " at once; with reverse_hold_s the look is let go at the first forward command; only"
         " with a base server that moves the neck while driving",
-        why="off until the body self-filter lands: looking back at the working tilt the cart's"
-        " own rear edge is 52 deg down, 3 deg inside the frame's bottom edge (config/neck.json's"
-        " lens 1.203 m up, the hull's 0.30 m rear), so a look back paints the cart's top shelf"
-        " into the volume as an obstacle; reverse_tilt_deg stays at home's 23.8 for that reason",
+        why="on since 2026-10-06 (Artem: freeze the new baseline): the body self-filter is on by"
+        " default since 2026-10-05 (0 self-voxels on a full sweep), and 61 reverse looks over"
+        " 0348-0371 wrote 267 frames with one look per leg in 18 of 20 legs. Off before the"
+        " self-filter because at the working tilt the cart's own rear edge is 52 deg down, 3 deg"
+        " inside the frame (config/neck.json's lens 1.203 m up, the hull's 0.30 m rear), and a"
+        " look back painted the cart's top shelf into the volume; reverse_tilt_deg stays at home's"
+        " 23.8 for that reason",
         on_when="after the self-filter, for the rear the lidar's masked wedges leave unseen",
         off_when="the volume grows marks on the cart itself while it reverses",
     ),

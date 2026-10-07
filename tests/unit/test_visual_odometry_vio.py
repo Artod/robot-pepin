@@ -76,6 +76,8 @@ def _node(**params: Any) -> VisualOdometry:
     # (1.75 / 2.5 since 2026-10-06, measured on 19 drives) are a knob, pinned in test_knobs.
     params.setdefault("vio_sigma_scale", 1.0)
     params.setdefault("vio_yaw_sigma_scale", 1.0)
+    # The track tests read the admitted poses on /vo; twist is the shipped default since 2026-10-06.
+    params.setdefault("vo_output", "pose")
     with ros_stubs.parameters(vo_input="vio", **params):
         node = VisualOdometry()
     assert node._tf is not None
@@ -340,7 +342,9 @@ def test_the_input_switches_live_between_stereo_and_vio_without_a_jump(
     rgbd_odometry runs); stereo again reads /vo/raw."""
     clock = _Clock()
     monkeypatch.setattr(relay, "time", clock)
-    node = VisualOdometry()
+    # vio / twist are the defaults since 2026-10-06; this follows the pose track across the switch
+    with ros_stubs.parameters(vo_input="stereo", vo_output="pose"):
+        node = VisualOdometry()
     assert node._tf is None and VIO_POSE_TOPIC not in node.subs
     for i in range(3):  # stereo drives 4 cm along its own x
         clock.now += 0.1
@@ -764,7 +768,8 @@ def test_the_rate_is_vio_publish_hz_under_vio_and_vo_publish_hz_under_rtabmap() 
     assert node.set_parameters([ros_stubs.Parameter("vo_publish_hz", value=5.0)])[0].successful
     assert node._cap.hz == 30.0, "rtabmap's knob does not move the VIO's rate"
     node.close()
-    stereo = VisualOdometry()
+    with ros_stubs.parameters(vo_input="stereo"):
+        stereo = VisualOdometry()
     assert stereo._cap.hz == 10.0
     stereo.close()
 

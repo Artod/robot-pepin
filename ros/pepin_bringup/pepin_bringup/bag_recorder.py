@@ -164,7 +164,7 @@ CARRY_LAST = ("/global_costmap/costmap",)
 FLAGS = FlagSet(
     Flag(
         "goal_bag",
-        "record",
+        "ring",
         choices=("record", "ring"),
         description="how a goal's bag is made. record: one `ros2 bag record` of BAG_TOPICS per"
         " goal, started on the goal's word and closed at its end (its first message 0.3-0.4 s"
@@ -175,9 +175,12 @@ FLAGS = FlagSet(
         " /maps/rec/<run>/ (pepin.ring, pepin.bag_slice), whole once the ring is written past"
         " the window (tail_s and ~1 s after the goal). A change starts or stops the ring at once;"
         " a run keeps the way it began",
-        why="record until the ring is measured on the robot (a default flips on a measurement):"
-        " estimated 3 % of a core for its recorder (a replayed drive bag, a throwaway container)"
-        " and ~19 MB a minute of the Mac's disk, ~26 with odomimu",
+        why="ring since 2026-10-06 (Artem: freeze the new baseline), measured live over 40 goals:"
+        " the recorder 11.7 % of a core and 96 MB, 29.5 MB a minute of the Mac's disk (1.77 GB/h,"
+        " 10 GB cap binds at ~5.6 h), every slice with its 15 s pre-roll and 2 s tail, readable"
+        " by bag_to_tape and the replays; and it removed the run-end transport stall (no laptop"
+        " subscriber exits at a goal's end: 72 ms worst lag after a run vs 2.1 s). record was the"
+        " default while that was an estimate (3 % of a core, ~19-26 MB a minute)",
         on_when="for bags that begin with the robot at rest before the goal (a cold OpenVINS"
         " replay needs init_window_time, 1 s, of it: the replays of 2026-10-05 never initialised)"
         " and that show what happened before a command (a shove, a carry); needs the mcap"
