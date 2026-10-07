@@ -91,7 +91,25 @@
                         <GlobalUpdatedGoal/>
                       </Inverter>
                       <ScriptCondition code="selected_controller == 'FollowPathShim' &amp;&amp; plan_controller == selected_controller"/>
-                      <IsPathValid path="{path}"/>
+                      <!-- 2026-10-07: the kept plan is checked up to the parking, not into it. Nav2's
+                           validity check (Jazzy planner_server, footprint costmap) fails a pose whose
+                           hull outline touches a LETHAL cell. A goal parked against furniture has its
+                           front edge 6.25 cm ahead of base_link (the footprint), in the 5 cm cell beside
+                           the furniture's face, so a re-mark of that face one cell nearer turns the goal
+                           pose invalid, while Smac Hybrid-A*, which checks the hull at the centre of the
+                           pose's cell (1.6 cm further back at the printer), keeps ending its plans
+                           there. Drive 0376: 7 failures in 16 s, each on the plan's end pose alone and
+                           each a fresh plan from the moving cart, six of them one a second at the start,
+                           three of those with an 8 cm reverse stub (the cart's direction flipped 5
+                           times); 46 of the 165 failures on drives 0348-0379 lay only in the last metre.
+                           TruncatePath drops the poses within 1.0 m (straight line) of the plan's end
+                           before the check: the goal server's park_distance_m (config/knobs.json),
+                           where the drive passes to MPPI, which gets a fresh plan every second and never
+                           a kept one, so the part left out is never driven on a kept plan. With
+                           park_distance_m 0 (no handover) that part is guarded by the shim's own
+                           collision check alone. -->
+                      <TruncatePath input_path="{path}" output_path="{path_check}" distance="1.0"/>
+                      <IsPathValid path="{path_check}"/>
                     </ReactiveSequence>
                     <ComputePathToPose goal="{goal}" path="{path}" planner_id="{selected_planner}" error_code_id="{compute_path_error_code}"/>
                   </Fallback>
