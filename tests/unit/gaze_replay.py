@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import math
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -31,6 +32,7 @@ from ros_stubs import (  # noqa: E402
     OccupancyGrid,
     Path_,
     PoseStamped,
+    String,
     Time,
 )
 
@@ -190,11 +192,12 @@ class Tape:
     stall: list[list[float]]
     writes: list[list[Any]]
     follow: list[list[float]] = field(default_factory=list)  # [t, 1 while FollowPath runs]
+    controller: list[list[Any]] = field(default_factory=list)  # [t, the selector's controller]
 
     @classmethod
-    def load(cls, run: str) -> Tape:
-        """``tests/fixtures/drive_<run>_gaze.json``."""
-        data = json.loads((FIXTURES / f"drive_{run}_gaze.json").read_text())
+    def load(cls, run: str, folder: Path = FIXTURES) -> Tape:
+        """``tests/fixtures/drive_<run>_gaze.json`` (or ``folder``'s)."""
+        data = json.loads((folder / f"drive_{run}_gaze.json").read_text())
         return cls(**{k: v for k, v in data.items() if not k.startswith("_")})
 
 
@@ -246,19 +249,23 @@ def replay_tape(
     after_s: float = 3.0,
     frame_every: int = FRAME_EVERY,
     head_deg_s: float = HEAD_DEG_S,
+    head: Head | None = None,
+    on_tick: Callable[[float, tuple[float, float], float, float], None] | None = None,
 ) -> list[Write]:
     """Drive the node through a taped drive with path gaze, reverse gaze and the stall look on,
     ``knobs`` set live: every input at its own time (a stall look submitted as the node's
-    ``_stall`` submits it, without the columns), a frame every ``frame_every`` ticks, a head of
-    ``head_deg_s``, the drive's end at ``end_s``, then ``after_s`` at rest; every write it made,
-    with the source that made it."""
+    ``_stall`` submits it, without the columns; the controller the selector names), a frame
+    every ``frame_every`` ticks, a head of ``head_deg_s`` (or ``head``'s profile), the drive's
+    end at ``end_s``, then ``after_s`` at rest; every write it made, with the source that made
+    it. ``on_tick``: seconds from the start, the head (pan, tilt deg) and the command (v, w)
+    after every step."""
     clock = [T0]
     node._now = lambda: clock[0]
     node._tf = TapeTf(tape, clock)
     flags = {"path_gaze": True, "reverse_gaze": True, "stall_look": True}
     for name, value in {**flags, **(knobs or {})}.items():
         node._switches.set(name, value)
-    head = [0.0, math.degrees(node._arbiter.home.tilt_rad)]
+    at = [0.0, math.degrees(node._arbiter.home.tilt_rad)]
     sent = node._link.sent
     writes: list[Write] = []
     events: list[tuple[float, str, Any]] = sorted(
@@ -266,6 +273,7 @@ def replay_tape(
         + [(row[0], "b grid", row) for row in tape.costmap]
         + [(row[0], "c stall", row) for row in tape.stall]
         + [(row[0], "a follow", row[1]) for row in tape.follow]
+        + [(row[0], "a controller", row[1]) for row in tape.controller]
         + [(tape.end_s, "d end", None)],
         key=lambda event: (event[0], event[1]),
     )
@@ -283,6 +291,9 @@ def replay_tape(
             elif what == "a follow":
                 if hasattr(node, "_on_driver_status"):  # the node since 2026-10-06
                     node._on_driver_status("follow_path", goals(1) if row else goals())
+            elif what == "a controller":
+                if hasattr(node, "_on_controller"):  # the node since 2026-10-07
+                    node._on_controller(String(data=row))
             elif what == "b grid":
                 node._on_costmap(grid(row[1], row[2], row[3]))
             elif what == "c stall":
@@ -306,12 +317,17 @@ def replay_tape(
                     node._arbiter.state(clock[0]).source,
                 )
             )
-        _follow(head, sent, head_deg_s)
+        if head is None:
+            _follow(at, sent, head_deg_s)
+        else:
+            head.follow(at, sent)
+        if on_tick is not None:
+            on_tick(t, (at[0], at[1]), v, w)
         clock[0] += TICK_S
         joints = gaze_node.JointState()
         joints.header.stamp = stamp(clock[0])
         joints.name = ["neck_pan", "head_tilt"]
-        joints.position = [math.radians(head[0]), math.radians(head[1])]
+        joints.position = [math.radians(at[0]), math.radians(at[1])]
         node._on_neck(joints)
         if k % frame_every == 0:
             node._on_frame(Header(stamp=stamp(clock[0])))
@@ -331,6 +347,38 @@ def _stall_look(node: Any, aim: Aim) -> Look:
         kind="point",
         hold_s=ttl if node._knob("glance_dwell_s") > 0.0 else 0.0,
     )
+
+
+class Head:
+    """A neck that runs each axis on the board's profile (config/neck.json's motion block): a
+    trapezoid of ``top_deg_s`` (the servos' measured peak) and the axis's ramp, from rest to
+    rest, toward the newest neck_target (at its own ``speed_deg_s`` when it asks for one)."""
+
+    def __init__(
+        self, top_deg_s: float = 289.0, pan_acc: float = 2232.0, tilt_acc: float = 600.0
+    ) -> None:
+        self.top = top_deg_s
+        self.acc = (pan_acc, tilt_acc)
+        self.speed = [0.0, 0.0]
+
+    def follow(self, at: list[float], sent: list[dict[str, Any]]) -> None:
+        """One tick of both axes toward the newest neck_target."""
+        targets = [m for m in sent if m.get("cmd") == "neck_target"]
+        if not targets:
+            return
+        goal = (math.degrees(targets[-1]["pan_rad"]), math.degrees(targets[-1]["tilt_rad"]))
+        top = targets[-1].get("speed_deg_s") or self.top
+        for axis in (0, 1):
+            gap = goal[axis] - at[axis]
+            if abs(gap) < 1e-9:
+                self.speed[axis] = 0.0
+                continue
+            acc = self.acc[axis]
+            cap = min(top, math.sqrt(2.0 * acc * abs(gap)))  # still stops at the goal from here
+            speed = min(cap, self.speed[axis] + acc * TICK_S)
+            step = min(abs(gap), 0.5 * (self.speed[axis] + speed) * TICK_S)
+            at[axis] += math.copysign(step, gap)
+            self.speed[axis] = speed if step < abs(gap) else 0.0
 
 
 def _follow(head: list[float], sent: list[dict[str, Any]], top_deg_s: float) -> None:
