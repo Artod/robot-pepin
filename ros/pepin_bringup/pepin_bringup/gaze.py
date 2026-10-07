@@ -43,7 +43,13 @@ sparingly (:class:`pepin.path_gaze.StandWatch`): no saccade while the cart stand
 (``path_still_m_s``) unless the plan's aim is more than ``path_still_deg`` off the head, none for
 ``path_stall_guard_s`` after the command dropped to zero (a stall look is coming), and one back to
 the plan's aim once it has been within ``path_recentre_deg`` of straight ahead for
-``path_recentre_s`` with the head still aside. While it has no aim — reversing before a reverse
+``path_recentre_s`` with the head still aside. It looks STRAIGHT AHEAD unless the plan point is
+more than ``path_bend_deg`` off the nose, and comes back straight ahead once a bend is passed;
+from the goal server's hand-over to the parker (``/controller_selector`` naming a controller of
+:data:`PARKERS` mid-drive) or ``path_park_ahead_m`` of plan left it looks at the parking spot,
+which the tail does not freeze, and a reverse leg there needs the plan's ``reverse_park_min_m``,
+a tight rear or a behaviour server's recovery to turn the head back
+(:func:`pepin.path_gaze.path_look`). While it has no aim — reversing before a reverse
 look, no plan point ahead — its look is renewed where it is for up to ``path_hold_s``, so the head
 does not lapse home and back; the next look replaces it or the drive's end lets it go. With
 ``glance_dwell_s`` above 0 the reverse look and the stall look are atomic GLANCES
@@ -138,10 +144,12 @@ from pepin.neck import JOINT_NAMES, NeckConfig
 from pepin.path_gaze import (
     PathFollower,
     PathGazeLaw,
+    PathLook,
     ReverseLaw,
     ReverseWatch,
     StandWatch,
-    path_aim,
+    park_spot,
+    path_look,
     remaining_m,
     reverse_aim,
     reverse_leg_m,
@@ -174,6 +182,8 @@ COSTMAP_TOPIC = "/local_costmap/costmap"
 SCAN_TOPIC = "/scan"
 MARKS_TOPIC = "/depth_marks"
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
+SELECTOR_TOPIC = "/controller_selector"  # the goal server's pick (latched): FollowPath's controller
+PARKERS = ("FollowPathMPPI",)  # a drive handed to one of these mid-goal is parking
 CONTROLLER_ACTION = "follow_path"  # the controller server's: the controller drives the wheels
 BEHAVIOUR_ACTIONS = ("backup", "drive_on_heading")  # the behaviour server's recoveries that drive
 ACTIVE_STATUSES = (1, 2, 3)  # accepted, executing, canceling
@@ -320,6 +330,10 @@ class Gaze(Node):
         self._path_at = 0.0
         self._follow = PathFollower()
         self._stand = StandWatch()
+        self._selected = ""  # the controller the selector names now
+        self._drive_controller: str | None = None  # ...and named at the drive's start
+        self._parking = False  # this drive's parking phase (latched until its end)
+        self._spot: tuple[float, float] | None = None  # ...and its spot, in the plan's frame
         self._path_quiet_since: float | None = None
         self._looks = LookTally()  # the report window's
         self._drive_looks: LookTally | None = None
@@ -351,6 +365,7 @@ class Gaze(Node):
             QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE),
         )
         status_qos = QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL)
+        self.create_subscription(String, SELECTOR_TOPIC, self._on_controller, status_qos)
         for action in NAV_ACTIONS:
             self.create_subscription(
                 GoalStatusArray,
@@ -447,16 +462,25 @@ class Gaze(Node):
             stall_guard_s=k("path_stall_guard_s"),
             recentre_s=k("path_recentre_s"),
             recentre_deg=k("path_recentre_deg"),
+            bend_deg=k("path_bend_deg"),
+            bend_lead_s=k("path_bend_lead_s"),
+            park_ahead_m=k("path_park_ahead_m"),
+            park_beyond_m=k("path_park_beyond_m"),
         )
 
     def _reverse_law(self) -> ReverseLaw:
+        """The reverse look's numbers; while parking (``reverse_park_min_m`` above 0) the plan
+        announces a leg only from that long, and a leg nobody announced gets no look by its
+        length in time (the parker's plan stubs and creeps: a tight rear or a recovery still
+        turns the head)."""
         k = self._knob
+        park = k("reverse_park_min_m") if self._parking else 0.0
         return ReverseLaw(
             pan_deg=k("reverse_pan_deg"),
             tilt_deg=k("reverse_tilt_deg"),
-            min_s=k("reverse_min_s"),
+            min_s=math.inf if park > 0.0 else k("reverse_min_s"),
             rear_m=k("reverse_rear_m"),
-            min_m=k("reverse_min_m"),
+            min_m=max(k("reverse_min_m"), park),
             recovery=k("reverse_recovery") > 0.0,
             hold_s=k("reverse_hold_s"),
         )
@@ -527,6 +551,7 @@ class Gaze(Node):
             self._driving = True
             self._follow.reset()
             self._stand.reset()
+            self._parking, self._spot, self._drive_controller = False, None, self._selected
             self._reverse.release()
             self._path_quiet_since = None
             if self._summary_at is not None:
@@ -551,17 +576,38 @@ class Gaze(Node):
             self._return_home(now)
             self._summary_at = now + LATE_S + 0.25  # the drive's last looks counted first
 
+    def _on_controller(self, msg: String) -> None:
+        """The goal server's controller pick: a drive handed to a parker (:data:`PARKERS`) after
+        it started on another controller is parking from now on."""
+        if not self._up:
+            return
+        self._selected = str(msg.data)
+        started = self._drive_controller
+        handed = self._driving and started is not None and self._selected != started
+        if handed and self._selected in PARKERS:
+            self._park(f"the controller {self._selected}")
+
+    def _park(self, why: str) -> None:
+        """The drive's parking phase starts (path gaze aims at the parking spot), once."""
+        if self._parking or self._knob("path_park_ahead_m") <= 0.0:
+            return
+        self._parking = True
+        self.get_logger().info(f"gaze: parking ({why}): the head looks at the spot")
+
     def _on_driver_status(self, action: str, msg: GoalStatusArray) -> None:
         """The controller's or a recovery's status list: which of them drives the wheels."""
         if self._up:
             self._drivers[action] = frozenset(_active_goals(msg))
 
-    def _recovery_drives(self) -> bool:
+    def _recovery_drives(self, *, behaviours_only: bool = False) -> bool:
         """Whether the tree's recovery drives the wheels, not the controller: a BackUp or a
-        DriveOnHeading goal runs, or the controller's status was heard and it runs none."""
+        DriveOnHeading goal runs, or (unless ``behaviours_only``) the controller's status was
+        heard and it runs none."""
         drivers = dict(self._drivers)
         if any(drivers.get(action) for action in BEHAVIOUR_ACTIONS):
             return True
+        if behaviours_only:
+            return False
         return CONTROLLER_ACTION in drivers and not drivers[CONTROLLER_ACTION]
 
     def _return_home(self, now: float) -> None:
@@ -689,10 +735,10 @@ class Gaze(Node):
         if target is None:
             self._keep_path(now)  # a mode change, or nothing ahead: the aim stays
             return
-        wanted, left, end_in = target
+        look, left, end_in = target
         fresh = not any(r.source == PATH_SOURCE for r in self._arbiter.pending())
         aim = self._follow.update(
-            wanted,
+            look.aim,
             now,
             path_law,
             end_in_s=end_in,
@@ -702,6 +748,8 @@ class Gaze(Node):
             stopped_s=self._stand.stopped_for(now),
             head=self._arbiter.looked_at(),
             home=self._arbiter.home,
+            kind=look.kind,
+            spot=look.spot,
         )
         if aim is None:
             return
@@ -725,7 +773,10 @@ class Gaze(Node):
     def _announcement(self, law: ReverseLaw) -> str:
         """Why this reverse leg is announced ("" when it is not): the tree's recovery drives it,
         or the plan leaves the cart backwards for ``reverse_min_m`` or more."""
-        if law.recovery and self._recovery_drives():
+        # while parking the controller's goal ends at the goal with the parker's last creep
+        # still the command (drive 0373: follow_path done +20.49, v -0.04): not a recovery
+        parking = self._parking and self._knob("reverse_park_min_m") > 0.0
+        if law.recovery and self._recovery_drives(behaviours_only=parking):
             return "a recovery drives"
         if law.min_m <= 0.0:
             return ""
@@ -765,26 +816,34 @@ class Gaze(Node):
         yaw = math.atan2(float(here.rotation[1, 0]), float(here.rotation[0, 0]))
         return path, (float(here.translation[0]), float(here.translation[1]), yaw)
 
-    def _path_target(self, speed: float) -> tuple[Aim, float, float] | None:
-        """Path gaze's aim from the newest plan and the cart's pose in its frame, the metres of
-        plan left and the seconds to its end at this speed."""
+    def _path_target(self, speed: float) -> tuple[PathLook, float, float] | None:
+        """Path gaze's wanted aim from the newest plan and the cart's pose in its frame, the
+        metres of plan left and the seconds to its end at this speed; the drive parks from the
+        first time the plan left is ``path_park_ahead_m`` or less."""
         found = self._plan_pose()
         if found is None:
             return None
         path, pose = found
-        aim = path_aim(
+        law = self._path_law()
+        left = remaining_m(path, (pose[0], pose[1]))
+        if left <= law.park_ahead_m:
+            self._park(f"{left:.2f} m of plan left")
+        if self._parking and self._spot is None:
+            self._spot = park_spot(path, law.park_beyond_m)  # once: the spot stays put
+        look = path_look(
             path,
             pose,
             speed,
-            self._path_law(),
+            law,
             lens_z_m=self._cfg.reference.z_m,
             home=self._arbiter.home,
             reach=self._reach,
+            spot=self._spot if self._parking and law.park_ahead_m > 0.0 else None,
+            bending=self._follow.bending,
         )
-        if aim is None:
+        if look is None:
             return None
-        left = remaining_m(path, (pose[0], pose[1]))
-        return aim, left, time_to_end(left, speed)
+        return look, left, time_to_end(left, speed)
 
     def _tight_rear(self, law: ReverseLaw) -> bool:
         with self._inputs_lock:

@@ -10,6 +10,7 @@ import json
 import math
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
@@ -17,13 +18,20 @@ import pytest
 from pepin.gaze import Aim, Reach, home_aim
 from pepin.neck import NeckConfig
 from pepin.path_gaze import (
+    AHEAD,
+    BEND,
+    PARK,
+    POINT,
     PathFollower,
     PathGazeLaw,
+    PathLook,
     ReverseLaw,
     ReverseWatch,
     StandWatch,
     lookahead_m,
+    park_spot,
     path_aim,
+    path_look,
     remaining_m,
     reverse_aim,
     reverse_leg_m,
@@ -265,6 +273,8 @@ def law_of(preset: str) -> PathGazeLaw:
         still_m_s=knobs["path_still_m_s"],
         stall_guard_s=knobs["path_stall_guard_s"],
         recentre_s=knobs["path_recentre_s"],
+        bend_deg=knobs["path_bend_deg"],
+        park_ahead_m=knobs["path_park_ahead_m"],
     )
 
 
@@ -500,3 +510,135 @@ def test_the_time_to_the_plans_end() -> None:
     assert time_to_end(0.95, 0.19) == pytest.approx(5.0)
     assert time_to_end(0.95, -0.19) == pytest.approx(5.0)
     assert time_to_end(0.95, 0.01) == math.inf  # standing: no end in sight
+
+
+# ---- the ahead magnet, the bend look and the parking spot (path_look, park_spot) --------------
+MAGNET_OFF = replace(FOLLOW, bend_deg=0.0, park_ahead_m=0.0)
+
+
+def look(
+    path: np.ndarray,
+    pose: tuple[float, float, float],
+    v: float = 0.3,
+    law: PathGazeLaw = FOLLOW,
+    **kw: Any,
+) -> PathLook:
+    found = path_look(path, pose, v, law, lens_z_m=1.2, home=HOME, reach=REACH, **kw)
+    assert found is not None
+    return found
+
+
+def test_with_the_magnet_and_the_parking_off_the_look_is_the_plan_point() -> None:
+    rng = np.random.default_rng(7)
+    for _ in range(200):
+        turn = float(rng.uniform(-2.0, 2.0))
+        path = np.array([[0.0, 0.0], [0.3, 0.0], [0.3 + math.cos(turn), math.sin(turn)]])
+        pose = (float(rng.uniform(-0.1, 0.2)), float(rng.uniform(-0.1, 0.1)), float(rng.normal()))
+        v = float(rng.uniform(0.0, 0.8))
+        found = look(path, pose, v, MAGNET_OFF)
+        assert found.kind == POINT
+        assert found.aim == aim(path, pose, v)
+
+
+def test_the_magnet_looks_straight_ahead_until_the_plan_bends_off_the_nose() -> None:
+    wiggle = np.column_stack((np.arange(0.0, 3.0, 0.05), 0.08 * np.sin(np.arange(60) / 6.0)))
+    found = look(wiggle, (0.0, 0.0, math.radians(10)))  # the cart 10 deg off a wiggling line
+    assert (found.kind, found.aim.pan_rad) == (AHEAD, 0.0)
+    assert found.aim.tilt_rad == look(wiggle, (0.0, 0.0, 0.1), law=MAGNET_OFF).aim.tilt_rad
+    corner = np.array([[0.0, 0.0], [0.3, 0.0], [0.3, 1.5]])  # left 0.3 m ahead: the point 45 deg
+    found = look(corner, (0.0, 0.0, 0.0))
+    assert found.kind == BEND and math.degrees(found.aim.pan_rad) == pytest.approx(45.0)
+    # a bend look ends only once the point is back within 0.6 of the threshold (18 deg)
+    arc = np.array([[0.0, 0.0], [1.0, math.tan(math.radians(24))]])
+    assert look(arc, (0.0, 0.0, 0.0)).kind == AHEAD
+    assert look(arc, (0.0, 0.0, 0.0), bending=True).kind == BEND
+
+
+def test_the_bend_lead_reads_the_bend_further_along_the_plan() -> None:
+    corner = np.array([[0.0, 0.0], [0.6, 0.0], [0.6, 1.5]])  # left 0.6 m ahead
+    assert look(corner, (0.0, 0.0, 0.0)).kind == AHEAD  # the 0.6 m point is the corner itself
+    lead = replace(FOLLOW, bend_lead_s=4.0)  # 1.2 m at 0.3 m/s
+    found = look(corner, (0.0, 0.0, 0.0), law=lead)
+    assert found.kind == BEND
+    assert math.degrees(found.aim.pan_rad) == pytest.approx(45.0)
+
+
+def test_the_parking_spot_is_past_the_plans_end_along_its_last_step() -> None:
+    approach = np.array([[0.0, 0.0], [0.5, 0.0], [0.9, 0.3], [1.0, 0.4]])
+    x, y = park_spot(approach, 0.5) or (0.0, 0.0)
+    assert (x, y) == pytest.approx((1.0 + 0.5 / math.sqrt(2), 0.4 + 0.5 / math.sqrt(2)))
+    tiny = np.vstack((STRAIGHT[:10], STRAIGHT[9] + [[0.001, 0.004], [0.002, 0.008]]))
+    x, y = park_spot(tiny, 0.5) or (0.0, 0.0)  # millimetre steps: read over 5 cm
+    assert math.degrees(math.atan2(y - tiny[-1, 1], x - tiny[-1, 0])) == pytest.approx(9, abs=1)
+    assert park_spot(np.zeros((1, 2)), 0.5) is None
+
+
+def test_parking_looks_at_the_spot_at_the_driving_tilt_ahead_once_the_cart_faces_it() -> None:
+    spot = (1.0, -1.0)
+    found = look(STRAIGHT, (0.0, 0.0, 0.0), spot=spot)  # 45 deg right, the plan straight
+    assert (found.kind, found.spot) == (PARK, True)
+    assert math.degrees(found.aim.pan_rad) == pytest.approx(-45.0)
+    assert found.aim.tilt_rad == look(STRAIGHT, (0.0, 0.0, 0.0), law=MAGNET_OFF).aim.tilt_rad
+    facing = look(STRAIGHT, (0.0, 0.0, -math.radians(40)), spot=spot)
+    assert (facing.kind, facing.aim.pan_rad, facing.spot) == (AHEAD, 0.0, True)
+    # the spot stays a look when the plan has nothing left ahead
+    end = STRAIGHT[-1]
+    assert look(STRAIGHT, (end[0], end[1], 0.0), spot=(end[0] + 0.5, end[1])).kind == AHEAD
+
+
+def test_the_magnet_brings_a_held_aim_back_straight_ahead_inside_the_zone() -> None:
+    """Drive 0379: the head held -14 after an arc, the plan's aim -7..+1 (inside the 22 deg
+    zone): the zone alone kept the head aside until the re-centre, 6.5 s later."""
+    follower = PathFollower()
+    follower.update(pan(-14), 13.8, FOLLOW, kind=BEND)
+    assert follower.bending
+    for t in (17.6, 17.8):  # the bend passed: straight ahead wanted, the hysteresis first
+        assert follower.update(pan(0), t, FOLLOW, kind=AHEAD) == pan(-14)
+    assert follower.update(pan(0), 18.0, FOLLOW, kind=AHEAD) == pan(0)
+    assert not follower.bending
+    assert follower.update(pan(0), 18.2, FOLLOW, kind=AHEAD) == pan(0)
+    follower.reset()  # a plan aim (the magnet off) inside the zone keeps the head aside
+    follower.update(pan(-14), 0.0, FOLLOW)
+    assert follower.update(pan(-6), 5.0, replace(FOLLOW, recentre_s=0.0)) == pan(-14)
+
+
+def test_the_parking_spot_is_followed_in_the_tail() -> None:
+    """Drive 0376: the tail froze the head at -53 for the last 3.4 s while the cart pivoted to
+    face the printer; a look read off the spot is not held by the tail."""
+    follower = PathFollower()
+    follower.update(pan(-53), 0.0, FOLLOW, kind=PARK, spot=True)
+    tail = {"left_m": 0.2, "end_in_s": 0.4}
+    assert follower.update(pan(0), 3.0, FOLLOW, kind=AHEAD, **tail) == pan(-53)  # the tail
+    assert follower.update(pan(0), 3.3, FOLLOW, kind=AHEAD, spot=True, **tail) == pan(-53)
+    assert follower.update(pan(0), 3.6, FOLLOW, kind=AHEAD, spot=True, **tail) == pan(0)
+    for t in (6.0, 6.3, 6.6):  # ...but no look aside in the tail (drive 0372: +44 0.5 s before
+        # the end, as the parker swung the nose past the spot)
+        assert follower.update(pan(44), t, FOLLOW, kind=PARK, spot=True, **tail) == pan(0)
+    follower.reset()
+    follower.update(pan(-53), 0.0, FOLLOW, kind=BEND)
+    for t in (3.0, 3.3, 3.6, 5.0):  # the plan point in the tail: held, as before
+        assert follower.update(pan(0), t, FOLLOW, kind=AHEAD, **tail) == pan(-53)
+
+
+def test_the_ahead_and_parking_defaults_are_the_knobs_and_the_follow_preset() -> None:
+    knobs = json.loads((REPO / "config/knobs.json").read_text())["gaze"]
+    assert (FOLLOW.bend_deg, FOLLOW.bend_lead_s, FOLLOW.park_ahead_m, FOLLOW.park_beyond_m) == (
+        30.0,
+        0.0,
+        1.0,
+        0.5,
+    )
+    for name, value in (
+        ("path_bend_deg", FOLLOW.bend_deg),
+        ("path_bend_lead_s", FOLLOW.bend_lead_s),
+        ("path_park_ahead_m", FOLLOW.park_ahead_m),
+        ("path_park_beyond_m", FOLLOW.park_beyond_m),
+    ):
+        assert knobs[name]["default"] == value
+    baseline = law_of("baseline")
+    assert (baseline.bend_deg, baseline.park_ahead_m) == (0.0, 0.0)
+    assert law_of("follow") == FOLLOW
+    assert (PRESETS["baseline"]["reverse_park_min_m"], PRESETS["follow"]["reverse_park_min_m"]) == (
+        0.0,
+        knobs["reverse_park_min_m"]["default"],
+    )

@@ -236,6 +236,7 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
         "/follow_path/_action/status",
         "/backup/_action/status",
         "/drive_on_heading/_action/status",
+        "/controller_selector",
     } <= set(node.subs)
     # on by default since 2026-10-06 (24 drives with them live)
     assert node._switches.on("stall_look") and node._switches.on("path_gaze")
@@ -689,7 +690,14 @@ TAPE_0365 = Tape.load("0365")
 LIVE_0330: dict[str, Any] = {"frame_every": 4, "head_deg_s": 210.0}
 # Path gaze without its economy (no saccade standing or just stopped, the re-centre): the follower
 # of 2026-10-06, which the tapes' reverse-timing and tail tests below were written against.
-NO_ECONOMY = {"path_still_m_s": 0.0, "path_stall_guard_s": 0.0, "path_recentre_s": 0.0}
+# The head of 2026-10-06 night: no ahead magnet, no parking look (the knobs' baseline values).
+NO_AHEAD = {"path_bend_deg": 0.0, "path_park_ahead_m": 0.0, "reverse_park_min_m": 0.0}
+NO_ECONOMY = {
+    "path_still_m_s": 0.0,
+    "path_stall_guard_s": 0.0,
+    "path_recentre_s": 0.0,
+    **NO_AHEAD,
+}
 FOLLOW_0330 = [
     (0.0, "nav.path", -60.0),  # the tape's first plan (live: -14/66 from the one before it)
     (0.4, "nav.stall", -3.8),
@@ -908,7 +916,7 @@ def test_the_economy_off_is_the_follower_before_it_on_drive_0365(node: Gaze) -> 
 def test_drive_0330_no_path_saccade_while_the_cart_stands(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
+    writes = replay_tape(node, TAPE_0330, knobs=NO_AHEAD, **LIVE_0330)
     assert short(writes) == ECONOMY_0330  # 13 writes, 17 without the economy
     looks = node._looks.looks
     assert stall_frames(node) == [(0.4, 3, "done"), (3.6, 3, "done")]
@@ -930,7 +938,7 @@ def test_drives_0358_and_0365_keep_the_head_home_until_the_first_command(
     the drive without the economy, the stall look's frames too."""
     for tape, before in ((TAPE_0358, FOLLOW_0358), (TAPE_0365, FOLLOW_0365)):
         node = build(monkeypatch)
-        writes = short(replay_tape(node, tape, **LIVE_0330))
+        writes = short(replay_tape(node, tape, knobs=NO_AHEAD, **LIVE_0330))
         assert writes == before[1:], tape.end_s
         assert writes[0][1] == "nav.reverse"
         frames = stall_frames(node)
@@ -939,3 +947,138 @@ def test_drives_0358_and_0365_keep_the_head_home_until_the_first_command(
         replay_tape(off, tape, knobs=NO_ECONOMY, **LIVE_0330)
         assert frames == stall_frames(off) and frames
         off.close()
+
+
+# ---- straight ahead by default, the parking spot (path_bend_deg, path_park_ahead_m) -------------
+TAPE_0376 = Tape.load("0376")
+TAPE_0379 = Tape.load("0379")
+# Drive 0376 (the printer) without them: the -12.9 look in the approach, the -60/58 look after
+# the parker's plan grew back past the tail's 0.35 m, held to the end as the cart pivoted 56 deg
+# under it to face the printer (live: -22.0 at +19.02, -52.6/57.7 at +21.37).
+FOLLOW_0376 = [
+    (0.35, "nav.reverse", -150.0),
+    (3.15, "nav.path", 60.0),
+    (4.35, "nav.reverse", -150.0),
+    (5.45, "nav.path", 60.0),
+    (6.45, "nav.reverse", -150.0),
+    (7.45, "nav.path", 60.0),
+    (11.45, "nav.path", 24.2),
+    (18.85, "nav.path", -12.9),
+    (21.25, "nav.path", -60.0),
+    (25.6, "nav.return", 0.0),
+]
+AHEAD_0376 = [
+    *FOLLOW_0376[:7],  # the departure's reverses and pivots: the same looks
+    (13.45, "nav.path", 0.0),  # the left arc passed: straight ahead
+    (18.25, "nav.path", -41.0),  # the parker from +17.27: the spot past the plan's end
+    (23.85, "nav.path", 0.0),  # the cart faces it: straight ahead, the tail notwithstanding
+    (25.6, "nav.return", 0.0),
+]
+# Drive 0379 (bookshelf -> home) without them: -10.8 held from the arc to the end, and the parker's
+# 0.16 m reverse stub turned the head 150 deg back 0.6 s before the end (live 0.41 s).
+FOLLOW_0379 = [
+    (0.35, "nav.reverse", -150.0),
+    (2.5, "nav.stall", -99.5),
+    (3.5, "nav.path", 60.0),
+    (10.75, "nav.path", 25.2),
+    (13.15, "nav.path", -10.8),
+    (24.3, "nav.reverse", -150.0),
+    (25.7, "nav.return", 0.0),
+]
+AHEAD_0379 = [
+    *FOLLOW_0379[:4],
+    (12.75, "nav.path", 0.0),  # straight ahead through the right arc (its aim -14..-20 deg)
+    (24.9, "nav.return", 0.0),  # no look back at the parker's stub
+]
+
+
+def ahead_share(writes: list[tuple[float, str, float]], end_s: float) -> float:
+    """The share of the time from the first of these writes to the drive's end with the head's
+    target straight ahead (|pan| <= 10 deg)."""
+    held = [(t, pan) for t, _source, pan in writes if t <= end_s]
+    ends = [*held[1:], (end_s, 0.0)]
+    spans = [(t, nxt, pan) for (t, pan), (nxt, _) in zip(held, ends, strict=True)]
+    total = sum(b - a for a, b, _ in spans)
+    return sum(b - a for a, b, pan in spans if abs(pan) <= 10.0) / total
+
+
+@pytest.mark.slow
+def test_drive_0376_parks_looking_at_the_printer_not_where_the_last_bend_left_the_head(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = short(replay_tape(node, TAPE_0376, **LIVE_0330))
+    assert writes == AHEAD_0376
+    info = node.logger.texts("info")
+    assert "gaze: parking (the controller FollowPathMPPI): the head looks at the spot" in info
+    before = build(monkeypatch)
+    assert short(replay_tape(before, TAPE_0376, knobs=NO_AHEAD, **LIVE_0330)) == FOLLOW_0376
+    assert reverse_looks(before) == reverse_looks(node)  # the departure's looks back unchanged
+    before.close()
+    final = [w for w in writes if w[1] == "nav.path"][-1]
+    assert final == (23.85, "nav.path", 0.0) and TAPE_0376.end_s - final[0] > 1.5
+
+
+@pytest.mark.slow
+def test_drive_0379_comes_back_ahead_after_the_arc_and_does_not_look_back_on_arrival(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = short(replay_tape(node, TAPE_0379, **LIVE_0330))
+    assert writes == AHEAD_0379
+    before = build(monkeypatch)
+    assert short(replay_tape(before, TAPE_0379, knobs=NO_AHEAD, **LIVE_0330)) == FOLLOW_0379
+    assert stall_frames(before) == stall_frames(node) == [(2.5, 3, "done")]
+    assert reverse_looks(before)[0] == reverse_looks(node)[0] == (0.35, 2.5)  # the departure
+    before.close()
+    after_stall = [w for w in writes if w[0] > 3.0]
+    assert ahead_share(after_stall, TAPE_0379.end_s) > 0.5  # 0 before: +60, +25, -10.8
+    assert ahead_share([w for w in FOLLOW_0379 if w[0] > 3.0], TAPE_0379.end_s) == 0.0
+
+
+@pytest.mark.slow
+def test_the_stall_and_reverse_looks_are_untouched_on_drives_0330_0358_0365(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Straight ahead and the parking change only path looks: every stall look writes the same
+    frames, every reverse look is asked at the same moment (0365's last one, from the plan's
+    0.51 m reverse leg while parking, too)."""
+    for tape in (TAPE_0330, TAPE_0358, TAPE_0365):
+        new, old = build(monkeypatch), build(monkeypatch)
+        replay_tape(new, tape, **LIVE_0330)
+        replay_tape(old, tape, knobs=NO_AHEAD, **LIVE_0330)
+        assert stall_frames(new) == stall_frames(old), tape.end_s
+        assert [t for t, _ in reverse_looks(new)] == [t for t, _ in reverse_looks(old)]
+        new.close()
+        old.close()
+
+
+def test_the_selector_and_the_parker_are_the_goal_servers() -> None:
+    """The parking starts on the goal server's hand-over: its latched pick's topic and the
+    parker's controller id, by name."""
+    source = (
+        Path(__file__).resolve().parents[2] / "ros/pepin_bringup/pepin_bringup/goal_server.py"
+    ).read_text()
+    assert 'create_publisher(String, "controller_selector", latched)' in source
+    assert gaze_node.SELECTOR_TOPIC == "/controller_selector"
+    assert gaze_node.PARKERS == ("FollowPathMPPI",)
+    assert 'PARKERS = {"shim_mppi": ("FollowPathMPPI", "general_goal_checker")}' in source
+
+
+def test_a_hand_over_mid_drive_starts_the_parking_and_a_drive_on_the_parker_does_not(
+    node: Gaze,
+) -> None:
+    node._on_controller(gaze_node.String(data="FollowPathShim"))
+    node._on_nav_status("navigate_to_pose", goals(1))
+    assert not node._parking
+    node._on_controller(gaze_node.String(data="FollowPathMPPI"))
+    assert node._parking
+    node._on_nav_status("navigate_to_pose", goals())
+    node._on_nav_status("navigate_to_pose", goals(2))  # the next goal starts on the parker
+    assert not node._parking
+    node._on_controller(gaze_node.String(data="FollowPathMPPI"))
+    assert not node._parking  # MPPI for the whole drive is no hand-over
+    node._switches.set("path_park_ahead_m", 0.0)
+    node._on_controller(gaze_node.String(data="FollowPathShim"))
+    node._on_nav_status("navigate_to_pose", goals())
+    node._on_nav_status("navigate_to_pose", goals(3))
+    node._on_controller(gaze_node.String(data="FollowPathMPPI"))
+    assert not node._parking  # the knob at 0: no parking phase
