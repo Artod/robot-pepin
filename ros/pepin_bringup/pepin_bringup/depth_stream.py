@@ -113,7 +113,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
 from std_msgs.msg import Header
 
-from pepin.camera import CameraConfig, mount_transform, optics
+from pepin.camera import CameraConfig, camera_rate, mount_transform, optics
 from pepin.contact import fan_min_z
 from pepin.depth import (
     MIN_SAMPLES,
@@ -668,6 +668,7 @@ class DepthStream(Node):
         )
         self._gaze = GazeFeed(
             self,
+            period_s=camera_rate(config).period_s,  # the 0 knobs follow config/camera.json's rate
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),

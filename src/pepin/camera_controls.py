@@ -288,10 +288,27 @@ def show(device: str, run: Run = _run) -> list[str]:
     return lines
 
 
+def desired_fps(config: Path, rig: str | None = None) -> int:
+    """The rate ustreamer asks the camera for: the active rig's ``rate.fps`` in camera.json
+    (``PEPIN_CAMERA`` or ``rig`` over the file's ``active``, as :meth:`Exposure.from_camera_json`;
+    :class:`pepin.camera.CameraRate` reads the same block on the laptop), refused unless a
+    positive whole number (``--desired-fps`` is one)."""
+    data = json.loads(config.read_text())
+    name = rig or os.environ.get("PEPIN_CAMERA") or str(data.get("active", ""))
+    block = data.get(name)
+    if not isinstance(block, Mapping) or not isinstance(block.get("rate"), Mapping):
+        raise ValueError(f"camera.json has no rig {name!r} with a rate block")
+    fps = float(block["rate"]["fps"])
+    if fps <= 0 or fps != int(fps):
+        raise ValueError(f"camera.json: rate.fps {fps:g} is not a positive whole number")
+    return int(fps)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
-    """``show`` or ``apply`` (the config's mode, or ``--mode`` and its numbers to try one live)."""
+    """``show``, ``apply`` (the config's mode, or ``--mode`` and its numbers to try one live) or
+    ``rate`` (the config's frame rate, the board's camera service's --desired-fps)."""
     parser = argparse.ArgumentParser(prog="python -m pepin.camera_controls", description=__doc__)
-    parser.add_argument("verb", choices=("show", "apply"))
+    parser.add_argument("verb", choices=("show", "apply", "rate"))
     parser.add_argument("--device", default=os.environ.get("PEPIN_CAMERA_DEVICE", ""))
     parser.add_argument("--config", type=Path, default=CONFIG)
     parser.add_argument("--rig", default=None, help="the rig block (default: the file's active)")
@@ -300,6 +317,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--gain", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true", help="say what would be set")
     args = parser.parse_args(argv)
+    if args.verb == "rate":
+        try:
+            print(desired_fps(args.config, args.rig))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"camera rate: {exc}", file=sys.stderr)
+            return 1
+        return 0
     if not args.device:
         print("no --device and no PEPIN_CAMERA_DEVICE", file=sys.stderr)
         return 2

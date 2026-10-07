@@ -62,7 +62,12 @@ def test_the_nominal_extrinsics_are_a_proper_rotation_from_the_axis_photo() -> N
         TOOL.nominal_t_cam_imu("x,y,w", (0, 0, 0))
 
 
-def _config_with_imu(tmp_path: Path, t_cam_imu: np.ndarray | None) -> Path:
+# The rule's lag at 10 fps (0.885 x 100 ms + 3.5 ms): a block measured against stamps dated by it
+# needs no shift while camera_stream follows the rate.
+LAG_10_FPS = 0.092
+
+
+def _config_with_imu(tmp_path: Path, t_cam_imu: np.ndarray | None, fps: float = 10) -> Path:
     tmp_path.mkdir(parents=True, exist_ok=True)
     for name in ("stereo_calibration.json", "head_imu.json"):
         (tmp_path / name).write_text((REPO / "config" / name).read_text())
@@ -71,9 +76,12 @@ def _config_with_imu(tmp_path: Path, t_cam_imu: np.ndarray | None) -> Path:
         data["stereo"]["head_imu"] = {
             "T_cam_imu": t_cam_imu.tolist(),
             "time_offset_s": 0.0042,
+            "stamp_lag_s": LAG_10_FPS,
+            "camera_fps": 10,
         }
     else:
         data["stereo"].pop("head_imu", None)  # the shipped config may carry one
+    data["stereo"]["rate"]["fps"] = fps
     (tmp_path / "camera.json").write_text(json.dumps(data))
     return tmp_path
 
@@ -182,26 +190,49 @@ def test_the_nominal_block_is_one_camera_json_accepts(tmp_path: Path) -> None:
     assert np.allclose(rig.t_cam_imu, TOOL.nominal_t_cam_imu("x,-z,y", (0.0, 0.03, 0.04)))
 
 
-def test_a_live_stamp_lag_moves_the_time_shift_by_its_distance_from_the_knob_default(
+def test_the_time_shift_follows_the_stamps_camera_stream_dates_at_the_rate_configured(
     tmp_path: Path,
 ) -> None:
-    """time_offset_s is measured against camera_stream's stamps at camera_stamp_lag_s's default;
-    a live lag dates every frame earlier by the difference, and the time shift follows it."""
+    """time_offset_s is measured against stamps dated head_imu.stamp_lag_s at camera_fps; the
+    shift written moves by how far today's stamps sit from those, where the grab's own lag is
+    the rate's rule (one frame period, 2026-10-07): following the rate (no lag, or 0) at any rate
+    leaves it, a fixed live lag moves it by its distance, and a fixed lag gone stale at a new
+    rate moves it by the rule's difference too."""
     config = _config_with_imu(tmp_path / "config", _asymmetric())
-    knobs = json.loads((REPO / "config/knobs.json").read_text())
-    knobs["camera_stream"]["camera_stamp_lag_s"]["default"] = 0.02
-    (config / "knobs.json").write_text(json.dumps(knobs))
-    assert TOOL.stamp_lag_default(config) == pytest.approx(0.02)
     out = tmp_path / "vio"
-    assert TOOL.main(["--config", str(config), "--out", str(out)]) == 0
     chain = out / "kalibr_imucam_chain.yaml"
-    assert _read(chain, "cam0", "timeshift_cam_imu") == pytest.approx(0.0042), "the default"
-    args = ["--config", str(config), "--out", str(out), "--camera-stamp-lag", "0.093"]
-    assert TOOL.main(args) == 0
-    assert _read(chain, "cam0", "timeshift_cam_imu") == pytest.approx(0.0042 + 0.073)
-    assert _read(chain, "cam1", "timeshift_cam_imu") == pytest.approx(0.0042 + 0.073)
-    assert "camera_stamp_lag_s 0.0930" in chain.read_text()
-    assert TOOL.stamp_lag_default(tmp_path) == 0.0, "no knobs.json: no lag"
+
+    def shift(*extra: str) -> float:
+        assert TOOL.main(["--config", str(config), "--out", str(out), *extra]) == 0
+        cam0 = float(_read(chain, "cam0", "timeshift_cam_imu"))
+        assert _read(chain, "cam1", "timeshift_cam_imu") == pytest.approx(cam0)
+        return cam0
+
+    assert shift() == pytest.approx(0.0042), "following, at the calibration's rate"
+    assert shift("--camera-stamp-lag", "0") == pytest.approx(0.0042), "0 is the follow mode"
+    assert shift("--camera-stamp-lag", "0.093") == pytest.approx(0.0042 + 0.001)
+    assert "time shift moved +1.0 ms" in chain.read_text()
+    config = _config_with_imu(tmp_path / "config", _asymmetric(), fps=20)
+    assert shift() == pytest.approx(0.0042), "following at 20 fps: the stamps are right again"
+    assert _read(out / "estimator_config.yaml", "track_frequency") == 30.0
+    stale = (0.09 - LAG_10_FPS) - 0.885 * (0.05 - 0.1)
+    assert shift("--camera-stamp-lag", "0.09") == pytest.approx(0.0042 + stale)
+    assert stale == pytest.approx(0.04225), "the 42 ms OpenVINS's online offset moved by live"
+
+
+def test_a_head_imu_block_without_its_reference_stamps_is_refused(tmp_path: Path) -> None:
+    config = _config_with_imu(tmp_path / "config", _asymmetric())
+    data = json.loads((config / "camera.json").read_text())
+    del data["stereo"]["head_imu"]["camera_fps"]
+    (config / "camera.json").write_text(json.dumps(data))
+    with pytest.raises(SystemExit, match="stamp_lag_s / camera_fps"):
+        TOOL.main(["--config", str(config), "--out", str(tmp_path / "vio")])
+
+
+def test_the_shipped_head_imu_names_its_reference_stamps() -> None:
+    """The 2026-10-04 Kalibr runs: camera_stamp_lag_s 0.09 at the stereo head's 10 fps."""
+    block = json.loads((REPO / "config/camera.json").read_text())["stereo"]["head_imu"]
+    assert (block["stamp_lag_s"], block["camera_fps"]) == (0.09, 10)
 
 
 def test_the_zupt_holds_rest_and_the_dynamic_init_is_a_switch(tmp_path: Path) -> None:

@@ -111,6 +111,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import PointCloud2
 from std_srvs.srv import Trigger
 
+from pepin.camera import camera_rate
 from pepin.depth import rotation_matrix
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE, SWAYING
@@ -396,6 +397,7 @@ class VisualOdometry(Node):
         sway_dps, sway_deg = self._sway_knobs()
         self._gaze = GazeFeed(
             self,
+            period_s=camera_rate().period_s,  # the 0 knobs follow config/camera.json's rate
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),

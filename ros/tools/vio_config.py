@@ -40,11 +40,19 @@ not wait for a jerk either: it starts from ~1 s of stillness. ``--no-zupt`` writ
 design's (ZUPT off, the init waits for a jerk). ``--dyn-init`` lets OpenVINS initialise IN MOTION
 too (a restart while the head turns or the cart drives); still windows keep the static one.
 
-THE TIME SHIFT is head_imu's ``time_offset_s``, which is measured against the stamps camera_stream
-publishes with its ``camera_stamp_lag_s`` knob at the default of config/knobs.json. When the knob
-runs live at another value the stamps moved by the difference, and so does the shift:
-``--camera-stamp-lag S`` (ros/laptop.sh vio passes the live value it reads from camera_stream)
-writes ``time_offset_s + S - default``.
+THE CAMERA'S RATE is config/camera.json's active rig's ``rate.fps``, the one number the board's
+stream, camera_stream's stamps and the frame gates follow too: ``track_frequency`` is
+:data:`TRACK_PER_FPS` times it (OpenVINS skips a frame that arrives sooner than 1 /
+track_frequency after the last one it took, so a margin over the rate passes every frame and the
+grab stamps' 1-2 ms jitter).
+
+THE TIME SHIFT is head_imu's ``time_offset_s``, measured against camera_stream's stamps dated
+``head_imu.stamp_lag_s`` before the grab while the camera ran ``head_imu.camera_fps``. The stamps
+now are dated ``L`` before the grab (``--camera-stamp-lag``: ros/laptop.sh vio passes the
+live knob of camera_stream; 0 or none is its follow mode, the rate's rule ``lag(period)``), and
+the grab itself sits ``lag(period)`` after the picture at the rate now, so the shift written is
+``time_offset_s + (L - stamp_lag_s) - (lag(period now) - lag(period then))``: a rate change with
+the knob following moves it only by what the rule says the calibration's fixed lag was off by.
 """
 
 from __future__ import annotations
@@ -72,9 +80,10 @@ DEFAULT_OUT = Path("/maps/vio") if IN_CONTAINER else REPO / "ros/maps/vio"
 LEFT_TOPIC = "/camera/image"
 RIGHT_TOPIC = "/camera/right/image"
 IMU_TOPIC = "/head/imu"
-# The camera's own rate is 9.5-11.6 Hz (ustreamer desired-fps 10): OpenVINS skips a frame that
-# arrives sooner than 1 / track_frequency after the last, so 10 would drop the faster ones.
-TRACK_FREQUENCY_HZ = 15.0
+# OpenVINS skips a frame that arrives sooner than 1 / track_frequency after the last it took:
+# at 10 fps the camera's 9.5-11.6 Hz passed whole under 15, and 15 under a 30 fps camera took one
+# frame in three (2026-10-07). track_frequency is this many times config/camera.json's rate.
+TRACK_PER_FPS = 1.5
 # OpenVINS's zero-velocity update (UpdaterZeroVelocity::try_update), tried at every frame: it is
 # ACCEPTED when the IMU reads rest (the camera interval's gyro and accel residuals under the
 # current biases pass chi2 at 95 % times zupt_chi2_multipler, with the densities times
@@ -171,30 +180,55 @@ def nominal_block(axes: str, offset_m: Sequence[float]) -> dict[str, object]:
     }
 
 
-def stamp_lag_default(config_dir: Path = CONFIG) -> float:
-    """camera_stream's ``camera_stamp_lag_s`` default (config/knobs.json); 0 without the knob."""
-    path = config_dir / "knobs.json"
-    if not path.is_file():
-        return 0.0
-    knobs = json.loads(path.read_text())
-    knob = knobs.get("camera_stream", {}).get("camera_stamp_lag_s")
-    return float(knob["default"]) if knob else 0.0
+def track_frequency_hz(fps: float) -> float:
+    """OpenVINS's track_frequency for a camera running ``fps``."""
+    return TRACK_PER_FPS * fps
 
 
-def with_stamp_lag(rig: Rig, lag_s: float | None, config_dir: Path = CONFIG) -> Rig:
-    """The rig with its time shift moved by the live stamp lag's distance from the knob's
-    default (the stamps ``time_offset_s`` was measured against); ``None`` is the default."""
-    if lag_s is None:
+def with_stamp_lag(
+    rig: Rig, lag_s: float | None, config_dir: Path = CONFIG, camera: str | None = None
+) -> Rig:
+    """The rig with its time shift moved from the stamps ``time_offset_s`` was measured against
+    (head_imu's ``stamp_lag_s`` at ``camera_fps``) to the stamps camera_stream publishes now:
+    dated ``lag_s`` before the grab, or by the rate's rule when ``lag_s`` is 0 or ``None`` (the
+    knob's follow mode), at config/camera.json's rate. A rig without a measured head_imu block is
+    left as it is; a block without its reference stamps is refused."""
+    sys.path.insert(0, str(SRC))
+    from pepin.camera import active_camera, camera_rate
+
+    data = json.loads((config_dir / "camera.json").read_text())
+    block = data[active_camera(data, camera)].get("head_imu")
+    if not block:
         return rig
-    shift = lag_s - stamp_lag_default(config_dir)
-    if shift == 0.0:
+    if "stamp_lag_s" not in block or "camera_fps" not in block:
+        raise SystemExit(
+            "config/camera.json's head_imu has no stamp_lag_s / camera_fps: the stamps its"
+            " time_offset_s was measured against are unknown (ros/tools/head_calib.py writes them)"
+        )
+    rate = camera_rate(config_dir / "camera.json", camera)
+    following = lag_s is None or lag_s <= 0.0
+    now = rate.grab_lag_s() if following else float(lag_s)  # type: ignore[arg-type]
+    then = float(block["stamp_lag_s"])
+    truth = rate.grab_lag_s() - rate.grab_lag_s(1.0 / float(block["camera_fps"]))
+    shift = (now - then) - truth
+    if abs(shift) < 1e-9:
         return rig
+    how = "following the rate" if following else "the live camera_stamp_lag_s"
     return replace(
         rig,
         time_offset_s=rig.time_offset_s + shift,
-        imu_source=f"{rig.imu_source}; time shift moved {shift * 1e3:+.1f} ms by the live"
-        f" camera_stamp_lag_s {lag_s:.4f} s",
+        imu_source=f"{rig.imu_source}; time shift moved {shift * 1e3:+.1f} ms: stamps dated"
+        f" {now * 1e3:.1f} ms before the grab ({how}) at {rate.fps:g} fps against"
+        f" {then * 1e3:.1f} ms at {float(block['camera_fps']):g} fps when measured",
     )
+
+
+def camera_fps(config_dir: Path = CONFIG, camera: str | None = None) -> float:
+    """config/camera.json's rate for the rig (the active one by default)."""
+    sys.path.insert(0, str(SRC))
+    from pepin.camera import camera_rate
+
+    return camera_rate(config_dir / "camera.json", camera).fps
 
 
 def invert(transform: Array) -> Array:
@@ -347,7 +381,9 @@ def zupt_block(zupt: bool) -> str:
     )
 
 
-def estimator_config(calib_extrinsics: bool, zupt: bool = True, dyn_init: bool = False) -> str:
+def estimator_config(
+    calib_extrinsics: bool, zupt: bool = True, dyn_init: bool = False, fps: float = 10.0
+) -> str:
     """OpenVINS's estimator_config.yaml for this rig (vio.md section 4): stereo, the time offset
     estimated online, extrinsics fixed, OpenVINS's own ZUPT (:data:`ZUPT`, off with ``zupt``
     false), the static init at a ground robot's threshold (and the dynamic one in motion with
@@ -422,7 +458,7 @@ grid_x: 5
 grid_y: 5
 min_px_dist: 10
 knn_ratio: 0.70
-track_frequency: {TRACK_FREQUENCY_HZ:.1f} # the camera's 9.5-11.6 Hz pass whole
+track_frequency: {track_frequency_hz(fps):.1f} # {TRACK_PER_FPS:g} x the camera's {fps:g} fps
 downsample_cameras: false # true = 400x300 if the CPU bites
 num_opencv_threads: 2
 histogram_method: "HISTOGRAM"
@@ -538,7 +574,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(nominal_block(*nominal), indent=2))
         return 0
     rig = load_rig(args.config, args.camera, nominal, need_imu=not args.kalibr_only)
-    rig = with_stamp_lag(rig, args.camera_stamp_lag, args.config)
+    rig = with_stamp_lag(rig, args.camera_stamp_lag, args.config, args.camera)
+    fps = camera_fps(args.config, args.camera)
     sys.path.insert(0, str(SRC))
     from pepin.head_imu import HeadImuConfig
 
@@ -555,14 +592,15 @@ def main(argv: list[str] | None = None) -> int:
                 "kalibr_imucam_chain.yaml": imucam_chain(rig),
                 "kalibr_imu_chain.yaml": imu_chain(head.noise, head.rate_hz),
                 "estimator_config.yaml": estimator_config(
-                    args.calib_extrinsics, zupt=not args.no_zupt, dyn_init=args.dyn_init
+                    args.calib_extrinsics, zupt=not args.no_zupt, dyn_init=args.dyn_init, fps=fps
                 ),
             }
         )
     write_all(args.out, files)
     if not args.kalibr_only:
         print(
-            f"OpenVINS: ZUPT {'off' if args.no_zupt else 'on'}, init"
+            f"OpenVINS: {fps:g} fps (track_frequency {track_frequency_hz(fps):g}),"
+            f" ZUPT {'off' if args.no_zupt else 'on'}, init"
             f" {'static + dynamic' if args.dyn_init else 'static'}"
         )
     print(f"IMU extrinsics: {rig.imu_source}; time shift {rig.time_offset_s * 1e3:+.1f} ms")

@@ -188,11 +188,24 @@ def summary(bag: Path) -> dict[str, Stream]:
 
 
 # ---- the recording's facts ------------------------------------------------------------------
+def camera_rate(config_dir: Path = CONFIG) -> Any:
+    """config/camera.json's active rig's :class:`pepin.camera.CameraRate`."""
+    sys.path.insert(0, str(REPO / "src"))
+    from pepin.camera import camera_rate as rate
+
+    return rate(config_dir / "camera.json")
+
+
 def stamp_lag_default(config_dir: Path = CONFIG) -> float:
-    """camera_stream's ``camera_stamp_lag_s`` default (config/knobs.json); 0 without it."""
+    """How far camera_stream dates a grab stamp back with its ``camera_stamp_lag_s`` knob at
+    the default (config/knobs.json): the knob's value, or at 0 (follow) the rate's rule at
+    config/camera.json's rate; 0 without the knob."""
     knobs = json.loads((config_dir / "knobs.json").read_text())
     knob = knobs.get("camera_stream", {}).get("camera_stamp_lag_s")
-    return float(knob["default"]) if knob else 0.0
+    if not knob:
+        return 0.0
+    value = float(knob["default"])
+    return value if value > 0.0 else float(camera_rate(config_dir).grab_lag_s())
 
 
 def git_state() -> str:
@@ -255,6 +268,10 @@ def read_result(bag: Path) -> KalibrResult:
     meta_path = bag / META
     meta = json.loads(meta_path.read_text()) if meta_path.is_file() else {}
     lag = meta.get("camera_stamp_lag_s")
+    if lag is not None and float(lag) <= 0.0:  # the knob followed the rate: the rule's lag
+        rate = camera_rate()
+        fps = float(meta.get("camera_fps") or rate.fps)
+        lag = rate.grab_lag_s(1.0 / fps)
     return KalibrResult(
         name=bag.name,
         t_cam_imu=np.asarray(cam0["T_cam_imu"], dtype=float),
@@ -340,10 +357,15 @@ def failures(results: Sequence[KalibrResult], default_lag_s: float) -> list[str]
 
 
 def head_imu_block(
-    results: Sequence[KalibrResult], default_lag_s: float, image: str = KALIBR_IMAGE
+    results: Sequence[KalibrResult],
+    default_lag_s: float,
+    camera_fps: float,
+    image: str = KALIBR_IMAGE,
 ) -> dict[str, Any]:
     """config/camera.json's ``stereo.head_imu`` from the runs: their mean T_cam_imu as Kalibr
-    gives it, their mean time offset at the knob's default lag, the date, how, and the numbers."""
+    gives it, their mean time offset at the knob's default lag, the stamps that offset is
+    against (``stamp_lag_s`` at ``camera_fps``, what ros/tools/vio_config.py moves it from), the
+    date, how, and the numbers."""
     t = mean_transform([r.t_cam_imu for r in results])
     offset = float(np.mean([r.time_offset_s(default_lag_s) for r in results]))
     runs = ", ".join(r.name for r in results)
@@ -362,6 +384,8 @@ def head_imu_block(
     return {
         "T_cam_imu": [[round(float(v), 7) for v in row] for row in t],
         "time_offset_s": round(offset, 5),
+        "stamp_lag_s": round(default_lag_s, 5),
+        "camera_fps": camera_fps,
         "date": max(r.recorded for r in results),
         "method": (
             f"kalibr_calibrate_imu_camera ({image}), procedure D (ros/calib_record.sh: the"
@@ -457,6 +481,7 @@ def _cmd_meta(args: argparse.Namespace) -> int:
         "camera_stamp": args.camera_stamp,
         "camera_stamp_lag_s": args.stamp_lag,
         "camera_stamp_lag_default_s": stamp_lag_default(),
+        "camera_fps": camera_rate().fps,
         "exposure": exposure.strip().splitlines(),
         "exposure_capped": capped,
         "exposure_verdict": why,
@@ -493,7 +518,7 @@ def _cmd_apply(args: argparse.Namespace) -> int:
     if failed and not args.force:
         print("refused (--force writes it anyway): " + "; ".join(failed))
         return 1
-    block = head_imu_block(results, default)
+    block = head_imu_block(results, default, camera_rate(args.config).fps)
     write_head_imu(args.config / "camera.json", block)
     print(json.dumps(block, indent=2))
     print(f"wrote {args.config / 'camera.json'} stereo.head_imu")

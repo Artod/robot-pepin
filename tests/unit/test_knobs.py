@@ -23,7 +23,7 @@ from pepin.gaze import GazeSettings
 from pepin.gaze_gate import (
     DARK_DEFAULTS,
     DARK_KNOBS,
-    EXPOSURE_S,
+    FOLLOW,
     GATE_DEFAULTS,
     GATE_KNOBS,
     STAMP_END,
@@ -102,13 +102,13 @@ NAMED = {
     ("vio_keeper", "vio_disagree_m_s"): DISAGREE_M_S,
     ("vio_keeper", "vio_disagree_s"): DISAGREE_S,
     # the VIO's feed: the gate's window as every gated node shapes it
-    ("vio_feed", "gate_exposure_s"): EXPOSURE_S,
+    ("vio_feed", "gate_exposure_s"): FOLLOW,
     ("vio_feed", "gate_stamp_end"): STAMP_END,
     # the gaze arbiter: its library's defaults, and the marks' band its columns are read in
     ("gaze", "frames"): GazeSettings().frames,
     ("gaze", "settle_tol_deg"): GazeSettings().settle_tol_deg,
     ("gaze", "move_timeout_s"): GazeSettings().move_timeout_s,
-    ("gaze", "frame_period_s"): GazeSettings().frame_period_s,
+    ("gaze", "frame_period_s"): FOLLOW,  # 0: BLIND_TAIL_PER_PERIOD periods of the rate
     ("gaze", "ttl_navigation_s"): GazeSettings().ttl_for(1),
     ("gaze", "ttl_person_s"): GazeSettings().ttl_for(2),
     ("gaze", "ttl_driving_s"): GazeSettings().ttl_for(4),

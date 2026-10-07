@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-from pepin.mjpeg import capture_time, parts
+from pepin.mjpeg import GrabPeriod, capture_time, parts
 
 
 def stream(frames: list[tuple[float, bytes]]) -> io.BytesIO:
@@ -102,3 +102,14 @@ def test_a_plain_reader_without_read1_still_works() -> None:
 
     got = list(parts(Plain(stream([(1.0, b"a"), (2.0, b"b")]).getvalue())))  # type: ignore[arg-type]
     assert [body for _, body in got] == [b"a", b"b"]
+
+
+def test_the_grab_period_is_the_median_interval_and_ignores_a_dropped_frame() -> None:
+    period = GrabPeriod(window=5)
+    assert period.add(0.0) is None and period.add(0.05) is None, "one interval is no median"
+    assert period.add(0.10) == pytest.approx(0.05)
+    period.add(0.20)  # a frame dropped: one 100 ms interval
+    assert period.add(0.25) == pytest.approx(0.05)
+    for k in range(6):  # the board switched to 10 fps: the window forgets 20
+        last = period.add(0.35 + 0.1 * k)
+    assert last == pytest.approx(0.1)

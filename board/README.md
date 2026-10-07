@@ -65,7 +65,7 @@ and `systemctl start pepin-base` after.
 | `board/wifi_primary.sh` | run by hand, as root: `dongle\|onboard\|status\|confirm` picks which radio carries the board's DHCP identity, with a timed rollback (see its header) |
 | `board/xvf_host_install.sh` | run once: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
-| `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure, read by pepin-camera at its start) |
+| `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure and frame rate (the active rig's `rate.fps`, the one number the laptop's stamps, OpenVINS and the frame gates follow), read by pepin-camera at its start: a rate change is this file copied and `systemctl restart pepin-camera`; `ros/sync.sh` does not reach `/opt/pepin`) |
 | `config/head.json`, `config/face.json` | `/opt/pepin/config/` (`head.json`: the head's port, its IMU's rate and ranges, the clock map; `face.json`: the mouth's expressions and the robot events, read by pepin-head and by pepin-audio's lip sync) |
 | `ros/` | `/root/pepin-ros/` (`ros/sync.sh`) |
 

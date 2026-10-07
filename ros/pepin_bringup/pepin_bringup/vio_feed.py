@@ -45,8 +45,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import Image, Imu
 
+from pepin.camera import camera_rate, follow_period
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.gaze_gate import SPINNING, FrameGate
+from pepin.gaze_gate import EXPOSURE_PER_PERIOD, SPINNING, FrameGate
 from pepin_bringup.msgs import stamp_seconds
 from pepin_bringup.node_kit import Switches, Tally, spin_main
 from pepin_bringup.stereo_frames import LEFT_IMAGE_TOPIC, RIGHT_IMAGE_TOPIC
@@ -132,8 +133,11 @@ class VioFeed(Node):
             self, with_knobs(FLAGS, load_knobs("vio_feed")), on_change=self._on_switch
         )
         # The gaze gate's rate rule alone: no /gaze/state is fed, so no blind interval exists.
+        self._period_s = camera_rate().period_s  # gate_exposure_s 0 follows the camera's rate
         self._gate = FrameGate(
-            exposure_s=float(self._switches["gate_exposure_s"]),
+            exposure_s=follow_period(
+                float(self._switches["gate_exposure_s"]), EXPOSURE_PER_PERIOD, self._period_s
+            ),
             stamp_end=float(self._switches["gate_stamp_end"]) >= 0.5,
             yaw_dps=float(self._switches["head_rate_dps"]),
         )
@@ -163,7 +167,11 @@ class VioFeed(Node):
     def _on_switch(self, name: str, _old: object, new: object) -> None:
         """A knob changed: the gate takes it for the next pair."""
         if name == "gate_exposure_s":
-            self._gate.exposure_s = float(new)  # type: ignore[arg-type]
+            self._gate.exposure_s = follow_period(
+                float(new),  # type: ignore[arg-type]
+                EXPOSURE_PER_PERIOD,
+                self._period_s,
+            )
         elif name == "gate_stamp_end":
             self._gate.stamp_end = float(new) >= 0.5  # type: ignore[arg-type]
         elif name == "head_rate_dps":

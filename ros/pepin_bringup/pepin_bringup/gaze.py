@@ -104,10 +104,12 @@ from std_msgs.msg import Header, String
 from std_srvs.srv import Trigger
 
 from pepin.base_link import BASE_PORT
+from pepin.camera import camera_rate, follow_period
 from pepin.deployment import config_file
 from pepin.face_events import FaceSink, StallFace
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze import (
+    BLIND_TAIL_PER_PERIOD,
     DRIVE_REFUSAL,
     DRIVING,
     IDLE,
@@ -283,6 +285,8 @@ class Gaze(Node):
     def __init__(self) -> None:
         super().__init__("gaze")
         self._up = False
+        # frame_period_s 0 (the default) follows the camera's rate, read once here
+        self._period_s = camera_rate().period_s
         host = str(self.declare_parameter("host", os.environ.get("PEPIN_HOST", BOARD_HOST)).value)
         port = int(self.declare_parameter("port", BASE_PORT).value)
         self._http_port = int(self.declare_parameter("http_port", GAZE_PORT).value)
@@ -415,7 +419,9 @@ class Gaze(Node):
             frames=int(self._switches["frames"]),
             settle_tol_deg=k("settle_tol_deg"),
             move_timeout_s=k("move_timeout_s"),
-            frame_period_s=k("frame_period_s"),
+            frame_period_s=follow_period(
+                k("frame_period_s"), BLIND_TAIL_PER_PERIOD, self._period_s
+            ),
             ttl_s=(
                 k("ttl_operator_s"),
                 k("ttl_navigation_s"),

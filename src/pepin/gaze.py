@@ -128,6 +128,11 @@ class Refusal:
     transient: bool
 
 
+# The blind tail in frame periods when the gaze node's frame_period_s knob is 0 (its default):
+# 1.05 periods of config/camera.json's rate, the 0.105 s it was at 10 fps (one 9.5 fps frame).
+BLIND_TAIL_PER_PERIOD = 1.05
+
+
 @dataclass(frozen=True)
 class GazeSettings:
     """The arbiter's numbers (config/knobs.json's ``gaze`` block, live); ``ttl_s`` is the

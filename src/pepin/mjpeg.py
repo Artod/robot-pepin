@@ -17,7 +17,10 @@ capture on the realtime clock is ``grab + (X-Timestamp - send)`` (:func:`capture
 
 from __future__ import annotations
 
+import statistics
+from collections import deque
 from collections.abc import Iterator
+from itertools import pairwise
 from typing import IO
 
 CHUNK = 65536
@@ -141,3 +144,22 @@ def _seconds(headers: dict[str, str], name: str) -> float | None:
         return float(headers[name])
     except (KeyError, ValueError):
         return None
+
+
+# How many of the last grab intervals the measured frame period is the median of: three seconds
+# at 10 fps, one at 30; a dropped frame is one long interval the median ignores.
+PERIOD_WINDOW = 31
+
+
+class GrabPeriod:
+    """The camera's frame period as the grab stamps show it: the median of the last
+    :data:`PERIOD_WINDOW` positive intervals (``None`` before two of them)."""
+
+    def __init__(self, window: int = PERIOD_WINDOW) -> None:
+        self._grabs: deque[float] = deque(maxlen=window + 1)
+
+    def add(self, grab: float) -> float | None:
+        """One more grab stamp (seconds); the period after it."""
+        self._grabs.append(grab)
+        intervals = [b - a for a, b in pairwise(self._grabs) if b > a]
+        return statistics.median(intervals) if len(intervals) >= 2 else None
