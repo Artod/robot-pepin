@@ -554,6 +554,71 @@ def test_no_features_at_rest_is_not_lost_and_the_shortage_counts_from_the_first_
     assert lost.check(6.6, 0.0) is None, "features back"
 
 
+def test_the_lost_rule_counts_the_used_features_or_the_tracks_by_its_rule() -> None:
+    """A head swing in good light: the update uses 2 features, the tracker keeps 40 tracks. Under
+    ``used`` (the default) that is lost after a second of motion; under ``tracked`` it is not,
+    until the tracks themselves fall under the threshold; a stale track count says nothing, at
+    rest nothing is lost, and the threshold and the rule are live attributes."""
+    from pepin.visual_odometry import VIO_LOST_RULE, VioLost
+
+    assert VIO_LOST_RULE == "used"
+    for rule, verdict in (("used", True), ("tracked", False)):
+        lost = VioLost(lost_s=1.0, min_features=20, rule=rule)
+        for i in range(12):
+            t = 0.1 * i
+            lost.features(t, 2)
+            lost.tracked(t, 40)
+            lost.check(t, 0.0)
+        assert (lost.check(1.2, 0.0) is not None) is verdict, rule
+        assert lost.feature_count == (2 if rule == "used" else 40)
+    lost = VioLost(lost_s=1.0, min_features=20, rule="tracked")
+    for i in range(12):
+        lost.tracked(0.1 * i, 15)
+        reason = lost.check(0.1 * i, 0.0)
+    assert reason is not None and "15 tracked features (under 20)" in reason
+    assert lost.counts["features"] == 1
+    lost.min_features = 10
+    assert lost.check(1.2, 0.0) is None, "the knob is read at every check"
+    lost.min_features = 20
+    assert lost.check(3.0, 0.0) is None, "1.9 s old: a stale count says nothing"
+    lost.tracked(3.0, 3)
+    lost.zupt(3.0)
+    assert lost.check(4.0, 0.0) is None, "never at rest"
+    lost.rule = "used"
+    assert lost.feature_count is None, "no used count heard"
+
+
+def test_only_a_fed_update_restarts_the_bias_walk_under_the_tracked_rule() -> None:
+    """VioLost.updated says whether a passing sample had a visual update behind it: always under
+    ``used``; under ``tracked`` only with a fresh used count of at least min_features. YawOnly
+    keeps the bias walk's start at the last such sample and still ends the episode."""
+    from pepin.visual_odometry import VioLost, YawOnly
+
+    used = VioLost(min_features=20, rule="used")
+    assert used.updated(0.0), "under used every passing sample vouches"
+    tracked = VioLost(min_features=20, rule="tracked")
+    assert not tracked.updated(0.0), "nothing heard"
+    tracked.features(0.0, 25)
+    assert tracked.updated(0.5) and not tracked.updated(1.5), "fresh, then stale"
+    tracked.features(2.0, 5)
+    assert not tracked.updated(2.0), "an update with 5 features under 20"
+    tracked.min_features = 0
+    assert tracked.updated(2.0), "with the rule off any update that used a feature vouches"
+    tracked.features(2.1, 0)
+    assert not tracked.updated(2.1), "one that used none does not"
+
+    clock = YawOnly(1e-4)
+    clock.visual(100.0)
+    clock.visual(101.0, updated=False)
+    clock.lost(102.0, "3 tracked features (under 20) for 1.0 s while moving")
+    assert clock.active and clock.age(102.5) == pytest.approx(2.5), "from 100.0, not 101.0"
+    clock.visual(103.0, updated=False)
+    assert not clock.active, "the episode ends either way"
+    clock.visual(104.0)
+    clock.lost(104.0, "dark")
+    assert clock.age(105.0) == pytest.approx(1.0)
+
+
 def test_the_guard_wheel_rule_switches_off_and_the_speed_rule_does_not() -> None:
     """vio_guard off: 0.3 m/s against still wheels (a slip the VIO sees through) passes; 1.5 m/s
     is still a divergence; on again, the same 0.3 m/s is refused."""

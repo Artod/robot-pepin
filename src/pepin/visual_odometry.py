@@ -57,6 +57,8 @@ __all__ = [
     "SIGMA_FLOOR_M",
     "VIO_IMU_HALF_SAMPLE_S",
     "VIO_IMU_LAG_S",
+    "VIO_LOST_RULE",
+    "VIO_LOST_RULES",
     "VIO_LOST_S",
     "VIO_LOST_SPEED_M_S",
     "VIO_MAX_SPEED_M_S",
@@ -138,11 +140,22 @@ VIO_STEP_FRACTION = 0.03
 VIO_REINIT_RATIO = 10.0
 # The three LOST rules (vio.md section 4, S9): the composed base speed disagreeing with the
 # wheels by this much for this long while the board does not say rest; moving faster than
-# VIO_REST_SPEED_M_S while /zupt says rest; fewer tracked features than this.
+# VIO_REST_SPEED_M_S while /zupt says rest; fewer features than this while the base moves.
 VIO_LOST_SPEED_M_S = 0.1
 VIO_LOST_S = 1.0
 VIO_MIN_FEATURES = 20
 VIO_REST_SPEED_M_S = 0.03
+# Which features the third rule counts: `used`, the features OpenVINS's last update used (MSCKF +
+# SLAM), or `tracked`, the tracker's persistent tracks (the left eye's features seen in 3+ frames,
+# /ov_msckf/health, the keeper's dark count). The used ones fall to 0-8 whenever the head moves
+# or the scene is plain while the tracks stay 20-45 (drives 0343-0363, moving: 46 % of the frames
+# under 20 used, 7 % under 20 persistent outside a head swing); but a filter with few features
+# in its update coasts on the IMU, and the twists `tracked` adds are the coasting ones: replayed
+# on those drives 3.12 instead of 2.52 full twists per moving second, the added ones' vx sigma
+# multiplier 1.76 [1.42, 2.59] against 0.84 [0.70, 1.02], 19.5 % of them off the lidar truth by
+# more than 0.2 m/s against 1.1 % (scratch/vio_lost_rule/replay.py). So `used` stays the default.
+VIO_LOST_RULES = ("used", "tracked")
+VIO_LOST_RULE = "used"
 # /zupt is published while the board's witnesses agree on rest; heard within this, it holds.
 ZUPT_FRESH_S = 0.5
 # A wheel speed or a feature count older than this says nothing any more.
@@ -621,10 +634,13 @@ class VioLost:
     Three rules, each counted (vio.md section 4): (a) the composed base speed disagrees with the
     wheels by more than ``lost_speed_m_s`` for ``lost_s`` while the board does not say rest; (b)
     it moves faster than ``rest_speed_m_s`` while ``/zupt`` (wheels, gyro and command witnessed)
-    says rest; (c) fewer than ``min_features`` features in OpenVINS's last update for ``lost_s``
-    while the base moves (``/zupt`` silent), never at rest: at rest no track ends, so the MSCKF
-    update has none (0 of 300 poses on 2026-10-04 with the head still), and a still cart is not
-    lost for seeing nothing new. Times are the receiving node's clock."""
+    says rest; (c) fewer than ``min_features`` features for ``lost_s`` while the base moves
+    (``/zupt`` silent), never at rest. ``rule`` says which features (c) counts: ``tracked``, the
+    tracker's persistent tracks (:meth:`tracked`), what the picture still holds; or ``used``, the
+    features OpenVINS's last update used (:meth:`features`), which a moving head or a plain
+    scene takes to 0-8 in good light and which are 0 at rest (no track ends there: 0 of 300 poses
+    on 2026-10-04 with the head still). A still cart is not lost for seeing nothing new. Times
+    are the receiving node's clock."""
 
     def __init__(
         self,
@@ -632,14 +648,17 @@ class VioLost:
         lost_s: float = VIO_LOST_S,
         min_features: int = VIO_MIN_FEATURES,
         rest_speed_m_s: float = VIO_REST_SPEED_M_S,
+        rule: str = VIO_LOST_RULE,
     ) -> None:
         self.lost_speed_m_s = lost_speed_m_s  # live: vio_lost_speed_m_s
         self.lost_s = lost_s  # live: vio_lost_s
         self.min_features = min_features  # live: vio_min_features
         self.rest_speed_m_s = rest_speed_m_s
+        self.rule = rule  # live: vio_lost_rule
         self._wheels: tuple[float, float] | None = None  # (now, |speed|)
         self._zupt: float | None = None
-        self._features: tuple[float, int] | None = None
+        self._features: tuple[float, int] | None = None  # the used count
+        self._tracked: tuple[float, int] | None = None  # the persistent tracks
         self._disagree_since: float | None = None
         self._few_since: float | None = None  # since when few features AND the base moving
         self.counts = {"wheels": 0, "rest": 0, "features": 0}
@@ -656,13 +675,39 @@ class VioLost:
 
     def features(self, now: float, count: int) -> None:
         """How many features the VIO used in its last update (the node sums OpenVINS's MSCKF and
-        SLAM features)."""
+        SLAM features): rule (c)'s count under ``used``."""
         self._features = (now, count)
+
+    def tracked(self, now: float, count: int) -> None:
+        """How many persistent tracks the VIO's tracker holds on its last frame (health's
+        ``persistent``): rule (c)'s count under ``tracked``."""
+        self._tracked = (now, count)
 
     @property
     def feature_count(self) -> int | None:
-        """The last count heard, for the report line."""
-        return None if self._features is None else self._features[1]
+        """The last count heard under the rule in force, for the report line."""
+        counted = self._counted()
+        return None if counted is None else counted[1]
+
+    def _counted(self) -> tuple[float, int] | None:
+        """The ``(time, count)`` rule (c) reads: the tracks under ``tracked``, else the used."""
+        return self._tracked if self.rule == "tracked" else self._features
+
+    def updated(self, now: float) -> bool:
+        """Whether a sample that passed the rules had a visual update behind it, the moment the
+        yaw-only mode's bias walk starts from (:meth:`YawOnly.visual`). Under ``used`` every
+        passing sample (the rule itself allows at most ``lost_s`` of few used features); under
+        ``tracked`` only one whose last update, heard within ``WITNESS_FRESH_S``, used at least
+        ``min_features`` (at least one): a filter that still tracks but does not update coasts on
+        the IMU, and its gyro bias walks as in the dark."""
+        if self.rule != "tracked":
+            return True
+        used = self._features
+        return (
+            used is not None
+            and now - used[0] <= WITNESS_FRESH_S
+            and used[1] >= max(self.min_features, 1)
+        )
 
     def check(self, now: float, vio_speed_m_s: float) -> str | None:
         """Why the VIO is lost now, or ``None``; a new episode is counted under its rule."""
@@ -674,7 +719,8 @@ class VioLost:
         return reason
 
     def _reason(self, now: float, speed: float) -> tuple[str | None, str | None]:
-        features = self._features
+        features = self._counted()
+        what = "tracked features" if self.rule == "tracked" else "features"
         at_rest = self._zupt is not None and now - self._zupt <= ZUPT_FRESH_S
         few = (
             self.min_features > 0
@@ -688,7 +734,7 @@ class VioLost:
             if now - self._few_since >= self.lost_s:
                 assert features is not None
                 return (
-                    f"{features[1]} features (under {self.min_features}) for"
+                    f"{features[1]} {what} (under {self.min_features}) for"
                     f" {now - self._few_since:.1f} s while moving",
                     "features",
                 )
@@ -1040,9 +1086,11 @@ class YawOnly:
         self.reason: str | None = None
         self.episodes = 0
 
-    def visual(self, stamp: float) -> None:
-        """A sample that passed the lost rules: the visual updates vouch for the bias again."""
-        if self._visual is None or stamp > self._visual:
+    def visual(self, stamp: float, updated: bool = True) -> None:
+        """A sample that passed the lost rules: the episode ends, and when ``updated`` (a visual
+        update behind it, :meth:`VioLost.updated`) the visual updates vouch for the bias again;
+        otherwise the bias walk keeps counting from the last sample that had one."""
+        if updated and (self._visual is None or stamp > self._visual):
             self._visual = stamp
         self._since = None
 

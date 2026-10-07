@@ -76,10 +76,13 @@ counted). The guard's divergence still withholds everything.
 Every composed sample first passes the plausibility guard (:class:`pepin.visual_odometry.VioGuard`:
 a base velocity over ``vio_max_speed_m_s`` is not sent, nor, while ``vio_guard`` is on, one
 ``vio_wheel_diff_m_s`` from the wheels'), then the three lost rules of
-:class:`pepin.visual_odometry.VioLost` (the wheels' speed over time, motion under ``/zupt``, the
-features of ``/ov_msckf/points_msckf`` + ``points_slam`` short for ``vio_lost_s`` while the base
-moves, never at rest); a refused sample only re-anchors. OpenVINS never resets itself: after
-``vio_restart_rejects`` guard rejections in a row with the wheels at rest for 2 s this node calls
+:class:`pepin.visual_odometry.VioLost` (the wheels' speed over time, motion under ``/zupt``, fewer
+than ``vio_min_features`` features for ``vio_lost_s`` while the base moves, never at rest); a
+refused sample only re-anchors. ``vio_lost_rule`` says which features: ``tracked``, the tracker's
+persistent tracks from ``/ov_msckf/health`` (the keeper's dark count), or ``used``, the ones
+OpenVINS's last update used (``/ov_msckf/points_msckf`` + ``points_slam``). OpenVINS never
+resets itself: after ``vio_restart_rejects`` guard rejections in a row with the wheels at rest for
+2 s this node calls
 ``/vio/restart`` (pepin_bringup.vio_keeper in pepin-vio), logged once; by hand it is
 ``ros/laptop.sh vio kick``, at rest. The report line adds the samples in, out and refused, the
 stamp-to-receipt latency, whether the board's EKF subscribes ``/vo``, and the EKF's own odom ->
@@ -94,6 +97,7 @@ import time
 from collections import Counter
 from typing import Any
 
+from diagnostic_msgs.msg import DiagnosticStatus
 from geometry_msgs.msg import PoseWithCovarianceStamped, TwistWithCovarianceStamped
 from nav_msgs.msg import Odometry
 from rclpy.node import Node
@@ -106,7 +110,9 @@ from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE, SWAYING
 from pepin.head_imu import HeadImuConfig
 from pepin.mounts import load_camera_mounts
+from pepin.vio_recover import Health, health_values
 from pepin.visual_odometry import (
+    VIO_LOST_RULES,
     ImuQueue,
     ImuState,
     NeckBaseline,
@@ -166,6 +172,9 @@ VIO_ODOM_TOPIC = "/ov_msckf/odomimu"
 # update (ROS2Visualizer::publish_features).
 VIO_POINTS_TOPIC = "/ov_msckf/points_msckf"
 VIO_SLAM_POINTS_TOPIC = "/ov_msckf/points_slam"
+# OpenVINS's health per processed frame (ros/patches/openvins-reset.patch, published whether or not
+# anyone listens): its `persistent` tracks are lost rule (c)'s count under vio_lost_rule tracked.
+VIO_HEALTH_TOPIC = "/ov_msckf/health"
 ZUPT_TOPIC = "/zupt"  # the board's zero-velocity update: published only while it says rest
 IMU_FRAME = "head_imu"  # camera_stream's static camera_optical -> head_imu (config/camera.json)
 BASE_FRAME = "base_link"
@@ -321,6 +330,28 @@ FLAGS = FlagSet(
         " twist; VioLost's wheel rule (vio_lost_speed_m_s for vio_lost_s) still catches a sustained"
         " divergence",
     ),
+    Flag(
+        "vio_lost_rule",
+        "used",
+        choices=VIO_LOST_RULES,
+        description="which features the lost rule counts (fewer than vio_min_features for"
+        " vio_lost_s while the base moves, never at rest): `used`, the features OpenVINS's last"
+        " update used, /ov_msckf/points_msckf + points_slam; `tracked`, the tracker's persistent"
+        f" tracks on {VIO_HEALTH_TOPIC} (features seen in 3+ frames, the count the keeper's dark"
+        " rule reads). Under tracked the yaw-only bias walk counts from the last sample whose"
+        " update used vio_min_features, not from the last one that passed. The wheel and rest"
+        " rules and the guard are the same under both. Live",
+        why="used, measured against tracked on drives 0343-0347 and 0355-0363 replayed through"
+        " the relay's classes (scratch/vio_lost_rule/replay.py; the used replay matches the live"
+        " /vo_twist 98-100 %): tracked lifts the full twists per moving second from 2.52 to 3.12"
+        " (the gaze gate withholds 53-64 % of the moving poses under either), and the twists it"
+        " adds are the ones OpenVINS coasts on the IMU through: vx sigma multiplier 1.76 [1.42,"
+        " 2.59] against 0.84 [0.70, 1.02] for those used passes, 19.5 % of them more than 0.2 m/s"
+        " off the lidar truth against 1.1 %, worse the longer since an update used 20 features",
+        on_when="tracked for a drive that measures the VIO's vote with its coasting samples in,"
+        " once the twist's sigma grows with the time since the last fed update",
+        off_when="used whenever the EKF must have the VIO's honest twists only",
+    ),
     # A pose of a frame taken while the head turned, or the body spun, and the first pose after
     # one, never reach the EKF: each becomes the anchor the next step is measured from, so the
     # pan rtabmap reads as a base yaw is never differenced into the filter (gaze.md 3.4).
@@ -381,6 +412,7 @@ class VisualOdometry(Node):
             lost_speed_m_s=float(self._switches["vio_lost_speed_m_s"]),
             lost_s=float(self._switches["vio_lost_s"]),
             min_features=int(self._switches["vio_min_features"]),
+            rule=str(self._switches["vio_lost_rule"]),
         )
         self._guard = VioGuard(
             max_speed_m_s=float(self._switches["vio_max_speed_m_s"]),
@@ -392,6 +424,7 @@ class VisualOdometry(Node):
         self._tf_failure: str | None = None
         self._restart: Any = None  # the /vio/restart client, made with the VIO's subscriptions
         self._points: dict[str, int] = {}  # the latest feature count of each cloud (msckf, slam)
+        self._health: Health | None = None  # OpenVINS's last frame health (its tracks)
         self._last_vio: VoPose | None = None  # the previous composed pose, for the VIO's speed
         self._last_vio_xy: tuple[float, float] | None = None  # the last published, for its step
         self._local = local
@@ -460,6 +493,7 @@ class VisualOdometry(Node):
         self.create_subscription(
             PointCloud2, VIO_SLAM_POINTS_TOPIC, lambda m: self._on_points("slam", m), local
         )
+        self.create_subscription(DiagnosticStatus, VIO_HEALTH_TOPIC, self._on_health, local)
         self.create_subscription(
             Odometry,
             ZUPT_TOPIC,
@@ -534,6 +568,8 @@ class VisualOdometry(Node):
             self._vio_lost.lost_s = float(new)  # type: ignore[arg-type]
         elif name == "vio_min_features":
             self._vio_lost.min_features = int(new)  # type: ignore[call-overload]
+        elif name == "vio_lost_rule":
+            self._vio_lost.rule = str(new)
         elif name in GATE_KNOBS:
             self._gaze.set(name, float(new))  # type: ignore[arg-type]
         elif name == "gaze_gate":
@@ -706,7 +742,7 @@ class VisualOdometry(Node):
                 self._step_yaw_only(msg.header.stamp, last, pose, t_i_b.rotation.T)
             return
         self._vio_verdict = "ok"
-        self._yaw_only.visual(stamp)
+        self._yaw_only.visual(stamp, self._vio_lost.updated(now))
         published = self._admit(pose, lost=False)
         if published is None:
             return
@@ -949,6 +985,16 @@ class VisualOdometry(Node):
         self._points[kind] = int(msg.width) * int(msg.height)
         self._vio_lost.features(time.monotonic(), sum(self._points.values()))
 
+    def _on_health(self, msg: DiagnosticStatus) -> None:
+        """OpenVINS's health of its last frame: its persistent tracks are lost rule (c)'s count
+        under ``vio_lost_rule tracked``. An unreadable message is counted and changes nothing."""
+        health = Health.parse(health_values(msg.values), str(msg.hardware_id))
+        if health is None:
+            self._tally.count("health_bad")
+            return
+        self._health = health
+        self._vio_lost.tracked(time.monotonic(), health.persistent)
+
     def _on_zupt(self, _msg: Odometry) -> None:
         """The board says the cart is at rest (wheels, gyro and command witnessed)."""
         self._vio_lost.zupt(time.monotonic())
@@ -1025,7 +1071,7 @@ class VisualOdometry(Node):
             f" output {self._output_mode()}: {self._twist_text(counts)};"
             f" covariance {self._covariance_mode()}; reinit {counts['vio_reinit']}"
             f" ({self._vio_health.reinits} since the start), {counts['vio_lost']} poses withheld"
-            f" as lost, {self._vio_lost.report()}, features {self._features_text()},"
+            f" as lost, {self._vio_lost.report()}, {self._features_text(counts)},"
             f" tf_miss {counts['tf_miss']}{tf}; kick at rest:"
             " ros/laptop.sh vio kick;"
         )
@@ -1084,12 +1130,18 @@ class VisualOdometry(Node):
             f" lost episodes {lost.episodes}, gyro bias walk {brw}"
         )
 
-    def _features_text(self) -> str:
-        """The last feature counts: ``57 (msckf 0 + slam 57)``, or ``none heard``."""
-        if not self._points:
-            return "none heard"
-        parts = " + ".join(f"{k} {n}" for k, n in sorted(self._points.items()))
-        return f"{sum(self._points.values())} ({parts})"
+    def _features_text(self, counts: Counter[str]) -> str:
+        """The lost rule's counts: ``features rule tracked: tracked 35 (of 78), used 24 (msckf 0 +
+        slam 24)``; ``none heard`` for a source not heard yet, unreadable health counted."""
+        h = self._health
+        tracked = "none heard" if h is None else f"{h.persistent} (of {h.tracked})"
+        if self._points:
+            parts = " + ".join(f"{k} {n}" for k, n in sorted(self._points.items()))
+            used = f"{sum(self._points.values())} ({parts})"
+        else:
+            used = "none heard"
+        bad = f", health unreadable {counts['health_bad']}" if counts["health_bad"] else ""
+        return f"features rule {self._vio_lost.rule}: tracked {tracked}, used {used}{bad}"
 
     def _ekf_text(self) -> str:
         """Whether the board's EKF subscribes /vo, from the graph (rmw_zenoh carries the remote
