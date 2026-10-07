@@ -63,3 +63,42 @@ def test_without_the_extra_headers_grab_falls_back_to_the_send_time() -> None:
     assert capture_time({}, mode="grab") is None
     with pytest.raises(ValueError, match="stamp mode"):
         capture_time(plain, mode="exposure")
+
+
+class Trickle:
+    """A socket-like stream: ``read1`` hands over what has arrived (one piece a call) and
+    ``read`` would block for more, which a reader must never wait on mid-stream."""
+
+    def __init__(self, pieces: list[bytes]) -> None:
+        self.pieces = pieces
+        self.calls = 0
+
+    def read1(self, size: int = -1) -> bytes:
+        self.calls += 1
+        return self.pieces.pop(0) if self.pieces else b""
+
+    def read(self, size: int = -1) -> bytes:
+        raise AssertionError("read() blocks until size bytes are in; read1 was there")
+
+
+def test_a_frame_is_yielded_as_soon_as_its_body_is_in_not_when_the_next_one_starts() -> None:
+    """Under read(64 kB) a frame's last bytes waited for the next frame's first: 55-70 ms on
+    every frame at 10 fps (2026-10-07). With read1 the frame is out after its own bytes."""
+    whole = stream([(1.5, b"\xff\xd8abc\xff\xd9")]).getvalue()
+    trickle = Trickle([whole[:20], whole[20:]])
+    frames = parts(trickle)  # type: ignore[arg-type]
+    headers, body = next(frames)
+    assert body == b"\xff\xd8abc\xff\xd9" and capture_time(headers) == 1.5
+    assert trickle.calls == 2, "nothing read past the frame before it was handed over"
+
+
+def test_a_plain_reader_without_read1_still_works() -> None:
+    class Plain:
+        def __init__(self, data: bytes) -> None:
+            self.inner = io.BytesIO(data)
+
+        def read(self, size: int = -1) -> bytes:
+            return self.inner.read(size)
+
+    got = list(parts(Plain(stream([(1.0, b"a"), (2.0, b"b")]).getvalue())))  # type: ignore[arg-type]
+    assert [body for _, body in got] == [b"a", b"b"]
