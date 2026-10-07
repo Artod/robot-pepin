@@ -102,7 +102,7 @@ controller_server:
       # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
       desired_linear_vel: 0.30
       lookahead_dist: 0.55
-      min_lookahead_dist: 0.40
+      min_lookahead_dist: 0.25  # 0.40 until 2026-10-06: after a forced reverse leg the aim point sat on the 0.20 m U-turn behind the cart and RPP drove the forward plan backwards (1.8-3.1 m); 0.25 halved reverse driving (39 -> 22 % of metres), no corner cutting (plan distance p95 18 -> 16 cm)
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
@@ -162,7 +162,7 @@ controller_server:
       # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
       desired_linear_vel: 0.30
       lookahead_dist: 0.55
-      min_lookahead_dist: 0.40
+      min_lookahead_dist: 0.25  # see FollowPath
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
@@ -238,7 +238,7 @@ controller_server:
       # until 2026-09-09 sat at a 0.20 that a second number like this one held silently.
       desired_linear_vel: 0.30
       lookahead_dist: 0.55
-      min_lookahead_dist: 0.40
+      min_lookahead_dist: 0.25  # see FollowPath
       max_lookahead_dist: 1.15  # lookahead_time x desired_linear_vel, else the scaling is clipped
       lookahead_time: 2.5
       use_velocity_scaled_lookahead_dist: true
