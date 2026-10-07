@@ -656,6 +656,27 @@ def test_a_newer_request_of_a_glancing_source_waits_for_the_glance() -> None:
     assert head.writes[-1][0] == RIGHT
 
 
+def test_its_own_source_withdraws_a_glance_under_way_and_the_next_look_takes_the_head() -> None:
+    """The reverse look let go at the first forward command: mid-swing, where a release waits."""
+    arb, head, out = arbiter()
+    arb.submit(glance(hold_s=0.6), 0.0, out.append)
+    arb.step(0.0)
+    assert arb.holds("nav.reverse") and not arb.holds("nav.path")
+    path: list[Outcome] = []
+    arb.submit(look("nav.path", (RIGHT,), DRIVING, 0, 0.5, 0.5), 0.3, path.append)
+    assert arb.withdraw("nav.path", 0.3, "nothing") == 1 and path[0].status == "preempted"
+    arb.submit(look("nav.path", (RIGHT,), DRIVING, 0, 0.5, 0.5), 0.3)
+    assert arb.withdraw("nav.reverse", 0.3, "the first forward command") == 1
+    assert out[0].status == "preempted" and out[0].reason == "by the first forward command"
+    arb.step(0.3)
+    assert head.writes[-1][0] == RIGHT and arb.holds("nav.path")
+    assert arb.withdraw("nav.reverse", 0.35, "again") == 0  # nothing of it left
+    booked = arb.take_looks(2.0)
+    assert [(b.source, b.ended, b.still_from) for b in booked] == [
+        ("nav.reverse", "preempted", None)  # cut before it settled: it wrote no frames
+    ]
+
+
 def test_a_look_without_a_hold_is_no_glance() -> None:
     """hold_s 0 (the baseline): the TTL ends it mid-move and a release cuts it, as before."""
     arb, _head, out = arbiter()
