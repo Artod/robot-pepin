@@ -14,6 +14,7 @@ from typing import Any
 import pytest
 
 from pepin.gaze import (
+    DARK_ENDED,
     DRIVING,
     NAVIGATION,
     PERSON,
@@ -37,6 +38,7 @@ from pepin.gaze import (
     lens_at,
     look_from_json,
 )
+from pepin.gaze_gate import DARK, DarkLog, FrameGate
 from pepin.neck import NeckAngles, NeckConfig, camera_pose
 
 REPO = Path(__file__).resolve().parents[2]
@@ -712,3 +714,91 @@ def test_the_neck_target_driver_goes_home_slowly_after_a_drive() -> None:
     assert wire.lines[-1]["speed_deg_s"] == 45.0
     target_head(wire).write(None, speed="return", hold=False, now=0.0)
     assert "speed_deg_s" not in wire.lines[-1]  # no return speed given: the board's own
+
+
+# ---- dark frames: the depth gate's darkness rule -----------------------------------------------
+def _stall_look(arb: Arbiter, head: FakeHead, out: list[Outcome]) -> None:
+    """A navigation look (3 frames, TTL 3 s) that settles on LEFT at board second 0.0."""
+    arb.submit(look("nav.stall", band=NAVIGATION, ttl_s=3.0), 0.0, out.append)
+    arb.step(0.0)
+    arrive(arb, head, LEFT, 0.0)
+    arb.step(0.0)
+
+
+def test_a_look_over_dark_frames_gives_up_after_the_patience_not_the_ttl() -> None:
+    """Twenty frames at 10 fps that the depth gate drops as dark (a room the auto exposure cannot
+    light): the look ends 1.5 s into the dark, expired as 'dark, no frames', booked so and
+    counted, instead of holding the head for its 3 s TTL."""
+    arb, head, out = arbiter()
+    _stall_look(arb, head, out)
+    ended = None
+    for k in range(20):
+        stamp = 0.15 + 0.1 * k
+        arb.dark_frame(stamp)
+        arb.step(stamp)
+        if out and ended is None:
+            ended = stamp
+    assert ended == pytest.approx(1.65), "1.5 s from the first dark frame, not 3.0 s"
+    assert out[0].status == "expired" and out[0].reason.startswith(DARK_ENDED)
+    assert out[0].frames_seen == 0 and arb.counts["dark"] == 1
+    arb.step(5.0)
+    booked = arb.take_looks(5.0)
+    assert [b.ended for b in booked] == [DARK_ENDED]
+    tally = LookTally()
+    tally.add(booked[0])
+    assert "1 WROTE NO FRAMES: nav.stall +30/40 deg" in tally.text()
+    assert tally.text().endswith(DARK_ENDED)
+
+
+def test_a_look_whose_frames_turn_light_completes_as_ever() -> None:
+    """A turn from a window: 1 s of dark frames, then the eyes catch up and the frames are fused
+    again; the look is answered done on its three frames, as in a lit room."""
+    arb, head, out = arbiter()
+    _stall_look(arb, head, out)
+    for k in range(9):
+        arb.dark_frame(0.15 + 0.1 * k)
+        arb.step(0.15 + 0.1 * k)
+    assert out == []
+    for stamp in (1.05, 1.15, 1.25):
+        arb.frame(stamp)
+        arb.step(stamp)
+    assert out[0].status == "done" and out[0].frames_seen == 3
+    assert arb.counts["dark"] == 0
+
+
+def test_without_patience_a_dark_look_waits_for_its_ttl() -> None:
+    head = FakeHead()
+    settings = GazeSettings(frames=3, frame_period_s=0.1, dark_patience_s=0.0)
+    arb, out = Arbiter(head, HOME, settings), []
+    _stall_look(arb, head, out)
+    for k in range(29):
+        arb.dark_frame(0.15 + 0.1 * k)
+        arb.step(0.15 + 0.1 * k)
+    assert out == []
+    arb.step(3.05)
+    assert out[0].status == "expired" and not out[0].reason.startswith(DARK_ENDED)
+
+
+def test_a_look_s_still_frames_do_not_advance_on_frames_the_gate_finds_dark() -> None:
+    """The gate and the look together, as depth_stream and depth_fusion wire them: each frame's
+    brightness through the darkness rule (floor 10, leaves at 12), a dark one told to the
+    arbiter as dark and never fused, a passed one fused. The auto exposure ramps up after a turn
+    into the room: the look's count starts only once the picture is past 12 grey."""
+    arb, head, out = arbiter()
+    gate = FrameGate(exposure_s=0.0, dark_on=True, dark=DarkLog(10.0, 2.0))
+    _stall_look(arb, head, out)
+    ramp = (4.0, 5.0, 6.0, 8.0, 9.0, 10.5, 11.5, 13.0, 25.0, 40.0, 60.0)
+    fused = []
+    for k, level in enumerate(ramp):
+        stamp = 0.15 + 0.1 * k
+        gate.observe_brightness(stamp, level)
+        if gate.verdict(stamp, 0.0) == DARK:
+            arb.dark_frame(stamp)
+        else:
+            arb.frame(stamp)
+            fused.append(stamp)
+        arb.step(stamp)
+        if len(fused) < 3:
+            assert out == [], f"answered at {stamp:.2f} on {len(fused)} still frames"
+    assert fused[0] == pytest.approx(0.85), "10.5 and 11.5 are still dark: the hysteresis"
+    assert out[0].status == "done" and out[0].frames_seen == 3

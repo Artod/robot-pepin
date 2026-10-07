@@ -138,8 +138,9 @@ counts of full, lidar-only and camera-only snapshots, and the place descriptors 
 why); the flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set sensor_pack
 <flag> <value>``) are ``sensor_pack``, ``sources``, ``pack_hz``, ``pair_periods``,
 ``global_descriptor``, ``place_descriptor``, ``place_timeout_s``, and the gaze gate's ``gaze_gate``
-with its ``gate_*`` knobs (:mod:`pepin.gaze_gate`: a picture taken while the head turned or the
-body spun is heard — the camera stays alive — but never becomes a member). The arrangement of
+with its ``gate_*`` knobs and ``gate_dark`` (:mod:`pepin.gaze_gate`: a picture taken while the head
+turned or the body spun, or too dark to measure, is heard — the camera stays alive — but never
+becomes a member). The arrangement of
 before this node — RTAB-Map on its own synchronised triple — is in git history (before
 2026-10-02).
 """
@@ -157,7 +158,7 @@ from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointFiel
 from std_msgs.msg import String
 
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
+from pepin.gaze_gate import DARK_KNOBS, GATE_DARK, GATE_KNOBS, GAZE_GATE
 from pepin.global_descriptor import (
     ATTACH_AUTO,
     ATTACH_CHOICES,
@@ -304,6 +305,9 @@ FLAGS = FlagSet(
     # waits for the next usable picture (pepin.snapshot.SnapshotPacker.heard keeps the camera
     # alive meanwhile), so RTAB-Map gets neither a smeared keyframe nor a lidar-only node.
     GAZE_GATE,
+    # ...nor one too dark to measure (its depth never comes from depth_stream either; here the
+    # picture is refused by its own stamp, and counted).
+    GATE_DARK,
 )
 
 
@@ -477,6 +481,9 @@ class SensorPack(Node):
             stamp_end=float(self._switches["gate_stamp_end"]),
             sway_dps=float(self._switches["gate_sway_dps"]),
             sway_deg=float(self._switches["gate_sway_deg"]),
+            dark_on=self._switches.on("gate_dark"),
+            dark_floor=float(self._switches["gate_dark_floor"]),
+            dark_hyst=float(self._switches["gate_dark_hyst"]),
         )
         self.create_subscription(CameraInfo, CAMERA_INFO_TOPIC, self._on_info, reliable)
         self.create_subscription(Image, IMAGE_TOPIC, self._on_image, pair)
@@ -514,8 +521,10 @@ class SensorPack(Node):
             self._packer.set_pair_periods(float(new))  # type: ignore[arg-type]
         elif name == "place_descriptor":
             self._say_place()
-        elif name in GATE_KNOBS:
+        elif name in GATE_KNOBS or name in DARK_KNOBS:
             self._gaze.set(name, float(new))  # type: ignore[arg-type]
+        elif name == "gate_dark":
+            self._gaze.set_dark(bool(new))
 
     def _on_info(self, msg: CameraInfo) -> None:
         self._info = msg

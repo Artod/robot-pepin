@@ -99,6 +99,11 @@ ODOMETRY_TOPICS = ("/vo", "/vo_twist", "/zupt")  # /vo_twist: the VIO as twist0 
 # camera itself is the board-side clip (ros/tools/clip_to_bag.py). Neither exists without
 # head_imu:=true, and a topic nobody publishes costs the recorder nothing. bag_to_tape skips them.
 HEAD_TOPICS = ("/head/imu", "/mast/state")
+# ...and every camera frame's brightness (camera_stream's /camera/brightness, ten small messages a
+# second), the one input of the gaze gate's darkness rule that nothing else in the bag carries
+# (the clip's JPEGs are on the board): with it the gate's dark verdicts replay exactly.
+# bag_to_tape skips it.
+FRAME_TOPICS = ("/camera/brightness",)
 BAG_TOPICS: tuple[str, ...] = (
     *sorted(TOPIC_RECORDS),
     "/tf",
@@ -107,6 +112,7 @@ BAG_TOPICS: tuple[str, ...] = (
     *CAMERA_MARK_TOPICS,
     *ODOMETRY_TOPICS,
     *HEAD_TOPICS,
+    *FRAME_TOPICS,
 )
 # MCAP, no compression: the storage rosbag2 ships with in Jazzy, read by rosbag2_py on the laptop
 # and by every MCAP tool. Compression would cost this board's cores exactly what we are taking

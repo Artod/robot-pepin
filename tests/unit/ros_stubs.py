@@ -109,6 +109,8 @@ PointCloud2 = _msg(
     data=b"",
     is_dense=False,
 )
+# camera_stream's per-frame brightness (the mean luma rides in illuminance, not lux)
+Illuminance = _msg("Illuminance", header=Header, illuminance=0.0, variance=0.0)
 Imu = _msg(
     "Imu",
     header=Header,
@@ -1018,6 +1020,7 @@ def install() -> Any:
             Range=Range,
             PointField=PointField,
             Imu=Imu,
+            Illuminance=Illuminance,
         ),
         "message_filters": _module(
             "message_filters", Subscriber=FilterSubscriber, TimeSynchronizer=TimeSynchronizer

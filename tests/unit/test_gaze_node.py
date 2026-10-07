@@ -519,6 +519,27 @@ def test_a_look_that_wrote_no_frames_is_named_in_the_report(node: Gaze) -> None:
     assert "looks none" in node.logger.texts("info")[-1]  # the window starts over
 
 
+def test_the_dark_frames_reach_the_arbiter_and_a_dark_look_is_named_in_the_report(
+    node: Gaze,
+) -> None:
+    """depth_stream's /depth/dark goes to the arbiter at the frame's own stamp; the patience is
+    the live knob; a look that gave up on dark frames is counted and named as such."""
+    stamp = ros_stubs.Time(sec=100, nanosec=500_000_000)
+    node.subs["/depth/dark"][1](ros_stubs.Header(stamp=stamp))
+    assert list(node._arbiter._dark) == [100.5]
+    assert node._settings().dark_patience_s == 1.5
+    node._switches.set("gate_dark_patience_s", 0.0)
+    assert node._settings().dark_patience_s == 0.0
+    node._arbiter.counts["expired"] += 1
+    node._arbiter.counts["dark"] += 1
+    dark = HeldLook("1", "nav.stall", 1, Aim(0.8, 0.85), 10.0, 11.6, "dark, no frames", 10.1)
+    node._looks.add(dark)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "expired 1 of which dark, no frames 1)" in line
+    assert "1 WROTE NO FRAMES: nav.stall +46/49 deg 1.60 s dark, no frames" in line
+
+
 def test_the_stall_look_is_a_glance_capped_by_its_ttl_only_with_glances_on(node: Gaze) -> None:
     node._switches.set("stall_look", True)
     asked: list[Look] = []

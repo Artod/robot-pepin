@@ -37,6 +37,7 @@ from pepin_bringup.msgs import stamp_seconds  # noqa: E402
 from pepin_bringup.node_kit import spin_main  # noqa: E402
 
 from pepin.camera import quaternion_from_rpy  # noqa: E402
+from pepin.gaze_gate import BRIGHTNESS_TOPIC, frame_brightness  # noqa: E402
 from pepin.mounts import Mounts  # noqa: E402
 from pepin.stereo import SideBySide  # noqa: E402
 
@@ -573,6 +574,26 @@ def published_image(msg: Any) -> np.ndarray:
     return array if channels == 3 else array[:, :, 0]
 
 
+def test_every_frame_s_brightness_goes_out_under_its_stamp_measured_before_the_cut(
+    build: Build, tmp_path: Path
+) -> None:
+    """The gaze gate's exposure witness: one /camera/brightness per frame, under the frame's own
+    stamp, carrying the mean luma of the WHOLE decoded side-by-side frame (both eyes, before the
+    split and the rectifier), the same number the replay computes from the clip."""
+    config = stereo_config(tmp_path, ideal_stereo_calibration())
+    body = stereo_jpeg()
+    node, _ = build(multipart([(1_750_000_000.25, body), (1_750_000_000.35, body)]), config=config)
+    sent = node.pubs[BRIGHTNESS_TOPIC].sent
+    assert until(lambda: len(node.pubs["/camera/image"].sent) == 2), "the pump published nothing"
+    assert len(sent) == 2, "one per frame"
+    decoded = cv2.imdecode(np.frombuffer(body, np.uint8), cv2.IMREAD_COLOR)
+    for msg, image in zip(sent, node.pubs["/camera/image"].sent, strict=True):
+        assert msg.header.stamp == image.header.stamp, "the frame's own stamp"
+        assert msg.header.frame_id == "camera_optical"
+        assert msg.illuminance == pytest.approx(frame_brightness(decoded))
+    assert 0.0 < sent[0].illuminance < 255.0
+
+
 def test_a_stereo_rig_publishes_two_rectified_eyes_of_one_frame_under_one_stamp(
     build: Build, tmp_path: Path
 ) -> None:
@@ -752,12 +773,13 @@ def test_the_static_edges_are_the_active_rig_s_mount(build: Build, tmp_path: Pat
 
 def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     """The contract the stereo path must not touch: with the overview camera active this node
-    advertises TWO topics and no more, publishes one bgr8 picture at half the webcam's size with
-    its own CameraInfo, keeps the scale flag at 0.5, and its report line carries no rig and no
-    stage timings — it is the line that has been in the logs since 2026-09-09."""
+    advertises TWO picture topics and no more (beside every rig's /camera/brightness), publishes
+    one bgr8 picture at half the webcam's size with its own CameraInfo, keeps the scale flag at
+    0.5, and its report line carries no rig and no stage timings — it is the line that has been
+    in the logs since 2026-09-09."""
     node, _ = build(multipart([(1.0, jpeg(1280, 720))]))
     assert until(lambda: node.pubs["/camera/image"].sent)
-    assert set(node.pubs) == {"/camera/image", "/camera/camera_info"}
+    assert set(node.pubs) == {"/camera/image", "/camera/camera_info", BRIGHTNESS_TOPIC}
     assert node._rig is None and node._split is None and node._published.rectifier is None
     image = node.pubs["/camera/image"].sent[0]
     assert (image.width, image.height) == (640, 360) and image.encoding == "bgr8"

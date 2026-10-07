@@ -16,6 +16,10 @@ depth frames at each, how long to hold, which band, how long the request may liv
 * a GLANCE (``hold_s`` > 0) is atomic once it holds the head: it is answered at ``frames`` frames
   or ``hold_s`` after settling, whichever comes first, and until then neither its TTL, nor a
   release, nor a newcomer of its own band takes the head from it; a better band does;
+* a look whose frames the depth gate has been dropping as too dark (``dark_frame``, depth_stream's
+  ``/depth/dark``) for ``dark_patience_s`` without one fused frame between gives up: ended "dark,
+  no frames", status expired, instead of waiting out its TTL in a room the auto exposure cannot
+  light; a window's transition (1-2 s of dark frames that then turn light) still completes;
 * every look that held the head is booked when it lets go (:class:`HeldLook`): how long, how it
   ended, and the frames fused while it held the head still (late frames are counted for
   :data:`LATE_S`), for the node's report;
@@ -71,6 +75,7 @@ BANDS = {
 STILL_RAD = 2 * RAD_PER_TICK  # two encoder readings this close are one pose (the encoder's jitter)
 RETRY_S = 0.2  # a write the base server refused for now is tried again after this
 FRAMES_KEPT = 1024  # the fused frames' stamps kept: a look held for a minute and more at 10 fps
+DARK_ENDED = "dark, no frames"  # how a look that gave up on dark frames is booked and answered
 LATE_S = 1.5  # a look's frames are counted this long after it let go: the fusion's latency
 # What a person's look is told during a drive by a base server that moves the neck only at rest.
 DRIVE_REFUSAL = (
@@ -125,13 +130,16 @@ class Refusal:
 @dataclass(frozen=True)
 class GazeSettings:
     """The arbiter's numbers (config/knobs.json's ``gaze`` block, live); ``ttl_s`` is the
-    default TTL of the operator, navigation, person, sensor, driving and idle bands."""
+    default TTL of the operator, navigation, person, sensor, driving and idle bands;
+    ``dark_patience_s`` how long a look waits on frames the depth gate drops as dark (0: until
+    its TTL)."""
 
     frames: int = 3
     settle_tol_deg: float = 1.0
     move_timeout_s: float = 3.0
     frame_period_s: float = 0.105
     ttl_s: tuple[float, float, float, float, float, float] = (0.5, 3.0, 10.0, 2.0, 0.5, 20.0)
+    dark_patience_s: float = 1.5
 
     def ttl_for(self, band: int) -> float:
         """The default TTL of a band's request."""
@@ -334,6 +342,7 @@ class Arbiter:
         self._retry_at = 0.0
         self._readings: deque[HeadReading] = deque(maxlen=2)
         self._frames: deque[float] = deque(maxlen=FRAMES_KEPT)
+        self._dark: deque[float] = deque(maxlen=FRAMES_KEPT)  # frames the depth gate found dark
         self._closing: list[HeldLook] = []  # let go less than LATE_S ago: still counting
         self._closed: list[HeldLook] = []
         self._phase: Phase = "home"
@@ -359,6 +368,12 @@ class Arbiter:
             for booked in self._closing:
                 if _claims(booked, stamp):
                     booked.frames += 1
+
+    def dark_frame(self, stamp: float) -> None:
+        """One frame the depth stream's gate dropped as too dark, at its own stamp
+        (``/depth/dark``): it will never be fused, and a look waiting on it learns why."""
+        with self._lock:
+            self._dark.append(stamp)
 
     def submit(
         self, look: Look, now: float, on_done: Callable[[Outcome], None] | None = None
@@ -582,11 +597,31 @@ class Arbiter:
         held.frames_seen = sum(1 for stamp in self._frames if stamp > floor)
         glanced = look.hold_s > 0.0 and now - held.settled_at >= look.hold_s
         if not home and held.frames_seen < look.frames and not glanced:
+            dark_s = self._dark_spell(floor)
+            patience = self.settings.dark_patience_s
+            if patience > 0.0 and dark_s >= patience:
+                self.counts["dark"] += 1
+                self._finish(
+                    held,
+                    "expired",
+                    f"{DARK_ENDED}: every frame of the last {dark_s:.1f} s was too dark for the"
+                    f" depth (the gate's dark floor), {held.frames_seen} of {look.frames} fused",
+                    now,
+                    ended=DARK_ENDED,
+                )
             return
         if held.view + 1 < len(look.views):
             held.view += 1
             return
         self._answer(held, now)
+
+    def _dark_spell(self, floor: float) -> float:
+        """How long the frames after ``floor`` (board s) have been dark without a break: from
+        the first dark frame after the last fused one to the newest dark frame; 0 when the
+        newest frame heard of was fused, or none was dark."""
+        fused = max((t for t in self._frames if t > floor), default=floor)
+        spell = [t for t in self._dark if t > fused]
+        return spell[-1] - spell[0] if spell else 0.0
 
     def _write(self, held: _Held, aim: Aim, *, home: bool, now: float) -> None:
         """One write toward ``aim``, or a wait while the driver cannot take it."""
@@ -683,9 +718,12 @@ class Arbiter:
         if held.look.dwell_s <= 0.0 or held.let_go:
             self._drop(held, now, "done")
 
-    def _finish(self, held: _Held, status: Status, reason: str, now: float) -> None:
-        """End a request that was not answered as done: status, reason, where the head is."""
-        self._drop(held, now, status)
+    def _finish(
+        self, held: _Held, status: Status, reason: str, now: float, *, ended: str | None = None
+    ) -> None:
+        """End a request that was not answered as done: status, reason, where the head is;
+        ``ended`` books the look under another word than its status."""
+        self._drop(held, now, ended or status)
         if held.answered:
             return
         head = self._readings[-1] if self._readings else None

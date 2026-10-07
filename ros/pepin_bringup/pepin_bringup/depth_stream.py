@@ -87,6 +87,10 @@ exposure overlaps a head saccade (``/gaze/state``) or a body yaw above ``gate_ya
 before the worker is offered it, so it costs no network time and every consumer of the depth —
 depth_fusion's volume, contact_scan, the costmap's clearing fan, rgbd_odometry — simply never
 receives it. Counted per window in the report line; without ``/gaze/state`` nothing is dropped.
+Under ``gate_dark`` a frame too dark to measure (``/camera/brightness`` under ``gate_dark_floor``,
+until it climbs past the floor plus ``gate_dark_hyst``) is dropped the same way and counted as
+dark: it neither marks nor carves, and each one is told to the gaze arbiter on ``/depth/dark`` at
+its stamp, so a look waiting for still frames knows they are not coming.
 """
 
 from __future__ import annotations
@@ -107,6 +111,7 @@ import numpy.typing as npt
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
+from std_msgs.msg import Header
 
 from pepin.camera import CameraConfig, mount_transform, optics
 from pepin.contact import fan_min_z
@@ -146,7 +151,7 @@ from pepin.depth_service import (
 )
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import FramePoser, settled_pose
-from pepin.gaze_gate import GATE_KNOBS, GAZE_GATE
+from pepin.gaze_gate import DARK, DARK_FRAME_TOPIC, DARK_KNOBS, GATE_DARK, GATE_KNOBS, GAZE_GATE
 from pepin.stereo_depth import (
     MATCHERS as STEREO_MATCHERS,
 )
@@ -376,6 +381,9 @@ FLAGS = FlagSet(
     # A frame taken during a saccade or a fast body yaw never reaches the network: no depth, no
     # /depth_scan, nothing for depth_fusion, contact_scan or rgbd_odometry to drop downstream.
     GAZE_GATE,
+    # ...nor one too dark to measure, under the gate: its stereo match is noise (the volume's
+    # phantoms), and the clearing fan carved from it is noise too. The VIO's relay never asks it.
+    GATE_DARK,
 )
 FLOOR_STAGES = ("floor_anchor",)  # the stages that read the IMU's up vector
 
@@ -666,7 +674,11 @@ class DepthStream(Node):
             stamp_end=float(self._switches["gate_stamp_end"]),
             sway_dps=float(self._switches["gate_sway_dps"]),
             sway_deg=float(self._switches["gate_sway_deg"]),
+            dark_on=self._switches.on("gate_dark"),
+            dark_floor=float(self._switches["gate_dark_floor"]),
+            dark_hyst=float(self._switches["gate_dark_hyst"]),
         )
+        self._dark_pub = self.create_publisher(Header, DARK_FRAME_TOPIC, reliable)
         self.create_subscription(CameraInfo, "/camera/camera_info", self._on_info, reliable)
         self.create_subscription(Image, "/camera/image", self._on_image, newest)
         self.create_subscription(LaserScan, "/scan", self._on_scan, reliable)
@@ -809,7 +821,8 @@ class DepthStream(Node):
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
         upper bound, ``imu_lean`` the poser's and the estimator's, ``lean_min_quality`` the
-        poser's floor under a lean, a stage's flag switches that stage of the pipeline."""
+        poser's floor under a lean, the ``gate_*`` knobs and ``gate_dark`` the gaze gate's, a
+        stage's flag switches that stage of the pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
         elif name == "stereo_matcher":
@@ -823,8 +836,10 @@ class DepthStream(Node):
             self._lean.use_gyro = bool(new)
         elif name == "lean_min_quality":
             self._poser.min_lean_quality = float(new)
-        elif name in GATE_KNOBS:
+        elif name in GATE_KNOBS or name in DARK_KNOBS:
             self._gaze.set(name, float(new))
+        elif name == "gate_dark":
+            self._gaze.set_dark(bool(new))
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -1012,6 +1027,8 @@ class DepthStream(Node):
             verdict = self._gaze.verdict(stamp_seconds(msg.header.stamp))
             if verdict is not None:
                 self._tally.count(f"gaze_{verdict}")
+                if verdict == DARK:
+                    self._dark_pub.publish(Header(stamp=msg.header.stamp, frame_id=DARK))
                 return
         if self._worker.offer(msg):
             self._tally.count("dropped")

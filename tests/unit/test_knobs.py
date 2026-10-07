@@ -20,7 +20,14 @@ from pepin.contact import CONTACT_MAX_RANGE
 from pepin.depth import SCALE_CEILING
 from pepin.flags import FlagSet, knob, knobs_of, load_knobs, load_table, read_knobs, with_knobs
 from pepin.gaze import GazeSettings
-from pepin.gaze_gate import EXPOSURE_S, GATE_DEFAULTS, GATE_KNOBS, STAMP_END
+from pepin.gaze_gate import (
+    DARK_DEFAULTS,
+    DARK_KNOBS,
+    EXPOSURE_S,
+    GATE_DEFAULTS,
+    GATE_KNOBS,
+    STAMP_END,
+)
 from pepin.global_descriptor import MAX_NULL_SHARE
 from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG
@@ -64,6 +71,13 @@ NAMED = {
         for node in ("depth_stream", "sensor_pack", "visual_odometry")
         for name, value in zip(GATE_KNOBS, GATE_DEFAULTS, strict=True)
     },
+    # ...and its darkness rule in the two nodes that turn it on (never the visual odometry)
+    **{
+        (node, name): value
+        for node in ("depth_stream", "sensor_pack")
+        for name, value in zip(DARK_KNOBS, DARK_DEFAULTS, strict=True)
+    },
+    ("gaze", "gate_dark_patience_s"): GazeSettings().dark_patience_s,
     # the VIO's guard: pepin.visual_odometry.VioGuard's defaults
     ("visual_odometry", "vio_max_speed_m_s"): VIO_MAX_SPEED_M_S,
     ("visual_odometry", "vio_wheel_diff_m_s"): VIO_WHEEL_DIFF_M_S,

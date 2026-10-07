@@ -36,6 +36,14 @@ which turns an upside-down module's halves back and swaps them) and then:
   of ``hfov_deg``, NOTHING on the right topics, and the report line says in words that the head
   is uncalibrated and depth has no source from it.
 
+EVERY FRAME'S BRIGHTNESS goes out beside it on ``/camera/brightness`` (``sensor_msgs/Illuminance``
+under the frame's own stamp; ``illuminance`` carries the mean luma 0-255, not lux), measured on
+the decoded frame before the eyes are cut (:func:`pepin.gaze_gate.frame_brightness`, a 1/8
+subsample): the camera's auto exposure reports nothing per frame, so this is the gaze gate's
+witness of it (the darkness rule, depth_stream's and sensor_pack's ``gate_dark``), published
+BEFORE the picture so a gate has it when the frame arrives, and recorded with the drive so the
+gate's verdicts replay.
+
 The flags keep their meaning for the mono rig. On a stereo rig the calibration's own rectifying
 replaces ``undistort`` (which is refused, with that reason) and the picture goes out at the
 calibration's own size, so ``scale`` is pinned to 1.0 — a matcher wants the size the maps were
@@ -81,12 +89,13 @@ import numpy as np
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
-from sensor_msgs.msg import CameraInfo, Image
+from sensor_msgs.msg import CameraInfo, Illuminance, Image
 from tf2_ros import StaticTransformBroadcaster
 
 from pepin.calibration import undistort_optics
 from pepin.camera import CameraConfig, Optics, optics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
+from pepin.gaze_gate import BRIGHTNESS_TOPIC, frame_brightness
 from pepin.mjpeg import STAMP_MODES, capture_time, has_grab, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
@@ -271,6 +280,7 @@ class CameraStream(Node):
         reliable = QoSProfile(depth=5, reliability=ReliabilityPolicy.RELIABLE)
         self._image_pub = self.create_publisher(Image, "/camera/image", reliable)
         self._info_pub = self.create_publisher(CameraInfo, "/camera/camera_info", reliable)
+        self._brightness_pub = self.create_publisher(Illuminance, BRIGHTNESS_TOPIC, reliable)
         # Only a stereo rig advertises the right eye at all: a mono run's graph is what it was.
         self._right_image_pub = (
             None if self._rig is None else self.create_publisher(Image, RIGHT_IMAGE_TOPIC, reliable)
@@ -622,12 +632,13 @@ class CameraStream(Node):
             return
         published = self._published
         array = np.asarray(frame)
+        stamp = self._stamp(taken_at)
+        self._publish_brightness(array, stamp)
         if published.size != (self._cfg.width, self._cfg.height):
             array = cv2.resize(array, published.size, interpolation=cv2.INTER_AREA)
         if published.maps is not None:
             array = cv2.remap(array, published.maps[0], published.maps[1], cv2.INTER_LINEAR)
             self._tally.count("rectified")
-        stamp = self._stamp(taken_at)
         published.info.header.stamp = stamp
         self._image_pub.publish(image_from_array(array, "bgr8", stamp, self._cfg.optical_frame))
         self._info_pub.publish(published.info)
@@ -653,6 +664,7 @@ class CameraStream(Node):
         """
         published, stamp = self._published, self._stamp(taken_at)
         array = np.asarray(frame)
+        self._publish_brightness(array, stamp)
         rig = self._rig
         if rig is not None and array.shape[:2] != (rig.frame_height, rig.frame_width):
             self._tally.count("wrong_size")
@@ -694,6 +706,15 @@ class CameraStream(Node):
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
+
+    def _publish_brightness(self, frame: Any, stamp: Any) -> None:
+        """The decoded frame's mean luma on :data:`pepin.gaze_gate.BRIGHTNESS_TOPIC` under the
+        frame's own stamp, before any of its pictures go out."""
+        msg = Illuminance()
+        msg.header.stamp = stamp
+        msg.header.frame_id = self._cfg.optical_frame
+        msg.illuminance = frame_brightness(frame)
+        self._brightness_pub.publish(msg)
 
     def _frame_time(self, headers: dict[str, str]) -> float | None:
         """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
