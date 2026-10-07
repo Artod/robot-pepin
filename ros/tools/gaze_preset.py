@@ -1,17 +1,23 @@
 #!/usr/bin/env python3
-"""The gaze arbiter's follow-in-zone and glance knobs set live in one go (config/gaze_presets.json).
+"""The gaze arbiter's follow-in-zone, glance and reverse-timing knobs set live in one go
+(config/gaze_presets.json).
 
     uv run python ros/tools/gaze_preset.py baseline   the head of drives 306/307 (2026-10-05)
                                                       exactly: a path re-aim at every 8 deg
                                                       shift, a path look that lapses home when
                                                       its source goes quiet, the reverse look
-                                                      answered on arrival, no atomic glance, a
-                                                      saccade home after the drive
+                                                      after 1 s of reversing and answered on
+                                                      arrival, no atomic glance, a saccade home
+                                                      after the drive
     uv run python ros/tools/gaze_preset.py follow     the knobs' defaults: a 22 deg zone, 0.3 s
                                                       hysteresis, 2 s cooldown, no saccade in
                                                       the plan's last 0.5 s or 0.35 m, the aim
                                                       held through a mode change, glances of 3
-                                                      frames or 0.6 s, home at 45 deg/s
+                                                      frames or 0.6 s, the reverse look at the
+                                                      leg's start when the plan (>= 0.15 m) or
+                                                      a recovery announces it and let go at the
+                                                      first forward command (a stand held up to
+                                                      1.5 s), home at 45 deg/s
     uv run python ros/tools/gaze_preset.py show       both sets beside the knobs' defaults; no
                                                       node touched
 

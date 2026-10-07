@@ -15,7 +15,8 @@ depth frames at each, how long to hold, which band, how long the request may liv
   ``dwell_s`` more before letting go;
 * a GLANCE (``hold_s`` > 0) is atomic once it holds the head: it is answered at ``frames`` frames
   or ``hold_s`` after settling, whichever comes first, and until then neither its TTL, nor a
-  release, nor a newcomer of its own band takes the head from it; a better band does;
+  release, nor a newcomer of its own band takes the head from it; a better band does, and so
+  does its own source's :meth:`Arbiter.withdraw`;
 * every look that held the head is booked when it lets go (:class:`HeldLook`): how long, how it
   ended, and the frames fused while it held the head still (late frames are counted for
   :data:`LATE_S`), for the node's report;
@@ -382,6 +383,22 @@ class Arbiter:
                     self._finish(held, "preempted", f"by {by}", now)
         self._deliver()
         return sum(1 for h in refused if not h.let_go)
+
+    def withdraw(self, source: str, now: float, by: str) -> int:
+        """Take back every request of ``source``, as preempted ``by``, a glance under way too:
+        its own asker's word, which :meth:`release` is not (the reverse look let go at the first
+        forward command); how many went."""
+        with self._lock:
+            mine = [h for h in self._held if h.look.source == source]
+            for held in mine:
+                self._finish(held, "preempted", f"by {by}", now)
+        self._deliver()
+        return len(mine)
+
+    def holds(self, source: str) -> bool:
+        """Whether a request of ``source`` holds the head."""
+        with self._lock:
+            return self._active is not None and self._active.look.source == source
 
     def glancing(self, source: str) -> bool:
         """Whether ``source`` holds the head with a glance not yet answered."""
