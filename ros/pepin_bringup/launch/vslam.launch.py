@@ -1052,7 +1052,7 @@ def generate_launch_description() -> LaunchDescription:
             # What that odometry reads: depth (rgbd_odometry, at the depth's rate), stereo
             # (stereo_odometry on the two eyes, at the camera's) or vio (OpenVINS in its own
             # container, ros/laptop.sh vio). See the node's comment above.
-            DeclareLaunchArgument("vo_input", default_value="stereo"),
+            DeclareLaunchArgument("vo_input", default_value="vio"),
             DeclareLaunchArgument("static_camera_tf", default_value="false"),
             OpaqueFunction(function=_describe),
         ]

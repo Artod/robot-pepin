@@ -373,7 +373,7 @@ case "${1:-}" in
         # all until the node's vo_publish flag is turned on (ros/flags.sh set visual_odometry
         # vo_publish true).
         VO=true
-        VO_INPUT=stereo
+        VO_INPUT=vio  # the baseline since 2026-10-06 (40 drives); --vo-stereo for rtabmap's odometry
         # The board's base bridge publishes base_link -> camera_link live from the neck's
         # encoders, so the camera node's static edge is off; --fixed-head puts it back for a rig
         # without a neck. A wrong choice is two publishers of one edge, or none; the camera node's
@@ -387,8 +387,9 @@ case "${1:-}" in
                 --fixed-head) STATIC_CAMERA_TF=true ;;
                 --no-vo) VO=false ;;
                 --vo-depth) VO_INPUT=depth ;;
+                --vo-stereo) VO_INPUT=stereo ;;
                 --vo-vio) VO_INPUT=vio ;;
-                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] [--vo-vio]"; exit 2 ;;
+                *) echo "usage: ros/laptop.sh vslam [--fresh] [--camera-only] [--fixed-head] [--no-vo] [--vo-depth] [--vo-stereo] [--vo-vio]"; exit 2 ;;
             esac
         done
         # --fresh: an empty room, which is one fact on disk — the database gone. The launch reads

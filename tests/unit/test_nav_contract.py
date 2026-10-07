@@ -2732,7 +2732,8 @@ def test_the_visual_odometry_runs_on_the_laptop_behind_one_launch_switch() -> No
     declared = {
         ast.unparse(c.args[0]): sf.keywords(c) for c in sf.calls_to(vslam, "DeclareLaunchArgument")
     }
-    assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'stereo'", "today's input"
+    # vio is the baseline since 2026-10-06 (40 drives); --vo-stereo keeps rtabmap's odometry
+    assert ast.unparse(declared["'vo_input'"]["default_value"]) == "'vio'", "today's input"
     assert ast.literal_eval(sf.assignments(vslam)["VO_INPUTS"]) == ("depth", "stereo", "vio")
     stereo = sf.keywords(_node_named(vslam, "stereo_odometry"))
     assert ast.unparse(stereo["executable"]) == "'stereo_odometry'"
