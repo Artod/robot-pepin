@@ -43,6 +43,7 @@ QUIET = {
     "RoundRobin",
     "GoalUpdated",
     "KeepPathWhileValid",
+    "TruncatePath",  # the validity check's view of the plan, one line per check (2026-10-07)
 }
 # A node whose name holds one of these is a recovery: its start is a line of its own.
 RECOVERY = ("Wait", "Spin", "BackUp", "DriveOnHeading", "Clear", "Rock", "Retreat")
