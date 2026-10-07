@@ -1,0 +1,31 @@
+OpenVINS's ROS 2 IMU subscription (ROS2Visualizer::setup_subscribers) is rclcpp::SensorDataQoS():
+best effort, KEEP_LAST 5, no parameter and no QoS overrides, so no config can change it. The head
+IMU's 200 Hz samples reach the laptop in bursts over WiFi/zenoh (21 drives of 2026-10-06/07: 72 %
+of receipt gaps under 0.5 ms; 4 samples per 20 ms most of the time, 8-12 in 19 % of samples, a
+largest burst of 24; up to 93 samples within 50 ms and 158 within 250 ms after a 354 ms stall),
+and the IMU callback shares the node's one mutually exclusive callback group with the image
+callbacks, which wait on camera_queue_mtx for the whole update. With 5 slots the oldest samples
+of a burst are overwritten before the callback runs: 16.8 % of the samples (21 % driving) never
+got an odomimu, 46 % of an 8-burst's, oldest first.
+
+The depth becomes the parameter imu_queue_depth, default 200: one second of samples at 200 Hz,
+1.3x the worst 250 ms seen. Best effort is kept. Separate callback group: not here, because
+openvins-reset.patch's swap of _app relies on the IMU callback sharing the service's group.
+--- a/ov_msckf/src/ros/ROS2Visualizer.cpp
++++ b/ov_msckf/src/ros/ROS2Visualizer.cpp
+@@ -285,9 +285,13 @@
+   _node->declare_parameter<std::string>("topic_imu", "/imu0");
+   _node->get_parameter("topic_imu", topic_imu);
+   parser->parse_external("relative_config_imu", "imu0", "rostopic", topic_imu);
+-  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS(),
++  // The IMU queue's depth (upstream: SensorDataQoS's 5): the samples arrive in bursts and wait while the image
++  // callback waits for an update, so 5 drops the oldest of each burst; 200 is 1 s at 200 Hz
++  int imu_queue_depth = 200;
++  _node->get_parameter_or<int>("imu_queue_depth", imu_queue_depth, 200);
++  sub_imu = _node->create_subscription<sensor_msgs::msg::Imu>(topic_imu, rclcpp::SensorDataQoS().keep_last(imu_queue_depth),
+                                                               std::bind(&ROS2Visualizer::callback_inertial, this, std::placeholders::_1));
+-  PRINT_INFO("subscribing to IMU: %s\n", topic_imu.c_str());
++  PRINT_INFO("subscribing to IMU: %s (queue depth %d)\n", topic_imu.c_str(), imu_queue_depth);
+ 
+   // Logic for sync stereo subscriber
+   // https://answers.ros.org/question/96346/subscribe-to-two-image_raws-with-one-function/?answer=96491#post-id-96491

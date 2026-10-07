@@ -41,6 +41,10 @@
 # keeper's rules read; poseimu and odomimu name their gravity frame global, then global_<n> after
 # the n-th reset. Every number is a parameter read at the moment of use (config/knobs.json's
 # vio_keeper block; vio.launch.py and the keeper set them).
+#
+# IMU_QUEUE=1 (default, on top of EXECUTOR=1 and RESET=1) applies patches/openvins-imu-queue.patch:
+# the IMU subscription's depth is the parameter imu_queue_depth, default 200 (upstream
+# SensorDataQoS's 5 lost 17 % of the head IMU's samples, the oldest of each WiFi burst).
 ARG BASE=pepin-laptop:xfeat
 FROM ${BASE}
 ARG OV_MASTER=69488123ed9362dd44b6f28e7f4680abbff1442b
@@ -48,11 +52,13 @@ ARG OV_PR500=0bd027a997f3ca911b3df504d20b00b60f371b31
 ARG MASK=0
 ARG EXECUTOR=1
 ARG RESET=1
+ARG IMU_QUEUE=1
 # Few jobs on purpose: the Docker VM also runs the live stack (Dockerfile.xfeat's reasoning).
 ARG JOBS=2
 COPY patches/openvins-frame-mask.patch /opt/openvins/patches/openvins-frame-mask.patch
 COPY patches/openvins-executor.patch /opt/openvins/patches/openvins-executor.patch
 COPY patches/openvins-reset.patch /opt/openvins/patches/openvins-reset.patch
+COPY patches/openvins-imu-queue.patch /opt/openvins/patches/openvins-imu-queue.patch
 RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
     && cd /ws_vio/src/open_vins \
     && git fetch -q origin pull/500/head \
@@ -62,11 +68,14 @@ RUN git clone -q https://github.com/rpng/open_vins.git /ws_vio/src/open_vins \
     && if [ "$EXECUTOR" = 1 ]; then git apply /opt/openvins/patches/openvins-executor.patch; fi \
     && if [ "$EXECUTOR" = 1 ] && [ "$RESET" = 1 ]; then \
            git apply /opt/openvins/patches/openvins-reset.patch; fi \
+    && if [ "$EXECUTOR" = 1 ] && [ "$RESET" = 1 ] && [ "$IMU_QUEUE" = 1 ]; then \
+           git apply /opt/openvins/patches/openvins-imu-queue.patch; fi \
     && { echo "open_vins master $OV_MASTER (2025-11-30)"; \
          echo "PR #500 head $OV_PR500 (Jazzy/24.04, Ceres 2.2 fix)"; \
          echo "frame mask patch: $MASK"; \
          echo "executor patch: $EXECUTOR"; \
          echo "reset patch: $RESET"; \
+         echo "imu queue patch: $IMU_QUEUE"; \
          echo "built tree $(git rev-parse HEAD)$(git diff --quiet || echo ' + patch')"; } \
        > /opt/openvins/SHAS \
     && rm -rf .git
