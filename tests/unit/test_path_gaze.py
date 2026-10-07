@@ -1,7 +1,8 @@
 """Path gaze and reverse gaze (pepin.path_gaze): the point ahead, the clamp, the dead-band, the
-following in a zone (hysteresis, cooldown, tail; the baseline preset is the dead-band), the
-rear's side, the tight rear, the plan's reverse leg and the reverse look's hold through a stand
-(the baseline preset is the leg's end)."""
+following in a zone (hysteresis, cooldown, tail; the baseline preset is the dead-band), its
+economy (no saccade standing or just stopped, the re-centre), the rear's side, the tight rear,
+the plan's reverse leg and the reverse look's hold through a stand (the baseline preset is the
+leg's end)."""
 
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ from pepin.path_gaze import (
     PathGazeLaw,
     ReverseLaw,
     ReverseWatch,
+    StandWatch,
     lookahead_m,
     path_aim,
     remaining_m,
@@ -260,6 +262,9 @@ def law_of(preset: str) -> PathGazeLaw:
         tail_s=knobs["path_tail_s"],
         tail_m=knobs["path_tail_m"],
         hold_s=knobs["path_hold_s"],
+        still_m_s=knobs["path_still_m_s"],
+        stall_guard_s=knobs["path_stall_guard_s"],
+        recentre_s=knobs["path_recentre_s"],
     )
 
 
@@ -281,6 +286,10 @@ def test_the_baseline_follower_is_the_dead_band_it_replaced() -> None:
             end_in_s=float(rng.uniform(0.0, 3.0)),
             left_m=float(rng.uniform(0.0, 1.0)),
             fresh=bool(rng.integers(2)),
+            standing=bool(rng.integers(2)),  # the economy's inputs change nothing at baseline
+            stopped_s=float(rng.uniform(0.0, 1.0)),
+            head=pan(float(rng.uniform(-60.0, 60.0))) if k % 3 else None,
+            home=HOME,
         )
         current = settle(current, wanted, 8.0)
         assert held == current
@@ -295,6 +304,13 @@ def test_the_follow_defaults_are_the_knobs_and_the_preset() -> None:
         FOLLOW.tail_s,
         FOLLOW.tail_m,
     ) == (22.0, 0.3, 2.0, 0.5, 0.35)
+    assert (
+        FOLLOW.still_m_s,
+        FOLLOW.still_deg,
+        FOLLOW.stall_guard_s,
+        FOLLOW.recentre_s,
+        FOLLOW.recentre_deg,
+    ) == (0.02, 60.0, 0.5, 1.0, 5.0)
 
 
 def test_the_head_follows_in_its_zone() -> None:
@@ -357,6 +373,124 @@ def test_the_plans_last_metres_are_the_tail_whatever_the_speed() -> None:
     follower.update(pan(2), 0.0, off)
     assert follower.update(pan(-38), 3.0, off, end_in_s=end_in, left_m=0.16) == pan(2)
     assert follower.update(pan(-38), 3.4, off, end_in_s=end_in, left_m=0.16) == pan(-38)
+
+
+def tilted(pan_deg: float, tilt_deg: float) -> Aim:
+    return Aim(math.radians(pan_deg), math.radians(tilt_deg))
+
+
+def test_the_stand_watch_reads_standing_and_the_commands_drop_to_zero() -> None:
+    watch = StandWatch()
+    watch.update(0.0, 0.0, 0.0, FOLLOW)
+    assert watch.standing and watch.stopped_for(0.0) == math.inf  # nothing moved yet: no drop
+    watch.update(0.01, 0.3, 0.1, FOLLOW)
+    assert not watch.standing  # turning in place is no stand
+    watch.update(0.15, 0.0, 0.2, FOLLOW)
+    assert not watch.standing and watch.stopped_for(0.2) == math.inf
+    watch.update(0.01, 0.05, 0.3, FOLLOW)
+    assert watch.standing and watch.stopped_for(0.3) == math.inf  # slow, but not zero
+    watch.update(0.0, 0.0, 0.4, FOLLOW)
+    watch.update(0.0, 0.0, 0.6, FOLLOW)
+    assert watch.stopped_for(0.7) == pytest.approx(0.3)  # from the first zero
+    watch.update(0.1, 0.0, 0.8, FOLLOW)
+    assert watch.stopped_for(0.8) == math.inf
+    watch.reset()
+    watch.update(0.0, 0.0, 1.0, FOLLOW)
+    assert watch.stopped_for(1.0) == math.inf
+    watch.update(0.0, 0.0, 1.0, replace(FOLLOW, still_m_s=0.0))
+    assert not watch.standing  # the knob at 0: never
+
+
+def test_no_saccade_while_the_cart_stands_unless_the_aim_is_far_off_the_head() -> None:
+    follower = PathFollower()
+    assert follower.update(pan(0), 0.0, FOLLOW) == pan(0)
+    for t in (3.0, 3.5, 4.0):  # out of the zone, past hysteresis and cooldown: held standing
+        assert follower.update(pan(40), t, FOLLOW, standing=True) == pan(0)
+    # 70 deg off: the zone's rules again, the hysteresis counted from the first such aim
+    assert follower.update(pan(-70), 4.2, FOLLOW, standing=True) == pan(0)
+    assert follower.update(pan(70), 4.4, FOLLOW, standing=True) == pan(0)
+    assert follower.update(pan(70), 4.6, FOLLOW, standing=True) == pan(70)
+    assert follower.update(pan(40), 7.0, FOLLOW) == pan(70)  # moving: the zone holds it
+    assert follower.update(pan(0), 7.2, FOLLOW) == pan(70)  # out since 7.2...
+    assert follower.update(pan(0), 7.5, FOLLOW) == pan(0)  # ...0.3 s
+
+
+def test_a_path_look_that_lost_the_head_takes_it_where_a_look_left_it() -> None:
+    """After a stall look at (-4, 63), standing: no re-aim to (-60, 48.5); the path look holds
+    the head where the stall look left it, and the first command that moves the cart aims at
+    once (the drive's departure look, wherever the zone would have kept it)."""
+    follower = PathFollower()
+    follower.update(pan(-60), 0.0, FOLLOW)
+    stall = tilted(-4.0, 63.4)
+    wanted = tilted(-60.0, 48.5)
+    held = follower.update(wanted, 1.5, FOLLOW, fresh=True, standing=True, head=stall, home=HOME)
+    assert held == stall
+    assert follower.update(wanted, 1.7, FOLLOW, standing=True, head=stall, home=HOME) == stall
+    assert follower.update(tilted(-10.0, 48.5), 1.9, FOLLOW, head=stall) == tilted(-10.0, 48.5)
+    # a stall look on the other side is too far off: the path look turns the head at once
+    follower.reset()
+    follower.update(pan(-60), 0.0, FOLLOW)
+    other = tilted(76.1, 58.0)
+    assert follower.update(wanted, 5.1, FOLLOW, fresh=True, standing=True, head=other) == wanted
+
+
+def test_a_head_at_home_stays_there_without_a_path_look_until_the_cart_moves() -> None:
+    """A drive's start: the plan bends 60 deg away, the cart stands; no look (the arbiter keeps
+    the head home), then the first forward command aims at once."""
+    follower = PathFollower()
+    for t in (0.0, 0.2, 0.4):
+        assert follower.update(pan(-60), t, FOLLOW, fresh=True, standing=True, home=HOME) is None
+    assert follower.update(pan(-60), 0.6, FOLLOW, fresh=True, home=HOME) == pan(-60)
+    off = replace(FOLLOW, still_deg=45.0)  # 60 deg off home is far enough at 45
+    follower.reset()
+    assert follower.update(pan(-60), 0.0, off, fresh=True, standing=True, home=HOME) == pan(-60)
+
+
+def test_no_saccade_just_after_the_command_dropped_to_zero() -> None:
+    follower = PathFollower()
+    follower.update(pan(0), 0.0, FOLLOW)
+    assert follower.update(pan(80), 3.0, FOLLOW, stopped_s=0.1) == pan(0)  # even 80 deg off
+    assert follower.update(pan(80), 3.4, FOLLOW, stopped_s=0.45) == pan(0)
+    assert follower.update(pan(80), 3.5, FOLLOW, stopped_s=0.55) == pan(0)  # out since 3.5
+    assert follower.update(pan(80), 3.9, FOLLOW, stopped_s=0.95) == pan(80)
+    follower.reset()  # a look that lost the head: held where it is, no write
+    follower.update(pan(0), 0.0, FOLLOW)
+    stall = tilted(30.0, 60.0)
+    assert follower.update(pan(-50), 3.0, FOLLOW, fresh=True, stopped_s=0.2, head=stall) == stall
+    off = replace(FOLLOW, stall_guard_s=0.0)
+    follower.reset()
+    follower.update(pan(0), 0.0, off)
+    assert follower.update(pan(80), 3.0, off, stopped_s=0.1, fresh=True) == pan(80)
+
+
+def test_the_head_re_centres_once_the_cart_has_turned_the_path_ahead() -> None:
+    """Drive 0365: the aim -24 set in a pivot, the cart's own turn brings the plan's aim to
+    -7..+2, all inside the zone of -24: the head moves once the aim has been within 5 deg of
+    straight ahead for 1 s."""
+    follower = PathFollower()
+    follower.update(pan(-60), 0.0, FOLLOW)
+    assert follower.update(pan(-24), 8.0, FOLLOW, fresh=True) == pan(-24)
+    trail = ((8.6, -19), (9.0, -13), (9.6, -7), (10.0, -5), (10.4, -5), (10.8, -4))
+    for t, deg in trail:
+        assert follower.update(pan(deg), t, FOLLOW) == pan(-24), t
+    assert follower.update(pan(-3), 11.0, FOLLOW) == pan(-3)  # 1.0 s within 5 deg of ahead
+    assert follower.update(pan(3), 12.5, FOLLOW) == pan(-3)  # once: within the zone of -3 now
+    off = replace(FOLLOW, recentre_s=0.0)
+    follower.reset()
+    follower.update(pan(-24), 8.0, off)
+    assert follower.update(pan(0), 12.0, off) == pan(-24)  # the zone alone, as before
+
+
+def test_the_re_centre_waits_for_the_cooldown_and_a_head_aside() -> None:
+    follower = PathFollower()
+    follower.update(pan(-15), 0.0, FOLLOW)
+    assert follower.update(pan(0), 0.0, FOLLOW) == pan(-15)
+    assert follower.update(pan(0), 1.5, FOLLOW) == pan(-15)  # 1.5 s ahead, the cooldown 2 s
+    assert follower.update(pan(0), 2.0, FOLLOW) == pan(0)
+    follower.reset()
+    follower.update(pan(-8), 0.0, FOLLOW)  # 8 deg aside is within half the zone: no move
+    assert follower.update(pan(2), 5.0, FOLLOW) == pan(-8)
+    assert follower.update(pan(2), 7.0, FOLLOW) == pan(-8)
 
 
 def test_the_time_to_the_plans_end() -> None:

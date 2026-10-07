@@ -1,5 +1,5 @@
 {
-  "_note": "Live sets of the gaze arbiter's follow-in-zone, glance and reverse-timing knobs (config/knobs.json's gaze block), applied by uv run python ros/tools/gaze_preset.py until the gaze node restarts. baseline: the head of drives 306/307 (2026-10-05) exactly: re-aim at every 8 deg shift, a path look that lapses home when its source goes quiet, the reverse look only after reverse_min_s of reversing and answered on arrival, no glance, a saccade home. follow: the knobs' defaults. The flags path_gaze, stall_look and reverse_gaze are separate (ros/flags.sh set gaze <flag> on).",
+  "_note": "Live sets of the gaze arbiter's follow-in-zone, glance and reverse-timing knobs (config/knobs.json's gaze block), applied by uv run python ros/tools/gaze_preset.py until the gaze node restarts. baseline: the head of drives 306/307 (2026-10-05) exactly: re-aim at every 8 deg shift, a path look that lapses home when its source goes quiet, re-aims while the cart stands or has just stopped and no re-centre, the reverse look only after reverse_min_s of reversing and answered on arrival, no glance, a saccade home. follow: the knobs' defaults. The flags path_gaze, stall_look and reverse_gaze are separate (ros/flags.sh set gaze <flag> on).",
   "baseline": {
     "path_deadband_deg": 8.0,
     "path_hyst_s": 0.0,
@@ -12,7 +12,10 @@
     "return_deg_s": 0.0,
     "reverse_min_m": 0.0,
     "reverse_recovery": 0,
-    "reverse_hold_s": 0.0
+    "reverse_hold_s": 0.0,
+    "path_still_m_s": 0.0,
+    "path_stall_guard_s": 0.0,
+    "path_recentre_s": 0.0
   },
   "follow": {
     "path_deadband_deg": 22.0,
@@ -26,6 +29,9 @@
     "return_deg_s": 45.0,
     "reverse_min_m": 0.15,
     "reverse_recovery": 1,
-    "reverse_hold_s": 1.5
+    "reverse_hold_s": 1.5,
+    "path_still_m_s": 0.02,
+    "path_stall_guard_s": 0.5,
+    "path_recentre_s": 1.0
   }
 }
