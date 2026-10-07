@@ -601,12 +601,13 @@ def _drive_into_the_dark(
     sway: tuple[float, float] = (0, 0),
     used: Callable[[float], int] = _in_the_dark,
     tracked: Callable[[float], int] | None = None,
+    sway_rad_s: float = 0.2,
 ) -> None:
     """The cart drives an arc (0.2 m/s, 0.3 rad/s) with the head still; 50 features for the
     first second, then none (the dark kitchen of 2026-10-05) -- ``used`` and ``tracked`` (health,
     none by default) give other counts by time; odomimu around every pose; /mast/state swaying
-    at 0.2 rad/s (11.5 deg/s) inside ``sway`` (seconds). vio_lost_s 0.95: ten 0.1 s ticks of the
-    test's clock sum to 0.99999, not 1.0."""
+    at ``sway_rad_s`` (0.2: 11.5 deg/s) inside ``sway`` (seconds). vio_lost_s 0.95: ten 0.1 s
+    ticks of the test's clock sum to 0.99999, not 1.0."""
     assert node.set_parameters([ros_stubs.Parameter("vio_lost_s", value=0.95)])[0].successful
     for i in range(round(seconds * 10)):
         t = 0.1 * i
@@ -624,7 +625,7 @@ def _drive_into_the_dark(
                 mast.header.stamp = stamp_from_seconds(T0 + s)
                 mast.name = ["mast_roll", "mast_pitch", "mast_yaw"]
                 mast.position = [0.001, 0.0, 0.0]
-                mast.velocity = [0.2, 0.0, 0.0]
+                mast.velocity = [sway_rad_s, 0.0, 0.0]
                 node.subs["/mast/state"][1](mast)
         _feed(node, t, _arc(t), 0.0)
 
@@ -746,14 +747,14 @@ def test_an_unreadable_health_message_is_counted_and_changes_nothing() -> None:
 def test_the_mast_swaying_withholds_the_yaw_rate_while_lost(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The same dark drive with the mast swaying at 11.5 deg/s (over gate_sway_dps 6) from t 2.5
-    to 3.0: those yaw rates are withheld and counted as mast (a pose is judged at both ends of
-    its step, so the one after the sway goes too); the rest still flow."""
+    """The same dark drive with the mast swaying at 22.9 deg/s (over vio_gate_sway_dps 20) from
+    t 2.5 to 3.0: those yaw rates are withheld and counted as mast (a pose is judged at both ends
+    of its step, so the one after the sway goes too); the rest still flow."""
     clock = _Clock()
     monkeypatch.setattr(relay, "time", clock)
     node = _node()
     assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
-    _drive_into_the_dark(node, clock, sway=(2.45, 3.0))
+    _drive_into_the_dark(node, clock, sway=(2.45, 3.0), sway_rad_s=0.4)
     yaw = [m for m in node.pubs[VO_TWIST_TOPIC].sent if m.twist.covariance[0] >= 1e6]
     w = node._tally.take()
     assert 5 <= w.counts["yaw_mast"] <= 7
@@ -761,6 +762,74 @@ def test_the_mast_swaying_withholds_the_yaw_rate_while_lost(
     stamps = [round(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0, 1) for m in yaw]
     assert not any(2.5 <= s <= 3.0 for s in stamps), "nothing inside the sway"
     node.close()
+
+
+def test_under_vio_the_sway_gate_is_the_vio_pair_and_rtabmaps_inputs_keep_the_gates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A mast swaying at 11.5 deg/s from t 0.25 to 0.8 (over gate_sway_dps 6, under
+    vio_gate_sway_dps 20): under vio every pose of the lit drive sends its whole twist; with
+    vio_gate_sway_dps set live to 6 the swaying ones are withheld as gaze_swaying. A stereo relay
+    judges by gate_sway_dps / gate_sway_deg."""
+    for dps, withheld in ((None, False), (6.0, True)):
+        clock = _Clock()
+        monkeypatch.setattr(relay, "time", clock)
+        node = _node()
+        assert node._gaze.gate.sway_dps == 20.0 and node._gaze.gate.sway_deg == 1.0
+        assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+        if dps is not None:
+            change = ros_stubs.Parameter("vio_gate_sway_dps", value=dps)
+            assert node.set_parameters([change])[0].successful
+            assert node._gaze.gate.sway_dps == dps
+        _drive_into_the_dark(node, clock, seconds=1.0, sway=(0.25, 0.8))
+        counts = node._tally.take().counts
+        full = [m for m in node.pubs[VO_TWIST_TOPIC].sent if m.twist.covariance[0] < 1.0]
+        assert (counts["gaze_swaying"] > 0) == withheld, dps
+        assert (len(full) == 9) != withheld, "t 0.1-0.9 whole unless the sway withholds"
+        node.close()
+    with ros_stubs.parameters(vo_input="stereo"):
+        stereo = VisualOdometry()
+    assert stereo._sway_knobs() == (6.0, 1.0), "rtabmap's inputs: the gate's own pair"
+    assert stereo._gaze.gate.sway_dps == 6.0
+    change = ros_stubs.Parameter("vio_gate_sway_dps", value=30.0)
+    assert stereo.set_parameters([change])[0].successful
+    assert stereo._gaze.gate.sway_dps == 6.0, "the VIO pair does not reach a stereo relay"
+    stereo.close()
+
+
+def test_a_coasting_filter_sends_its_twist_with_the_sigma_the_law_grows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """vio_lost_rule tracked on a plain wall: the update uses 50 features until t 1.0 and none
+    after while 40 tracks hold, so every pose sends its whole twist. Before t 1.0 the vx variance
+    is the IMU's own (9e-4 through the chip's axes: base x = IMU z); from then the sigma grows by
+    the coasting law, at t 2.0 (age 1.1 s since the frame at 0.9) x(1 + 0.5 * 0.95) = x1.475, at
+    t 3.9 the cap x2.25; the yaw rate's variance stays the IMU's 4e-6. No health heard: x1."""
+    clock = _Clock()
+    monkeypatch.setattr(relay, "time", clock)
+    node = _node(vio_lost_rule="tracked")
+    assert node.set_parameters([ros_stubs.Parameter("vo_output", value="twist")])[0].successful
+    _drive_into_the_dark(node, clock, tracked=lambda _t: 40)
+    full = {
+        round(m.header.stamp.sec + m.header.stamp.nanosec * 1e-9 - T0, 1): m.twist.covariance
+        for m in node.pubs[VO_TWIST_TOPIC].sent
+        if m.twist.covariance[0] < 1.0
+    }
+    assert len(full) == 39
+    assert full[0.5][0] == pytest.approx(9e-4), "fresh: the update of the frame before"
+    assert full[2.0][0] == pytest.approx(9e-4 * 1.475**2, rel=1e-6)
+    assert full[2.0][7] == pytest.approx(1e-4 * 1.475**2, rel=1e-6), "vy alike (base y = IMU x)"
+    assert full[3.9][0] == pytest.approx(9e-4 * 2.25**2, rel=1e-6), "the cap"
+    assert full[3.9][35] == pytest.approx(4e-6), "the yaw rate is not inflated"
+    node._report()
+    line = node.get_logger().texts("info")[-1]
+    assert "inflated (1 + 0.5 per s past 0.15 s, cap 2.25)" in line
+    assert node.set_parameters([ros_stubs.Parameter("vio_coast_per_s", value=0.0)])[0].successful
+    assert node._coasting.multiplier(T0 + 3.9) == 1.0, "0 is off, live"
+    node.close()
+    quiet = _node()
+    assert quiet._coasting.multiplier(T0 + 10.0) == 1.0, "no health heard: nothing measured"
+    quiet.close()
 
 
 def _imu_state(t: float, pan_rate: float) -> tuple[Any, Any]:

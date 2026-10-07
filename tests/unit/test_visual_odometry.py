@@ -949,3 +949,29 @@ def test_the_lever_carries_the_gyro_noise_into_vx_and_vy() -> None:
     assert out[1] == pytest.approx(-0.0012 * 2.8e-4)
     plain = base_twist_covariance(source, _CHIP)
     assert plain is not None and (plain[0], plain[5]) == pytest.approx((9e-4, 0.0))
+
+
+def test_the_coasting_law_grows_from_the_last_updating_frame_to_its_cap() -> None:
+    """m(age) = min(1 + 0.5 * max(age - 0.15, 0), 2.25), age from the last frame whose update
+    used >= 20 features (camera time); unknown before one and after a reset: 1."""
+    from pepin.visual_odometry import Coasting
+
+    law = Coasting()
+    assert law.age(10.0) is None and law.multiplier(10.0) == 1.0
+    law.update(10.0, 25)
+    law.update(10.1, 5)  # coasting: not an update
+    assert law.age(10.1) == pytest.approx(0.1)
+    assert law.multiplier(10.1) == 1.0, "within free_s"
+    assert law.multiplier(11.15) == pytest.approx(1.5)
+    assert law.multiplier(20.0) == pytest.approx(2.25), "the cap"
+    assert law.age(9.9) == 0.0, "a stamp before the update is fresh"
+    law.update(9.0, 50)  # older than the one held: ignored
+    assert law.age(10.5) == pytest.approx(0.5)
+    law.min_features = 0  # off the features rule: any update with one feature counts
+    law.update(10.4, 1)
+    assert law.age(10.5) == pytest.approx(0.1)
+    law.per_s = 0.0
+    assert law.multiplier(20.0) == 1.0, "0 is off"
+    law.per_s = 0.5
+    law.reset()
+    assert law.multiplier(20.0) == 1.0, "a new filter: unknown"

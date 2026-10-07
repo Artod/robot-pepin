@@ -55,6 +55,11 @@ __all__ = [
     "REST_YAW_RAD_S",
     "SCALE_ERROR",
     "SIGMA_FLOOR_M",
+    "VIO_COAST_FREE_S",
+    "VIO_COAST_MAX",
+    "VIO_COAST_PER_S",
+    "VIO_GATE_SWAY_DEG",
+    "VIO_GATE_SWAY_DPS",
     "VIO_IMU_HALF_SAMPLE_S",
     "VIO_IMU_LAG_S",
     "VIO_LOST_RULE",
@@ -75,6 +80,7 @@ __all__ = [
     "VIO_TWIST_MATCH_S",
     "VIO_WHEEL_DIFF_M_S",
     "WEIGHTLESS_VARIANCE",
+    "Coasting",
     "EvenRate",
     "ImuQueue",
     "ImuState",
@@ -156,6 +162,29 @@ VIO_REST_SPEED_M_S = 0.03
 # more than 0.2 m/s against 1.1 % (scratch/vio_lost_rule/replay.py). So `used` stays the default.
 VIO_LOST_RULES = ("used", "tracked")
 VIO_LOST_RULE = "used"
+# THE COASTING LAW (:class:`Coasting`, the relay's vio_coast_* knobs): a filter whose updates use
+# few features propagates its velocity on the accelerometer, and its reported covariance grows
+# slower than its error. Replayed over drives 0331-0363 (33, 1137 moving s; scratch/vio_push/
+# coast.py, coast_fit.py), the sent twists' vx multiplier s90 at the shipped sigma by seconds since
+# the last update that used >= vio_min_features: 1.14 under 0.15 s, 1.42 at 0.6-1.0, 1.86 at
+# 1.0-1.5, 2.31 at 1.5-2.5, 2.57 past 4 s. The sigma of vx and vy is multiplied by
+# min(1 + VIO_COAST_PER_S * max(age - VIO_COAST_FREE_S, 0), VIO_COAST_MAX), the law that holds
+# every age's s90 to the fresh twists' (inflated: 1.06-1.27 per bin); the yaw rate (the gyro) is
+# left alone, its multiplier shows no trend with the age.
+VIO_COAST_PER_S = 0.5
+VIO_COAST_FREE_S = 0.15
+VIO_COAST_MAX = 2.25
+# THE VIO'S OWN SWAY GATE (the relay's vio_gate_sway_dps / vio_gate_sway_deg under vo_input vio;
+# rtabmap's inputs and the depth consumers keep gate_sway_dps 6 / gate_sway_deg 1): the mast's
+# sway blurs a frame for depth, but OpenVINS's velocity rides the IMU and the composition
+# subtracts the sway through TF. The twists the 6 deg/s gate withheld while moving, replayed over
+# the 33 drives (scratch/vio_push/gate.py): vx multiplier s50 1.15 against 0.80 for the passed,
+# 1.2 % off the truth by > 0.2 m/s against 0.9 %, flat up to 20 deg/s (1.05 / 1.19 / 1.27 at
+# 6-10 / 10-15 / 15-20) and worse past it (1.68 at 20-30, 3.0 beyond); the few windows over 1 deg
+# 2.74 (n 12). At 20 / 1 the full twists per moving second go 2.71 -> 5.26, the added ones s50 1.04
+# [0.99, 1.15], 1.2 % over 0.2 m/s. Saccade frames stay gated: s50 1.90, 31 % over 0.1 m/s.
+VIO_GATE_SWAY_DPS = 20.0
+VIO_GATE_SWAY_DEG = 1.0
 # /zupt is published while the board's witnesses agree on rest; heard within this, it holds.
 ZUPT_FRESH_S = 0.5
 # A wheel speed or a feature count older than this says nothing any more.
@@ -1124,6 +1153,57 @@ class YawOnly:
         """A new filter (a re-init, a restart, an input switch): nothing is lost, nothing seen."""
         self._visual = None
         self._since = None
+
+
+class Coasting:
+    """How long OpenVINS has coasted on its IMU, and what that costs its velocity's sigma.
+
+    ``update`` takes each frame's health (``/ov_msckf/health``: its camera time and the features
+    its update used, MSCKF + SLAM); the age at a sample's stamp is the time since the last frame
+    whose update used at least ``min_features`` (one, when that is 0), and the sigma multiplier
+
+        m(age) = min(1 + per_s * max(age - free_s, 0), max_multiplier)
+
+    (:data:`VIO_COAST_PER_S` and beside it for the measurement). With no such frame since the
+    start or the last :meth:`reset` (a new filter, no health heard) the age is unknown and the
+    multiplier is 1: nothing measured, nothing changed. Stamps are the data's own (camera time).
+    """
+
+    def __init__(
+        self,
+        per_s: float = VIO_COAST_PER_S,
+        free_s: float = VIO_COAST_FREE_S,
+        max_multiplier: float = VIO_COAST_MAX,
+        min_features: int = VIO_MIN_FEATURES,
+    ) -> None:
+        self.per_s = per_s  # live: vio_coast_per_s; 0 is off
+        self.free_s = free_s  # live: vio_coast_free_s
+        self.max_multiplier = max_multiplier  # live: vio_coast_max
+        self.min_features = min_features  # live: vio_min_features
+        self._updated: float | None = None  # the camera time of the last frame that updated
+
+    def update(self, t: float, used: int) -> None:
+        """One frame's health: its camera time ``t`` and the features its update used."""
+        if used >= max(self.min_features, 1) and (self._updated is None or t > self._updated):
+            self._updated = t
+
+    def age(self, stamp: float) -> float | None:
+        """Seconds from the last updating frame to ``stamp`` (0 at most), ``None`` unknown."""
+        if self._updated is None:
+            return None
+        return max(stamp - self._updated, 0.0)
+
+    def multiplier(self, stamp: float) -> float:
+        """The sigma multiplier for vx and vy of a sample stamped ``stamp`` (1 when unknown)."""
+        age = self.age(stamp)
+        if age is None or self.per_s <= 0.0:
+            return 1.0
+        grown = 1.0 + self.per_s * max(age - self.free_s, 0.0)
+        return max(1.0, min(grown, self.max_multiplier))
+
+    def reset(self) -> None:
+        """A new filter (a re-init, a restart, an input switch): no update seen yet."""
+        self._updated = None
 
 
 class VioGuard:

@@ -314,6 +314,16 @@
     "gate_sway_dps": {"default": 6.0, "range": [0.0, 360.0],
       "note": "a frame whose window holds a mast sway rate above this (deg/s, the norm of /mast/state's velocities, the base bridge's head gyro minus base yaw and neck) is dropped as swaying; small sway is kept because the bridge's TF corrects it. 0 is off (as shipped: /mast/state does not exist before the head IMU); vio.md proposes 10 (the 5.3 Hz ring peaks at 6.7 deg/s, a knock is faster)"},
     "gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
-      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"}
+      "note": "a frame whose window holds a mast sway angle above this (deg, the norm of /mast/state's positions) is dropped as swaying: beyond what the TF correction is trusted for (a knock, a runaway). 0 is off (as shipped); vio.md proposes 1.0"},
+    "vio_gate_sway_dps": {"default": 20.0, "range": [0.0, 360.0],
+      "note": "vo_input vio: the mast-sway rate (deg/s) over which a pose's frame is withheld, in place of gate_sway_dps (rtabmap's inputs and the depth consumers keep theirs): OpenVINS's velocity rides the IMU and the composition subtracts the sway through TF. Drives 0331-0363 replayed (scratch/vio_push/gate.py): the twists the 6 deg/s gate withheld scored a vx sigma multiplier 1.05 / 1.19 / 1.27 at 6-10 / 10-15 / 15-20 deg/s, 1.68 at 20-30, 3.0 beyond (the passed 0.80); at 20 the full twists per moving second 2.71 -> 5.26, 1.2 % of all off the truth by > 0.2 m/s (0.9 % before); 0 is off"},
+    "vio_gate_sway_deg": {"default": 1.0, "range": [0.0, 10.0],
+      "note": "vo_input vio: the mast-sway angle (deg) over which a pose's frame is withheld, in place of gate_sway_deg; the 12 moving frames over 1 deg of drives 0331-0363 scored a vx multiplier 2.74, so it stays at the gate's 1; 0 is off"},
+    "vio_coast_per_s": {"default": 0.5, "range": [0.0, 10.0],
+      "note": "vo_input vio, vo_output twist: vx and vy sigma x min(1 + this * max(age - vio_coast_free_s, 0), vio_coast_max), age = seconds since OpenVINS's last update that used vio_min_features (/ov_msckf/health msckf + slam); the coasting filter's velocity drifts faster than its covariance says (drives 0331-0363, scratch/vio_push/coast_fit.py: vx s90 1.14 fresh, 1.86 at 1.0-1.5 s, 2.31 at 1.5-2.5 s, 2.57 past 4 s; with the law 1.06-1.27 per bin); 0 is off"},
+    "vio_coast_free_s": {"default": 0.15, "range": [0.0, 10.0],
+      "note": "vo_input vio: the coasting age (s) under which the sigma is not inflated: the update of the frame before (a pose is judged before its own frame's health arrives)"},
+    "vio_coast_max": {"default": 2.25, "range": [1.0, 10.0],
+      "note": "vo_input vio: the coasting multiplier's ceiling (the s90 past 2.5 s, 2.36-2.57, over the fresh 1.14)"}
   }
 }

@@ -31,7 +31,16 @@ from pepin.stall_look import AHEAD_M as STALL_AHEAD_M
 from pepin.stall_look import CLUSTER_M as STALL_CLUSTER_M
 from pepin.stall_look import MARGIN_M as STALL_MARGIN_M
 from pepin.tsdf import band_half_z_m
-from pepin.visual_odometry import VIO_MAX_SPEED_M_S, VIO_RESTART_REJECTS, VIO_WHEEL_DIFF_M_S
+from pepin.visual_odometry import (
+    VIO_COAST_FREE_S,
+    VIO_COAST_MAX,
+    VIO_COAST_PER_S,
+    VIO_GATE_SWAY_DEG,
+    VIO_GATE_SWAY_DPS,
+    VIO_MAX_SPEED_M_S,
+    VIO_RESTART_REJECTS,
+    VIO_WHEEL_DIFF_M_S,
+)
 from pepin.volume_scan import MARKS_MAX_Z_M, MARKS_MIN_Z_M
 
 REPO = Path(__file__).resolve().parents[2]
@@ -68,6 +77,12 @@ NAMED = {
     ("visual_odometry", "vio_max_speed_m_s"): VIO_MAX_SPEED_M_S,
     ("visual_odometry", "vio_wheel_diff_m_s"): VIO_WHEEL_DIFF_M_S,
     ("visual_odometry", "vio_restart_rejects"): VIO_RESTART_REJECTS,
+    # the VIO's own sway gate and the coasting law (pepin.visual_odometry)
+    ("visual_odometry", "vio_gate_sway_dps"): VIO_GATE_SWAY_DPS,
+    ("visual_odometry", "vio_gate_sway_deg"): VIO_GATE_SWAY_DEG,
+    ("visual_odometry", "vio_coast_per_s"): VIO_COAST_PER_S,
+    ("visual_odometry", "vio_coast_free_s"): VIO_COAST_FREE_S,
+    ("visual_odometry", "vio_coast_max"): VIO_COAST_MAX,
     # the VIO's feed: the gate's window as every gated node shapes it
     ("vio_feed", "gate_exposure_s"): EXPOSURE_S,
     ("vio_feed", "gate_stamp_end"): STAMP_END,
