@@ -7,14 +7,14 @@ be compared write for write.
 :func:`replay` drives a fixed plan with a list of twists (only names the gaze node has had since
 2026-10-05 are used, so it runs on an older checkout: scratch/gaze_follow/baseline_capture.py);
 :func:`replay_tape` replays a whole taped drive (:class:`Tape`): its twists, plans, poses, local
-costmaps and stall looks, each at its own time.
+costmaps, stall looks and the controller's status (who drives the wheels), each at its own time.
 """
 
 from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -116,9 +116,11 @@ def replay(
     *,
     knobs: dict[str, Any] | None = None,
     after_s: float = 3.0,
+    route: tuple[tuple[float, float], ...] = TURN_LEFT,
 ) -> list[Write]:
     """Drive the node through one drive of these 10 Hz commands with path and reverse gaze on,
-    ``knobs`` set live, then ``after_s`` at rest after the drive's end; every write it made."""
+    ``knobs`` set live, along a fixed plan through ``route`` (the cart stays at its start,
+    facing +x), then ``after_s`` at rest after the drive's end; every write it made."""
     clock = [T0]
     node._now = lambda: clock[0]
     for name, value in {"path_gaze": True, "reverse_gaze": True, **(knobs or {})}.items():
@@ -127,7 +129,7 @@ def replay(
     head = [0.0, home_tilt]
     sent = node._link.sent
     writes: list[Write] = []
-    node._on_plan(plan())
+    node._on_plan(plan(route))
     node._link.on_message({"type": "state", "moving": False, "v": 0.0, "w": 0.0, **_ticks()})
     node._on_nav_status(NAV, goals(9))
     ticks = 2 * len(v) + round(after_s / TICK_S)
@@ -187,6 +189,7 @@ class Tape:
     costmap: list[list[Any]]
     stall: list[list[float]]
     writes: list[list[Any]]
+    follow: list[list[float]] = field(default_factory=list)  # [t, 1 while FollowPath runs]
 
     @classmethod
     def load(cls, run: str) -> Tape:
@@ -262,6 +265,7 @@ def replay_tape(
         [(row[0], "a plan", row[1]) for row in tape.plan]
         + [(row[0], "b grid", row) for row in tape.costmap]
         + [(row[0], "c stall", row) for row in tape.stall]
+        + [(row[0], "a follow", row[1]) for row in tape.follow]
         + [(tape.end_s, "d end", None)],
         key=lambda event: (event[0], event[1]),
     )
@@ -276,6 +280,9 @@ def replay_tape(
             _at, what, row = events.pop(0)
             if what == "a plan":
                 node._on_plan(plan(tuple((x, y) for x, y in row)))
+            elif what == "a follow":
+                if hasattr(node, "_on_driver_status"):  # the node since 2026-10-06
+                    node._on_driver_status("follow_path", goals(1) if row else goals())
             elif what == "b grid":
                 node._on_costmap(grid(row[1], row[2], row[3]))
             elif what == "c stall":

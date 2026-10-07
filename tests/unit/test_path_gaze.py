@@ -1,6 +1,7 @@
 """Path gaze and reverse gaze (pepin.path_gaze): the point ahead, the clamp, the dead-band, the
 following in a zone (hysteresis, cooldown, tail; the baseline preset is the dead-band), the
-rear's side and the tight rear."""
+rear's side, the tight rear, the plan's reverse leg and the reverse look's hold through a stand
+(the baseline preset is the leg's end)."""
 
 from __future__ import annotations
 
@@ -23,6 +24,7 @@ from pepin.path_gaze import (
     path_aim,
     remaining_m,
     reverse_aim,
+    reverse_leg_m,
     settle,
     tight_rear,
     time_to_end,
@@ -133,6 +135,95 @@ def test_a_reverse_look_keeps_its_side_while_the_controller_wiggles() -> None:
     assert held.side == sides[0]
     held.update(-0.1, sides[0] * 0.5, 8.1, law)
     assert held.side == -sides[0]
+
+
+# Drive 0358's first plan (+0.12 s, map) and the cart docked at the printer facing -x: Hybrid-A*'s
+# departure, three 0.078 m steps backwards to a cusp, then forward round to the left.
+PLAN_0358 = np.array(
+    [
+        [-0.975, 0.324],
+        [-0.897, 0.324],
+        [-0.819, 0.324],
+        [-0.742, 0.309],
+        [-0.807, 0.352],
+        [-0.851, 0.417],
+        [-0.866, 0.494],
+        [-0.862, 0.573],
+    ]
+)
+DOCKED_0358 = (-0.9726, 0.3191, -3.07698)
+
+
+def test_the_plans_reverse_leg_runs_from_the_cart_to_its_first_cusp() -> None:
+    assert reverse_leg_m(PLAN_0358, DOCKED_0358) == pytest.approx(0.234, abs=0.002)
+    facing_plus_x = (DOCKED_0358[0], DOCKED_0358[1], 0.0)
+    assert reverse_leg_m(PLAN_0358, facing_plus_x) == 0.0  # the same steps lead it forwards
+    # from the cart's nearest vertex: half way back, the rest of the leg
+    assert reverse_leg_m(PLAN_0358, (-0.85, 0.33, -3.08)) == pytest.approx(0.078, abs=0.002)
+    # at the cusp the plan goes on forwards, round to the left
+    assert reverse_leg_m(PLAN_0358, (-0.745, 0.31, -3.08 + 0.4)) == 0.0
+    behind = (0.0, 0.0, math.pi)  # a straight plan behind the cart: backwards to its end
+    assert reverse_leg_m(STRAIGHT, behind) == pytest.approx(3.95)
+    repeated = np.array([[0.0, 0.0], [0.0, 0.0], [-0.1, 0.0], [-0.2, 0.0]])
+    assert reverse_leg_m(repeated, (0.0, 0.0, 0.0)) == pytest.approx(0.2)  # a repeat is no step
+    assert reverse_leg_m(np.zeros((1, 2)), (0.0, 0.0, 0.0)) == 0.0
+    assert reverse_leg_m(STRAIGHT, (3.95, 0.0, math.pi)) == 0.0  # nothing left
+
+
+def test_a_reverse_look_is_held_through_a_short_stand_until_the_first_forward_twist() -> None:
+    law = ReverseLaw()  # hold_s 1.5
+    watch = ReverseWatch()
+    watch.update(-0.1, 0.3, 0.0, law)
+    watch.announce("the plan's 0.23 m reverse leg")
+    side = watch.hold()
+    watch.update(0.0, 0.0, 1.0, law)  # the leg ends: a stand
+    assert watch.looking and not watch.reversing and watch.announced == ""
+    watch.update(-0.1, -0.5, 2.4, law)  # backing again within the stand: the same look, its side
+    assert watch.looking and watch.side == side and watch.reversing_for(2.6) == pytest.approx(0.2)
+    watch.update(0.01, 0.0, 2.7, law)  # a creep is no forward command
+    assert watch.looking
+    watch.update(0.08, 0.0, 2.8, law)  # the first forward command lets it go
+    assert not watch.looking
+    watch.update(-0.1, 0.0, 3.0, law)
+    watch.hold()
+    for now in (3.5, 4.0, 4.99):  # a stand, the controller spinning the cart
+        watch.update(0.0, 0.5, now, law)
+    assert watch.looking
+    watch.update(0.0, 0.5, 5.0, law)  # 1.5 s of it: let go
+    assert not watch.looking
+    watch.update(-0.1, 0.0, 6.0, law)
+    watch.hold()
+    watch.release()  # a drive's end
+    assert not watch.looking
+
+
+def test_without_the_hold_the_reverse_look_ends_with_the_leg_as_before() -> None:
+    old = replace(ReverseLaw(), hold_s=0.0)
+    watch = ReverseWatch()
+    watch.update(-0.1, 0.3, 0.0, old)
+    watch.hold()
+    watch.update(0.0, 0.0, 0.1, old)
+    assert not watch.looking
+
+
+def test_the_reverse_timing_defaults_are_the_knobs_and_the_follow_preset() -> None:
+    law, knobs = ReverseLaw(), json.loads((REPO / "config/knobs.json").read_text())["gaze"]
+    assert (law.min_m, law.recovery, law.hold_s, law.min_s) == (0.15, True, 1.5, 1.0)
+    for name, value in (
+        ("reverse_min_m", law.min_m),
+        ("reverse_recovery", int(law.recovery)),
+        ("reverse_hold_s", law.hold_s),
+        ("reverse_min_s", law.min_s),
+    ):
+        assert knobs[name]["default"] == value
+    follow, baseline = PRESETS["follow"], PRESETS["baseline"]
+    assert (follow["reverse_min_m"], follow["reverse_recovery"], follow["reverse_hold_s"]) == (
+        0.15,
+        1,
+        1.5,
+    )
+    assert (baseline["reverse_min_m"], baseline["reverse_recovery"]) == (0.0, 0)
+    assert baseline["reverse_hold_s"] == 0.0
 
 
 def test_a_tight_rear_is_a_lethal_cell_just_behind_the_hull() -> None:

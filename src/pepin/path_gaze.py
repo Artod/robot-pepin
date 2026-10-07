@@ -21,11 +21,18 @@ costs the visual odometry samples (drive 306: a >= 45 deg swing at ~300 deg/s lo
 4.7-6.5 of them) and writes no frame while it lasts. A path look that does not hold the head
 (another look had it) is aimed at once. All five at 0 are :func:`settle` exactly.
 
-REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that has lasted
-``min_s``, or any reverse with lethal cells within ``rear_m`` behind the hull
-(:func:`tight_rear`), turns the head to ``pan_deg`` on the side the rear swings to (with the cart
-turning left, w > 0, the rear swings right), at ``tilt_deg``, and keeps that side until the leg
-ends.
+REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that was ANNOUNCED —
+the plan leaves the cart backwards for ``min_m`` or more (:func:`reverse_leg_m`), or the tree's
+recovery drives it (``recovery``) — turns the head back at its first reversing command; one that
+was not, once it has lasted ``min_s``; any reverse with lethal cells within ``rear_m`` behind the
+hull (:func:`tight_rear`) from its first. The head goes to ``pan_deg`` on the side the rear swings
+to (with the cart turning left, w > 0, the rear swings right), at ``tilt_deg``, and keeps that
+side until the leg ends — with ``hold_s`` above 0, through a stand after it of up to ``hold_s``
+(a reverse that follows within it is the same leg), and the look is let go at once at the first
+forward command or the stand's end, even mid-glance. Drives 0348-0363 before it: requested
+1.17 s into the leg by ``min_s`` alone, the head settled after 1-2 s legs had ended (9 of 12) and
+still looked back 0.54 s into the forward drive. ``min_m``, ``recovery`` and ``hold_s`` at 0 are
+the reverse gaze of 2026-10-05.
 """
 
 from __future__ import annotations
@@ -181,39 +188,64 @@ class ReverseLaw:
     min_s: float = 1.0
     rear_m: float = 0.30
     min_speed_m_s: float = 0.02
+    min_m: float = 0.15
+    recovery: bool = True
+    hold_s: float = 1.5
 
 
 class ReverseWatch:
-    """How long the cart has been reversing without a break, and which side its rear last swung
-    to (+1 left, -1 right). Once a reverse look has taken the side (:meth:`hold`) it stays for the
-    rest of the leg: a controller that swings its turn through zero while it backs (drive 306:
-    w -0.5, +0.6, -0.9, +0.9 rad/s within 4 s at -0.06 m/s) would otherwise send the head 300 deg
-    across the back at every swing."""
+    """How long the cart has been reversing without a break, whether the leg was announced, and
+    which side its rear last swung to (+1 left, -1 right). Once a reverse look has taken the side
+    (:meth:`hold`) it stays for the rest of the leg — with the law's ``hold_s``, through a stand
+    of up to that long after it, until the first forward twist: a controller that swings its turn
+    through zero while it backs (drive 306: w -0.5, +0.6, -0.9, +0.9 rad/s within 4 s at
+    -0.06 m/s) would otherwise send the head 300 deg across the back at every swing."""
 
     def __init__(self) -> None:
         self._since: float | None = None
+        self._stood: float | None = None  # when the stand after a held leg began
         self._held = False
         self.side = 1
+        self.announced = ""  # why this leg was announced ("" while it was not)
 
     def update(self, v: float, w: float, now: float, law: ReverseLaw) -> None:
         """One commanded twist."""
         if v < -law.min_speed_m_s:
             if self._since is None:
                 self._since = now
+            self._stood = None
             if self._held:
                 return
             if w > 0.0:
                 self.side = -1
             elif w < 0.0:
                 self.side = 1
-        else:
-            self._since = None
-            self._held = False
+            return
+        self._since = None
+        self.announced = ""
+        if not self._held:
+            return
+        if law.hold_s <= 0.0 or v > law.min_speed_m_s:
+            self._held, self._stood = False, None
+            return
+        if self._stood is None:
+            self._stood = now
+        if now - self._stood >= law.hold_s:
+            self._held, self._stood = False, None
+
+    def announce(self, why: str) -> None:
+        """This leg was announced (the plan's reverse leg, a recovery), for the rest of it."""
+        self.announced = why
 
     def hold(self) -> int:
-        """The side for this leg's reverse look, kept from now until the leg ends."""
+        """The side for this leg's reverse look, kept from now until the leg ends (with
+        ``hold_s``: until the first forward twist or the stand's end)."""
         self._held = True
         return self.side
+
+    def release(self) -> None:
+        """No reverse look any more (a drive's start or end): the next leg chooses again."""
+        self._held, self._stood = False, None
 
     def reversing_for(self, now: float) -> float:
         """Seconds of this reverse leg so far (0 when not reversing)."""
@@ -224,10 +256,36 @@ class ReverseWatch:
         """Whether the last twist reversed."""
         return self._since is not None
 
+    @property
+    def looking(self) -> bool:
+        """Whether a reverse look holds its side (from :meth:`hold` until it is let go)."""
+        return self._held
+
 
 def reverse_aim(side: int, law: ReverseLaw, reach: Reach) -> Aim:
     """The head toward the rear on ``side`` (+1 left), inside the reach."""
     return reach.clamp(Aim(side * math.radians(law.pan_deg), math.radians(law.tilt_deg)))
+
+
+def reverse_leg_m(path_xy: Array, pose: tuple[float, float, float]) -> float:
+    """The plan's reverse leg at the cart (pose: x, y, yaw in the plan's frame): from the plan's
+    vertex nearest the cart, the arc of its steps up to the first cusp (two steps that point
+    apart, as Nav2's controllers find it), when the first of them points behind the cart; 0 when
+    the plan leaves the cart forwards or has nothing left."""
+    path = np.asarray(path_xy, dtype=float).reshape(-1, 2)
+    if len(path) < 2:
+        return 0.0
+    start = int(np.argmin(np.hypot(path[:, 0] - pose[0], path[:, 1] - pose[1])))
+    steps = np.diff(path[start:], axis=0)
+    lengths = np.hypot(steps[:, 0], steps[:, 1])
+    steps, lengths = steps[lengths > 1e-6], lengths[lengths > 1e-6]
+    if len(steps) == 0:
+        return 0.0
+    if steps[0, 0] * math.cos(pose[2]) + steps[0, 1] * math.sin(pose[2]) >= 0.0:
+        return 0.0
+    apart = np.flatnonzero(np.einsum("ij,ij->i", steps[1:], steps[:-1]) < 0.0)
+    end = int(apart[0]) + 1 if len(apart) else len(steps)
+    return float(lengths[:end].sum())
 
 
 def tight_rear(

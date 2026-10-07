@@ -16,6 +16,7 @@ from typing import Any
 import numpy as np
 import pytest
 import ros_stubs
+import yaml
 
 ros_stubs.install()
 
@@ -232,12 +233,28 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
         "/depth_marks",
         "/navigate_to_pose/_action/status",
         "/navigate_through_poses/_action/status",
+        "/follow_path/_action/status",
+        "/backup/_action/status",
+        "/drive_on_heading/_action/status",
     } <= set(node.subs)
     assert not node._switches.on("stall_look") and not node._switches.on("path_gaze")
     assert not node._switches.on("reverse_gaze")
     assert int(node._switches["frames"]) == 3
     line = node.logger.texts("info")[-1]
     assert line.startswith("gaze up:") and "stall_look=off" in line
+
+
+def test_the_recoveries_it_watches_are_the_behaviour_servers_and_the_trees() -> None:
+    """The reverse look's recovery trigger reads these actions' status lists by name."""
+    repo = Path(__file__).resolve().parents[2]
+    params = yaml.safe_load((repo / "ros/params/nav2_params.yaml").read_text())
+    plugins = params["behavior_server"]["ros__parameters"]["behavior_plugins"]
+    assert set(gaze_node.BEHAVIOUR_ACTIONS) <= set(plugins)
+    tree = (repo / "ros/params/pepin_nav_to_pose.xml").read_text()
+    assert "<BackUp " in tree and "<DriveOnHeading " in tree and "server_name" not in tree
+    assert gaze_node.CONTROLLER_ACTION == "follow_path"  # Nav2's controller server, no rename
+    # ...and the tape keeps its status, which the replays' follow rows are made from
+    assert "/follow_path/_action/status" in (repo / "src/pepin/tape_rows.py").read_text()
 
 
 def test_the_main_spins_on_several_threads(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -465,8 +482,12 @@ def test_the_baseline_preset_on_a_reverse_leg_is_the_node_before_it_too(node: Ga
     assert "1 WROTE NO FRAMES: nav.reverse -150/24 deg 0.60 s preempted" in drive, drive
 
 
+# The reverse look timed as before 2026-10-06: only after reverse_min_s, let go when the leg ends.
+LATE_REVERSE = {"reverse_min_m": 0.0, "reverse_recovery": 0, "reverse_hold_s": 0.0}
+
+
 def test_the_path_look_is_held_until_the_reverse_look_replaces_it(node: Gaze) -> None:
-    writes = replay(node, LEG_V, (0.5,) * len(LEG_V))
+    writes = replay(node, LEG_V, (0.5,) * len(LEG_V), knobs=LATE_REVERSE)
     assert [(x.t, x.pan_deg, x.speed_deg_s) for x in writes] == [
         (0.0, 45.0, None),
         (3.0, -150.0, None),  # no lapse home at 2.5: the reverse look takes the held head
@@ -476,8 +497,23 @@ def test_the_path_look_is_held_until_the_reverse_look_replaces_it(node: Gaze) ->
     assert node.logger.texts("info")[-1].endswith("every one wrote frames")
 
 
+def test_the_first_forward_command_lets_the_reverse_look_go_even_mid_swing(node: Gaze) -> None:
+    """The same leg at the defaults: nothing announced it (the plan leads ahead, no controller
+    status), so its look comes after reverse_min_s, and the cart going forward 0.5 s later takes
+    it back before the head arrived; the path look turns the head in the same step."""
+    writes = replay(node, LEG_V, (0.5,) * len(LEG_V))
+    assert [(x.t, x.pan_deg, x.speed_deg_s) for x in writes] == [
+        (0.0, 45.0, None),
+        (3.0, -150.0, None),
+        (3.5, 45.0, None),  # the first forward command: no dwell, no swing's end awaited
+        (5.5, 0.0, 45.0),
+    ]
+    assert "gaze: the reverse look let go at the first forward command" in node.logger.texts("info")
+    assert "nav.reverse -150/24 deg 0.50 s preempted" in node.logger.texts("info")[-1]
+
+
 def test_the_follow_defaults_hold_the_path_look_through_short_reverses(node: Gaze) -> None:
-    writes = replay(node)  # the knobs' defaults: the follow preset
+    writes = replay(node, knobs=LATE_REVERSE)  # the follow preset with the late reverse look
     home_tilt = math.degrees(node._arbiter.home.tilt_rad)
     assert writes == [
         Write(1.0, -150.0, 23.8, None),  # the reverse glance
@@ -495,10 +531,11 @@ def test_the_follow_defaults_hold_the_path_look_through_short_reverses(node: Gaz
 
 
 def test_a_reverse_glance_ends_whole_when_the_leg_ends_under_it(node: Gaze) -> None:
-    """A 1.2 s reverse then forward: the glance starts at 1.0 s, the head is still turning when
-    the leg ends, and the path look waits until the glance has its frames."""
+    """A 1.2 s reverse then forward, the reverse look timed as before 2026-10-06: the glance
+    starts at 1.0 s, the head is still turning when the leg ends, and the path look waits until
+    the glance has its frames."""
     v = (-0.1,) * 12 + (0.1,) * 20
-    writes = replay(node, v, (0.5,) * len(v))
+    writes = replay(node, v, (0.5,) * len(v), knobs=LATE_REVERSE)
     assert [(x.pan_deg, x.speed_deg_s) for x in writes] == [
         (-150.0, None),
         (45.0, None),
@@ -508,6 +545,78 @@ def test_a_reverse_glance_ends_whole_when_the_leg_ends_under_it(node: Gaze) -> N
     drive = node.logger.texts("info")[-1]
     assert drive.startswith("gaze: the drive's head: 3 writes") and "nav.reverse 1 (" in drive
     assert "nav.reverse 1 (0 frames)" not in drive and "every one wrote frames" in drive
+
+
+# Hybrid-A*'s departure from a dock (the cart at the origin facing +x): 0.20 m backwards to a cusp,
+# then forward round to the left. 0.2 s standing, 1.5 s back, 2 s forward.
+BACK_THEN_LEFT = ((0.0, 0.0), (-0.1, 0.0), (-0.2, 0.0), (-0.1, 0.05), (0.2, 0.4), (0.3, 1.5))
+DEPART_V = (0.0,) * 2 + (-0.1,) * 15 + (0.1,) * 20
+
+
+def rear_times(writes: list[Write]) -> list[float]:
+    return [w.t for w in writes if abs(w.pan_deg) == 150.0]
+
+
+def test_a_reverse_leg_the_plan_announces_turns_the_head_at_its_first_command(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = replay(node, DEPART_V, (0.5,) * len(DEPART_V), route=BACK_THEN_LEFT)
+    assert rear_times(writes) == [0.2]  # the step of the leg's first reversing command
+    let_go = writes[[w.t for w in writes].index(0.2) + 1]
+    assert let_go.t == 1.7 and abs(let_go.pan_deg) < 90.0  # the first forward command: ahead
+    info = node.logger.texts("info")
+    assert "gaze: a reverse look (the plan's 0.20 m reverse leg), pan -150 deg" in info
+    late = build(monkeypatch)
+    before = replay(
+        late, DEPART_V, (0.5,) * len(DEPART_V), route=BACK_THEN_LEFT, knobs=LATE_REVERSE
+    )
+    late.close()
+    assert rear_times(before) == [1.2]  # reverse_min_s into the leg, as before 2026-10-06
+    short_leg = build(monkeypatch)  # a 0.20 m reverse leg is no announcement at 0.25
+    after = replay(
+        short_leg,
+        DEPART_V,
+        (0.5,) * len(DEPART_V),
+        route=BACK_THEN_LEFT,
+        knobs={"reverse_min_m": 0.25},
+    )
+    short_leg.close()
+    assert rear_times(after) == [1.2]
+
+
+def test_a_reverse_a_recovery_drives_turns_the_head_at_its_first_command(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The plan leads ahead (TURN_LEFT); the controller's status says it runs no goal: the
+    tree's BackUp drives. A BackUp goal running says so whatever the controller's status."""
+    node._on_driver_status("follow_path", goals())
+    writes = replay(node, DEPART_V, (0.5,) * len(DEPART_V))
+    assert rear_times(writes) == [0.2]
+    assert "gaze: a reverse look (a recovery drives), pan -150 deg" in node.logger.texts("info")
+    backup = build(monkeypatch)
+    backup._on_driver_status("follow_path", goals(1))
+    backup._on_driver_status("backup", goals(2))
+    assert rear_times(replay(backup, DEPART_V, (0.5,) * len(DEPART_V))) == [0.2]
+    backup.close()
+    # the controller driving, its status never heard, or the knob off: reverse_min_s
+    for status, knobs in ((goals(1), {}), (None, {}), (goals(), {"reverse_recovery": 0})):
+        other = build(monkeypatch)
+        if status is not None:
+            other._on_driver_status("follow_path", status)
+        late = replay(other, DEPART_V, (0.5,) * len(DEPART_V), knobs=knobs)
+        other.close()
+        assert rear_times(late) == [1.2]
+
+
+def test_a_reverse_look_is_held_through_a_short_stand_and_let_go_at_its_end(node: Gaze) -> None:
+    """Backing 1.5 s, standing 3 s, forward: held 1.5 s of the stand (a reverse within it would
+    be the same leg), then the path look."""
+    v = (0.0,) * 2 + (-0.1,) * 15 + (0.0,) * 30 + (0.1,) * 10
+    writes = replay(node, v, (0.5,) * len(v), route=BACK_THEN_LEFT)
+    assert rear_times(writes) == [0.2]
+    let_go = writes[[w.t for w in writes].index(0.2) + 1]
+    assert let_go.t == 3.2 and abs(let_go.pan_deg) < 90.0
+    assert "gaze: the reverse look let go at its stand's end" in node.logger.texts("info")
 
 
 def test_a_look_that_wrote_no_frames_is_named_in_the_report(node: Gaze) -> None:
@@ -545,16 +654,38 @@ def test_no_return_look_when_the_head_is_home_or_the_knob_is_off(node: Gaze) -> 
     assert node._arbiter.pending() == []
 
 
-# ---- drive 0330 replayed (gaze_replay.replay_tape, tests/fixtures/drive_0330_gaze.json) ----------
+# ---- drives 0330 and 0358 replayed (gaze_replay.replay_tape, tests/fixtures/drive_<n>_gaze.json)
 # At the live drive's frame rate (3.3-6.2 fused fps while driving: a frame every 4th tick, 5 Hz) and
 # head speed (-60 -> +150 deg in 0.98-1.03 s, latency included: 210 deg/s). On the tree before the
-# path_tail_m knob and the preempting reverse glance (scratch/gaze_night/old) this replay makes the
-# live drive's 18 writes: the path look -60/48 expired after 0.80 s (live 0.70 s) and the tail's
+# path_tail_m knob and the preempting reverse glance (scratch/gaze_night/old) the 0330 replay makes
+# the live drive's 18 writes: the path look -60/48 expired after 0.80 s (live 0.70 s) and the tail's
 # saccade at +40.8 s (live +41.5 s).
 TAPE_0330 = Tape.load("0330")
+TAPE_0358 = Tape.load("0358")
 LIVE_0330: dict[str, Any] = {"frame_every": 4, "head_deg_s": 210.0}
 FOLLOW_0330 = [
     (0.0, "nav.path", -60.0),  # the tape's first plan (live: -14/66 from the one before it)
+    (0.4, "nav.stall", -3.8),
+    (1.5, "nav.path", -60.0),
+    (3.6, "nav.stall", -4.3),
+    (4.7, "nav.path", -60.0),
+    (6.55, "nav.reverse", 150.0),  # the BackUp's first command (the controller runs no goal)
+    (9.35, "nav.path", -60.0),  # its first forward command
+    (10.35, "nav.reverse", 150.0),  # the controller's reverse, once the plan read 0.16 m of it
+    (14.65, "nav.path", -31.2),  # held through the 1.4 s stand and Rock's BackUp, to forward
+    (17.65, "nav.path", -53.5),
+    (18.45, "nav.reverse", 150.0),  # the plan's 0.23 m (a 1.1 s leg: none before)
+    (21.05, "nav.path", -53.5),  # 1.5 s into a 3.5 s spinning stand
+    (25.15, "nav.reverse", 150.0),
+    (27.75, "nav.path", -53.5),
+    (31.15, "nav.path", -25.0),
+    (35.35, "nav.path", 0.2),
+    (42.0, "nav.return", 0.0),  # no saccade in the last metres: held to the end, then home
+]
+# The same replay with the reverse look timed as before 2026-10-06 (LATE_REVERSE): 1.0-1.2 s into
+# each leg, the 1.1 s leg at +18.4 none, the path look swung in between at the 1.4 s stand.
+FOLLOW_0330_LATE = [
+    (0.0, "nav.path", -60.0),
     (0.4, "nav.stall", -3.8),
     (1.5, "nav.path", -60.0),
     (3.6, "nav.stall", -4.3),
@@ -570,7 +701,7 @@ FOLLOW_0330 = [
     (27.9, "nav.path", -53.5),
     (31.2, "nav.path", -21.4),
     (37.2, "nav.path", 10.6),
-    (42.0, "nav.return", 0.0),  # no saccade in the last metres: held to the end, then home
+    (42.0, "nav.return", 0.0),
 ]
 
 
@@ -578,18 +709,33 @@ def short(writes: list[Write]) -> list[tuple[float, str, float]]:
     return [(w.t, w.source, w.pan_deg) for w in writes]
 
 
+def reverse_looks(node: Gaze) -> list[tuple[float, float]]:
+    """The reverse looks that held the head: when they took it and let it go, from the goal."""
+    return [
+        (round(b.since - T0, 2), round(b.until - T0, 2))
+        for b in node._looks.looks
+        if b.source == "nav.reverse"
+    ]
+
+
+def first_forward(tape: Tape, after: float) -> float:
+    """The tape's first forward command at or after ``after``."""
+    return next(t for t, v, _w in tape.cmd if t >= after and v > 0.02)
+
+
 @pytest.mark.slow
 def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
-    assert short(writes) == FOLLOW_0330
+    """The tail rule against the node of 2026-10-06 01:00, the reverse look timed as then."""
+    writes = replay_tape(node, TAPE_0330, knobs=LATE_REVERSE, **LIVE_0330)
+    assert short(writes) == FOLLOW_0330_LATE
     path = [b for b in node._looks.looks if b.source == "nav.path"]
     assert path[-1].until - T0 == pytest.approx(TAPE_0330.end_s)  # held to the drive's end
     drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
     assert drive[0].startswith("gaze: the drive's head: 17 writes,")
     before = build(monkeypatch)  # the metres off: the seconds alone, as before
-    old = replay_tape(before, TAPE_0330, knobs={"path_tail_m": 0.0}, **LIVE_0330)
+    old = replay_tape(before, TAPE_0330, knobs={**LATE_REVERSE, "path_tail_m": 0.0}, **LIVE_0330)
     before.close()
     assert [w for w in old if w.t < 40.0] == [w for w in writes if w.t < 40.0]  # nothing earlier
     assert [(w.t, w.source, w.pan_deg, w.tilt_deg) for w in old if 40.0 <= w.t < 42.0] == [
@@ -601,7 +747,7 @@ def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
 def test_drive_0330_a_swinging_path_look_is_replaced_by_the_reverse_look_not_expired(
     node: Gaze,
 ) -> None:
-    replay_tape(node, TAPE_0330, **LIVE_0330)
+    replay_tape(node, TAPE_0330, knobs=LATE_REVERSE, **LIVE_0330)
     looks = node._looks.looks
     assert [b.text() for b in looks if b.ended == "expired"] == []
     swung = next(b for b in looks if b.source == "nav.path" and abs(b.since - T0 - 13.1) < 1e-6)
@@ -610,3 +756,71 @@ def test_drive_0330_a_swinging_path_look_is_replaced_by_the_reverse_look_not_exp
     assert taker.source == "nav.reverse" and taker.frames >= 2
     # Every path look held the head until another look took it or the drive ended.
     assert {b.ended for b in looks if b.source == "nav.path"} == {"preempted"}
+
+
+@pytest.mark.slow
+def test_drive_0330_looks_back_at_each_legs_start_and_ahead_at_the_first_forward_command(
+    node: Gaze,
+) -> None:
+    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
+    assert short(writes) == FOLLOW_0330
+    drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
+    assert drive[0].startswith("gaze: the drive's head: 17 writes,")  # as many as before
+    path = [b for b in node._looks.looks if b.source == "nav.path"]
+    assert path[-1].until - T0 == pytest.approx(TAPE_0330.end_s)  # held to the drive's end
+    looks = reverse_looks(node)
+    starts = (6.537, 10.237, 18.437, 25.137)  # the legs' first reversing commands (and 13.137,
+    # Rock's BackUp after the 1.4 s stand, inside the second look)
+    requested = [round(took - start, 2) for (took, _), start in zip(looks, starts, strict=True)]
+    assert requested == [0.01, 0.11, 0.01, 0.01]  # the plan read 0.08 m at the second leg's
+    # start and 0.16 m 0.1 s later; the 50 ms step is the replay's
+    forward = [first_forward(TAPE_0330, start) for start in (6.6, 13.2, 25.2)]
+    assert forward == [9.337, 14.637, 27.737]
+    let_go = [round(looks[i][1] - f, 2) for i, f in zip((0, 1, 3), forward, strict=True)]
+    assert let_go == [0.01, 0.01, 0.01]  # the step of the first forward command
+    assert looks[2][1] == 21.05  # 1.5 s into a 3.5 s stand (spinning) after its 1.1 s leg
+    assert {b.ended for b in node._looks.looks if b.source == "nav.reverse"} == {"preempted"}
+    assert [b.text() for b in node._looks.looks if b.ended == "expired"] == []
+
+
+# Drive 0358 (home from the printer): the departure's 0.23 m reverse, a 0.8 s reverse after a
+# 1.3 s stand, a stall look in the next stand, a controller reverse of 1.1 s that no plan announced
+# (0.08 m), forward 0.3 s, the BackUp of 2.0 s at +8.5. Live (reverse_min_s alone): the BackUp's
+# look requested +1.16 s into it, settled +2.18, forward at +2.30, let go +2.88.
+FOLLOW_0358 = [
+    (0.0, "nav.path", -60.0),
+    (0.35, "nav.reverse", 150.0),  # the plan's 0.23 m: the leg's first command (+0.32)
+    (3.9, "nav.stall", 76.1),  # held through the stand and the 0.8 s leg until the stall look
+    (5.1, "nav.path", -60.0),  # ...after which the head does not turn back
+    (8.15, "nav.reverse", 150.0),  # the unannounced 1.1 s leg: reverse_min_s, 1.0 s into it
+    (8.25, "nav.path", -60.0),  # ...and let go 0.1 s later, at its first forward command
+    (8.55, "nav.reverse", 150.0),  # the BackUp's first command (+8.52): the controller runs none
+    (10.85, "nav.path", -32.2),  # its first forward command (+10.82)
+    (15.05, "nav.path", -6.0),
+    (23.7, "nav.return", 0.0),
+]
+
+
+@pytest.mark.slow
+def test_drive_0358_looks_back_at_each_legs_start_and_ahead_at_the_first_forward_command(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = replay_tape(node, TAPE_0358, **LIVE_0330)
+    assert short(writes) == FOLLOW_0358
+    looks = reverse_looks(node)
+    assert [took for took, _ in looks] == [0.35, 8.15, 8.55]
+    assert first_forward(TAPE_0358, 8.6) == 10.821
+    assert looks[-1] == (8.55, 10.85)  # the BackUp: requested +0.03, let go +0.03 after forward
+    info = node.logger.texts("info")
+    assert "gaze: a reverse look (the plan's 0.23 m reverse leg), pan +150 deg" in info
+    assert "gaze: a reverse look (a recovery drives), pan +150 deg" in info
+    drive = [t for t in info if t.startswith("gaze: the drive's head")]
+    assert drive[0].startswith("gaze: the drive's head: 10 writes,")
+    late = build(monkeypatch)
+    before = replay_tape(late, TAPE_0358, knobs=LATE_REVERSE, **LIVE_0330)
+    late.close()
+    assert [(w.t, w.source) for w in before if w.source == "nav.reverse"] == [
+        (1.4, "nav.reverse"),  # +1.08 into the departure, after it had ended (+1.20)
+        (8.2, "nav.reverse"),  # +1.08 into the 1.1 s leg, held through the BackUp to +10.6
+    ]
+    assert len(before) == 9

@@ -49,6 +49,17 @@ the head from the path look at once, even mid-swing (``preempt``: drive 0330's p
 swinging 210 deg as the cart backed again, held the head against it until its 0.5 s TTL ran
 out). After a drive the head goes home at ``return_deg_s``.
 
+THE REVERSE LOOK'S TIMING (:class:`pepin.path_gaze.ReverseWatch`). It is requested in the step of
+the leg's first reversing command when the leg is announced: ``/plan`` leaves the cart backwards
+for ``reverse_min_m`` or more (:func:`pepin.path_gaze.reverse_leg_m`), or ``reverse_recovery``
+and the tree's recovery drives — a ``/backup`` or ``/drive_on_heading`` goal runs, or
+``/follow_path``'s status was heard and runs none (the controller does not drive). A leg nobody
+announced gets it after ``reverse_min_s``, a tight rear at once. With ``reverse_hold_s`` above 0
+the look holds through a stand after its leg for up to that long, and is withdrawn in the step
+of the first forward command or the stand's end, a glance under way too, so path gaze takes the
+head in the same step; a stand in which a better look took the head (a stall look) ends it
+then, so the head does not turn back after that look.
+
 A DRIVE'S START (a new goal on either navigator) drops every request but the operator's, so the
 head goes home (or to path gaze) before the wheels turn; a drive's end drops the navigation
 requests (a glance under way ends first).
@@ -125,6 +136,7 @@ from pepin.path_gaze import (
     path_aim,
     remaining_m,
     reverse_aim,
+    reverse_leg_m,
     tight_rear,
     time_to_end,
 )
@@ -154,6 +166,8 @@ COSTMAP_TOPIC = "/local_costmap/costmap"
 SCAN_TOPIC = "/scan"
 MARKS_TOPIC = "/depth_marks"
 NAV_ACTIONS = ("navigate_to_pose", "navigate_through_poses")
+CONTROLLER_ACTION = "follow_path"  # the controller server's: the controller drives the wheels
+BEHAVIOUR_ACTIONS = ("backup", "drive_on_heading")  # the behaviour server's recoveries that drive
 ACTIVE_STATUSES = (1, 2, 3)  # accepted, executing, canceling
 BASE_FRAME = "base_link"
 STALL_SOURCE = "nav.stall"
@@ -204,9 +218,11 @@ FLAGS = FlagSet(
     Flag(
         "reverse_gaze",
         False,
-        description="a reverse leg longer than reverse_min_s, or any reverse with the rear"
-        " tight, turns the head reverse_pan_deg toward the side the rear swings to; only with a"
-        " base server that moves the neck while driving",
+        description="a reverse leg the plan announces (reverse_min_m) or a recovery drives"
+        " (reverse_recovery) turns the head reverse_pan_deg toward the side the rear swings to"
+        " at its first reversing command, any other after reverse_min_s, any with the rear tight"
+        " at once; with reverse_hold_s the look is let go at the first forward command; only"
+        " with a base server that moves the neck while driving",
         why="off until the body self-filter lands: looking back at the working tilt the cart's"
         " own rear edge is 52 deg down, 3 deg inside the frame's bottom edge (config/neck.json's"
         " lens 1.203 m up, the hull's 0.30 m rear), so a look back paints the cart's top shelf"
@@ -283,6 +299,8 @@ class Gaze(Node):
         self._inputs_lock = threading.Lock()
         self._inputs = _Inputs()
         self._goals: dict[str, set[bytes]] = {action: set() for action in NAV_ACTIONS}
+        # who drives the wheels: an action's active goals, once its status was heard
+        self._drivers: dict[str, frozenset[bytes]] = {}
         self._driving = False
         self._reverse = ReverseWatch()
         self._path_at = 0.0
@@ -322,6 +340,13 @@ class Gaze(Node):
                 GoalStatusArray,
                 f"/{action}/_action/status",
                 lambda msg, a=action: self._on_nav_status(a, msg),
+                status_qos,
+            )
+        for action in (CONTROLLER_ACTION, *BEHAVIOUR_ACTIONS):
+            self.create_subscription(
+                GoalStatusArray,
+                f"/{action}/_action/status",
+                lambda msg, a=action: self._on_driver_status(a, msg),
                 status_qos,
             )
         # The stall look waits for the head and for /fusion/column inside its own callback: its
@@ -409,6 +434,9 @@ class Gaze(Node):
             tilt_deg=k("reverse_tilt_deg"),
             min_s=k("reverse_min_s"),
             rear_m=k("reverse_rear_m"),
+            min_m=k("reverse_min_m"),
+            recovery=k("reverse_recovery") > 0.0,
+            hold_s=k("reverse_hold_s"),
         )
 
     # ---- inputs --------------------------------------------------------------------------------
@@ -464,11 +492,7 @@ class Gaze(Node):
         """A navigator's status list: a new goal is a drive's start, no goal left its end."""
         if not self._up:
             return
-        active = {
-            bytes(bytearray(s.goal_info.goal_id.uuid))
-            for s in msg.status_list
-            if s.status in ACTIVE_STATUSES
-        }
+        active = _active_goals(msg)
         before = set[bytes]().union(*self._goals.values())
         self._goals[action] = active
         after = set[bytes]().union(*self._goals.values())
@@ -476,6 +500,7 @@ class Gaze(Node):
         if after - before:
             self._driving = True
             self._follow.reset()
+            self._reverse.release()
             self._path_quiet_since = None
             if self._summary_at is not None:
                 self._drive_line()  # the last drive's, before its late looks are all in
@@ -492,11 +517,25 @@ class Gaze(Node):
             )
         elif before and not after:
             self._driving = False
+            self._reverse.release()
             self._arbiter.release(
                 now, "the drive's end", keep=lambda r: not r.source.startswith("nav.")
             )
             self._return_home(now)
             self._summary_at = now + LATE_S + 0.25  # the drive's last looks counted first
+
+    def _on_driver_status(self, action: str, msg: GoalStatusArray) -> None:
+        """The controller's or a recovery's status list: which of them drives the wheels."""
+        if self._up:
+            self._drivers[action] = frozenset(_active_goals(msg))
+
+    def _recovery_drives(self) -> bool:
+        """Whether the tree's recovery drives the wheels, not the controller: a BackUp or a
+        DriveOnHeading goal runs, or the controller's status was heard and it runs none."""
+        drivers = dict(self._drivers)
+        if any(drivers.get(action) for action in BEHAVIOUR_ACTIONS):
+            return True
+        return CONTROLLER_ACTION in drivers and not drivers[CONTROLLER_ACTION]
 
     def _return_home(self, now: float) -> None:
         """After a drive, home at ``return_deg_s`` rather than a saccade (0: the arbiter's own
@@ -577,19 +616,42 @@ class Gaze(Node):
         self._arbiter.submit(look, now)
 
     def _drive_gaze(self, now: float) -> None:
-        """Path gaze or reverse gaze, renewed every ``path_period_s`` while a drive runs."""
+        """Path gaze or reverse gaze, renewed every ``path_period_s`` while a drive runs; a
+        reverse leg's announcement and the reverse look's end act in the step they come."""
         v, w = self._head.twist
         law = self._reverse_law()
+        looking = self._reverse.looking
         self._reverse.update(v, w, now, law)
         if not self._driving or not self._head.moves_while_driving:
             return
+        reverse_gaze = self._switches.on("reverse_gaze")
+        standing = self._reverse.looking and not self._reverse.reversing
+        if looking and not self._reverse.looking and law.hold_s > 0.0:
+            forward = v > law.min_speed_m_s
+            self._let_go_reverse(now, "the first forward command" if forward else "its stand's end")
+            self._path_at = -math.inf  # path gaze in this step: no write home between the looks
+        elif standing and law.hold_s > 0.0 and not self._arbiter.holds(REVERSE_SOURCE):
+            # a better look took the head in the stand (a stall look): no turn back after it
+            self._reverse.release()
+            self._let_go_reverse(now, "a stand another look took the head in")
+            self._path_at = -math.inf
+        elif reverse_gaze and self._reverse.reversing and not looking:
+            if not self._reverse.announced:
+                self._reverse.announce(self._announcement(law))
+            if self._reverse.announced:
+                self._path_at = -math.inf  # the look goes out in this step
         if now - self._path_at < self._knob("path_period_s"):
             return
         self._path_at = now
-        if self._switches.on("reverse_gaze") and self._reverse.reversing:
-            long_leg = self._reverse.reversing_for(now) >= law.min_s
-            if long_leg or self._tight_rear(law):
+        if reverse_gaze:
+            why = self._reverse_trigger(now, law)
+            if why:
+                first = not self._reverse.looking
                 rear = reverse_aim(self._reverse.hold(), law, self._reach)
+                if first:
+                    self.get_logger().info(
+                        f"gaze: a reverse look ({why}), pan {math.degrees(rear.pan_rad):+.0f} deg"
+                    )
                 self._glance(REVERSE_SOURCE, rear, now)
                 return
         if not self._switches.on("path_gaze"):
@@ -608,6 +670,39 @@ class Gaze(Node):
         self._path_quiet_since = None
         self._hold(PATH_SOURCE, aim, now)
 
+    def _reverse_trigger(self, now: float, law: ReverseLaw) -> str:
+        """Why the head looks back this period ("" when it does not): a look held through its
+        leg's stand, the leg's announcement, its length, or a tight rear."""
+        watch = self._reverse
+        if law.hold_s > 0.0 and watch.looking:
+            return "held"
+        if not watch.reversing:
+            return ""
+        if watch.announced:
+            return watch.announced
+        if watch.reversing_for(now) >= law.min_s:
+            return f"{law.min_s:.1f} s of reversing"
+        return "a tight rear" if self._tight_rear(law) else ""
+
+    def _announcement(self, law: ReverseLaw) -> str:
+        """Why this reverse leg is announced ("" when it is not): the tree's recovery drives it,
+        or the plan leaves the cart backwards for ``reverse_min_m`` or more."""
+        if law.recovery and self._recovery_drives():
+            return "a recovery drives"
+        if law.min_m <= 0.0:
+            return ""
+        found = self._plan_pose()
+        if found is None:
+            return ""
+        leg = reverse_leg_m(*found)
+        return f"the plan's {leg:.2f} m reverse leg" if leg >= law.min_m else ""
+
+    def _let_go_reverse(self, now: float, by: str) -> None:
+        """The reverse look withdrawn, a glance under way too: at the first forward command, at
+        the end of its stand (``reverse_hold_s``), or once another look took the head in it."""
+        if self._arbiter.withdraw(REVERSE_SOURCE, now, by):
+            self.get_logger().info(f"gaze: the reverse look let go at {by}")
+
     def _keep_path(self, now: float) -> None:
         """Path gaze has no aim this period: its look is renewed where it is, for up to
         ``path_hold_s`` (0: it lapses after its TTL, as before)."""
@@ -619,9 +714,8 @@ class Gaze(Node):
         if now - self._path_quiet_since < hold:
             self._arbiter.renew(PATH_SOURCE, now)
 
-    def _path_target(self, speed: float) -> tuple[Aim, float, float] | None:
-        """Path gaze's aim from the newest plan and the cart's pose in its frame, the metres of
-        plan left and the seconds to its end at this speed."""
+    def _plan_pose(self) -> tuple[Any, tuple[float, float, float]] | None:
+        """The newest plan's points and the cart's pose (x, y, yaw) in its frame, now."""
         with self._inputs_lock:
             plan = self._inputs.plan
         if plan is None or len(plan.poses) < 2:
@@ -631,7 +725,15 @@ class Gaze(Node):
             return None
         path = np.array([[p.pose.position.x, p.pose.position.y] for p in plan.poses], dtype=float)
         yaw = math.atan2(float(here.rotation[1, 0]), float(here.rotation[0, 0]))
-        pose = (float(here.translation[0]), float(here.translation[1]), yaw)
+        return path, (float(here.translation[0]), float(here.translation[1]), yaw)
+
+    def _path_target(self, speed: float) -> tuple[Aim, float, float] | None:
+        """Path gaze's aim from the newest plan and the cart's pose in its frame, the metres of
+        plan left and the seconds to its end at this speed."""
+        found = self._plan_pose()
+        if found is None:
+            return None
+        path, pose = found
         aim = path_aim(
             path,
             pose,
@@ -990,6 +1092,15 @@ class Gaze(Node):
             f" flags: {self._switches.state()}"
         )
         self._looks = LookTally()
+
+
+def _active_goals(msg: GoalStatusArray) -> set[bytes]:
+    """The ids of an action's goals that are accepted, executing or canceling."""
+    return {
+        bytes(bytearray(s.goal_info.goal_id.uuid))
+        for s in msg.status_list
+        if s.status in ACTIVE_STATUSES
+    }
 
 
 def _into(pose: RigidPose, point: tuple[float, float, float]) -> tuple[float, float, float]:
