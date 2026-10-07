@@ -36,8 +36,8 @@
     "path_still_m_s": 0.02,
     "path_stall_guard_s": 0.5,
     "path_recentre_s": 1.0,
-    "path_bend_deg": 30.0,
-    "path_park_ahead_m": 1.0,
-    "reverse_park_min_m": 0.3
+    "path_bend_deg": 0.0,
+    "path_park_ahead_m": 0.0,
+    "reverse_park_min_m": 0.0
   }
 }

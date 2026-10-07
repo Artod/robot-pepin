@@ -695,6 +695,9 @@ LIVE_0330: dict[str, Any] = {"frame_every": 4, "head_deg_s": 210.0}
 # of 2026-10-06, which the tapes' reverse-timing and tail tests below were written against.
 # The head of 2026-10-06 night: no ahead magnet, no parking look (the knobs' baseline values).
 NO_AHEAD = {"path_bend_deg": 0.0, "path_park_ahead_m": 0.0, "reverse_park_min_m": 0.0}
+# The rules of the night of 2026-10-07 (ahead magnet, parking spot, no look back at the parker's
+# stubs): they FAILED LIVE on drive 0386 and are off by default; the pins below keep them testable.
+NIGHT = {"path_bend_deg": 30.0, "path_park_ahead_m": 1.0, "reverse_park_min_m": 0.3}
 NO_ECONOMY = {
     "path_still_m_s": 0.0,
     "path_stall_guard_s": 0.0,
@@ -1009,7 +1012,7 @@ def ahead_share(writes: list[tuple[float, str, float]], end_s: float) -> float:
 def test_drive_0376_parks_looking_at_the_printer_not_where_the_last_bend_left_the_head(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writes = short(replay_tape(node, TAPE_0376, **LIVE_0330))
+    writes = short(replay_tape(node, TAPE_0376, knobs=NIGHT, **LIVE_0330))
     assert writes == AHEAD_0376
     info = node.logger.texts("info")
     assert "gaze: parking (the controller FollowPathMPPI): the head looks at the spot" in info
@@ -1025,7 +1028,7 @@ def test_drive_0376_parks_looking_at_the_printer_not_where_the_last_bend_left_th
 def test_drive_0379_comes_back_ahead_after_the_arc_and_does_not_look_back_on_arrival(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writes = short(replay_tape(node, TAPE_0379, **LIVE_0330))
+    writes = short(replay_tape(node, TAPE_0379, knobs=NIGHT, **LIVE_0330))
     assert writes == AHEAD_0379
     before = build(monkeypatch)
     assert short(replay_tape(before, TAPE_0379, knobs=NO_AHEAD, **LIVE_0330)) == FOLLOW_0379
@@ -1069,6 +1072,7 @@ def test_the_selector_and_the_parker_are_the_goal_servers() -> None:
 def test_a_hand_over_mid_drive_starts_the_parking_and_a_drive_on_the_parker_does_not(
     node: Gaze,
 ) -> None:
+    node._switches.set("path_park_ahead_m", 1.0)  # the parking rule of 2026-10-07, off by default
     node._on_controller(gaze_node.String(data="FollowPathShim"))
     node._on_nav_status("navigate_to_pose", goals(1))
     assert not node._parking

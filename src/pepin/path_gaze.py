@@ -103,9 +103,9 @@ class PathGazeLaw:
     stall_guard_s: float = 0.5
     recentre_s: float = 1.0
     recentre_deg: float = 5.0
-    bend_deg: float = 30.0
+    bend_deg: float = 0.0  # 0: off. 30 FAILED LIVE 2026-10-07 (config/knobs.json path_bend_deg)
     bend_lead_s: float = 0.0
-    park_ahead_m: float = 1.0
+    park_ahead_m: float = 0.0  # 0: off. 1.0 FAILED LIVE 2026-10-07 (knobs path_park_ahead_m)
     park_beyond_m: float = 0.5
 
 

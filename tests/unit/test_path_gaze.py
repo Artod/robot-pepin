@@ -541,23 +541,25 @@ def test_with_the_magnet_and_the_parking_off_the_look_is_the_plan_point() -> Non
 
 
 def test_the_magnet_looks_straight_ahead_until_the_plan_bends_off_the_nose() -> None:
+    magnet = replace(FOLLOW, bend_deg=30.0)  # the magnet of 2026-10-07, off by default
     wiggle = np.column_stack((np.arange(0.0, 3.0, 0.05), 0.08 * np.sin(np.arange(60) / 6.0)))
-    found = look(wiggle, (0.0, 0.0, math.radians(10)))  # the cart 10 deg off a wiggling line
+    found = look(wiggle, (0.0, 0.0, math.radians(10)), law=magnet)  # 10 deg off a wiggling line
     assert (found.kind, found.aim.pan_rad) == (AHEAD, 0.0)
     assert found.aim.tilt_rad == look(wiggle, (0.0, 0.0, 0.1), law=MAGNET_OFF).aim.tilt_rad
     corner = np.array([[0.0, 0.0], [0.3, 0.0], [0.3, 1.5]])  # left 0.3 m ahead: the point 45 deg
-    found = look(corner, (0.0, 0.0, 0.0))
+    found = look(corner, (0.0, 0.0, 0.0), law=magnet)
     assert found.kind == BEND and math.degrees(found.aim.pan_rad) == pytest.approx(45.0)
     # a bend look ends only once the point is back within 0.6 of the threshold (18 deg)
     arc = np.array([[0.0, 0.0], [1.0, math.tan(math.radians(24))]])
-    assert look(arc, (0.0, 0.0, 0.0)).kind == AHEAD
-    assert look(arc, (0.0, 0.0, 0.0), bending=True).kind == BEND
+    assert look(arc, (0.0, 0.0, 0.0), law=magnet).kind == AHEAD
+    assert look(arc, (0.0, 0.0, 0.0), law=magnet, bending=True).kind == BEND
 
 
 def test_the_bend_lead_reads_the_bend_further_along_the_plan() -> None:
     corner = np.array([[0.0, 0.0], [0.6, 0.0], [0.6, 1.5]])  # left 0.6 m ahead
-    assert look(corner, (0.0, 0.0, 0.0)).kind == AHEAD  # the 0.6 m point is the corner itself
-    lead = replace(FOLLOW, bend_lead_s=4.0)  # 1.2 m at 0.3 m/s
+    magnet = replace(FOLLOW, bend_deg=30.0)  # the magnet of 2026-10-07, off by default
+    assert look(corner, (0.0, 0.0, 0.0), law=magnet).kind == AHEAD  # the 0.6 m point is the corner
+    lead = replace(magnet, bend_lead_s=4.0)  # 1.2 m at 0.3 m/s
     found = look(corner, (0.0, 0.0, 0.0), law=lead)
     assert found.kind == BEND
     assert math.degrees(found.aim.pan_rad) == pytest.approx(45.0)
@@ -574,16 +576,21 @@ def test_the_parking_spot_is_past_the_plans_end_along_its_last_step() -> None:
 
 
 def test_parking_looks_at_the_spot_at_the_driving_tilt_ahead_once_the_cart_faces_it() -> None:
+    night = replace(
+        FOLLOW, bend_deg=30.0, park_ahead_m=1.0
+    )  # the rules of 2026-10-07, off by default
     spot = (1.0, -1.0)
-    found = look(STRAIGHT, (0.0, 0.0, 0.0), spot=spot)  # 45 deg right, the plan straight
+    found = look(STRAIGHT, (0.0, 0.0, 0.0), spot=spot, law=night)  # 45 deg right, the plan straight
     assert (found.kind, found.spot) == (PARK, True)
     assert math.degrees(found.aim.pan_rad) == pytest.approx(-45.0)
     assert found.aim.tilt_rad == look(STRAIGHT, (0.0, 0.0, 0.0), law=MAGNET_OFF).aim.tilt_rad
-    facing = look(STRAIGHT, (0.0, 0.0, -math.radians(40)), spot=spot)
+    facing = look(STRAIGHT, (0.0, 0.0, -math.radians(40)), spot=spot, law=night)
     assert (facing.kind, facing.aim.pan_rad, facing.spot) == (AHEAD, 0.0, True)
     # the spot stays a look when the plan has nothing left ahead
     end = STRAIGHT[-1]
-    assert look(STRAIGHT, (end[0], end[1], 0.0), spot=(end[0] + 0.5, end[1])).kind == AHEAD
+    assert (
+        look(STRAIGHT, (end[0], end[1], 0.0), spot=(end[0] + 0.5, end[1]), law=night).kind == AHEAD
+    )
 
 
 def test_the_magnet_brings_a_held_aim_back_straight_ahead_inside_the_zone() -> None:
@@ -622,10 +629,11 @@ def test_the_parking_spot_is_followed_in_the_tail() -> None:
 
 def test_the_ahead_and_parking_defaults_are_the_knobs_and_the_follow_preset() -> None:
     knobs = json.loads((REPO / "config/knobs.json").read_text())["gaze"]
+    # 30 / 1.0 failed live on 2026-10-07 (drive 0386): off by default, kept for debugging
     assert (FOLLOW.bend_deg, FOLLOW.bend_lead_s, FOLLOW.park_ahead_m, FOLLOW.park_beyond_m) == (
-        30.0,
         0.0,
-        1.0,
+        0.0,
+        0.0,
         0.5,
     )
     for name, value in (
