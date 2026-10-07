@@ -31,6 +31,7 @@ from pepin.stall_look import AHEAD_M as STALL_AHEAD_M
 from pepin.stall_look import CLUSTER_M as STALL_CLUSTER_M
 from pepin.stall_look import MARGIN_M as STALL_MARGIN_M
 from pepin.tsdf import band_half_z_m
+from pepin.vio_recover import DISAGREE_M_S, DISAGREE_S
 from pepin.visual_odometry import (
     VIO_COAST_FREE_S,
     VIO_COAST_MAX,
@@ -83,6 +84,9 @@ NAMED = {
     ("visual_odometry", "vio_coast_per_s"): VIO_COAST_PER_S,
     ("visual_odometry", "vio_coast_free_s"): VIO_COAST_FREE_S,
     ("visual_odometry", "vio_coast_max"): VIO_COAST_MAX,
+    # the keeper's disagreement rule: pepin.vio_recover.VioWatch's defaults
+    ("vio_keeper", "vio_disagree_m_s"): DISAGREE_M_S,
+    ("vio_keeper", "vio_disagree_s"): DISAGREE_S,
     # the VIO's feed: the gate's window as every gated node shapes it
     ("vio_feed", "gate_exposure_s"): EXPOSURE_S,
     ("vio_feed", "gate_stamp_end"): STAMP_END,

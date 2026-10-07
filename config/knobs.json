@@ -213,8 +213,8 @@
   "vio_keeper": {
     "vio_disagree_m_s": {"default": 0.2, "range": [0.0, 10.0],
       "note": "the disagreement rule: a frame whose OpenVINS velocity at the IMU (/ov_msckf/health v_I) is farther than this (m/s) from the EKF's carried to the IMU (/vio/seed_twist, sent only while the head is still, used within 0.3 s) adds its interval to a run; 0 turns the rule off. Replayed divergences ran 0.2 -> 0.5 m/s off within 1 s, healthy filters within 0.02-0.17 of the wheels (scratch/vio_recover r4)"},
-    "vio_disagree_s": {"default": 1.0, "range": [0.1, 30.0],
-      "note": "the disagreement rule: this many seconds of disagreeing frames (frames without a fresh reference not counted) make OpenVINS lost"},
+    "vio_disagree_s": {"default": 0.7, "range": [0.1, 30.0],
+      "note": "the disagreement rule: this many seconds of disagreeing frames (frames without a fresh reference, or taken in a swing, not counted) make OpenVINS lost. 0.7 since 2026-10-06 (scratch/vio_push/keeper.py, the keeper replayed on its own seeds over drives 0331-0363, its 17 live resets matched): 0.6-0.8 also reset 0361 +25.4 (0.3-0.9 m/s off the truth for 3 s, its run cut at 0.8 s by one frame at 0.17) and 0349 +26.6, with no reset outside a divergence; 0.5 adds one (0351 +134.0), 1.0 missed both"},
     "vio_dark_tracks": {"default": 10, "range": [0, 500],
       "note": "the dark rule: a frame with fewer persistent tracks than this (the left eye's features seen in seed_track_frames frames, /ov_msckf/health) adds its interval to a run, unless OpenVINS held it with its zero-velocity update (vio_dark_at_rest) or the camera was swinging (vio_swing_rad_s); 0 turns the rule off. Not the features the update used: 0-8 in good light with the gaze moving (drives 0329/0330 replayed), while the tracker kept 20-45 persistent tracks in the dimmest stretch"},
     "vio_dark_s": {"default": 1.0, "range": [0.1, 30.0],
