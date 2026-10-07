@@ -685,7 +685,11 @@ def test_no_return_look_when_the_head_is_home_or_the_knob_is_off(node: Gaze) -> 
 # saccade at +40.8 s (live +41.5 s).
 TAPE_0330 = Tape.load("0330")
 TAPE_0358 = Tape.load("0358")
+TAPE_0365 = Tape.load("0365")
 LIVE_0330: dict[str, Any] = {"frame_every": 4, "head_deg_s": 210.0}
+# Path gaze without its economy (no saccade standing or just stopped, the re-centre): the follower
+# of 2026-10-06, which the tapes' reverse-timing and tail tests below were written against.
+NO_ECONOMY = {"path_still_m_s": 0.0, "path_stall_guard_s": 0.0, "path_recentre_s": 0.0}
 FOLLOW_0330 = [
     (0.0, "nav.path", -60.0),  # the tape's first plan (live: -14/66 from the one before it)
     (0.4, "nav.stall", -3.8),
@@ -751,14 +755,16 @@ def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The tail rule against the node of 2026-10-06 01:00, the reverse look timed as then."""
-    writes = replay_tape(node, TAPE_0330, knobs=LATE_REVERSE, **LIVE_0330)
+    writes = replay_tape(node, TAPE_0330, knobs={**LATE_REVERSE, **NO_ECONOMY}, **LIVE_0330)
     assert short(writes) == FOLLOW_0330_LATE
     path = [b for b in node._looks.looks if b.source == "nav.path"]
     assert path[-1].until - T0 == pytest.approx(TAPE_0330.end_s)  # held to the drive's end
     drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
     assert drive[0].startswith("gaze: the drive's head: 17 writes,")
     before = build(monkeypatch)  # the metres off: the seconds alone, as before
-    old = replay_tape(before, TAPE_0330, knobs={**LATE_REVERSE, "path_tail_m": 0.0}, **LIVE_0330)
+    old = replay_tape(
+        before, TAPE_0330, knobs={**LATE_REVERSE, **NO_ECONOMY, "path_tail_m": 0.0}, **LIVE_0330
+    )
     before.close()
     assert [w for w in old if w.t < 40.0] == [w for w in writes if w.t < 40.0]  # nothing earlier
     assert [(w.t, w.source, w.pan_deg, w.tilt_deg) for w in old if 40.0 <= w.t < 42.0] == [
@@ -770,7 +776,7 @@ def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
 def test_drive_0330_a_swinging_path_look_is_replaced_by_the_reverse_look_not_expired(
     node: Gaze,
 ) -> None:
-    replay_tape(node, TAPE_0330, knobs=LATE_REVERSE, **LIVE_0330)
+    replay_tape(node, TAPE_0330, knobs={**LATE_REVERSE, **NO_ECONOMY}, **LIVE_0330)
     looks = node._looks.looks
     assert [b.text() for b in looks if b.ended == "expired"] == []
     swung = next(b for b in looks if b.source == "nav.path" and abs(b.since - T0 - 13.1) < 1e-6)
@@ -785,7 +791,7 @@ def test_drive_0330_a_swinging_path_look_is_replaced_by_the_reverse_look_not_exp
 def test_drive_0330_looks_back_at_each_legs_start_and_ahead_at_the_first_forward_command(
     node: Gaze,
 ) -> None:
-    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
+    writes = replay_tape(node, TAPE_0330, knobs=NO_ECONOMY, **LIVE_0330)
     assert short(writes) == FOLLOW_0330
     drive = [t for t in node.logger.texts("info") if t.startswith("gaze: the drive's head")]
     assert drive[0].startswith("gaze: the drive's head: 17 writes,")  # as many as before
@@ -828,7 +834,7 @@ FOLLOW_0358 = [
 def test_drive_0358_looks_back_at_each_legs_start_and_ahead_at_the_first_forward_command(
     node: Gaze, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    writes = replay_tape(node, TAPE_0358, **LIVE_0330)
+    writes = replay_tape(node, TAPE_0358, knobs=NO_ECONOMY, **LIVE_0330)
     assert short(writes) == FOLLOW_0358
     looks = reverse_looks(node)
     assert [took for took, _ in looks] == [0.35, 8.15, 8.55]
@@ -840,10 +846,96 @@ def test_drive_0358_looks_back_at_each_legs_start_and_ahead_at_the_first_forward
     drive = [t for t in info if t.startswith("gaze: the drive's head")]
     assert drive[0].startswith("gaze: the drive's head: 10 writes,")
     late = build(monkeypatch)
-    before = replay_tape(late, TAPE_0358, knobs=LATE_REVERSE, **LIVE_0330)
+    before = replay_tape(late, TAPE_0358, knobs={**LATE_REVERSE, **NO_ECONOMY}, **LIVE_0330)
     late.close()
     assert [(w.t, w.source) for w in before if w.source == "nav.reverse"] == [
         (1.4, "nav.reverse"),  # +1.08 into the departure, after it had ended (+1.20)
         (8.2, "nav.reverse"),  # +1.08 into the 1.1 s leg, held through the BackUp to +10.6
     ]
     assert len(before) == 9
+
+
+# ---- the head's economy on the tapes (path_still_m_s/path_still_deg, path_stall_guard_s) ---------
+# Drive 0365 without the economy (the reverse look timed as on 2026-10-06 evening): the departure
+# look cut 0.3 s later by the reverse look, the path look between the reverse and the stall look,
+# the aim -29 set in the pivot held until the zone let it go at +10.6.
+FOLLOW_0365 = [
+    (0.0, "nav.path", -60.0),
+    (0.3, "nav.reverse", 150.0),
+    (2.4, "nav.path", -60.0),
+    (3.15, "nav.stall", 44.8),
+    (4.1, "nav.path", -60.0),
+    (8.0, "nav.path", -29.2),
+    (10.6, "nav.path", -3.4),
+    (18.6, "nav.path", -60.0),
+    (19.2, "nav.reverse", -150.0),
+    (20.3, "nav.return", 0.0),
+]
+# At the defaults: no path look while the cart stands at the start (the head stays home), the
+# stall looks' aims held through the stands between them, the first path look at the first
+# forward command.
+ECONOMY_0330 = [
+    (0.4, "nav.stall", -3.8),
+    (3.6, "nav.stall", -4.3),  # no -60 in the stand between the stall looks, nor home
+    (6.55, "nav.reverse", 150.0),  # ...nor after it: the BackUp's first command
+    (9.35, "nav.path", -60.0),  # the first forward command
+    (10.35, "nav.reverse", 150.0),
+    (14.65, "nav.path", -31.2),
+    (18.45, "nav.reverse", 150.0),  # no -53.5 in the stand before it (+17.65)
+    (21.05, "nav.path", -56.9),
+    (25.15, "nav.reverse", 150.0),
+    (27.75, "nav.path", -56.9),
+    (30.95, "nav.path", -25.0),
+    (35.35, "nav.path", 0.2),
+    (42.0, "nav.return", 0.0),
+]
+
+
+def stall_frames(node: Gaze) -> list[tuple[float, int, str]]:
+    return [
+        (round(b.since - T0, 2), b.frames, b.ended)
+        for b in node._looks.looks
+        if b.source == "nav.stall"
+    ]
+
+
+@pytest.mark.slow
+def test_the_economy_off_is_the_follower_before_it_on_drive_0365(node: Gaze) -> None:
+    assert short(replay_tape(node, TAPE_0365, knobs=NO_ECONOMY, **LIVE_0330)) == FOLLOW_0365
+
+
+@pytest.mark.slow
+def test_drive_0330_no_path_saccade_while_the_cart_stands(
+    node: Gaze, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    writes = replay_tape(node, TAPE_0330, **LIVE_0330)
+    assert short(writes) == ECONOMY_0330  # 13 writes, 17 without the economy
+    looks = node._looks.looks
+    assert stall_frames(node) == [(0.4, 3, "done"), (3.6, 3, "done")]
+    kept = [b for b in looks if b.source == "nav.path" and b.since - T0 < 6.0]
+    assert [b.aim for b in kept] == [looks[0].aim, looks[2].aim]  # the stall looks' aims
+    assert sum(b.frames == 0 for b in looks) == 1  # 2 without the economy
+    before = build(monkeypatch)
+    replay_tape(before, TAPE_0330, knobs=NO_ECONOMY, **LIVE_0330)
+    assert stall_frames(before) == stall_frames(node)  # no stall look lost a frame
+    before.close()
+
+
+@pytest.mark.slow
+def test_drives_0358_and_0365_keep_the_head_home_until_the_first_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Both start with a reverse leg: no path look at the plan's first aim while the cart
+    stands, the reverse look takes the head from home at the leg's first command; the rest is
+    the drive without the economy, the stall look's frames too."""
+    for tape, before in ((TAPE_0358, FOLLOW_0358), (TAPE_0365, FOLLOW_0365)):
+        node = build(monkeypatch)
+        writes = short(replay_tape(node, tape, **LIVE_0330))
+        assert writes == before[1:], tape.end_s
+        assert writes[0][1] == "nav.reverse"
+        frames = stall_frames(node)
+        node.close()
+        off = build(monkeypatch)
+        replay_tape(off, tape, knobs=NO_ECONOMY, **LIVE_0330)
+        assert frames == stall_frames(off) and frames
+        off.close()

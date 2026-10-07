@@ -443,6 +443,13 @@ class Arbiter:
             self.counts["adopted"] += 1
             return True
 
+    def looked_at(self) -> Aim | None:
+        """Where the newest write sent the head for a look; ``None`` when it sent it home, the
+        encoders found it elsewhere (:meth:`adopt`) or nothing was written."""
+        with self._lock:
+            head = self._head
+            return head.aim if head is not None and head.owner and not head.home else None
+
     def renew(self, source: str, now: float) -> int:
         """Restart the TTL of ``source``'s requests, and the dwell of one already answered
         (``see`` keeps a look; path gaze keeps its aim); how many."""

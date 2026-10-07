@@ -21,6 +21,19 @@ costs the visual odometry samples (drive 306: a >= 45 deg swing at ~300 deg/s lo
 4.7-6.5 of them) and writes no frame while it lasts. A path look that does not hold the head
 (another look had it) is aimed at once. All five at 0 are :func:`settle` exactly.
 
+ECONOMY (:class:`StandWatch` feeds the follower): while the cart STANDS (``|v|`` under
+``still_m_s``, ``|w|`` under :data:`STILL_RAD_S`) the path look makes no saccade unless the plan's
+aim is more than ``still_deg`` off where the head is; one that does not hold the head then takes
+it where it is (no write), and the first saccade waits for the first command that moves the cart
+(drives 0348-0371: 59 fresh path looks made standing, 21 of them in 0351's recovery loop). For
+``stall_guard_s`` after the controller's command dropped to zero the path look makes no saccade at
+all: a stall look is coming and takes the head from where it is (29 path looks held still under
+0.5 s, 18 frames in all). RE-CENTRE: when the plan's aim has been within ``recentre_deg`` of
+straight ahead for ``recentre_s`` while the held aim is more than half the zone from it (the
+cart's own turn carried the path ahead, the head still looks aside: drive 0365, 24 deg right for
+2.4 s along a straight path), the head moves once to the plan's aim, the cooldown permitting.
+``still_m_s``, ``stall_guard_s`` and ``recentre_s`` at 0 are the follower of 2026-10-06.
+
 REVERSE GAZE (:class:`ReverseWatch`, :func:`reverse_aim`): a reverse leg that was ANNOUNCED —
 the plan leaves the cart backwards for ``min_m`` or more (:func:`reverse_leg_m`), or the tree's
 recovery drives it (``recovery``) — turns the head back at its first reversing command; one that
@@ -67,6 +80,11 @@ class PathGazeLaw:
     tail_s: float = 0.5
     tail_m: float = 0.35
     hold_s: float = 60.0
+    still_m_s: float = 0.02
+    still_deg: float = 60.0
+    stall_guard_s: float = 0.5
+    recentre_s: float = 1.0
+    recentre_deg: float = 5.0
 
 
 def lookahead_m(speed_m_s: float, law: PathGazeLaw) -> float:
@@ -112,6 +130,8 @@ def settle(current: Aim | None, wanted: Aim, deadband_deg: float) -> Aim:
 
 
 MOVING_M_S = 0.02  # slower than this the cart is taken as stopped: no end in sight
+STILL_RAD_S = 0.1  # a cart turning slower than this stands (with |v| under the law's still_m_s)
+ZERO_CMD = 1e-3  # a command this small in both v and w is the controller's zero
 
 
 def remaining_m(path_xy: Array, cart_xy: tuple[float, float]) -> float:
@@ -130,18 +150,49 @@ def time_to_end(remaining: float, speed_m_s: float) -> float:
     return remaining / speed if speed >= MOVING_M_S else math.inf
 
 
+class StandWatch:
+    """Whether the cart stands, and how long ago the command last dropped to zero from a moving
+    one (the controller stopped: a stall look may be coming); fed every commanded twist."""
+
+    def __init__(self) -> None:
+        self.standing = False
+        self._moved = False  # a nonzero command since the drive's start
+        self._zero_since: float | None = None
+
+    def reset(self) -> None:
+        """A new drive: nothing commanded yet."""
+        self.standing, self._moved, self._zero_since = False, False, None
+
+    def update(self, v: float, w: float, now: float, law: PathGazeLaw) -> None:
+        """One commanded twist."""
+        self.standing = law.still_m_s > 0.0 and abs(v) < law.still_m_s and abs(w) < STILL_RAD_S
+        if abs(v) <= ZERO_CMD and abs(w) <= ZERO_CMD:
+            if self._moved and self._zero_since is None:
+                self._zero_since = now
+            return
+        self._moved, self._zero_since = True, None
+
+    def stopped_for(self, now: float) -> float:
+        """Seconds since the command dropped to zero; infinite while it moves the cart or has
+        not since the drive's start."""
+        return math.inf if self._zero_since is None else now - self._zero_since
+
+
 class PathFollower:
-    """The path look's aim through one drive (see FOLLOWING above); :meth:`reset` at a drive's
-    start."""
+    """The path look's aim through one drive (see FOLLOWING and ECONOMY above); :meth:`reset` at
+    a drive's start."""
 
     def __init__(self) -> None:
         self.aim: Aim | None = None
         self._out_since: float | None = None
         self._moved_at: float | None = None
+        self._ahead_since: float | None = None  # the re-centre's condition held since
+        self._adopted = False  # the aim is where another look left the head, not one chosen
 
     def reset(self) -> None:
         """A new drive: no aim held."""
         self.aim, self._out_since, self._moved_at = None, None, None
+        self._ahead_since, self._adopted = None, False
 
     def update(
         self,
@@ -152,22 +203,39 @@ class PathFollower:
         end_in_s: float = math.inf,
         left_m: float = math.inf,
         fresh: bool = False,
+        standing: bool = False,
+        stopped_s: float = math.inf,
+        head: Aim | None = None,
+        home: Aim | None = None,
     ) -> Aim | None:
         """The aim to hold now for the plan's ``wanted``, ``left_m`` of plan and ``end_in_s``
-        seconds at the current speed from the plan's end; ``None`` in the drive's tail when the
-        path look holds nothing. ``fresh``: the path look does not hold the head, so a move
-        waits for neither the hysteresis nor the cooldown (and in the tail is not made)."""
-        current = self.aim
+        seconds at the current speed from the plan's end; ``None`` when the path look holds
+        nothing (the drive's tail, a stand with the head home). ``fresh``: the path look does
+        not hold the head, so a move waits for neither the hysteresis nor the cooldown (and in
+        the tail is not made). ``standing`` (:class:`StandWatch`), ``stopped_s`` since the
+        command dropped to zero, ``head`` (where a look sent the head; ``None``: home, or found
+        there) and ``home`` drive the ECONOMY rules."""
         tail = (law.tail_s > 0.0 and end_in_s <= law.tail_s) or (
             law.tail_m > 0.0 and left_m <= law.tail_m
         )
         if tail and fresh:
             return None  # a head elsewhere is not brought back in the last seconds either
+        keep, kept = self._economy(
+            wanted, law, fresh=fresh, standing=standing, stopped_s=stopped_s, head=head, home=home
+        )
+        if keep:
+            return kept
+        # an aim taken where another look left the head is no choice: the first move is made
+        current = None if self._adopted else self.aim
         if current is not None and current.off(wanted) <= math.radians(law.deadband_deg):
             self._out_since = None
-            return current
+            if tail or not self._recentre(current, wanted, now, law):
+                return current
+            self.aim, self._moved_at, self._ahead_since = wanted, now, None
+            return wanted
+        self._ahead_since = None
         if tail:
-            return current
+            return self.aim
         if current is not None and not fresh:
             if self._out_since is None:
                 self._out_since = now
@@ -176,7 +244,53 @@ class PathFollower:
             if self._moved_at is not None and now - self._moved_at < law.cooldown_s:
                 return current
         self.aim, self._out_since, self._moved_at = wanted, None, now
+        self._adopted = False
         return wanted
+
+    def _economy(
+        self,
+        wanted: Aim,
+        law: PathGazeLaw,
+        *,
+        fresh: bool,
+        standing: bool,
+        stopped_s: float,
+        head: Aim | None,
+        home: Aim | None,
+    ) -> tuple[bool, Aim | None]:
+        """Whether the ECONOMY rules keep the head now (no saccade), and the aim to hold: just
+        after the command dropped to zero, or standing with the plan's aim within ``still_deg``
+        of the head. A path look that does not hold the head takes it where a look left it,
+        until the first move the rules let through; a head at home stays there without one."""
+        guard = law.stall_guard_s > 0.0 and stopped_s < law.stall_guard_s
+        if not (guard or (standing and law.still_m_s > 0.0)):
+            return False, None
+        where = (head if head is not None else home) if fresh else self.aim
+        if where is None:
+            return False, None
+        if not guard and wanted.off(where) > math.radians(law.still_deg):
+            return False, None
+        if fresh:
+            if head is None:
+                return True, None  # home: the arbiter keeps it there, no look needed
+            self.aim, self._out_since, self._ahead_since = head, None, None
+            self._adopted = True
+        return True, self.aim
+
+    def _recentre(self, current: Aim, wanted: Aim, now: float, law: PathGazeLaw) -> bool:
+        """Whether the held aim moves to the plan's now: its aim has been within
+        ``recentre_deg`` of straight ahead for ``recentre_s``, the held one more than half the
+        zone from it, and the cooldown has passed."""
+        aside = abs(current.pan_rad - wanted.pan_rad) > math.radians(law.deadband_deg) / 2.0
+        ahead = abs(wanted.pan_rad) <= math.radians(law.recentre_deg)
+        if law.recentre_s <= 0.0 or not (aside and ahead):
+            self._ahead_since = None
+            return False
+        if self._ahead_since is None:
+            self._ahead_since = now
+        if now - self._ahead_since < law.recentre_s:
+            return False
+        return self._moved_at is None or now - self._moved_at >= law.cooldown_s
 
 
 @dataclass(frozen=True)

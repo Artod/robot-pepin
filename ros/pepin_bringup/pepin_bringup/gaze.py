@@ -34,20 +34,24 @@ only at rest the head is home again before the answer, so the drive never resume
 head; with ``neck_target`` it goes home as the drive resumes. Every stall look is one JSON line
 on ``/gaze/stall`` and one log line.
 
-PATH GAZE and REVERSE GAZE (behind ``path_gaze`` and ``reverse_gaze``, :mod:`pepin.path_gaze`)
-run only with a base server that moves the neck while driving: with one that does not, a head
-turned during a pause would drive on turned. Path gaze FOLLOWS in a zone
+PATH GAZE and REVERSE GAZE (behind ``path_gaze`` and ``reverse_gaze``, :mod:`pepin.path_gaze`) run
+only with a base server that moves the neck while driving: with one that does not, a head turned
+during a pause would drive on turned. Path gaze FOLLOWS in a zone
 (:class:`pepin.path_gaze.PathFollower`: ``path_deadband_deg``, ``path_hyst_s``,
-``path_cooldown_s``, and no new saccade in the plan's last ``path_tail_m`` or ``path_tail_s``);
-while it has no aim — reversing before a reverse look, no plan point ahead — its look is renewed
-where it is for up to ``path_hold_s``, so the head does not lapse home and back; the next look
-replaces it or the drive's end lets it go. With ``glance_dwell_s`` above 0 the reverse look and
-the stall look are atomic GLANCES (:class:`pepin.gaze.Look`'s ``hold_s``): the reverse look waits
-for ``reverse_frames`` clean frames or ``glance_dwell_s`` once settled, the stall look for
-``frames`` or its TTL, and only a better band takes the head before; the reverse glance takes
-the head from the path look at once, even mid-swing (``preempt``: drive 0330's path look,
-swinging 210 deg as the cart backed again, held the head against it until its 0.5 s TTL ran
-out). After a drive the head goes home at ``return_deg_s``.
+``path_cooldown_s``, and no new saccade in the plan's last ``path_tail_m`` or ``path_tail_s``), and
+sparingly (:class:`pepin.path_gaze.StandWatch`): no saccade while the cart stands
+(``path_still_m_s``) unless the plan's aim is more than ``path_still_deg`` off the head, none for
+``path_stall_guard_s`` after the command dropped to zero (a stall look is coming), and one back to
+the plan's aim once it has been within ``path_recentre_deg`` of straight ahead for
+``path_recentre_s`` with the head still aside. While it has no aim — reversing before a reverse
+look, no plan point ahead — its look is renewed where it is for up to ``path_hold_s``, so the head
+does not lapse home and back; the next look replaces it or the drive's end lets it go. With
+``glance_dwell_s`` above 0 the reverse look and the stall look are atomic GLANCES
+(:class:`pepin.gaze.Look`'s ``hold_s``): the reverse look waits for ``reverse_frames`` clean frames
+or ``glance_dwell_s`` once settled, the stall look for ``frames`` or its TTL, and only a better
+band takes the head before; the reverse glance takes the head from the path look at once, even
+mid-swing (``preempt``: drive 0330's path look, swinging 210 deg as the cart backed again, held the
+head against it until its 0.5 s TTL ran out). After a drive the head goes home at ``return_deg_s``.
 
 THE REVERSE LOOK'S TIMING (:class:`pepin.path_gaze.ReverseWatch`). It is requested in the step of
 the leg's first reversing command when the leg is announced: ``/plan`` leaves the cart backwards
@@ -136,6 +140,7 @@ from pepin.path_gaze import (
     PathGazeLaw,
     ReverseLaw,
     ReverseWatch,
+    StandWatch,
     path_aim,
     remaining_m,
     reverse_aim,
@@ -314,6 +319,7 @@ class Gaze(Node):
         self._reverse = ReverseWatch()
         self._path_at = 0.0
         self._follow = PathFollower()
+        self._stand = StandWatch()
         self._path_quiet_since: float | None = None
         self._looks = LookTally()  # the report window's
         self._drive_looks: LookTally | None = None
@@ -436,6 +442,11 @@ class Gaze(Node):
             tail_s=k("path_tail_s"),
             tail_m=k("path_tail_m"),
             hold_s=k("path_hold_s"),
+            still_m_s=k("path_still_m_s"),
+            still_deg=k("path_still_deg"),
+            stall_guard_s=k("path_stall_guard_s"),
+            recentre_s=k("path_recentre_s"),
+            recentre_deg=k("path_recentre_deg"),
         )
 
     def _reverse_law(self) -> ReverseLaw:
@@ -515,6 +526,7 @@ class Gaze(Node):
         if after - before:
             self._driving = True
             self._follow.reset()
+            self._stand.reset()
             self._reverse.release()
             self._path_quiet_since = None
             if self._summary_at is not None:
@@ -637,6 +649,8 @@ class Gaze(Node):
         law = self._reverse_law()
         looking = self._reverse.looking
         self._reverse.update(v, w, now, law)
+        path_law = self._path_law()
+        self._stand.update(v, w, now, path_law)
         if not self._driving or not self._head.moves_while_driving:
             return
         reverse_gaze = self._switches.on("reverse_gaze")
@@ -678,7 +692,16 @@ class Gaze(Node):
         wanted, left, end_in = target
         fresh = not any(r.source == PATH_SOURCE for r in self._arbiter.pending())
         aim = self._follow.update(
-            wanted, now, self._path_law(), end_in_s=end_in, left_m=left, fresh=fresh
+            wanted,
+            now,
+            path_law,
+            end_in_s=end_in,
+            left_m=left,
+            fresh=fresh,
+            standing=self._stand.standing,
+            stopped_s=self._stand.stopped_for(now),
+            head=self._arbiter.looked_at(),
+            home=self._arbiter.home,
         )
         if aim is None:
             return
