@@ -234,7 +234,7 @@ def test_the_camera_service_applies_it_first_and_streams_whatever_happens() -> N
         " ${PEPIN_CAMERA_DEVICE} --config /opt/pepin/config/camera.json"
     ], "the leading '-': a failure there never keeps the stream down"
     assert "Environment=PYTHONPATH=/opt/pepin" in unit
-    assert unit.index("ExecStartPre=") < unit.index("ExecStart=/usr/bin/ustreamer")
+    assert unit.index("ExecStartPre=") < unit.index("ExecStart=/bin/sh")
 
 
 def test_the_module_needs_nothing_but_the_standard_library() -> None:
@@ -251,3 +251,68 @@ def test_the_module_needs_nothing_but_the_standard_library() -> None:
         if isinstance(node, ast.ImportFrom) and node.level == 0
     }
     assert imported <= set(sys.stdlib_module_names) | {"__future__"}, imported
+
+
+# ---- the frame rate -------------------------------------------------------------------------
+def test_the_rate_verb_prints_the_active_rigs_fps_and_refuses_what_ustreamer_cannot_take(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.delenv("PEPIN_CAMERA", raising=False)
+    config = tmp_path / "camera.json"
+    rate = {"lag_per_period": 0.885, "lag_offset_s": 0.0035}
+    data = {"active": "stereo", "stereo": {"rate": {"fps": 20, **rate}}, "overview": {}}
+    config.write_text(json.dumps(data))
+    assert cc.main(["rate", "--config", str(config)]) == 0
+    assert capsys.readouterr().out.strip() == "20", "no --device needed for the rate"
+    assert cc.main(["rate", "--config", str(config), "--rig", "overview"]) == 1
+    assert "no rig 'overview' with a rate block" in capsys.readouterr().err
+    data["stereo"]["rate"]["fps"] = 12.5
+    config.write_text(json.dumps(data))
+    assert cc.main(["rate", "--config", str(config)]) == 1
+    assert "not a positive whole number" in capsys.readouterr().err
+
+
+def test_the_shipped_rate_is_the_stereo_heads_ten_fps(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PEPIN_CAMERA", raising=False)
+    assert cc.desired_fps(REPO / "config/camera.json") == 10
+
+
+def _unit_script(tmp_path: Path, config: Path) -> str:
+    """The camera unit's ExecStart as /bin/sh runs it, with ustreamer an echo and the board's
+    python this one: systemd's $$ is a literal $."""
+    unit = (REPO / "board/pepin-camera.service").read_text()
+    (line,) = [x for x in unit.splitlines() if x.startswith("ExecStart=/bin/sh -c '")]
+    script = line.removeprefix("ExecStart=/bin/sh -c '").removesuffix("'").replace("$$", "$")
+    return (
+        script.replace("/opt/pepin/bin/python", sys.executable)
+        .replace("/opt/pepin/config/camera.json", str(config))
+        .replace("exec /usr/bin/ustreamer", "exec echo ustreamer")
+    )
+
+
+def test_the_camera_service_asks_ustreamer_for_the_configs_rate(tmp_path: Path) -> None:
+    """The unit's own command line under sh: --desired-fps is camera.json's rate.fps, and a file
+    that cannot be read falls back to PEPIN_CAMERA_FPS instead of keeping the stream down."""
+    config = tmp_path / "camera.json"
+    rate = {"fps": 20, "lag_per_period": 0.885, "lag_offset_s": 0.0035}
+    config.write_text(json.dumps({"active": "stereo", "stereo": {"rate": rate}}))
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "PYTHONPATH": str(REPO / "src"),
+        "PEPIN_CAMERA_DEVICE": "/dev/v4l/by-id/cam",
+        "PEPIN_CAMERA_RESOLUTION": "1600x600",
+        "PEPIN_CAMERA_ENCODER": "HW",
+        "PEPIN_CAMERA_FPS": "15",
+    }
+    script = _unit_script(tmp_path, config)
+    out = subprocess.run(
+        ["/bin/sh", "-c", script], env=env, capture_output=True, text=True, check=True
+    ).stdout
+    assert "--resolution 1600x600 --desired-fps 20 --host" in out
+    assert "--device /dev/v4l/by-id/cam" in out
+    config.write_text("{")
+    out = subprocess.run(
+        ["/bin/sh", "-c", script], env=env, capture_output=True, text=True, check=True
+    ).stdout
+    assert "no rate from camera.json: PEPIN_CAMERA_FPS 15" in out
+    assert "--desired-fps 15 --host" in out

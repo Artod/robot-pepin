@@ -293,6 +293,71 @@ class CameraConfig:
         return replace(cfg, calibrated=_stereo_calibrated(cfg.rig, file.parent))
 
 
+@dataclass(frozen=True)
+class CameraRate:
+    """The head camera's frame rate, a rig's ``rate`` block in ``config/camera.json``: the ONE
+    number every consumer of the frame period follows (the board's ustreamer asks the camera for
+    ``fps``; camera_stream dates grab stamps by the period; OpenVINS's track_frequency and time
+    shift, the frame gate's window and the gaze arbiter's blind tail scale with it).
+
+    ``grab_lag_s`` is how far a V4L2 capture stamp sits behind the exposure: ``lag_per_period``
+    frame periods plus ``lag_offset_s`` (the camera hands a frame over about one period after it
+    was taken, at any rate)."""
+
+    fps: float
+    lag_per_period: float
+    lag_offset_s: float
+
+    @classmethod
+    def from_json(cls, block: Mapping[str, Any]) -> CameraRate:
+        """From a ``rate`` block; ``ValueError`` on a rate that is not positive."""
+        fps = float(block["fps"])
+        if not fps > 0.0:
+            raise ValueError(f"camera.json: rate.fps {fps} is not a positive rate")
+        return cls(
+            fps=fps,
+            lag_per_period=float(block["lag_per_period"]),
+            lag_offset_s=float(block["lag_offset_s"]),
+        )
+
+    @property
+    def period_s(self) -> float:
+        """One frame period at the configured rate."""
+        return 1.0 / self.fps
+
+    def grab_lag_s(self, period_s: float | None = None) -> float:
+        """The capture stamp's lag behind the exposure at ``period_s`` (a measured period),
+        or at the configured rate's when ``None``."""
+        period = self.period_s if period_s is None else period_s
+        return self.lag_per_period * period + self.lag_offset_s
+
+
+def camera_rate(
+    path: str | Path | None = None,
+    name: str | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> CameraRate:
+    """The active rig's (or ``name``'s) :class:`CameraRate` from ``config/camera.json``
+    (``path``, else :func:`pepin.deployment.config_file`). A rig without a ``rate`` block
+    raises ``KeyError``: the rate is never guessed."""
+    if path is None:
+        from pepin.deployment import config_file
+
+        path = config_file("camera.json")
+    data = json.loads(Path(path).read_text())
+    chosen = active_camera(data, name, environ)
+    block = data[chosen].get("rate")
+    if not isinstance(block, Mapping):
+        raise KeyError(f"config/camera.json: the {chosen!r} rig has no rate block")
+    return CameraRate.from_json(block)
+
+
+def follow_period(value: float, per_period: float, period_s: float) -> float:
+    """A period-keyed knob's effective value: ``value`` when it is set (above 0), else
+    ``per_period`` frame periods of ``period_s`` (0 = follow the camera's rate)."""
+    return value if value > 0.0 else per_period * period_s
+
+
 def _stereo_calibrated(rig: StereoRig, config_dir: Path) -> bool:
     """Whether the stereo calibration ``rig`` names exists beside the config and loads: a
     half-written or truncated file is not a calibration (:meth:`pepin.stereo.StereoCalibration

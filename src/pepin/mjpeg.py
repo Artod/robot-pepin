@@ -17,7 +17,10 @@ capture on the realtime clock is ``grab + (X-Timestamp - send)`` (:func:`capture
 
 from __future__ import annotations
 
+import statistics
+from collections import deque
 from collections.abc import Iterator
+from itertools import pairwise
 from typing import IO
 
 CHUNK = 65536
@@ -25,14 +28,21 @@ CHUNK = 65536
 
 def parts(stream: IO[bytes]) -> Iterator[tuple[dict[str, str], bytes]]:
     """Yield (headers, body) for every part of a multipart stream until it ends. Header names
-    are lower-cased; the boundary is whatever line starts the first part."""
+    are lower-cased; the boundary is whatever line starts the first part.
+
+    The stream is read with ``read1`` where it has one (an HTTP response, a buffered file): a
+    plain ``read(CHUNK)`` blocks until CHUNK bytes are in, so a frame that ends mid-chunk waited
+    for the NEXT frame's first bytes — 55-70 ms of latency on every frame at 10 fps (arrival -
+    send 129-130 ms with read, 58-59 with read1, 2026-10-07, scratch/vio_rate/reader_latency.py).
+    """
+    read = getattr(stream, "read1", stream.read)
     buffer = b""
     boundary: bytes | None = None
     while True:
         if boundary is None:
             line_end = buffer.find(b"\r\n")
             if line_end < 0:
-                more = stream.read(CHUNK)
+                more = read(CHUNK)
                 if not more:
                     return
                 buffer += more
@@ -44,7 +54,7 @@ def parts(stream: IO[bytes]) -> Iterator[tuple[dict[str, str], bytes]]:
             continue
         head_end = buffer.find(b"\r\n\r\n")
         if head_end < 0:
-            more = stream.read(CHUNK)
+            more = read(CHUNK)
             if not more:
                 return
             buffer += more
@@ -58,7 +68,7 @@ def parts(stream: IO[bytes]) -> Iterator[tuple[dict[str, str], bytes]]:
         length = int(headers.get("content-length", "0"))
         body_start = head_end + 4
         while len(buffer) < body_start + length:
-            more = stream.read(CHUNK)
+            more = read(CHUNK)
             if not more:
                 return
             buffer += more
@@ -66,7 +76,7 @@ def parts(stream: IO[bytes]) -> Iterator[tuple[dict[str, str], bytes]]:
         buffer = buffer[body_start + length :]
         next_boundary = buffer.find(boundary)
         if next_boundary < 0:
-            more = stream.read(CHUNK)
+            more = read(CHUNK)
             if not more:
                 return
             buffer += more
@@ -134,3 +144,22 @@ def _seconds(headers: dict[str, str], name: str) -> float | None:
         return float(headers[name])
     except (KeyError, ValueError):
         return None
+
+
+# How many of the last grab intervals the measured frame period is the median of: three seconds
+# at 10 fps, one at 30; a dropped frame is one long interval the median ignores.
+PERIOD_WINDOW = 31
+
+
+class GrabPeriod:
+    """The camera's frame period as the grab stamps show it: the median of the last
+    :data:`PERIOD_WINDOW` positive intervals (``None`` before two of them)."""
+
+    def __init__(self, window: int = PERIOD_WINDOW) -> None:
+        self._grabs: deque[float] = deque(maxlen=window + 1)
+
+    def add(self, grab: float) -> float | None:
+        """One more grab stamp (seconds); the period after it."""
+        self._grabs.append(grab)
+        intervals = [b - a for a, b in pairwise(self._grabs) if b > a]
+        return statistics.median(intervals) if len(intervals) >= 2 else None

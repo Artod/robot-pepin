@@ -157,6 +157,7 @@ from rtabmap_msgs.msg import GlobalDescriptor, SensorData
 from sensor_msgs.msg import CameraInfo, Image, LaserScan, PointCloud2, PointField
 from std_msgs.msg import String
 
+from pepin.camera import camera_rate
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import DARK_KNOBS, GATE_DARK, GATE_KNOBS, GAZE_GATE
 from pepin.global_descriptor import (
@@ -475,6 +476,7 @@ class SensorPack(Node):
         self._say_place()
         self._gaze = GazeFeed(
             self,
+            period_s=camera_rate().period_s,  # the 0 knobs follow config/camera.json's rate
             exposure_s=float(self._switches["gate_exposure_s"]),
             settle_s=float(self._switches["gate_settle_s"]),
             yaw_dps=float(self._switches["gate_yaw_dps"]),

@@ -308,10 +308,11 @@ case "${1:-}" in
         # initialise in motion; still windows keep the static init), --no-zupt (the first
         # design's: no ZUPT, the init waits for a jerk), --calib-extrinsics (a check session that
         # lets OpenVINS refine the camera-IMU transform). The two lines it prints say which.
-        # The time shift follows camera_stream's LIVE camera_stamp_lag_s (the knob dates every
-        # grab stamp earlier; head_imu.time_offset_s was measured at its default): read once,
-        # here, so a later change of the knob needs a vio restart. PEPIN_VIO_STAMP_LAG overrides
-        # the reading; camera_stream down leaves the knob's default.
+        # The camera's rate (config/camera.json's rate.fps) sets track_frequency, and the time
+        # shift follows camera_stream's LIVE camera_stamp_lag_s (0, its default, follows the rate;
+        # head_imu.time_offset_s names the stamps it was measured against): both read once, here,
+        # so a rate or knob change needs a vio restart. PEPIN_VIO_STAMP_LAG overrides the reading;
+        # camera_stream down leaves the knob's default.
         LAG="${PEPIN_VIO_STAMP_LAG:-$("$HERE/flags.sh" get camera_stream camera_stamp_lag_s 2>/dev/null | awk '/value is/ {print $NF}' || true)}"
         LAG_ARGS=()
         if [ -n "$LAG" ]; then LAG_ARGS=(--camera-stamp-lag "$LAG"); fi

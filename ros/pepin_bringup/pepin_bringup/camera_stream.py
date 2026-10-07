@@ -59,7 +59,9 @@ the base server, and this side must not publish the same edge.
 The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set camera_stream <name>
 <value>``): ``scale``, live (the published picture as a fraction of the camera's own, optics
 included); ``camera_stamp``, live (send or grab, above); ``camera_stamp_lag_s``, live (a grab stamp
-dated that much earlier, to the exposure the capture stamp sits behind); ``undistort``, live
+dated that much earlier, to the exposure the capture stamp sits behind; 0, the default, follows
+the camera's rate: config/camera.json's ``rate`` rule applied to the frame period this node
+measures from the grab stamps, the configured rate's until a few frames are in); ``undistort``, live
 (the picture is straightened by the calibration before it goes out, and its CameraInfo then
 carries no distortion); ``static_camera_tf``, read at start and not live — a static transform
 cannot be withdrawn once sent, so the other value needs a restart. All of them are printed in
@@ -93,10 +95,10 @@ from sensor_msgs.msg import CameraInfo, Illuminance, Image
 from tf2_ros import StaticTransformBroadcaster
 
 from pepin.calibration import undistort_optics
-from pepin.camera import CameraConfig, Optics, optics
+from pepin.camera import CameraConfig, Optics, camera_rate, optics
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import BRIGHTNESS_TOPIC, frame_brightness
-from pepin.mjpeg import STAMP_MODES, capture_time, has_grab, parts, send_lag_s
+from pepin.mjpeg import STAMP_MODES, GrabPeriod, capture_time, has_grab, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import (
@@ -246,6 +248,10 @@ class CameraStream(Node):
         camera = str(self.declare_parameter("camera", "").value).strip()
         self._cfg = CameraConfig.load(config, name=camera or None, board=board)
         self._rig = self._cfg.rig
+        # The camera's rate (config/camera.json's rate block): the grab stamps' lag rule, and the
+        # rate the measured period is checked against.
+        self._rate = camera_rate(config, camera or None)
+        self._period = GrabPeriod()
         self._split = SideBySide(self._rig.upside_down) if self._rig is not None else None
         self._calibration_file = (
             None if self._rig is None else self._rig.calibration_path(config.parent)
@@ -719,8 +725,8 @@ class CameraStream(Node):
     def _frame_time(self, headers: dict[str, str]) -> float | None:
         """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
         that carries both goes into the period's samples, and a ``grab`` part without them is
-        counted (it falls back to the send time). A grab stamp is dated ``camera_stamp_lag_s``
-        earlier, towards the exposure it sits behind; the send fallback is not."""
+        counted (it falls back to the send time). A grab stamp is dated earlier, towards the
+        exposure it sits behind (:meth:`_grab_lag_s`); the send fallback is not."""
         mode = str(self._switches["camera_stamp"])
         lag = send_lag_s(headers)
         if lag is not None:
@@ -729,8 +735,20 @@ class CameraStream(Node):
             self._tally.count("no_grab")
         taken = capture_time(headers, mode)
         if taken is not None and mode == "grab" and has_grab(headers):
-            taken -= float(self._switches["camera_stamp_lag_s"])
+            taken -= self._grab_lag_s(taken)
         return taken
+
+    def _grab_lag_s(self, grab: float) -> float:
+        """How much earlier than its grab stamp a frame is dated: ``camera_stamp_lag_s`` when set,
+        else (0, follow) the rate's rule on the measured frame period, the configured one's
+        until the grabs show one. The capture stamp sits about one period behind the picture at
+        any rate (92 / 48 / 33 ms at 10 / 20 / 30 fps, 2026-10-07), so a fixed lag goes stale the
+        moment the board's rate changes."""
+        period = self._period.add(grab)
+        if period is not None:
+            self._tally.sample("period_ms", period * 1e3)
+        fixed = float(self._switches["camera_stamp_lag_s"])
+        return fixed if fixed > 0.0 else self._rate.grab_lag_s(period)
 
     def _stamp(self, taken_at: float | None) -> Any:
         """The moment a frame is published under: the board's capture time when ustreamer sent
@@ -773,9 +791,35 @@ class CameraStream(Node):
             )
         median = lags[len(lags) // 2]
         p90 = lags[min(len(lags) - 1, int(0.9 * len(lags)))]
-        earlier = float(self._switches["camera_stamp_lag_s"])
-        dated = f", dated {earlier * 1e3:.0f} ms earlier" if mode == "grab" and earlier else ""
+        dated = f", dated {self._dated_text(w)}" if mode == "grab" else ""
         return f"stamp={mode}{dated}, send-grab median/p90 {median:.0f}/{p90:.0f} ms"
+
+    def _dated_text(self, w: Window) -> str:
+        """How far grab stamps were dated back in the window and why: the fixed knob, or the
+        rate's rule on the period measured (with a warning when the board's rate is not the
+        configured one: everything else that follows config/camera.json is then off)."""
+        periods = sorted(w.samples.get("period_ms", ()))
+        period_ms = periods[len(periods) // 2] if periods else None
+        fixed = float(self._switches["camera_stamp_lag_s"])
+        configured = f"config {self._rate.fps:g} fps"
+        if period_ms is not None:
+            measured = 1e3 / period_ms
+            configured += (
+                f", measured {measured:.1f} fps: NOT the configured rate"
+                if abs(measured - self._rate.fps) > 0.1 * self._rate.fps
+                else f", measured {measured:.1f} fps"
+            )
+        if fixed > 0.0:
+            return f"{fixed * 1e3:.0f} ms earlier (camera_stamp_lag_s; {configured})"
+        period = period_ms * 1e-3 if period_ms is not None else None
+        lag = self._rate.grab_lag_s(period)
+        source = (
+            f"the {period_ms:.1f} ms period" if period_ms is not None else "the configured period"
+        )
+        return (
+            f"{lag * 1e3:.0f} ms earlier (follow: {self._rate.lag_per_period:g} x {source}"
+            f" + {self._rate.lag_offset_s * 1e3:.1f} ms; {configured})"
+        )
 
     def _stereo_report(self, w: Window) -> str:
         """What a stereo rig adds to the report line — the head, the stages and whatever went

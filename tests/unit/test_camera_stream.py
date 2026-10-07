@@ -296,36 +296,45 @@ def test_the_stamp_mode_picks_the_send_or_the_capture_and_the_report_prints_the_
     build: Build,
 ) -> None:
     """``grab`` (the default since 2026-10-05) stamps the V4L2 capture moved onto ustreamer's
-    realtime clock, 48 ms before the send here, and camera_stamp_lag_s (0.09) earlier still;
-    ``send``, live, ustreamer's X-Timestamp; the report names the mode and the lag."""
+    realtime clock, 48 ms before the send here, and earlier still by the rate's rule
+    (camera_stamp_lag_s 0, the default: 0.885 x the period + 3.5 ms, the fixture's mono rig at its
+    configured 15 fps until grabs show a period); ``send``, live, ustreamer's X-Timestamp; the
+    report names the mode and the lag."""
     body = jpeg(1280, 720)
     node, _ = build(grab_part(1_750_000_000.30, 0.048, body))
     images = node.pubs["/camera/image"].sent
     assert until(lambda: images)
+    rule = 0.885 / 15 + 0.0035
     assert stamp_seconds(images[0].header.stamp) == pytest.approx(
-        1_750_000_000.30 - 0.048 - 0.09, abs=1e-6
+        1_750_000_000.30 - 0.048 - rule, abs=1e-6
     )
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "stamp=grab, dated 90 ms earlier, send-grab median/p90 48/48 ms" in line
+    assert (
+        "stamp=grab, dated 62 ms earlier (follow: 0.885 x the configured period + 3.5 ms;"
+        " config 15 fps), send-grab median/p90 48/48 ms" in line
+    )
     assert node.set_parameters([Param("camera_stamp", "send")])[0].successful
     assert node._frame_time({"x-timestamp": "1750000001.300000"}) == pytest.approx(
         1_750_000_001.300, abs=1e-6
     ), "send: X-Timestamp as it came, the lag untouched"
     node._report()
     assert "stamp=send" in node.logger.texts("info")[-1]
-    assert node.set_parameters([Param("camera_stamp_lag_s", 0.0)])[0].successful  # the raw grab
+    assert node.set_parameters([Param("camera_stamp_lag_s", 0.001)])[0].successful  # fixed
     assert node.set_parameters([Param("camera_stamp", "grab")])[0].successful
     headers = {
         "x-timestamp": "1750000001.300000",
         "x-ustreamer-send-time": "5001.000000",
         "x-ustreamer-grab-time": "5000.952000",
     }
-    assert node._frame_time(headers) == pytest.approx(1_750_000_001.252, abs=1e-6)
+    assert node._frame_time(headers) == pytest.approx(1_750_000_001.251, abs=1e-6)
     assert node._frame_time({"x-timestamp": "7.0"}) == 7.0, "no grab headers: the send time"
     node._report()
     line = node.logger.texts("info")[-1]
-    assert "stamp=grab, send-grab median/p90 48/48 ms" in line
+    assert (
+        "stamp=grab, dated 1 ms earlier (camera_stamp_lag_s; config 15 fps), send-grab"
+        " median/p90 48/48 ms" in line
+    )
     node._report()
     assert "stamp=grab (no grab headers" in node.logger.texts("info")[-1]
     assert not node.set_parameters([Param("camera_stamp", "exposure")])[0].successful
@@ -347,8 +356,38 @@ def test_the_stamp_lag_dates_a_grab_stamp_earlier_and_leaves_send_alone(build: B
     assert node._frame_time(headers) == pytest.approx(1_750_000_001.159, abs=1e-6)
     assert node._frame_time({"x-timestamp": "7.0"}) == 7.0, "the send fallback is not moved"
     node._report()
-    assert "stamp=grab, dated 93 ms earlier, send-grab" in node.logger.texts("info")[-1]
+    assert "stamp=grab, dated 93 ms earlier (camera_stamp_lag_s;" in node.logger.texts("info")[-1]
     assert not node.set_parameters([Param("camera_stamp_lag_s", -0.01)])[0].successful
+
+
+def test_the_follow_mode_dates_grabs_by_the_period_it_measures_and_says_when_it_is_not_the_config(
+    build: Build,
+) -> None:
+    """camera_stamp_lag_s 0 (the default) follows the camera's rate: the grab stamps' own
+    period (their median interval) through config/camera.json's rule, so a board switched to
+    20 fps is dated 48 ms back, not the 10 fps 92 ms, and the report line says the measured rate
+    is not the configured one (15 here) instead of hiding it."""
+    node, _ = build(grab_part(1_750_000_000.30, 0.048, jpeg(1280, 720)))
+
+    def frame(k: int) -> float | None:
+        grab = 5000.0 + 0.05 * k
+        return node._frame_time(
+            {
+                "x-timestamp": f"{1_750_000_000.0 + 0.05 * k + 0.01:.6f}",
+                "x-ustreamer-send-time": f"{grab + 0.01:.6f}",
+                "x-ustreamer-grab-time": f"{grab:.6f}",
+            }
+        )
+
+    for k in range(5):
+        taken = frame(k)
+    assert taken == pytest.approx(1_750_000_000.0 + 0.05 * 4 - (0.885 * 0.05 + 0.0035), abs=1e-6)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "dated 48 ms earlier (follow: 0.885 x the 50.0 ms period + 3.5 ms" in line
+    assert "config 15 fps, measured 20.0 fps: NOT the configured rate" in line
+    assert node.set_parameters([Param("camera_stamp_lag_s", 0.09)])[0].successful
+    assert frame(5) == pytest.approx(1_750_000_000.0 + 0.05 * 5 - 0.09, abs=1e-6), "the override"
 
 
 # ---- the optics ------------------------------------------------------------------------------
@@ -441,7 +480,7 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     line = node.logger.texts("info")[-1]
     assert (
         "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.09" in line
+        " camera_stamp_lag_s=0.0" in line
     )
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
@@ -787,7 +826,7 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     line = node.logger.texts("info")[-1]
     assert line.endswith(
         "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.09"
+        " camera_stamp_lag_s=0.0"
     )
 
 

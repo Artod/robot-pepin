@@ -281,7 +281,7 @@ def test_kalibr_s_t_cam_imu_is_stored_as_kalibr_gives_it_and_inverted_only_for_o
     assert np.allclose(a.t_cam_imu, truth)
     assert a.reprojection_px == (0.21, 0.23) and a.gyro_error == 0.0031 and a.accel_error == 0.041
     config = _config(tmp_path)
-    block = CALIB.head_imu_block([a], CALIB.stamp_lag_default(config))
+    block = CALIB.head_imu_block([a], CALIB.stamp_lag_default(config), 10)
     sys.path.insert(0, str(REPO / "src"))
     from pepin.camera import write_head_imu
 
@@ -293,7 +293,10 @@ def test_kalibr_s_t_cam_imu_is_stored_as_kalibr_gives_it_and_inverted_only_for_o
     assert not np.allclose(stored, np.linalg.inv(truth), atol=1e-3)
     rig = VIO.load_rig(config)
     assert np.allclose(rig.t_cam_imu, truth, atol=1e-6)
-    assert rig.time_offset_s == pytest.approx(0.0042)
+    # recorded at a fixed 0.09, stored against the knob's default: following the rate at 10 fps,
+    # 0.885 x 100 ms + 3.5 ms = 92 ms, so 2 ms more
+    assert block["stamp_lag_s"] == pytest.approx(0.092) and block["camera_fps"] == 10
+    assert rig.time_offset_s == pytest.approx(0.0042 + 0.002)
     chain = VIO.imucam_chain(rig)
     first = chain.split("T_imu_cam:")[1].splitlines()[1:5]
     t_imu_cam = np.array(
@@ -310,7 +313,7 @@ def test_the_block_is_written_and_nothing_else_in_the_file_moves(tmp_path: Path)
     sys.path.insert(0, str(REPO / "src"))
     from pepin.camera import write_head_imu
 
-    write_head_imu(config / "camera.json", CALIB.head_imu_block([a], 0.09))
+    write_head_imu(config / "camera.json", CALIB.head_imu_block([a], 0.09, 10))
     after = (config / "camera.json").read_text()
     old, new = json.loads(before), json.loads(after)
     old["stereo"].pop("head_imu"), new["stereo"].pop("head_imu")
@@ -352,7 +355,7 @@ def test_two_runs_must_agree_within_half_a_degree_5_mm_and_2_ms(tmp_path: Path) 
     mean = CALIB.mean_transform([a.t_cam_imu, b.t_cam_imu])
     assert CALIB.rotation_deg(mean, a.t_cam_imu) == pytest.approx(0.15, abs=1e-3)
     assert np.allclose(mean[:3, 3], (0.032, -0.012, 0.047))
-    block = CALIB.head_imu_block([a, b], 0.09)
+    block = CALIB.head_imu_block([a, b], 0.09, 10)
     assert block["time_offset_s"] == pytest.approx(0.0046)
     assert block["date"] == "2026-10-04" and "a, b (mean)" in block["method"]
 
@@ -366,3 +369,16 @@ def test_apply_refuses_a_set_that_fails_unless_forced(tmp_path: Path) -> None:
     assert CALIB.main(["apply", str(one), "--config", str(config), "--force"]) == 0
     stored = json.loads((config / "camera.json").read_text())["stereo"]["head_imu"]
     assert np.allclose(stored["T_cam_imu"], _asymmetric(), atol=1e-6)
+
+
+def test_a_run_recorded_with_the_lag_following_the_rate_is_read_at_the_rules_lag(
+    tmp_path: Path,
+) -> None:
+    """calib_meta.json's camera_stamp_lag_s 0 is camera_stream's follow mode: the run's stamps
+    were dated by the rate's rule at the rate it recorded (its camera_fps)."""
+    bag = _kalibr_run(tmp_path, "calib_f", _asymmetric(), 0.0042, lag_s=0.0)
+    meta = json.loads((bag / "calib_meta.json").read_text())
+    meta["camera_fps"] = 20
+    (bag / "calib_meta.json").write_text(json.dumps(meta))
+    run = CALIB.read_result(bag)
+    assert run.stamp_lag_s == pytest.approx(0.885 * 0.05 + 0.0035)

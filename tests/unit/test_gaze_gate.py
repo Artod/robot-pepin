@@ -235,6 +235,23 @@ def test_the_feed_hears_the_state_and_subscribes_the_imu_only_for_the_yaw_gate()
     assert gate_counts({"gaze_blind": 2}, 10) == "2 blind, 0 spinning of 10 frames"
 
 
+def test_the_window_and_the_settle_tail_follow_the_camera_rate_while_their_knobs_are_zero() -> None:
+    """gate_exposure_s and gate_settle_s at 0 (the default) are frame periods of the owning
+    node's camera rate: 0.35 and 1 period, the 0.035 / 0.1 s they were at 10 fps; a set value
+    overrides, live, and 0 follows again. The report says which follow."""
+    node = ros_stubs.Node("probe")
+    feed = GazeFeed(node, exposure_s=0.0, settle_s=0.0, yaw_dps=0.0, period_s=0.1)
+    assert (feed.gate.exposure_s, feed.gate.settle_s) == pytest.approx((0.035, 0.1))
+    assert "gate_exposure_s and gate_settle_s follow 10 fps" in feed.text()
+    feed = GazeFeed(node, exposure_s=0.0, settle_s=0.0, yaw_dps=0.0, period_s=0.05)
+    assert (feed.gate.exposure_s, feed.gate.settle_s) == pytest.approx((0.0175, 0.05))
+    feed.set("gate_exposure_s", 0.035)
+    assert feed.gate.exposure_s == 0.035, "the old fixed window, reachable live"
+    assert "gate_settle_s follow 20 fps" in feed.text()
+    feed.set("gate_exposure_s", 0.0)
+    assert feed.gate.exposure_s == pytest.approx(0.0175)
+
+
 # ---- the visual odometry ---------------------------------------------------------------------
 def _raw(t: float, x: float, yaw: float) -> Any:
     msg = ros_stubs.Odometry(

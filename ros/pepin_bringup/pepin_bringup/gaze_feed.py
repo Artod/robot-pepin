@@ -17,13 +17,16 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Illuminance, Imu, JointState
 from std_msgs.msg import String
 
+from pepin.camera import follow_period
 from pepin.gaze_gate import (
     BRIGHTNESS_TOPIC,
     DARK_FLOOR,
     DARK_HYST,
+    EXPOSURE_PER_PERIOD,
     GAZE_STATE_TOPIC,
     MAST_JOINTS,
     MAST_STATE_TOPIC,
+    SETTLE_PER_PERIOD,
     STAMP_END,
     SWAY_DEG,
     SWAY_DPS,
@@ -47,6 +50,10 @@ class GazeFeed:
     bridge's) are used: a reading in another frame is counted and ignored, never guessed at.
     ``/mast/state`` likewise only once ``gate_sway_dps`` or ``gate_sway_deg`` is above zero, and
     ``/camera/brightness`` (camera_stream's per-frame mean luma) once the darkness rule is on.
+
+    ``gate_exposure_s`` and ``gate_settle_s`` at 0 follow the camera's rate: ``period_s`` (the
+    owning node's config/camera.json rate) times :data:`pepin.gaze_gate.EXPOSURE_PER_PERIOD` and
+    :data:`pepin.gaze_gate.SETTLE_PER_PERIOD`; without a period a 0 is taken as it stands.
     """
 
     def __init__(
@@ -63,12 +70,15 @@ class GazeFeed:
         dark_floor: float = DARK_FLOOR,
         dark_hyst: float = DARK_HYST,
         clock: Callable[[], float] = time.monotonic,
+        period_s: float = 0.0,
     ) -> None:
         self._node = node
         self._now = clock
+        self.period_s = period_s
+        self._following = {"gate_exposure_s": exposure_s <= 0.0, "gate_settle_s": settle_s <= 0.0}
         self.gate = FrameGate(
-            exposure_s=exposure_s,
-            settle_s=settle_s,
+            exposure_s=follow_period(exposure_s, EXPOSURE_PER_PERIOD, period_s),
+            settle_s=follow_period(settle_s, SETTLE_PER_PERIOD, period_s),
             yaw_dps=yaw_dps,
             stamp_end=stamp_end >= 0.5,
             sway_dps=sway_dps,
@@ -101,9 +111,11 @@ class GazeFeed:
         """One of :data:`pepin.gaze_gate.GATE_KNOBS` or :data:`pepin.gaze_gate.DARK_KNOBS`
         changed live."""
         if name == "gate_exposure_s":
-            self.gate.exposure_s = float(value)
+            self._following[name] = float(value) <= 0.0
+            self.gate.exposure_s = follow_period(float(value), EXPOSURE_PER_PERIOD, self.period_s)
         elif name == "gate_settle_s":
-            self.gate.settle_s = float(value)
+            self._following[name] = float(value) <= 0.0
+            self.gate.settle_s = follow_period(float(value), SETTLE_PER_PERIOD, self.period_s)
         elif name == "gate_yaw_dps":
             self.gate.yaw_dps = float(value)
             self._listen_imu()
@@ -127,6 +139,12 @@ class GazeFeed:
     def text(self) -> str:
         """The gate's state for the owning node's report line."""
         extra = f", {self.bad_states} unreadable states" if self.bad_states else ""
+        following = [name for name, on in self._following.items() if on]
+        if following and self.period_s > 0.0:
+            extra += (
+                f", {' and '.join(following)} follow {1.0 / self.period_s:g} fps"
+                " (config/camera.json)"
+            )
         if self.foreign_imu:
             extra += f", {self.foreign_imu} IMU readings outside base_link ignored"
         if self.bad_mast:
