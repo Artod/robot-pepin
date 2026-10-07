@@ -412,11 +412,34 @@ def test_the_plan_is_recomputed_when_the_controller_changes() -> None:
     # shim's own plan, then validity.
     keep = branch.find(".//Fallback[@name='ReplanOnlyIfNeeded']/ReactiveSequence")
     assert keep is not None
-    assert [c.tag for c in keep] == ["Inverter", "ScriptCondition", "IsPathValid"]
+    assert [c.tag for c in keep] == ["Inverter", "ScriptCondition", "TruncatePath", "IsPathValid"]
     assert keep[0][0].tag == "GlobalUpdatedGoal"
     assert keep[1].get("code") == (
         "selected_controller == 'FollowPathShim' && plan_controller == selected_controller"
     )
+
+
+def test_the_kept_plan_is_checked_up_to_the_parking_not_into_it() -> None:
+    """A goal parked against furniture has its front edge in the cell beside the face, and the
+    validity check failed its end pose whenever the face was re-marked one cell nearer: drive
+    0376 replanned 7 times in 16 s on that pose alone (46 of 165 failures on 0348-0379 lay only in
+    the last metre). The check reads the plan without its last park_distance_m: the part MPPI
+    parks on with a fresh plan every second, never on a kept one. FollowPath still follows the
+    whole plan."""
+    tree = ET.parse(REPO / "ros/params/pepin_nav_to_pose.xml")
+    keep = tree.find(".//Fallback[@name='ReplanOnlyIfNeeded']/ReactiveSequence")
+    assert keep is not None
+    tags = [c.tag for c in keep]
+    truncate, check = keep[tags.index("TruncatePath")], keep[tags.index("IsPathValid")]
+    assert tags.index("TruncatePath") + 1 == tags.index("IsPathValid"), "cut, then checked"
+    assert truncate.get("input_path") == "{path}"
+    assert truncate.get("output_path") == check.get("path") == "{path_check}"
+    assert float(truncate.get("distance", "nan")) == load_knobs("goal_server")["park_distance_m"]
+    # The cut copy is the check's alone: every other reader of a plan reads the whole one.
+    readers = [n for n in tree.iter() if "{path_check}" in n.attrib.values()]
+    assert readers == [truncate, check]
+    assert all(n.get("path") == "{path}" for n in tree.iter("FollowPath"))
+    assert all(n.get("path") == "{path}" for n in tree.iter("ComputePathToPose"))
 
 
 def test_every_goal_starts_without_a_plan() -> None:
