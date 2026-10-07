@@ -86,9 +86,14 @@ ros2 bag record --storage mcap -o "$OUT.bag" /odometry/filtered /vo /ov_msckf/po
 sleep 6  # every node subscribed before the first message
 INPUTS=(-i "$DRIVE")
 [ -n "$CAM" ] && INPUTS+=(-i "$CAM")
-# The drive bag'"'"'s own /vo and fused odometry are what the arm replaces; its /tf keeps the
-# neck chain (odom -> base_link in it is harmless: the replayed EKF publishes no transform).
-ros2 bag play "${INPUTS[@]}" --clock 100 --exclude-topics /vo /odometry/filtered /vo/raw
+# The drive bag'"'"'s own visual odometry and fused odometry are what the arm replaces: /vo, and
+# since 2026-10-06 also the live relay'"'"'s /vo_twist (the EKF'"'"'s twist0) and OpenVINS'"'"'s own
+# outputs and the keeper'"'"'s seed, which would otherwise reach the replayed EKF and relay beside
+# the arm'"'"'s (arm A would not be "no VIO"); its /tf keeps the neck chain (odom -> base_link in it
+# is harmless: the replayed EKF publishes no transform).
+ros2 bag play "${INPUTS[@]}" --clock 100 --exclude-topics /vo /vo_twist /odometry/filtered \
+    /vo/raw /ov_msckf/poseimu /ov_msckf/odomimu /ov_msckf/health /ov_msckf/points_msckf \
+    /ov_msckf/points_slam /vio/seed_twist
 sleep 3
 kill -INT "$REC_PID"; wait "$REC_PID" || true
 # Each job is its own process group under job control: the wrappers (ros2 run, ros2 launch) and

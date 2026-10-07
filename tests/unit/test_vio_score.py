@@ -116,6 +116,19 @@ def test_the_offline_stereo_odometry_takes_the_live_launch_s_own_table() -> None
     assert values["guess_frame_id"] == "" and values["Odom/ResetCountdown"] == "1"
 
 
+def test_the_replay_never_plays_the_drive_s_own_visual_odometry_into_the_arm() -> None:
+    """A drive bag since 2026-10-06 carries the live relay's /vo_twist, OpenVINS's outputs and the
+    keeper's seed: ros/vio_replay.sh must leave every one of them out of the play, or the replayed
+    EKF and relay read them beside the arm's own (and arm A is not "no VIO")."""
+    script = (REPO / "ros/vio_replay.sh").read_text()
+    play = script[script.index("ros2 bag play") :].split("sleep", 1)[0].replace("\\\n", " ")
+    excluded = set(play.split("--exclude-topics", 1)[1].split())
+    live = {"/vo", "/vo_twist", "/odometry/filtered", "/vo/raw", "/ov_msckf/poseimu",
+            "/ov_msckf/odomimu", "/ov_msckf/health", "/ov_msckf/points_msckf",
+            "/ov_msckf/points_slam", "/vio/seed_twist"}  # fmt: skip
+    assert live <= excluded
+
+
 def test_the_calibration_dance_is_a_scan_the_gaze_arbiter_accepts() -> None:
     """ros/tools/neck_dance.py asks the arbiter (the neck's one owner) for one operator-band scan;
     pepin.gaze parses it as the arbiter would and finds every view within the neck's reach."""
