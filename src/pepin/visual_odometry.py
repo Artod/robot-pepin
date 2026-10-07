@@ -159,7 +159,12 @@ VIO_REST_SPEED_M_S = 0.03
 # in its update coasts on the IMU, and the twists `tracked` adds are the coasting ones: replayed
 # on those drives 3.12 instead of 2.52 full twists per moving second, the added ones' vx sigma
 # multiplier 1.76 [1.42, 2.59] against 0.84 [0.70, 1.02], 19.5 % of them off the lidar truth by
-# more than 0.2 m/s against 1.1 % (scratch/vio_lost_rule/replay.py). So `used` stays the default.
+# more than 0.2 m/s against 1.1 % (scratch/vio_lost_rule/replay.py). Measured again over drives
+# 0331-0363 with the VIO sway gate and the coasting law (scratch/vio_push/verdict.py): the law
+# makes the added twists' sigma honest (vx s50 0.81 [0.62, 1.14], s90 1.34) but not their values
+# (11.3 % off by > 0.2 m/s, 5.3 % sent inside a divergence, against 1.1 % / 1.1 % for used), and
+# so weighted they bring +4.5 % of the VIO's vx information for +25 % of its twists (5.26 -> 6.55
+# per moving second). So `used` stays the default.
 VIO_LOST_RULES = ("used", "tracked")
 VIO_LOST_RULE = "used"
 # THE COASTING LAW (:class:`Coasting`, the relay's vio_coast_* knobs): a filter whose updates use
@@ -169,8 +174,8 @@ VIO_LOST_RULE = "used"
 # the last update that used >= vio_min_features: 1.14 under 0.15 s, 1.42 at 0.6-1.0, 1.86 at
 # 1.0-1.5, 2.31 at 1.5-2.5, 2.57 past 4 s. The sigma of vx and vy is multiplied by
 # min(1 + VIO_COAST_PER_S * max(age - VIO_COAST_FREE_S, 0), VIO_COAST_MAX), the law that holds
-# every age's s90 to the fresh twists' (inflated: 1.06-1.27 per bin); the yaw rate (the gyro) is
-# left alone, its multiplier shows no trend with the age.
+# every age's s90 to the fresh twists' (inflated: 1.05-1.27 per bin); the yaw rate (the gyro) is
+# left alone: its s50 steps from 1.02 fresh to 1.0-1.7 past 0.15 s without growing with the age.
 VIO_COAST_PER_S = 0.5
 VIO_COAST_FREE_S = 0.15
 VIO_COAST_MAX = 2.25
@@ -182,7 +187,8 @@ VIO_COAST_MAX = 2.25
 # 1.2 % off the truth by > 0.2 m/s against 0.9 %, flat up to 20 deg/s (1.05 / 1.19 / 1.27 at
 # 6-10 / 10-15 / 15-20) and worse past it (1.68 at 20-30, 3.0 beyond); the few windows over 1 deg
 # 2.74 (n 12). At 20 / 1 the full twists per moving second go 2.71 -> 5.26, the added ones s50 1.04
-# [0.99, 1.15], 1.2 % over 0.2 m/s. Saccade frames stay gated: s50 1.90, 31 % over 0.1 m/s.
+# [0.98, 1.15] (0.99 [0.93, 1.06] under the coasting law), 1.2 % over 0.2 m/s (scratch/vio_push/
+# verdict.py). Saccade frames stay gated: s50 1.90, 31 % over 0.1 m/s.
 VIO_GATE_SWAY_DPS = 20.0
 VIO_GATE_SWAY_DEG = 1.0
 # /zupt is published while the board's witnesses agree on rest; heard within this, it holds.

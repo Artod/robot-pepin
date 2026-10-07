@@ -350,15 +350,18 @@ FLAGS = FlagSet(
         " rule reads). Under tracked the yaw-only bias walk counts from the last sample whose"
         " update used vio_min_features, not from the last one that passed. The wheel and rest"
         " rules and the guard are the same under both. Live",
-        why="used, measured against tracked on drives 0343-0347 and 0355-0363 replayed through"
-        " the relay's classes (scratch/vio_lost_rule/replay.py; the used replay matches the live"
-        " /vo_twist 98-100 %): tracked lifts the full twists per moving second from 2.52 to 3.12"
-        " (the gaze gate withholds 53-64 % of the moving poses under either), and the twists it"
-        " adds are the ones OpenVINS coasts on the IMU through: vx sigma multiplier 1.76 [1.42,"
-        " 2.59] against 0.84 [0.70, 1.02] for those used passes, 19.5 % of them more than 0.2 m/s"
-        " off the lidar truth against 1.1 %, worse the longer since an update used 20 features",
-        on_when="tracked for a drive that measures the VIO's vote with its coasting samples in,"
-        " once the twist's sigma grows with the time since the last fed update",
+        why="used, measured twice. Against tracked on drives 0343-0347 and 0355-0363 replayed"
+        " through the relay's classes (scratch/vio_lost_rule/replay.py, sway gate 6 deg/s, no"
+        " coasting law): the twists tracked adds are the ones OpenVINS coasts on the IMU through,"
+        " vx sigma multiplier 1.76 [1.42, 2.59], 19.5 % of them more than 0.2 m/s off the lidar"
+        " truth. Again on drives 0331-0363 under vio_gate_sway_dps 20 and the vio_coast_* law"
+        " (scratch/vio_push/verdict.py): the law makes their sigma honest (vx s50 0.81 [0.62,"
+        " 1.14], s90 1.34) but not their values (11.3 % off by > 0.2 m/s and 5.3 % sent inside a"
+        " divergence, against 1.1 % and 1.1 % for used's; yaw rate s50 1.42), and so weighted"
+        " they add 4.5 % to the VIO's vx information for 25 % more twists (5.26 -> 6.55 per"
+        " moving second)",
+        on_when="tracked for a drive that measures the coasting samples themselves (their sigma is"
+        " honest under the coasting law, their values are not)",
         off_when="used whenever the EKF must have the VIO's honest twists only",
     ),
     # A pose of a frame taken while the head turned, or the body spun, and the first pose after
