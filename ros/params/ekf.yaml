@@ -32,6 +32,26 @@ ekf_filter_node:
     frequency: 50.0
     sensor_timeout: 0.5
     two_d_mode: true
+    # A LATE MEASUREMENT IS FUSED AT ITS OWN STAMP (2026-10-07). /vo_twist reaches this filter
+    # ~250 ms after its stamp (the camera frame's way to OpenVINS and back: p50 254, p90 290 ms
+    # behind the newest wheel/gyro sample on 21 drives; rf2o's /odom_laser ~70-90 ms), and
+    # robot_localization (3.8.3) without smooth_lagged_data corrects the CURRENT state with any
+    # measurement older than its last one: no rewind, no prediction. The twist is body-frame, so
+    # nothing is misrotated; what is wrong is the speed itself, which changed by p50 1.5 / p90
+    # 6.2 cm/s in those 254 ms (>5 cm/s for 15 % of the twists: starts, stops, pivot ends). With
+    # the rewind the filter goes back to the measurement's stamp and re-runs everything after it.
+    # Replayed on drives 0355-0379 (21, the bags' own inputs, lidar truth with its yaw corrected
+    # +3.27 deg): end error without the lidar odometry 11.8 -> 8.0 cm mean (17 of 19 drives
+    # closer; without the rewind the VIO made it WORSE than wheels and gyro alone, 10.2 cm, 15
+    # of 19), with it 4.7 -> 3.9 cm (14 of 19); equal to an oracle with no VIO latency at all
+    # (2.8 against 2.7 cm on 0376-0379). Price: +8 % of the filter's CPU in the replay (1.96 ->
+    # 2.12 s for drive 0376 on the laptop; unmeasured on the A53), and the published pose moves
+    # in more small steps (replay: steps > 5 mm off the constant-velocity prediction 89 -> 157
+    # over 0376-0379). 1.0 s of history covers the VIO's worst lateness with WiFi to spare (0.5
+    # scored the same). Back: smooth_lagged_data false and a restart of this filter.
+    # (scratch/vio_review: run_arms.sh arms T/TL/WV/WVL/T0/WV0, ends.py, jumps.py, cpu_out.txt)
+    smooth_lagged_data: true
+    history_length: 1.0
     publish_tf: true
     publish_acceleration: false
     map_frame: map

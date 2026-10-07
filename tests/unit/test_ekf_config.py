@@ -103,6 +103,13 @@ def test_every_heading_source_is_named_in_the_file(params: dict[str, Any]) -> No
     assert fused(params, "odom1_config") & {"yaw"}
 
 
+def test_a_late_measurement_is_fused_at_its_own_stamp(params: dict[str, Any]) -> None:
+    """The VIO's twist arrives ~0.25 s (p90 0.29 s) after its stamp: the filter rewinds to it
+    instead of correcting the current state, with history for the worst lateness plus WiFi."""
+    assert params["smooth_lagged_data"] is True
+    assert params["history_length"] >= 0.5
+
+
 def test_the_filter_runs_at_the_wheels_rate_and_queues_a_fifth_of_a_second(
     params: dict[str, Any],
 ) -> None:
