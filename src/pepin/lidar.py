@@ -33,6 +33,10 @@ BAUDRATE = 230400
 FRAME_LEN = 47
 FRAME_HEADER = bytes([0x54, 0x2C])  # header byte + "12 points" version/length byte
 POINTS_PER_FRAME = 12
+# The moments of a sweep the board's LD19 driver can stamp a scan with (its lidar.scan_stamp,
+# ros/patches/ldlidar-scan-stamp.patch): the middle of the sweep, or the moment the driver's
+# polling thread picks the finished sweep up (upstream's).
+SCAN_STAMPS = ("end", "mid")
 
 # CRC8, polynomial 0x4D, init 0 — per the LD19 development manual.
 _CRC_TABLE = []
@@ -41,6 +45,16 @@ for _i in range(256):
     for _ in range(8):
         _c = ((_c << 1) ^ 0x4D if _c & 0x80 else _c << 1) & 0xFF
     _CRC_TABLE.append(_c)
+
+
+def scan_stamp_from_json(path: str | Path) -> str:
+    """``config/lidar.json``'s ``scan_stamp``: the moment of the sweep the board's driver stamps
+    /scan with, one of :data:`SCAN_STAMPS`. Missing or anything else raises ``ValueError``."""
+    with open(path) as f:
+        value = json.load(f).get("scan_stamp")
+    if value not in SCAN_STAMPS:
+        raise ValueError(f"{path}: scan_stamp must be one of {SCAN_STAMPS}, not {value!r}")
+    return str(value)
 
 
 def crc8(data: bytes) -> int:

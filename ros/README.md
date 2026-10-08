@@ -1005,6 +1005,28 @@ usually a forgotten `ros2 topic hz`). Entries marked `sometimes` are **IDLE** wh
 `%CPU` is the average over the process's whole life and a percentage of one core (400 % is the
 whole board).
 
+### The lidar's stamp
+
+The LD19 driver (`ldlidar_node`: the Myzhar component, built into the board image from a pinned
+commit with `ros/patches/ldlidar-scan-stamp.patch`) stamps each scan at the middle of its ~100 ms
+sweep. That is `config/lidar.json`'s `scan_stamp` (`mid`), passed as `lidar.scan_stamp` by the
+board's launch at every start of the lidar's process. The middle comes from the SDK's own
+per-packet arrival times, and so do `scan_time` (the sweep, first to last point) and
+`time_increment`, which is negative because `ranges[0]` is the newest beam: beam `i` was measured
+at `stamp + (i - (n - 1) / 2) * time_increment`. `end` is upstream's stamp and the way back: the
+moment the driver's polling thread picks the finished sweep up, 0 to 1 sweep after its last beam
+(the thread sleeps one sweep per pickup, so the lag saws from 0 to a whole sweep every several
+seconds, and about 1 % of the sweeps are never picked up: 9.84 scans a second). Every consumer
+places the whole sweep at the stamp (rf2o and through it the EKF, the costmaps, the volume,
+RTAB-Map's snapshots, the tapes); none deskews. Once a minute the driver prints the mode, the sweep
+duration, how long after a sweep's last point the pickup came (how late `end` would be), the
+sweeps never picked up, and the sweeps without packet timing (stamped at the pickup, with a
+warning):
+
+```bash
+ssh root@pepin.local 'docker logs pepin-ros 2>&1 | grep -a "scan timing: " | tail -1'
+```
+
 ### Laser odometry on the board
 
 `rf2o_laser_odometry` matches each LD19 scan against the one before it (no map) and publishes
