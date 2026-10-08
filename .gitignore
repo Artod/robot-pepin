@@ -53,6 +53,9 @@ ros/maps/vio/
 # The replay stand's engine build, prepared drives and snapshots (ros/replay.sh)
 ros/replay/.cache/
 
+# The odometry bench's work: truths, bag copies, replays, caches (ros/tools/odom_bench)
+ros/tools/odom_bench/.cache/
+
 # Model checkpoints: 40 MB of binary, fetched not committed (RAFT-Stereo's
 # download_models.sh; see src/pepin/vendor/raft_stereo/__init__.py)
 models/
