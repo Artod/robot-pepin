@@ -33,7 +33,7 @@
       "components": [
         {
           "name": "ldlidar_node",
-          "role": "the LD19 over /dev/lidar at 230400 baud"
+          "role": "the LD19 over /dev/lidar at 230400 baud; each scan stamped at the middle of its sweep from the SDK's packet times (lidar.scan_stamp, config/lidar.json; ros/patches/ldlidar-scan-stamp.patch: per scan a few additions and two numbers kept, once a minute a sort of ~600 for the report line)"
         },
         {
           "name": "scan_filter",

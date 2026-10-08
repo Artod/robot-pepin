@@ -1,0 +1,200 @@
+diff --git a/ldlidar_component/component/include/ldlidar_component.hpp b/ldlidar_component/component/include/ldlidar_component.hpp
+--- a/ldlidar_component/component/include/ldlidar_component.hpp
++++ b/ldlidar_component/component/include/ldlidar_component.hpp
+@@ -22,6 +22,8 @@
+ #include <string>
+ #include <memory>
+ #include <atomic>
++#include <chrono>
++#include <vector>
+ #include <lifecycle_msgs/msg/transition.hpp>
+ #include <rclcpp/publisher.hpp>
+ #include <rclcpp/rclcpp.hpp>
+@@ -188,6 +190,14 @@
+    */
+   void publishLaserScan(ldlidar::Points2D & src, double lidar_spin_freq);
+ 
++  /**
++   * @brief pepin: one sweep's timing into the report line, printed once a minute.
++   * @param sweep_s The sweep's first to last point, seconds (0 without packet timing).
++   * @param pickup_lag_s The pickup moment after the sweep's last point, seconds.
++   * @param mid_ns The middle of the sweep, nanoseconds of the system clock.
++   */
++  void reportSweepTiming(double sweep_s, double pickup_lag_s, int64_t mid_ns);
++
+ private:
+   // ----> Parameters
+   bool _debugMode = true; ///< Debug mode flag.
+@@ -233,6 +243,16 @@
+   bool _firstScan = true; ///< First scan flag, reset on each activation.
+   rclcpp::Time _endScanTime; ///< Timestamp of the previous scan, used for scan_time computation.
+   // <---- Scan state
++
++  // ----> pepin: the sweep's own timing (lidar.scan_stamp)
++  bool _stampMid = false; ///< Stamp the middle of the sweep (true) or the pickup moment (false, upstream).
++  std::vector<double> _sweepMs; ///< This minute's sweep durations, first to last point (ms).
++  std::vector<double> _pickupLagMs; ///< This minute's pickup moments after the sweep's last point (ms).
++  int64_t _prevMidNs = 0; ///< The previous sweep's middle, for the lost-sweep count.
++  long _lostSweeps = 0; ///< Sweeps never picked up this minute (middles > 1.5 sweeps apart).
++  long _untimedSweeps = 0; ///< Sweeps without packet timing this minute (stamped at the pickup).
++  std::chrono::steady_clock::time_point _reportAt; ///< Start of this minute's report.
++  // <---- pepin
+ 
+   // ----> Diagnostic
+   double _pubFreq = 0.0; ///< Publishing frequency (Hz).
+diff --git a/ldlidar_component/component/src/ldlidar_component.cpp b/ldlidar_component/component/src/ldlidar_component.cpp
+--- a/ldlidar_component/component/src/ldlidar_component.cpp
++++ b/ldlidar_component/component/src/ldlidar_component.cpp
+@@ -21,6 +21,9 @@
+ #include "rclcpp/parameter.hpp"
+ #include "rclcpp/exceptions.hpp"
+ 
++#include <algorithm>
++#include <cmath>
++
+ using namespace std::placeholders;
+ 
+ namespace ldlidar
+@@ -181,6 +184,25 @@
+   getParam(
+     "lidar.angle_crop_max", _angleCropMax, _angleCropMax, "Angle cropping maximum angle",
+     false, " * Angle cropping max angle: ");
++
++  // pepin: which moment of the sweep header.stamp names. "end" is upstream's: now() when the
++  // lidar thread picks the finished sweep up, 0 to 1 sweep after its last point. "mid" is the
++  // middle of the sweep, dated by the SDK from its own packets (publishLaserScan).
++  std::string scan_stamp = "end";
++  getParam(
++    "lidar.scan_stamp", scan_stamp, scan_stamp,
++    "Scan stamp: 'end' (the pickup moment, upstream) or 'mid' (the middle of the sweep)", false,
++    " * Scan stamp: ");
++  if (scan_stamp == "mid") {
++    _stampMid = true;
++  } else if (scan_stamp == "end") {
++    _stampMid = false;
++  } else {
++    RCLCPP_ERROR_STREAM(
++      get_logger(), " !!! The parameter 'lidar.scan_stamp' is not valid! -> " << scan_stamp);
++    RCLCPP_ERROR_STREAM(get_logger(), "     * Valid values: 'end', 'mid'");
++    return false;
++  }
+   // <---- Lidar config
+ 
+   return true;
+@@ -244,6 +266,13 @@
+   // Reset per-activation scan state
+   _firstScan = true;
+   _pubFreq = 0.0;
++  // pepin: a fresh minute of sweep timing
++  _sweepMs.clear();
++  _pickupLagMs.clear();
++  _prevMidNs = 0;
++  _lostSweeps = 0;
++  _untimedSweeps = 0;
++  _reportAt = std::chrono::steady_clock::now();
+ 
+   // Start lidar thread
+   startLidarThread();
+@@ -351,6 +380,26 @@
+     _pubFreq = 1.0 / scan_time;
+   }
+ 
++  // pepin: the sweep's own timing. The SDK dates every point from its 12-point packet's arrival
++  // (lipkg.cpp Parse: between the previous packet's arrival and this one's, on the system clock
++  // now() reads) and hands the sweep over sorted by that date, so its first and last points span
++  // the sweep as the sensor measured it. The pickup above comes 0 to 1 sweep after the last
++  // point: the lidar thread sleeps one sweep between pickups and the SDK keeps only the newest.
++  const int64_t first_ns = src.empty() ? 0 : static_cast<int64_t>(src.front().stamp);
++  const int64_t last_ns = src.empty() ? 0 : static_cast<int64_t>(src.back().stamp);
++  const int64_t pickup_ns = start_scan_time.nanoseconds();
++  const bool timed = first_ns > 0 && last_ns > first_ns && last_ns <= pickup_ns;
++  const double sweep_s = timed ? static_cast<double>(last_ns - first_ns) * 1e-9 : 0.0;
++  const int64_t mid_ns = timed ? first_ns + (last_ns - first_ns) / 2 : 0;
++  reportSweepTiming(
++    sweep_s, timed ? static_cast<double>(pickup_ns - last_ns) * 1e-9 : 0.0, mid_ns);
++  const bool mid = _stampMid && timed;
++  if (_stampMid && !timed) {
++    RCLCPP_WARN_THROTTLE(
++      get_logger(), *get_clock(), 10000,
++      "a sweep without packet timing (%zu points): stamped at its pickup", src.size());
++  }
++
+   // Adjust the parameters according to the demand
+   angle_min = 0;
+   angle_max = (2 * M_PI);
+@@ -359,7 +408,8 @@
+   if (lidar_spin_freq > 0) {
+     std::unique_ptr<sensor_msgs::msg::LaserScan> msg =
+       std::make_unique<sensor_msgs::msg::LaserScan>();
+-    msg->header.stamp = start_scan_time;
++    msg->header.stamp =
++      mid ? rclcpp::Time(mid_ns, start_scan_time.get_clock_type()) : start_scan_time;
+     msg->header.frame_id = _frameId;
+     msg->angle_min = angle_min;
+     msg->angle_max = angle_max;
+@@ -372,6 +422,14 @@
+       msg->time_increment = static_cast<float>(scan_time / (double)(beam_size - 1));
+     }
+     msg->scan_time = scan_time;
++    if (mid) {
++      // pepin: the beam timing from the same packets. The beams are laid out by angle: with
++      // rot_verse CCW (index_anticlockwise below) ranges[0] is the NEWEST beam, with CW the
++      // oldest, and beam i was measured at header.stamp + (i - (beam_size - 1) / 2) * time_increment.
++      const double per_beam = sweep_s / static_cast<double>(beam_size - 1);
++      msg->time_increment = static_cast<float>(_counterclockwise ? -per_beam : per_beam);
++      msg->scan_time = static_cast<float>(sweep_s);
++    }
+     // First fill all the data with Nan
+     msg->ranges.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
+     msg->intensities.assign(beam_size, std::numeric_limits<float>::quiet_NaN());
+@@ -432,6 +490,50 @@
+     _scanPub->publish(std::move(msg));
+     _endScanTime = start_scan_time;
+   }
++}
++
++void LdLidarComponent::reportSweepTiming(double sweep_s, double pickup_lag_s, int64_t mid_ns)
++{
++  // pepin: once a minute, how the sweeps were dated: the stamp mode, the sweep duration and the
++  // pickup lag (how late upstream's stamp is), the sweeps the polling loop never picked up.
++  if (sweep_s > 0.0) {
++    const double gap_s = static_cast<double>(mid_ns - _prevMidNs) * 1e-9;
++    if (_prevMidNs > 0 && gap_s > 1.5 * sweep_s) {
++      _lostSweeps += std::lround(gap_s / sweep_s) - 1;
++    }
++    _prevMidNs = mid_ns;
++    _sweepMs.push_back(sweep_s * 1e3);
++    _pickupLagMs.push_back(pickup_lag_s * 1e3);
++  } else {
++    ++_untimedSweeps;
++  }
++  const auto now = std::chrono::steady_clock::now();
++  const double elapsed = std::chrono::duration<double>(now - _reportAt).count();
++  if (elapsed < 60.0) {
++    return;
++  }
++  auto pct = [](std::vector<double> v, double p) {
++    if (v.empty()) {
++      return std::nan("");
++    }
++    const auto k = static_cast<size_t>(p * static_cast<double>(v.size() - 1) + 0.5);
++    std::nth_element(v.begin(), v.begin() + static_cast<std::ptrdiff_t>(k), v.end());
++    return v[k];
++  };
++  const size_t sweeps = _sweepMs.size() + static_cast<size_t>(_untimedSweeps);
++  RCLCPP_INFO(
++    get_logger(),
++    "scan timing: stamp %s; %zu sweeps in %.0f s (%.2f Hz); sweep %.1f ms [p10 %.1f, p90 %.1f]; "
++    "picked up %.0f ms [p10 %.0f, p90 %.0f] after the last point; %ld sweeps lost, %ld without "
++    "packet timing",
++    _stampMid ? "mid" : "end", sweeps, elapsed, static_cast<double>(sweeps) / elapsed,
++    pct(_sweepMs, 0.5), pct(_sweepMs, 0.1), pct(_sweepMs, 0.9), pct(_pickupLagMs, 0.5),
++    pct(_pickupLagMs, 0.1), pct(_pickupLagMs, 0.9), _lostSweeps, _untimedSweeps);
++  _sweepMs.clear();
++  _pickupLagMs.clear();
++  _lostSweeps = 0;
++  _untimedSweeps = 0;
++  _reportAt = now;
+ }
+ 
+ bool LdLidarComponent::initLidar()

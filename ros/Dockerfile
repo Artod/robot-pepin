@@ -36,9 +36,20 @@ RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
 # component alone. The repository's ldlidar_node package is its demo launch files, and its
 # rosdep keys are rviz2, slam_toolbox and robot_state_publisher (Qt, Mesa, LLVM, Ceres on a
 # headless board); its test keys are not needed either.
+# Pinned by commit (the one the image of 2026-10-06 was cloned at) because a patch rides on it:
+# ros/patches/ldlidar-scan-stamp.patch, the parameter lidar.scan_stamp (default "end", upstream's
+# pickup moment; robot.launch.py passes config/lidar.json's scan_stamp): "mid" stamps the middle
+# of the sweep from the SDK's own per-packet arrival times, fills time_increment and scan_time
+# from the same packets, and prints a minute report line of the sweep timing.
+ARG LDLIDAR_COMMIT=4ee53a8b176037cf418a54b25007075bb2b1d3a0
 WORKDIR /ws
-RUN git clone --depth 1 --recurse-submodules --shallow-submodules \
-        https://github.com/Myzhar/ldrobot-lidar-ros2.git src/ldrobot-lidar-ros2 \
+COPY patches/ldlidar-scan-stamp.patch /tmp/ldlidar-scan-stamp.patch
+RUN git init -q src/ldrobot-lidar-ros2 \
+    && git -C src/ldrobot-lidar-ros2 fetch -q --depth 1 \
+        https://github.com/Myzhar/ldrobot-lidar-ros2.git "$LDLIDAR_COMMIT" \
+    && git -C src/ldrobot-lidar-ros2 checkout -q --detach FETCH_HEAD \
+    && git -C src/ldrobot-lidar-ros2 submodule update -q --init --depth 1 \
+    && patch -p1 -d src/ldrobot-lidar-ros2 < /tmp/ldlidar-scan-stamp.patch \
     && . /opt/ros/jazzy/setup.sh \
     && apt-get update && apt-get install -y --no-install-recommends libudev-dev \
     && rosdep update --rosdistro jazzy \

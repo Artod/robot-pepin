@@ -61,6 +61,7 @@ from pepin.deployment import (
 )
 from pepin.footprint import hull_box
 from pepin.head_imu import HeadImuConfig, camera_from_imu
+from pepin.lidar import scan_stamp_from_json
 from pepin.mounts import Mounts
 from pepin.neck import JOINT_NAMES, NeckConfig, bridge_parameters
 from pepin.sensor_timing import imu_timing
@@ -122,6 +123,11 @@ def lidar_parts(context: LaunchContext) -> list:  # type: ignore[type-arg]
                     "lidar.range_min": 0.05,
                     "lidar.range_max": 12.0,
                     "lidar.enable_angle_crop": False,
+                    # Which moment of the ~100 ms sweep /scan is stamped with: "mid" (the middle,
+                    # from the SDK's per-packet arrival times) or "end" (upstream's pickup moment,
+                    # 0-1 sweep after the last beam). config/lidar.json, read at every lidar start;
+                    # the parameter is ros/patches/ldlidar-scan-stamp.patch's.
+                    "lidar.scan_stamp": scan_stamp_from_json(config_file("lidar.json")),
                 }
             ],
             # No remap on the driver: it gates publishing on count_subscribers() of its own

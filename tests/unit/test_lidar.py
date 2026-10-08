@@ -1,19 +1,25 @@
-"""LD19 parsing on a real capture, scan assembly, and mount geometry."""
+"""LD19 parsing on a real capture, scan assembly, mount geometry, and the board driver's stamp."""
 
+import ast
+import json
 import math
+import re
 from pathlib import Path
 
 import numpy as np
 import pytest
+import source_facts as sf
 
 from pepin.lidar import (
     FRAME_HEADER,
     FRAME_LEN,
+    SCAN_STAMPS,
     FrameParser,
     LaserScan,
     LidarFrame,
     LidarMount,
     ScanAssembler,
+    scan_stamp_from_json,
 )
 
 SAMPLE = Path(__file__).resolve().parents[1] / "fixtures" / "ld19_sample.bin"
@@ -290,3 +296,57 @@ def test_a_flipped_byte_costs_exactly_one_frame_and_is_counted() -> None:
     frames = parser.feed(bytes(damaged))
     assert parser.crc_failures == 1 and parser.frames == len(clean) - 1
     assert frames == clean[:1] + clean[2:]
+
+
+REPO = Path(__file__).resolve().parents[2]
+STAMP_PATCH = REPO / "ros/patches/ldlidar-scan-stamp.patch"
+
+
+def test_the_scan_stamp_is_read_from_the_lidar_config_and_refuses_anything_else(
+    tmp_path: Path,
+) -> None:
+    """config/lidar.json's scan_stamp is the board driver's lidar.scan_stamp: "mid" (the middle
+    of the sweep, the cure for rf2o's and the lidar truth's 140 ms, 2026-10-07) ships, and a
+    missing or misspelt value is a refusal at launch, never a silent default."""
+    assert scan_stamp_from_json(REPO / "config/lidar.json") == "mid"
+    for value in SCAN_STAMPS:
+        (tmp_path / "ok.json").write_text(json.dumps({"scan_stamp": value}))
+        assert scan_stamp_from_json(tmp_path / "ok.json") == value
+    for bad in ({}, {"scan_stamp": "middle"}, {"scan_stamp": None}):
+        (tmp_path / "bad.json").write_text(json.dumps(bad))
+        with pytest.raises(ValueError, match="scan_stamp"):
+            scan_stamp_from_json(tmp_path / "bad.json")
+    # The mount reader ignores the key: the stamp is the driver's business, not the geometry's.
+    assert LidarMount.from_json(REPO / "config/lidar.json").yaw_offset_deg > 0
+
+
+def test_the_board_driver_is_pinned_patched_and_told_the_scan_stamp() -> None:
+    """The LD19 driver is built from a pinned commit with ros/patches/ldlidar-scan-stamp.patch,
+    whose lidar.scan_stamp defaults to upstream's "end", dates the sweep by the SDK's own
+    packets, and is set by the launch from config/lidar.json inside lidar_parts (which every
+    respawn of the lidar's process calls again)."""
+    dockerfile = (REPO / "ros/Dockerfile").read_text()
+    commit = re.search(r"^ARG LDLIDAR_COMMIT=([0-9a-f]+)$", dockerfile, re.M)
+    assert commit is not None and len(commit.group(1)) == 40, "a moved branch breaks the patch"
+    copy = dockerfile.index("COPY patches/ldlidar-scan-stamp.patch /tmp/ldlidar-scan-stamp.patch")
+    fetch = dockerfile.index('ldrobot-lidar-ros2.git "$LDLIDAR_COMMIT"')
+    apply = dockerfile.index("patch -p1 -d src/ldrobot-lidar-ros2 < /tmp/ldlidar-scan-stamp.patch")
+    build = dockerfile.index("colcon build --packages-select ldlidar_component")
+    assert copy < fetch < apply < build
+    patch = STAMP_PATCH.read_text()
+    assert 'std::string scan_stamp = "end";' in patch, "upstream's behaviour unless told"
+    assert '"lidar.scan_stamp", scan_stamp, scan_stamp,' in patch
+    # The sweep is dated by the SDK's per-packet arrival times, never by the pickup or a constant.
+    assert "static_cast<int64_t>(src.front().stamp)" in patch
+    assert "static_cast<int64_t>(src.back().stamp)" in patch
+    assert "first_ns + (last_ns - first_ns) / 2" in patch
+    assert "_counterclockwise ? -per_beam : per_beam" in patch, "ranges[0] is the newest beam"
+    assert '"scan timing: stamp %s;' in patch, "the minute report line"
+    launch = sf.tree("ros/pepin_bringup/launch/robot.launch.py")
+    lidar_parts = next(
+        f for f in ast.walk(launch) if isinstance(f, ast.FunctionDef) and f.name == "lidar_parts"
+    )
+    params = sf.dict_items(lidar_parts)
+    assert params["lidar.scan_stamp"] == {"scan_stamp_from_json(config_file('lidar.json'))"}
+    # The sign of time_increment above holds for this rotation sense only.
+    assert params["lidar.rot_verse"] == {"'CCW'"}
