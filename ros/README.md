@@ -38,6 +38,7 @@ pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, t
 | `ros/tools/` | one-job tools: goal client, planner check, `map -> odom` reader, bag converter, flags doc, stereo calibration, `npz_to_map.py` (an old `data/maps/*.npz` grid to map_server format) |
 | `ros/calibrate.sh` | checkerboard calibration of the stereo head and the mono camera ("Camera calibration") |
 | `ros/replay.sh`, `ros/replay/` | the recorded drives through Nav2's own costmaps with candidate parameters ("Replay") |
+| `ros/tools/odom_bench/` | every speed source's claimed covariance against one yardstick on a frozen drive set, the EKF replayed to judge a change ("Odometry bench") |
 | `ros/sim.sh`, `ros/sim/` | the kinematic simulator: our Nav2 on a simulated cart in RTAB-Map's saved room ("Simulation") |
 
 ## Deploying a change
@@ -961,6 +962,148 @@ uv run python ros/tools/vio_score.py runs/06* --arms A B E --baseline B --s3 060
 
 Each run leaves `<run>_arm_<ARM>.bag` and `.csv` beside the drive; the scorer reads a directory per
 drive holding `truth.csv` (the lidar truth) and one `<ARM>.csv` per arm.
+
+## Odometry bench
+
+One yardstick for every speed source's claimed covariance, run on a frozen set of recorded drives
+(`ros/tools/odom_bench`). It answers, from the recordings alone: is each source's claim honest,
+what multiplier would make it so, does applying it improve held-out drives, how much does each
+source add, and does the VIO's per-second error grow with the camera rate. Nothing live is
+touched: the replays run the board's EKF in throwaway `--network none` containers.
+
+```bash
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench run                  # everything
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench run --stage analyse   # no replays
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench crab 0398             # lidar yaw, one drive
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench crab 0355 0356 0357   # ... pooled
+uv run python -m ros.tools.odom_bench truth ros/maps/rec/0398_20261007_195042Z_printer.jsonl --out truth.csv
+```
+
+`run` writes `bench_out.txt` (every table) into its work directory, `ros/tools/odom_bench/.cache/<set>/`
+(`--work` moves it): `runs/` (each drive's truth, its quality report and the extracted facts),
+`rec/` (the bag copies, ~3 GB, rebuilt when deleted), `out/` (the replays), `cache/` (the
+stages). A cold run is about an hour, nearly all of it the replays (`--parallel 5` at a time,
+`--cpus 1.5` each, image `pepin-laptop:vio`); a warm one, seconds. Delete a cache file to recompute
+its stage. The drives are read from `ros/maps/rec` (`--rec`).
+
+### What it measures
+
+- **Stamp offsets** of every source against the wheels' clock (the minimum of the mean squared
+  difference of their 0.1 s means). rf2o and the truth (the same scans) run ~140 ms late and are
+  aligned before the hat; the EKF still fuses rf2o as stamped, so its NEES is shown both ways.
+- **Per-source NEES** (1-D, mean e^2 / sigma_claimed^2; 1.0 = honest; the multiplier is its
+  sqrt), forward speed (VIO, wheels, rf2o) and turn rate (VIO, wheels, gyro), per sample and per
+  1 / 2 / 5 s window (the claimed sigma of a window's mean as if its samples were independent,
+  which is what the EKF believes). **own** is the three-cornered hat on the three independent
+  sources (no truth in it); **read** is against the lidar truth; **floor** is the truth's own
+  error in the source's units (the truth entered as a fourth source, `e_T^2 = M_VT - e_V^2`). Each
+  source's error autocorrelation time (Sokal's window) gives its independent samples per second
+  against those the EKF counts.
+- **Replays** of the board's EKF (`ros/params/ekf.yaml`) on TEST drives: A (the base claims, all
+  sources), A2 (A again: the replay's own noise), W / WG / WGR / WGV (sources left out: wheels,
+  gyro, rf2o, VIO), B_item (one tuned multiplier) and B (all); exploratory, outside the verdict:
+  Ar (the sqrt(rate) rule on) and A, WGR on the live group's TRAIN drives.
+- **RPE@1s** (translation error per moving second, % of the distance) and **RPE@1m** (per 1 m piece
+  of the smoothed truth path), both net of the truth's own along-track and yaw floor from the hat
+  (across-track is as read, so net is an upper bound); the **end error** (the goal's whole
+  relative motion against the truth's, cm and deg); **vNEES** and **pose NEES** (the filter's own
+  covariance against its error).
+
+Every bag is first copied with its claims normalised to the base configuration (the reference
+drives' VIO scales, no sqrt(rate) factor, the wheels on `config/base.json`'s law, rf2o as
+recorded), the scale each drive recorded measured from the bag itself. The truth is
+`odom_bench/truth.py` against the set's map, its heading corrected by the set's angle.
+
+### Split and verdict
+
+TRAIN = odd drive numbers, TEST = even; every multiplier is fitted on TRAIN and judged on TEST.
+Drives whose truth keeps under 75 % of the goal span's taped scans are dropped. VIO numbers are
+never pooled across the two camera-rate groups; wheels, rf2o and the gyro may pool. The verdict
+is for the live group's configuration, decided on its TEST drives by the rule fixed before the
+replays: an item is APPLIED if B_item - A lowers the end position error with the 95 %
+drive-bootstrap interval of the mean paired difference wholly below 0 and no secondary metric
+(RPE@1m, RPE@1s, |end heading|) worse with its interval wholly above 0; an item whose TRAIN
+multiplier interval reaches 0 is kept without a replay. Intervals are 95 % by resampling drives
+(1000 draws, seed 1). The rest of the method is `odom_bench/bench.py`'s docstring.
+
+### The truth map
+
+`ros/maps/rtab_20261005.{yaml,pgm}`: RTAB-Map's saved grid of 2026-10-05 (30 KB), frozen. Every
+drive of the set is matched against it, the mount from `config/lidar.json` with its yaw pinned to
+the angle the set's tapes were converted with (`lidar_yaw_offset_deg` in the set: a changed
+`config/lidar.json` yaw does not move the frozen truth). `run --map` and `crab --map` point at
+another map; the truth's hashes then no longer match the set's, and the run says so in its header.
+
+### Adding drives
+
+A set is never edited once a result is published from it: new drives go into a new set file.
+
+```bash
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench freeze 0412 0413 --group 20fps
+cp ros/tools/odom_bench/sets/0355-0411.json ros/tools/odom_bench/sets/0355-0413.json   # + the printed entries
+uv run --with rosbags==0.11.5 python -m ros.tools.odom_bench run --set ros/tools/odom_bench/sets/0355-0413.json
+```
+
+`freeze` hashes each drive's bag slice, tape and truth and prints its entry. Mark `"reference":
+true` on drives known to run the base VIO scales (each group's reference is their median ratio)
+and `"sqrt_rule": true` on drives recorded with the relay's sqrt(rate) factor. A run stops on a
+drive whose bag or tape no longer hashes as frozen, or whose recorded VIO claim is off every
+known configuration. A set holds two camera-rate groups, the live one last; a new live
+configuration (a camera rate, the VIO scales) is a new set whose live group's references run it,
+and the verdict's header in `bench.py` names today's (20 fps, 1.75 / 2.5, rewind on).
+
+### The frozen set `sets/0355-0411.json`
+
+43 goal drives of 2026-10-06/07 (sha256 to 12 digits; the full ones are in the file). 10 fps:
+0355-0393 (the EKF rewind live from 0390), 20 fps (live): 0398-0411 (0408-0411 recorded with the
+sqrt(rate) factor). References: 0386-0393 and 0398-0407. Truth heading +3.0 deg, tapes converted at
+yaw 87.5.
+
+| drive | goal | group | half | truth % | bag | mcap | tape | truth |
+|---|---|---|---|---|---|---|---|---|
+| 0355 | printer | 10fps | TRAIN | 96 | 20261006_233810Z | `d5837b6ec20d` | `b6b2fe3d9fd5` | `730f313a983c` |
+| 0356 | home | 10fps | TEST | 93 | 20261006_234002Z | `7062325a91ba` | `6d693e1ed7c5` | `3af3d60d4c4f` |
+| 0357 | printer | 10fps | TRAIN | 86 | 20261006_234602Z | `02ace359f674` | `212dce421469` | `aa935d7b35b0` |
+| 0358 | home | 10fps | TEST | 100 | 20261006_234649Z | `a9ff3ae852a3` | `ff2f80ddd608` | `83415ccd5755` |
+| 0359 | printer | 10fps | TRAIN | 85 | 20261006_234851Z | `5751e2121f12` | `17f951e6bc44` | `6d86967da65f` |
+| 0360 | bookshelf | 10fps | TEST | 100 | 20261006_234923Z | `7cd8603b88b3` | `21ded6942c3d` | `766a6dd77332` |
+| 0361 | home | 10fps | TRAIN | 96 | 20261006_235042Z | `ebb3868f8155` | `28c97a8e05bd` | `11ef762fff60` |
+| 0362 | bookshelf | 10fps | dropped | 69 | 20261006_235407Z | `a2b968e5b284` | `2f0018351d72` | `f4ea766a23f0` |
+| 0363 | home | 10fps | TRAIN | 91 | 20261006_235848Z | `1ed7c1057a4b` | `93baef4298d6` | `8c2a165da8d3` |
+| 0364 | printer | 10fps | TEST | 78 | 20261007_014744Z | `9e438307c113` | `c437569500a1` | `a7c61256cda9` |
+| 0365 | home | 10fps | TRAIN | 100 | 20261007_014952Z | `a55f96cce72d` | `16331747ade6` | `507f32f21762` |
+| 0366 | printer | 10fps | TEST | 85 | 20261007_015134Z | `00f14deb3a77` | `8371cc579217` | `e5b163c9900f` |
+| 0367 | home | 10fps | TRAIN | 100 | 20261007_015237Z | `de37f37327fa` | `a20808041b25` | `11f69616790d` |
+| 0368 | bookshelf | 10fps | TEST | 85 | 20261007_015309Z | `abdb29f2e7d1` | `1a58a597668f` | `4fd8adb53065` |
+| 0369 | home | 10fps | TRAIN | 100 | 20261007_015337Z | `4e071cbced3b` | `238905baa96b` | `e0fe94ea0dff` |
+| 0370 | printer | 10fps | TEST | 100 | 20261007_015435Z | `e89354a3584e` | `649280bf39f6` | `55b9f438848b` |
+| 0371 | home | 10fps | TRAIN | 100 | 20261007_015523Z | `99d99ae07c6f` | `f60472171bde` | `cae97465b120` |
+| 0376 | printer | 10fps | TEST | 85 | 20261007_031921Z | `a991297da541` | `08fd9370a097` | `4520b72c7b54` |
+| 0377 | home | 10fps | TRAIN | 99 | 20261007_032111Z | `421b38b9448b` | `6ae8b4aac832` | `1a5ce7ca7262` |
+| 0378 | bookshelf | 10fps | dropped | 57 | 20261007_032141Z | `1cfb904df20e` | `17739b0978bc` | `bb9c23c55e91` |
+| 0379 | home | 10fps | TRAIN | 95 | 20261007_032222Z | `9029f35bfcf6` | `f43380784c79` | `4384398a1084` |
+| 0386 | printer | 10fps | TEST | 89 | 20261007_184121Z | `f9bdfb4a9f69` | `2c6f5df3e32a` | `98c2637af059` |
+| 0387 | home | 10fps | TRAIN | 100 | 20261007_184204Z | `419f8094127b` | `da5001f81fd9` | `4172cb21f4b5` |
+| 0388 | bookshelf | 10fps | TEST | 79 | 20261007_184244Z | `012229883c96` | `15ec6d6c2b79` | `8066894a4d82` |
+| 0389 | home | 10fps | TRAIN | 100 | 20261007_184314Z | `1e54e2000093` | `554d80b2ce0f` | `d29611e065ca` |
+| 0390 | printer | 10fps | TEST | 88 | 20261007_185307Z | `4953121e8b5a` | `fa8fda9beff9` | `67b3eedde93a` |
+| 0391 | home | 10fps | TRAIN | 99 | 20261007_185342Z | `e93b25798b58` | `07b4e1ac81fc` | `ca4b6e6220ff` |
+| 0392 | bookshelf | 10fps | TEST | 79 | 20261007_185412Z | `1fb72e757065` | `46a4c963dcbf` | `7db02966f469` |
+| 0393 | home | 10fps | TRAIN | 100 | 20261007_185439Z | `f167ceb4c189` | `83c052b971d0` | `64e5e608abaa` |
+| 0398 | printer | 20fps | TEST | 100 | 20261007_195042Z | `a2ee39c8f28c` | `cc46851eaafc` | `53f96a83f734` |
+| 0399 | home | 20fps | TRAIN | 100 | 20261007_195159Z | `fd85bcdb23fc` | `d5f8e7ca2695` | `c62f26d1fbda` |
+| 0400 | bookshelf | 20fps | dropped | 69 | 20261007_195229Z | `6371c91e40eb` | `0259c1896cba` | `3097c4aad31e` |
+| 0401 | home | 20fps | TRAIN | 98 | 20261007_195301Z | `e54bae616d89` | `31d5dac3490a` | `d778633d991f` |
+| 0402 | printer | 20fps | TEST | 92 | 20261007_201240Z | `7298f54c8dcc` | `63c8227a13ef` | `5d0c7e555b2f` |
+| 0403 | home | 20fps | TRAIN | 100 | 20261007_201315Z | `0c73ab7d9b0d` | `770e90449f82` | `32c213fecf29` |
+| 0404 | bookshelf | 20fps | TEST | 81 | 20261007_201640Z | `0c1ce6dca8be` | `314cd09754c2` | `2116776a4c49` |
+| 0405 | home | 20fps | TRAIN | 100 | 20261007_201817Z | `58563fa4ac77` | `13993dd064a2` | `8405cc4a597f` |
+| 0406 | bookshelf | 20fps | TEST | 75 | 20261007_201903Z | `93997efe7491` | `350f052119ee` | `d927fd9f8884` |
+| 0407 | home | 20fps | TRAIN | 100 | 20261007_202014Z | `3a4cb16edbcf` | `7b51fda154db` | `16ae8acfa3b9` |
+| 0408 | printer | 20fps | TEST | 84 | 20261007_210921Z | `f4c45ae867a5` | `7b308df7e2e0` | `6f093155e7c3` |
+| 0409 | home | 20fps | TRAIN | 86 | 20261007_211034Z | `e17fd6ecc147` | `d29a8f296496` | `2a7876af53b5` |
+| 0410 | bookshelf | 20fps | dropped | 68 | 20261007_211211Z | `ce777c1452c6` | `93762dfca835` | `e16f6d0dd1fa` |
+| 0411 | home | 20fps | TRAIN | 97 | 20261007_211411Z | `6bfebace8963` | `9f8bb7c05643` | `8f8f94db5128` |
 
 ## Simulation
 
