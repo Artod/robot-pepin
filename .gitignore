@@ -68,6 +68,7 @@ ros/sim/run/
 
 # written by the depth node at run time (the stereo law witness), like depth_law.json
 ros/maps/depth_law_stereo.json
+ros/maps/depth_law_stereo.*.json
 # editor settings
 .vscode/
 
