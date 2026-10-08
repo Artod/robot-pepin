@@ -51,7 +51,7 @@
     "height": 600,
     "hfov_deg": 94.0,
     "rate": {
-      "fps": 10,
+      "fps": 20,
       "lag_per_period": 0.885,
       "lag_offset_s": 0.0035,
       "note": "THE CAMERA'S FRAME RATE, the one number every consumer of the frame period follows. fps is what the board's camera service asks the camera for (board/pepin-camera.service reads it from /opt/pepin/config/camera.json at its start: copy this file there and restart pepin-camera); camera_stream dates grab stamps by lag_per_period x the period it MEASURES plus lag_offset_s (its knob camera_stamp_lag_s 0 = follow) and warns when the measured rate is not this one; ros/tools/vio_config.py writes OpenVINS's track_frequency (1.5 x fps) and moves the time shift by the lag rule from head_imu's camera_fps (ros/laptop.sh vio); the frame gate's exposure window and settle tail and the gaze arbiter's blind tail are frame periods of this rate when their knobs are 0 (each node reads it at its start: kick it). The lag rule is MEASURED on this module: the grab stamp sits one frame period behind the picture at any rate, 92 / 48 / 33 ms at 10 / 20 / 30 fps (image flow vs /head/imu, 2026-10-07, scratch/vio_rate/lag_clip.py; OpenVINS's online offset moved by the same 42 / 57 ms), fitted 0.885 x period + 3.5 ms on those three rates. 10 fps is the rate the stereo head has run since 2026-09-20; at 20 / 30 fps no frame went weak or lost through 295 deg/s saccades (10 fps: 3-4 of 255) and the board sent 31 / 45 Mbit/s against 18 (one stream client; a second client, a drive's camera clip, at 30 fps reaches the board's ~80 Mbit/s WiFi ceiling)."
