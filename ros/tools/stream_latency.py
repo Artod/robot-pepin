@@ -48,8 +48,11 @@ class Stream:
 # laptop's re-publish). After a drive the base bridge's streams reached 0.8-3.8 s.
 STREAMS = (
     Stream("odom", "/odom", "nav_msgs/msg/Odometry", 150.0),
-    Stream("scan", "/ldlidar_node/scan", "sensor_msgs/msg/LaserScan", 150.0),
-    Stream("odom_laser", "/odom_laser", "nav_msgs/msg/Odometry", 200.0),
+    # The scan is stamped at the MIDDLE of its ~100 ms sweep since 2026-10-07 (config/lidar.json
+    # scan_stamp), so its age at the laptop reads ~100 ms more than the transport alone, rf2o's
+    # output (stamped with the scan) likewise: the limits carry that 100 ms.
+    Stream("scan", "/ldlidar_node/scan", "sensor_msgs/msg/LaserScan", 250.0),
+    Stream("odom_laser", "/odom_laser", "nav_msgs/msg/Odometry", 300.0),
     Stream("head_imu", "/head/imu", "sensor_msgs/msg/Imu", 150.0),
     Stream("neck", "/tf", "tf2_msgs/msg/TFMessage", 150.0),
     Stream("camera", "/camera/camera_info", "sensor_msgs/msg/CameraInfo", 400.0),

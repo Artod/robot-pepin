@@ -22,9 +22,11 @@ done
 # The board is a sensor box: of params/ it reads ekf.yaml and rosbag_qos.yaml (pepin.board_bag's
 # latched statics) alone, and of maps/ nothing — maps,
 # databases and places books are the laptop's (hundreds of MB that once held a deploy for
-# minutes). maps/rec and logs are written BY the board and fetched to the laptop. An excluded
+# minutes). Every .cache (ros/tools/odom_bench/.cache held 1.4 GB of replays on 2026-10-07 and a
+# sync shipped it to the board for 7 minutes at load 8 before it was killed) stays here.
+# maps/rec and logs are written BY the board and fetched to the laptop. An excluded
 # path is also out of --delete's reach, so what the board wrote there stays.
-rsync -a --delete --exclude '__pycache__' --exclude 'pepin_src' --exclude 'logs' --exclude 'maps/*' --include 'params/ekf.yaml' --include 'params/rosbag_qos.yaml' --exclude 'params/*' "$HERE/" "root@$BOARD:/root/pepin-ros/"
+rsync -a --delete --exclude '__pycache__' --exclude '.cache' --exclude 'pepin_src' --exclude 'logs' --exclude 'maps/*' --include 'params/ekf.yaml' --include 'params/rosbag_qos.yaml' --exclude 'params/*' "$HERE/" "root@$BOARD:/root/pepin-ros/"
 ssh "root@$BOARD" "mkdir -p /root/pepin-ros/pepin_src/pepin /root/pepin-ros/pepin_src/config"
 rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/root/pepin-ros/pepin_src/pepin/"
 # The mounts (config/lidar.json, config/imu.json) beside the library: the container mounts
