@@ -102,6 +102,9 @@ def build(monkeypatch: pytest.MonkeyPatch) -> Gaze:
     # The tapes' head went home at 45 deg/s, the knob's default from 2026-10-05 to 2026-10-07;
     # the pins below hold that write. The default is a saccade now (the test that sets 0 covers it).
     built._switches.set("return_deg_s", 45.0)
+    # The tapes were recorded at 10 fps; frame_period_s 0 follows config/camera.json's
+    # rate (20 fps since 2026-10-07), which would shift every blind tail. Pin the tapes' period.
+    built._switches.set("frame_period_s", 0.105)
     return built
 
 

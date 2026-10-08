@@ -272,9 +272,9 @@ def test_the_rate_verb_prints_the_active_rigs_fps_and_refuses_what_ustreamer_can
     assert "not a positive whole number" in capsys.readouterr().err
 
 
-def test_the_shipped_rate_is_the_stereo_heads_ten_fps(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_shipped_rate_is_the_stereo_heads_twenty_fps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("PEPIN_CAMERA", raising=False)
-    assert cc.desired_fps(REPO / "config/camera.json") == 10
+    assert cc.desired_fps(REPO / "config/camera.json") == 20  # 10 until 2026-10-07 (25dadae)
 
 
 def _unit_script(tmp_path: Path, config: Path) -> str:

@@ -279,7 +279,10 @@ POSES = (  # (t, x, yaw): a cart creeping 1 cm a frame while the head pans 0.3 r
 
 
 def _drive(gate_on: bool) -> tuple[VisualOdometry, list[Any]]:
-    with ros_stubs.parameters(gaze_gate=gate_on, vo_input="stereo"):
+    # the gate windows at the tapes' 10 fps (their 0 knobs follow config/camera.json: 20 fps now)
+    with ros_stubs.parameters(
+        gaze_gate=gate_on, vo_input="stereo", gate_exposure_s=0.035, gate_settle_s=0.1
+    ):
         node = VisualOdometry()
     node.subs[GAZE_STATE_TOPIC][1](
         ros_stubs.String(data=json.dumps({"phase": "saccade", "blind": True, "since": T0 + 0.18}))

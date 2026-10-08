@@ -173,17 +173,17 @@ def test_a_stereo_rig_is_calibrated_exactly_when_its_calibration_file_loads(
 def test_the_rate_is_one_number_per_rig_and_the_grab_lag_is_one_period_at_any_rate(
     tmp_path: Path,
 ) -> None:
-    """config/camera.json's rate block: the stereo head's 10 fps, and the grab stamp's lag
+    """config/camera.json's rate block: 20 fps (10 until 10-07), and the grab stamp's lag
     behind the picture as the 2026-10-07 bench fitted it (92 / 48 / 33 ms at 10 / 20 / 30 fps
     measured; 0.885 x period + 3.5 ms). A rig without the block is refused, never guessed."""
     from pepin.camera import CameraRate, camera_rate, follow_period
 
     config = REPO / "config/camera.json"
     rate = camera_rate(config, "stereo", environ={})
-    assert rate.fps == 10 and rate.period_s == pytest.approx(0.1)
+    assert rate.fps == 20 and rate.period_s == pytest.approx(0.05)  # 20 since 25dadae (2026-10-07)
     for fps, measured in ((10, 0.092), (20, 0.048), (30, 0.033)):
         assert rate.grab_lag_s(1.0 / fps) == pytest.approx(measured, abs=0.0015)
-    assert rate.grab_lag_s() == pytest.approx(0.092)
+    assert rate.grab_lag_s() == pytest.approx(0.048, abs=0.0015)
     assert camera_rate(config, "overview", environ={}).fps == 15
     data = json.loads(config.read_text())
     del data["stereo"]["rate"]

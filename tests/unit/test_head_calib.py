@@ -281,6 +281,11 @@ def test_kalibr_s_t_cam_imu_is_stored_as_kalibr_gives_it_and_inverted_only_for_o
     assert np.allclose(a.t_cam_imu, truth)
     assert a.reprojection_px == (0.21, 0.23) and a.gyro_error == 0.0031 and a.accel_error == 0.041
     config = _config(tmp_path)
+    # Kalibr and the tapes ran with the camera at 10 fps; the shipped rate is 20 since 2026-10-07,
+    # so pin the temp config's rate to 10 before the lag default is read and the block written.
+    cam = json.loads((config / "camera.json").read_text())
+    cam["stereo"]["rate"]["fps"] = 10
+    (config / "camera.json").write_text(json.dumps(cam, indent=2) + "\n")
     block = CALIB.head_imu_block([a], CALIB.stamp_lag_default(config), 10)
     sys.path.insert(0, str(REPO / "src"))
     from pepin.camera import write_head_imu
