@@ -321,6 +321,12 @@ def main() -> int:
     person = [t for t in loop.turns if t["kind"] == "person" and t["outcome"] != "merged"]
     if person:
         print("\n" + "\n".join(report(person)), flush=True)
+        ears = loop.ears
+        print(
+            f"Whisper started in a pause {ears.early_asked} times, {ears.early_dropped} of them"
+            " for a pause the person talked through",
+            flush=True,
+        )
     if bench and person:
         out = args.logs / time.strftime("%Y%m%d") / f"cascade_bench_{stamp}.json"
         out.parent.mkdir(parents=True, exist_ok=True)
@@ -332,6 +338,7 @@ def main() -> int:
             "voice": config.voice_engine,
             "source": str(args.bench),
             "report": report(person),
+            "whisper_early": {"asked": loop.ears.early_asked, "dropped": loop.ears.early_dropped},
             "turns": loop.turns,
         }
         out.write_text(json.dumps(summary, ensure_ascii=False, indent=1, default=str))

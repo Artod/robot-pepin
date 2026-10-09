@@ -20,7 +20,8 @@
     "whisper_repo": "mlx-community/whisper-large-v3-turbo",
     "language": "ru",
     "initial_prompt": null,
-    "note": "Whisper turbo on the Mac's GPU, ~0.26 s a phrase; Russian forced. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
+    "early_s": 0.15,
+    "note": "Whisper turbo on the Mac's GPU, ~0.26 s a phrase; Russian forced. early_s: Whisper starts on an utterance at this much quiet inside it, while the end-of-turn silence is still running, so its words are ready when the utterance closes (0: only after the close). A call costs ~230 ms whatever the length (the 30 s encoder window: 0.5 s of audio 233 ms, 5 s 299 ms, 8 s 326 ms on the M5, 2026-10-09), so decoding only the tail would not get under it; a pause the person talks through wastes one call. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
   },
   "brain": {
     "preset": "haiku",

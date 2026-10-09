@@ -97,6 +97,7 @@ class CascadeConfig:
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "ru"
     whisper_prompt: str | None = None
+    early_s: float = 0.15
     # brain
     brain: BrainConfig = field(default_factory=BrainConfig)
     # voice
@@ -163,6 +164,7 @@ class CascadeConfig:
             whisper_repo=str(tr.get("whisper_repo", d.whisper_repo)),
             language=str(tr.get("language", d.language)),
             whisper_prompt=tr.get("initial_prompt") or None,
+            early_s=float(tr.get("early_s", d.early_s)),
             brain=brain_config(data.get("brain", {})),
             voice_engine=str(voice.get("engine", d.voice_engine)),
             tts_model=str(voice.get("model", d.tts_model)),

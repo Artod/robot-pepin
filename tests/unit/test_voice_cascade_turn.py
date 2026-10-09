@@ -161,3 +161,24 @@ def test_smart_turn_itself_reads_a_phrase_when_its_weights_are_here() -> None:
         time.sleep(0.01)
     worker.close()
     assert worker.latest is not None and worker.latest.ms < 500
+
+
+def test_whisper_starts_in_the_pause_and_the_segment_carries_its_call() -> None:
+    import concurrent.futures
+
+    asked: list[int] = []
+
+    def early(pcm: bytes) -> concurrent.futures.Future[str]:
+        asked.append(len(pcm))
+        future: concurrent.futures.Future[str] = concurrent.futures.Future()
+        future.set_result(f"call {len(asked)}")
+        return future
+
+    config = CascadeConfig()
+    ears = Ears(config, lambda: "silent", early=early)
+    frames = quiet(0.5) + tone(0.6) + quiet(0.3) + tone(0.6) + quiet(1.0)
+    ((t, event),) = segments(ears, frames)
+    assert len(asked) == 2 and ears.early_asked == 2 and ears.early_dropped == 1
+    assert event.early is not None and event.early.result() == "call 2"
+    assert asked[1] > asked[0]  # the second call read the whole utterance so far
+    assert t == pytest.approx(0.5 + 0.6 + 0.3 + 0.6 + 0.5, abs=0.03)  # the close is unchanged

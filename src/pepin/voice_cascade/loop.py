@@ -169,7 +169,9 @@ class CascadeLoop:
         self.tools, self.allowed, self.moving, self.halt = tools, allowed, moving, halt
         self.events, self.logs, self.ledger = events, logs, ledger
         self.clock, self.wall, self.tick_s = clock, wall, tick_s
-        self.ears = Ears(config, player.playback, turn)
+        self._whisper = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="whisper")
+        early = self._read_early if config.early_s > 0 else None
+        self.ears = Ears(config, player.playback, turn, early)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
         self.replies: dict[int, Reply] = {}
@@ -191,7 +193,6 @@ class CascadeLoop:
         self.hold_next = False  # the utterance being read is to be held, not answered
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
-        self._whisper = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="whisper")
         self._praat = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="prosody")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._background: set[asyncio.Task[Any]] = set()
@@ -370,21 +371,33 @@ class CascadeLoop:
         self.speech.say(SpeechJob(self.last_turn, -1, line, "backchannel"))
         self._event("backchannel", text=line)
 
+    def _read_early(self, pcm: bytes) -> concurrent.futures.Future[str]:
+        """Whisper on an utterance not yet closed (the ears call this from the mic's thread)."""
+        return self._whisper.submit(self.transcriber.transcribe, pcm)
+
     async def _hear(self, event: EarEvent) -> None:
         assert event.segment is not None
         try:
             async with self._order:  # utterances are answered in the order they were said
-                await self._read(event.segment, event.t, eot_of(event))
+                await self._read(event.segment, event.t, eot_of(event), event.early)
         finally:
             self.hearing -= 1
 
     async def _read(
-        self, segment: Segment, closed_s: float, eot: dict[str, Any] | None = None
+        self,
+        segment: Segment,
+        closed_s: float,
+        eot: dict[str, Any] | None = None,
+        early: concurrent.futures.Future[str] | None = None,
     ) -> None:
         loop = asyncio.get_running_loop()
         timeline = Timeline(segment.ended_s)
         timeline.mark("closed", closed_s)
-        reading = loop.run_in_executor(self._whisper, self.transcriber.transcribe, segment.pcm)
+        if early is not None and not early.cancelled():
+            reading = asyncio.wrap_future(early)  # started in the pause: done, or nearly
+        else:
+            early = None
+            reading = loop.run_in_executor(self._whisper, self.transcriber.transcribe, segment.pcm)
         tagger = self.tagger if self.config.prosody_tags else None
         measuring = (
             loop.run_in_executor(self._praat, tagger.measure, segment.pcm)
@@ -411,7 +424,7 @@ class CascadeLoop:
         conversation = self.conversation
         assert conversation is not None
         conversation.log.event(
-            "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms,
+            "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms, early=early is not None,
             seconds=round(segment.duration_s, 2), voice_peak_db=voice_db,
         )  # fmt: skip
         if noise:

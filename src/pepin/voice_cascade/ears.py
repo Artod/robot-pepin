@@ -21,9 +21,10 @@ closes it as before. The segment event carries p, the model's milliseconds and t
 
 from __future__ import annotations
 
+import concurrent.futures
 from collections import deque
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
@@ -33,6 +34,7 @@ from pepin.voice_cascade.turn import TurnAnswer, TurnWorker
 from pepin.voice_live.wake import Segment, Segmenter, rms_db
 
 EarKind = Literal["start", "pause", "segment", "barge_in"]
+EarlyReader = Callable[[bytes], "concurrent.futures.Future[str]"]  # Whisper, started early
 FRAME_S = FRAME_SAMPLES / RATE
 PREROLL_S = 0.6  # the speech before a barge-in is confirmed, given to the gate when it is
 SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
@@ -53,6 +55,7 @@ class EarEvent:
     p: float | None = None
     model_ms: float | None = None
     saved_ms: float | None = None
+    early: concurrent.futures.Future[str] | None = None  # Whisper on it, started in its pause
 
 
 class TurnSegmenter(Segmenter):
@@ -80,6 +83,10 @@ class TurnSegmenter(Segmenter):
         self.reset()
         return segment if segment.duration_s >= self.min_s else None
 
+    def audio(self) -> bytes:
+        """The utterance in progress so far (its lead-in included)."""
+        return b"".join(self._voiced)
+
 
 class Ears:
     """The gate and the barge-in detector; :meth:`feed` one 20 ms frame at a time."""
@@ -89,12 +96,18 @@ class Ears:
         config: CascadeConfig,
         playback: Callable[[], Playback],
         turn: TurnWorker | None = None,
+        early: EarlyReader | None = None,
     ) -> None:
         """``playback`` says what the speaker is doing now (the player's); ``turn`` is the
-        end-of-turn model's worker (None: the fixed silence alone)."""
+        end-of-turn model's worker (None: the fixed silence alone); ``early`` starts Whisper on
+        the utterance so far (None: Whisper waits for the close)."""
         self.config = config
         self.playback = playback
         self.turn = turn
+        self.early = early
+        self._early: concurrent.futures.Future[str] | None = None
+        self.early_asked = 0  # Whisper calls started in a pause
+        self.early_dropped = 0  # of them, for a pause the person talked through
         self.gate = TurnSegmenter(
             floor_min_db=config.floor_min_dbfs,
             start_db=config.start_db,
@@ -136,6 +149,7 @@ class Ears:
         if self.gate.talking:
             self.gate.reset()
             self._asked = None
+            self._drop_early()
         if not self.config.barge_in:
             return []
         self._preroll.append((pcm, t))
@@ -171,8 +185,8 @@ class Ears:
             if segment is not None:
                 saved_ms = (self.config.silence_s - quiet_s) * 1000
                 events.append(
-                    EarEvent("segment", t, segment, closed_by="model", p=answer.p,
-                             model_ms=answer.ms, saved_ms=saved_ms)
+                    self._closed(EarEvent("segment", t, segment, closed_by="model", p=answer.p,
+                                          model_ms=answer.ms, saved_ms=saved_ms))
                 )  # fmt: skip
             return events
         was_talking = self.gate.talking
@@ -181,6 +195,7 @@ class Ears:
             self._frames = self._quiet = 0
             self._paused = False
             self._asked = None
+            self._drop_early()
             self._window.clear()
             self.voice_peak_db = db
             events.append(EarEvent("start", t))
@@ -190,6 +205,7 @@ class Ears:
             self._frames += 1
             self._quiet = 0 if loud else self._quiet + 1
             self._ask()
+            self._read_early()
             quiet_s = self._quiet * FRAME_S
             spoken_s = (self._frames - self._quiet) * FRAME_S
             if not self._quiet:
@@ -205,14 +221,38 @@ class Ears:
             last = self._answer()
             self._asked = None
             if self.turn is None:
-                events.append(EarEvent("segment", t, segment))
+                events.append(self._closed(EarEvent("segment", t, segment)))
             else:
                 events.append(
-                    EarEvent("segment", t, segment, closed_by="silence",
-                             p=last.p if last else None, model_ms=last.ms if last else None,
-                             saved_ms=0.0)
+                    self._closed(EarEvent("segment", t, segment, closed_by="silence",
+                                          p=last.p if last else None,
+                                          model_ms=last.ms if last else None, saved_ms=0.0))
                 )  # fmt: skip
+        elif not self.gate.talking:
+            self._drop_early()  # an utterance too short for a segment, or none at all
         return events
+
+    def _read_early(self) -> None:
+        """At ``transcriber.early_s`` into a pause, start Whisper on the utterance so far (once
+        a pause); a voiced frame drops it: the words are not finished."""
+        if self.early is None:
+            return
+        if not self._quiet:
+            self._drop_early()
+        elif self._early is None and self._quiet * FRAME_S >= self.config.early_s - 1e-9:
+            self.early_asked += 1
+            self._early = self.early(self.gate.audio())
+
+    def _drop_early(self) -> None:
+        if self._early is not None:
+            self._early.cancel()  # not started yet: never runs; running: its answer is unused
+            self.early_dropped += 1
+            self._early = None
+
+    def _closed(self, event: EarEvent) -> EarEvent:
+        """A segment ``event`` with the early Whisper call of its last pause."""
+        early, self._early = self._early, None
+        return replace(event, early=early)
 
     def _ask(self) -> None:
         """At ``turn.min_silence_s`` into a pause, hand its audio to the model (once a pause);
