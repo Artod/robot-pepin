@@ -152,6 +152,7 @@ under `ros/maps/rec/`.
 
 ```bash
 uv run python scripts/voice_live.py      # "Пепин, ..." — Gemini Live; GEMINI_API_KEY in .env
+uv run python scripts/voice_cascade.py   # "Пепин, ..." — Whisper -> Claude -> Qwen3-TTS, every stage timed
 uv run python -m pepin.tools.mcp         # the same tools as an MCP server (Claude Code / Desktop)
 ```
 
