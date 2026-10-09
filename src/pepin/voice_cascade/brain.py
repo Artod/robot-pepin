@@ -42,7 +42,7 @@ END_TOOL = {
     " it is called by name again.",
     "input_schema": {"type": "object", "properties": {}},
 }
-INTERRUPTED = " [the person interrupted here; the rest was not heard]"
+INTERRUPTED = " …"  # an ellipsis: a bracketed marker got copied into replies by chat models
 NOT_AWAITED = "interrupted by the person before the result came back"
 PLACES_KNOWN = (
     "The places go_to takes are: {names} (exactly these names). You know them already: when"
