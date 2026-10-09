@@ -153,7 +153,7 @@ def test_only_the_name_opens_and_a_turn_is_timed_and_logged(tmp_path: Path) -> N
     (turn,) = rig.loop.turns
     assert turn["reply"] == "Ты сказал: Пепин, привет" and turn["outcome"] == "committed"
     ms = turn["ms"]
-    assert ms["closed"] == pytest.approx(500, abs=40)
+    assert ms["closed"] == pytest.approx(400, abs=40)
     keys = ["closed", "transcript", "first_token", "first_sentence", "tts_first_audio",
             "speaker_start", "speaker_end"]  # fmt: skip
     assert all(ms[k] is not None for k in keys)

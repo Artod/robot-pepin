@@ -62,7 +62,7 @@ class TurnSegmenter(Segmenter):
     """The loudness gate, with the end of an utterance callable from outside and a floor that
     never follows the room below ``floor_min_db``."""
 
-    def __init__(self, *, floor_min_db: float = -75.0, **gate: float) -> None:
+    def __init__(self, *, floor_min_db: float = -85.0, **gate: float) -> None:
         """``gate``: the :class:`pepin.voice_live.wake.Segmenter` thresholds."""
         super().__init__(**gate)
         self.floor_min_db = floor_min_db

@@ -33,7 +33,9 @@ def quiet(seconds: float) -> list[bytes]:
 
 def ears_with(ps: list[float], **changes: object) -> tuple[Ears, ScriptedTurn]:
     detector = ScriptedTurn(ps)
-    config = CascadeConfig().with_changes(turn_model="smart-turn-v3.2", **changes)
+    config = CascadeConfig().with_changes(
+        turn_model="smart-turn-v3.2", silence_s=0.5, turn_threshold=0.5, **changes
+    )
     playback: list[Playback] = ["silent"]
     return Ears(config, lambda: playback[0], TurnWorker(detector, inline=True)), detector
 
@@ -76,7 +78,7 @@ def test_speech_after_a_pause_cancels_its_question_and_the_next_pause_asks_again
 
 
 def test_without_a_model_nothing_changes() -> None:
-    config = CascadeConfig()
+    config = CascadeConfig().with_changes(silence_s=0.5)
     ears = Ears(config, lambda: "silent")
     (closed,) = segments(ears, quiet(0.5) + tone(1.0) + quiet(1.0))
     assert closed[1].closed_by is None and eot_of(closed[1]) is None
@@ -115,7 +117,7 @@ def test_the_config_takes_the_model_and_refuses_what_cannot_work() -> None:
     assert (config.turn_min_silence_s, config.turn_window_s, config.turn_threshold) == (
         0.2,
         8.0,
-        0.5,
+        0.85,
     )
     assert CascadeConfig.load(CONFIG).turn_model is None
     for bad in (
@@ -174,7 +176,7 @@ def test_whisper_starts_in_the_pause_and_the_segment_carries_its_call() -> None:
         future.set_result(f"call {len(asked)}")
         return future
 
-    config = CascadeConfig()
+    config = CascadeConfig().with_changes(silence_s=0.5)
     ears = Ears(config, lambda: "silent", early=early)
     frames = quiet(0.5) + tone(0.6) + quiet(0.3) + tone(0.6) + quiet(1.0)
     ((t, event),) = segments(ears, frames)

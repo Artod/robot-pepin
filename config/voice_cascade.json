@@ -2,19 +2,19 @@
   "_note": "Pepin's own voice loop, the cascade (scripts/voice_cascade.py, pepin.voice_cascade): local ears (loudness gate + Whisper on the Mac) -> Claude as the talker (streamed, prompt-cached, the robot's tools) -> local voice (Qwen3-TTS on the Mac) -> the board's speaker. Every key can be switched for one run with --set section.key=value. Costs are ESTIMATES from the prices below and the API's own token counts.",
   "ears": {
     "wake": "name",
-    "silence_s": 0.5,
+    "silence_s": 0.4,
     "max_utterance_s": 15.0,
     "start_db": 10.0,
-    "floor_min_dbfs": -75.0,
+    "floor_min_dbfs": -85.0,
     "continuation_s": 0.8,
     "turn_model": null,
-    "note": "wake name: a conversation opens only on the robot's name (pepin.voice_live.wake.is_wake); always: every utterance is a turn (the bench). silence_s: the end of the turn is this much quiet after the last loud frame (0.5 s measured for the Live gate). start_db: a frame this far above the room's floor is voice. floor_min_dbfs: the floor never follows the room below this (the XVF3800's noise suppression delivers -90..-94 dBFS between words, 2026-10-09 logs; macOS say pads with digital silence; a floor that low opened the gate on -84 dBFS hiss for 15 s at a time, read by Whisper as 'Продолжение следует...'); speech sits at -50..-20 dBFS. continuation_s: the person starting again this soon after an utterance closed (by the model or the silence), before any of the reply was played, cancels the brain's call and the two utterances become one turn (2026-10-09: Smart Turn closed 'сегодня день.' at p 0.97 and the rest of the sentence came as the next turn); 0: off. Once the reply plays, it is a barge-in (flags.barge_in). turn_model: null (the fixed silence alone) or smart-turn-v3.2 (the turn section)"
+    "note": "wake name: a conversation opens only on the robot's name (pepin.voice_live.wake.is_wake); always: every utterance is a turn (the bench). silence_s: the end of the turn is this much quiet after the last loud frame (0.4 s; 0.5 s was the Live gate's). 2026-10-09, 18 of Artem's live utterances with 0.25 s of quiet inserted mid-sentence (scratch/voice_cascade_eot/eot_eval.py): silence 0.5 closed 2-3 of them early, 0.4 3-4, Smart Turn 0.5 15-16, Smart Turn 0.85 13-15; with the continuation merge none stayed cut (the voice always came back within 0.8 s); the close after the last word: 500, 400, 220 (max 500), 220 (max 400 with silence 0.4) ms. start_db: a frame this far above the room's floor is voice. floor_min_dbfs: the floor never follows the room below this (-85: the XVF3800's noise suppression delivers -90..-94 dBFS between words, 2026-10-09 logs, so a higher floor would call quiet syllables silence; macOS say pads with digital silence; a floor that low opened the gate on -84 dBFS hiss for 15 s at a time, read by Whisper as 'Продолжение следует...'); speech sits at -50..-20 dBFS. continuation_s: the person starting again this soon after an utterance closed (by the model or the silence), before any of the reply was played, cancels the brain's call and the two utterances become one turn (2026-10-09: Smart Turn closed 'сегодня день.' at p 0.97 and the rest of the sentence came as the next turn); 0: off. Once the reply plays, it is a barge-in (flags.barge_in). turn_model: null (the fixed silence alone) or smart-turn-v3.2 (the turn section)"
   },
   "turn": {
     "min_silence_s": 0.2,
     "window_s": 8.0,
-    "threshold": 0.5,
-    "note": "with ears.turn_model smart-turn-v3.2 (pipecat-ai/smart-turn-v3, smart-turn-v3.2-cpu.onnx: 8 MB int8 ONNX on the CPU, BSD-2-Clause, 23 languages with Russian at 93.5 % on its own benchmark; ~9 ms a call here): at min_silence_s of quiet inside an utterance the model reads its last window_s seconds (zeros in front, as it was trained) on a worker thread, and the utterance closes when it says p >= threshold; otherwise ears.silence_s closes it as before. Every turn logs p, the model's own ms and the time saved against the fixed silence"
+    "threshold": 0.85,
+    "note": "with ears.turn_model smart-turn-v3.2 (pipecat-ai/smart-turn-v3, smart-turn-v3.2-cpu.onnx: 8 MB int8 ONNX on the CPU, BSD-2-Clause, 23 languages with Russian at 93.5 % on its own benchmark; ~9 ms a call here): at min_silence_s of quiet inside an utterance the model reads its last window_s seconds (zeros in front, as it was trained) on a worker thread, and the utterance closes when it says p >= threshold (0.85: at 0.5 it cut 'сегодня день.' live at p 0.97, and at either it fires in most 0.25 s mid-sentence pauses, which the continuation merge joins back); otherwise ears.silence_s closes it as before. Every turn logs p, the model's own ms and the time saved against the fixed silence"
   },
   "transcriber": {
     "whisper_repo": "mlx-community/whisper-large-v3-turbo",

@@ -33,7 +33,7 @@ def test_the_file_reads_with_the_haiku_preset() -> None:
     config = CascadeConfig.load(CONFIG)
     assert config.brain.model == "claude-haiku-5-5"
     assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
-    assert config.wake == "name" and config.silence_s == 0.5
+    assert config.wake == "name" and config.silence_s == 0.4
     assert config.voice_engine == "qwen3" and config.tts_voice == "serena"
     assert not config.barge_in and not config.backchannel and config.prosody_tags
     assert config.price.input == pytest.approx(0.10)
@@ -218,7 +218,7 @@ def hear(ears: Ears, frames: list[bytes], t0: float = 0.0) -> list[tuple[str, fl
 
 
 def ears_with(mode: list[Playback], **changes: object) -> Ears:
-    config = CascadeConfig().with_changes(**changes)
+    config = CascadeConfig().with_changes(silence_s=0.5, **changes)
     return Ears(config, lambda: mode[0])
 
 

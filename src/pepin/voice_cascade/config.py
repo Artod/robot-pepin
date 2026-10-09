@@ -84,15 +84,15 @@ class CascadeConfig:
 
     # ears
     wake: str = "name"
-    silence_s: float = 0.5
+    silence_s: float = 0.4
     max_utterance_s: float = 15.0
     start_db: float = 10.0
-    floor_min_dbfs: float = -75.0
+    floor_min_dbfs: float = -85.0
     continuation_s: float = 0.8
     turn_model: str | None = None
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
-    turn_threshold: float = 0.5
+    turn_threshold: float = 0.85
     # transcriber
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "ru"
