@@ -25,7 +25,6 @@ from typing import Any
 from pepin.tools.registry import Image, Result, render
 from pepin.voice_cascade.brain import (
     END_TOOL,
-    INTERRUPTED,
     NOT_AWAITED,
     PLACES_KNOWN,
     PLACES_UNKNOWN,
@@ -403,6 +402,7 @@ class ChatBrain:
         if played.partial and cut is not None and cut.round == tool_rounds:
             heard.append(played.partial)
         if heard:
-            kept.append({"role": "assistant", "content": " ".join(heard) + INTERRUPTED})
+            # an ellipsis, not the bracketed marker: chat models copy a marker into replies
+            kept.append({"role": "assistant", "content": " ".join(heard) + " …"})
         self.history += self._without_pictures(kept)
         self._reset()
