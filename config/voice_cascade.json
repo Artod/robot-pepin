@@ -1,0 +1,94 @@
+{
+  "_note": "Pepin's own voice loop, the cascade (scripts/voice_cascade.py, pepin.voice_cascade): local ears (loudness gate + Whisper on the Mac) -> Claude as the talker (streamed, prompt-cached, the robot's tools) -> local voice (Qwen3-TTS on the Mac) -> the board's speaker. Every key can be switched for one run with --set section.key=value. Costs are ESTIMATES from the prices below and the API's own token counts.",
+  "ears": {
+    "wake": "name",
+    "silence_s": 0.5,
+    "max_utterance_s": 15.0,
+    "start_db": 10.0,
+    "turn_model": null,
+    "note": "wake name: a conversation opens only on the robot's name (pepin.voice_live.wake.is_wake); always: every utterance is a turn (the bench). silence_s: the end of the turn is this much quiet after the last loud frame (0.5 s measured for the Live gate). start_db: a frame this far above the room's floor is voice. turn_model: a learned end-of-turn detector (Smart Turn) is not wired yet: null"
+  },
+  "transcriber": {
+    "whisper_repo": "mlx-community/whisper-large-v3-turbo",
+    "language": "ru",
+    "initial_prompt": null,
+    "note": "Whisper turbo on the Mac's GPU, ~0.26 s a phrase; Russian forced. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
+  },
+  "brain": {
+    "preset": "haiku",
+    "max_tokens": 400,
+    "persona_file": "voice_cascade_persona.md",
+    "cache": true,
+    "prewarm": true,
+    "keep_warm_s": 270,
+    "max_tool_rounds": 4,
+    "timeout_s": 20,
+    "presets": {
+      "haiku": {"model": "claude-haiku-5-5", "thinking": "disabled", "effort": "low"},
+      "sonnet": {"model": "claude-sonnet-5-5", "thinking": "between_tools", "effort": "low"},
+      "opus": {"model": "claude-opus-5-5", "thinking": "adaptive", "effort": "low"}
+    },
+    "note": "preset picks model + thinking + effort; keys beside it win (--set brain.effort=medium). Thinking off: Haiku 5.5 'disabled'; Sonnet 5.5 'between_tools' (it refuses 'disabled'); Opus 5.5 cannot switch thinking off, 'adaptive' + effort low is its floor. Measured first word with a ~3k-token cached persona: Haiku 0.56 s, Sonnet 0.64 s, Opus 2.3 s; a tool round trip adds 1.4 s (Haiku) to 3.4 s (Sonnet). cache: a breakpoint on the persona (tools + persona, shared by every conversation) and on the growing conversation; prewarm: a max_tokens 0 call at start writes it, and again after keep_warm_s without a call (the cache lives 5 min). The key: ANTHROPIC_API_KEY in the environment"
+  },
+  "voice": {
+    "engine": "qwen3",
+    "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
+    "voice": "serena",
+    "language": "russian",
+    "chunk_s": 0.5,
+    "hf_home": "scratch/tts_voices/hf",
+    "say_voice": "Milena",
+    "say_rate_wpm": 185,
+    "note": "qwen3: Qwen3-TTS 0.6B CustomVoice through mlx-audio 0.5.8, loaded once on its own thread and kept hot; streams chunk_s chunks, first audio ~0.11 s warm (2.2 s cold: warmed at load), ~0.4x real time. hf_home: an HF cache already holding the weights (relative to the main checkout); missing there, the default cache is used. say: macOS say, whole sentences at 16 kHz, for a test without the model"
+  },
+  "player": {
+    "lead_s": 0.3,
+    "block_s": 0.04,
+    "note": "the pacer runs lead_s ahead of the speaker (the jitter buffer over WiFi; also what a barge-in has to silence) in block_s blocks"
+  },
+  "flags": {
+    "barge_in": false,
+    "backchannel": false,
+    "prosody_tags": true,
+    "note": "barge_in: while Pepin speaks, a voice over the barge_in threshold for hold_s flushes the speaker at once and cuts the conversation to what was heard; the person's words become the next turn (off: the mic is shut while Pepin speaks, as in the Live loop). backchannel: a short local clip when the person pauses mid-utterance. prosody_tags: Praat's numbers against the running baseline as a tag line in front of the person's words"
+  },
+  "barge_in": {
+    "over_floor_db": 25.0,
+    "min_dbfs": -45.0,
+    "hold_s": 0.25,
+    "note": "a frame is a voice cutting in when it stands over_floor_db above the room's floor and at least min_dbfs; the echo of the robot's own voice sits ~40 dB under the person's (XVF3800 echo cancellation). Every turn logs echo_peak_db (the loudest frame while the reply played) and every utterance voice_peak_db: set these from those two"
+  },
+  "backchannel": {
+    "delay_s": 0.3,
+    "min_speech_s": 0.8,
+    "lines": ["угу", "мм"],
+    "note": "a clip (synthesised once at load) when the person has been quiet delay_s inside an utterance of at least min_speech_s, before the end of the turn"
+  },
+  "prosody": {
+    "speaker": "Артём",
+    "min_baseline": 5,
+    "window": 200,
+    "z": 1.0,
+    "emotion_model": null,
+    "note": "the tag line names speaker (no speaker ID yet), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean: loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
+  },
+  "conversation": {
+    "idle_close_s": 20.0,
+    "max_session_s": 900.0,
+    "report_drive_start": true,
+    "error_line": "Извини, у меня сбой связи.",
+    "note": "a conversation closes after idle_close_s without the person's voice or a reply (never while a drive runs), on a goodbye, on end_conversation, or at max_session_s. report_drive_start: a drive answers its call when the goal server takes it (the brain says its acknowledgement) and its end comes as a [robot] turn. error_line: said locally when the brain fails before saying anything"
+  },
+  "money": {
+    "daily_budget_cad": 2.0,
+    "max_sessions_per_hour": 60,
+    "usd_to_cad": 1.38,
+    "prices_usd_per_mtok": {
+      "claude-haiku-5-5": {"input": 0.10, "output": 0.50, "cache_read": 0.01, "cache_write": 0.125},
+      "claude-sonnet-5-5": {"input": 2.00, "output": 10.00, "cache_read": 0.20, "cache_write": 2.50},
+      "claude-opus-5-5": {"input": 4.00, "output": 20.00, "cache_read": 0.20, "cache_write": 5.00},
+      "note": "Anthropic list prices (the claude-api reference, cached 2026-10-06): cache reads 0.1x input (0.05x on Opus 5.5), 5-minute cache writes 1.25x. Haiku 5.5 prompts over 100k tokens cost more (never reached here)"
+    },
+    "note": "a conversation that would break a cap is never opened; the estimates are kept in data/voice/cascade_ledger.jsonl"
+  }
+}
