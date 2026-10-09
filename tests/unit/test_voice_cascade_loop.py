@@ -143,6 +143,7 @@ def test_only_the_name_opens_and_a_turn_is_timed_and_logged(tmp_path: Path) -> N
         for _ in range(3):
             await rig.say(utterance())
         await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+        await until(lambda: "listening" in rig.states)
 
     asyncio.run(rig.run(scenario))
     assert rig.brain.heard == ["Пепин, привет"]
@@ -219,15 +220,18 @@ def test_a_barge_in_cuts_the_reply_to_what_was_heard_and_answers_the_new_words(
 def test_a_pause_in_a_long_utterance_gets_a_backchannel_before_the_answer(
     tmp_path: Path,
 ) -> None:
-    rig = Rig(tmp_path, ["Пепин, послушай"], backchannel=True)
+    rig = Rig(tmp_path, ["Пепин", "послушай меня"], backchannel=True)
 
     async def scenario(rig: Rig) -> None:
-        await rig.say(quiet(0.2) + tone(1.0) + quiet(0.7))
+        await rig.say(utterance())  # the name opens the conversation (no backchannel before)
         await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+        await rig.say(quiet(0.2) + tone(1.0) + quiet(0.7))
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
 
     asyncio.run(rig.run(scenario))
-    assert rig.voice.spoken[0] in ("угу", "мм")
-    assert rig.voice.spoken[1] == "Ты сказал: Пепин, послушай"
+    assert rig.voice.spoken[0] == "Ты сказал: Пепин"
+    assert rig.voice.spoken[1] in ("угу", "мм")
+    assert rig.voice.spoken[2] == "Ты сказал: послушай меня"
 
 
 def test_a_brain_that_fails_before_a_word_is_covered_by_the_local_error_line(

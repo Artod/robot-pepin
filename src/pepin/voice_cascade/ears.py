@@ -56,7 +56,8 @@ class Ears:
         self._loud_s = 0.0
         self._barged = False
         self._paused = False
-        self._started_s = 0.0
+        self._frames = 0  # frames of the utterance in progress
+        self._quiet = 0  # of them, quiet since the last loud one
         self.echo_peak_db = -120.0  # loudest frame heard while a reply played (since reset)
         self.voice_peak_db = -120.0  # loudest frame of the person's last utterance
 
@@ -97,22 +98,30 @@ class Ears:
         return events
 
     def _listen(self, pcm: bytes, t: float, db: float) -> list[EarEvent]:
+        """The gate on one frame. The pause is counted in frames, as the gate counts its
+        silence: frames that arrive in a burst over WiFi carry their arrival times, not 20 ms
+        steps."""
         events: list[EarEvent] = []
+        loud = rms_db(pcm) > self.gate.floor + self.gate.start_db  # the gate's own test
         was_talking = self.gate.talking
         segment = self.gate.feed(pcm, t)
         if not was_talking and self.gate.talking:
-            self._started_s, self._paused = t, False
+            self._frames = self._quiet = 0
+            self._paused = False
             self.voice_peak_db = db
             events.append(EarEvent("start", t))
         if self.gate.talking:
             self.voice_peak_db = max(self.voice_peak_db, db)
-            quiet_s = t - self.gate.last_voice_s
-            if quiet_s < FRAME_S:
+            self._frames += 1
+            self._quiet = 0 if loud else self._quiet + 1
+            quiet_s = self._quiet * FRAME_S
+            spoken_s = (self._frames - self._quiet) * FRAME_S
+            if not self._quiet:
                 self._paused = False
             elif (
                 not self._paused
-                and quiet_s >= self.config.backchannel_delay_s
-                and self.gate.last_voice_s - self._started_s >= self.config.backchannel_min_speech_s
+                and quiet_s >= self.config.backchannel_delay_s - 1e-9
+                and spoken_s >= self.config.backchannel_min_speech_s
             ):
                 self._paused = True
                 events.append(EarEvent("pause", t))
