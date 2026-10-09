@@ -46,6 +46,7 @@ class FaceObs:
     embedding: Vector | None = None
     expression: Expression | None = None
     mesh: Mesh | None = None
+    mesh_read: bool = False
 
     @property
     def face_px(self) -> float:
@@ -116,12 +117,14 @@ class FacePipeline:
             lens = self.lens.scaled(image.shape[1], image.shape[0])
             bearing = lens.bearing_deg(*det.centre)
         mesh = None
-        if self.landmarker is not None and g.attention:
+        mesh_read = self.landmarker is not None and g.attention
+        if self.landmarker is not None and mesh_read:
             t = time.perf_counter()
             mesh = self.landmarker.read(crop_box(image, det.box, margin=MESH_MARGIN, square=True))
             ms["mesh"] = _since(t)
         expression = None
-        looks_away = mesh is not None and not facing(mesh, self.cfg.attention)
+        # A face the landmarker cannot read is turned away (or no face at all): no expression.
+        looks_away = mesh_read and (mesh is None or not facing(mesh, self.cfg.attention))
         if self.expression is not None and g.expression and not looks_away:
             t = time.perf_counter()
             expression = self.expression.predict(tight)
@@ -131,7 +134,7 @@ class FacePipeline:
             t = time.perf_counter()
             embedding = self.embedder.embed(image, det)
             ms["embed"] = _since(t)
-        return FaceObs(det, quality, g, bearing, embedding, expression, mesh)
+        return FaceObs(det, quality, g, bearing, embedding, expression, mesh, mesh_read)
 
 
 def _since(start: float) -> float:
@@ -157,12 +160,22 @@ class FaceState:
         if obs is None:
             return
         self.last_face = result
-        if obs.mesh is not None:
+        if obs.mesh_read:
             self.attention.add(result.stamp, obs.mesh)
         if obs.expression is not None:
             self.expression.add(result.stamp, obs.expression)
         if obs.embedding is not None and self.vote is not None:
-            self.vote.add(result.stamp, obs.embedding, obs.face_px)
+            frontal = None
+            if obs.mesh_read:
+                limit = self.cfg.identity.max_yaw_deg
+                frontal = obs.mesh is not None and abs(obs.mesh.yaw) <= limit
+            self.vote.add(
+                result.stamp,
+                obs.embedding,
+                obs.face_px,
+                det=obs.detection.score,
+                frontal=frontal,
+            )
 
     def record(self, fps: float) -> dict[str, Any] | None:
         """The published line as of the newest frame; ``None`` before the first frame. Face

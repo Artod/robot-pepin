@@ -7,8 +7,10 @@ own pack's files).
 
 One frame's embedding is matched to every centroid by cosine. It votes for the best person when
 the cosine reaches ``accept_cos`` and beats the runner-up by ``margin``; it votes ``unknown``
-below ``unknown_cos``; between the two it abstains. The published identity is the label with at
-least ``min_votes`` of the last ``vote_frames`` ballots. Unknown faces become session guests
+below ``unknown_cos``, but only for a clear face (detector score at least ``unknown_min_det`` and
+not known to be turned more than ``max_yaw_deg`` away: a profile or a doubtful box matches nobody
+and is no evidence of a stranger); otherwise it abstains. The published identity is the label
+with at least ``min_votes`` of the last ``vote_frames`` ballots. Unknown faces become session guests
 (``guest-1``, ``guest-2``, ...): once ``min_votes`` unknown ballots of faces at least
 ``enrol_min_px`` wide agree, their mean embedding is a new guest, matched like a person
 afterwards and forgotten when the process ends.
@@ -237,10 +239,20 @@ class IdentityVote:
         self._window: deque[Ballot] = deque(maxlen=cfg.vote_frames)
         self._last = -np.inf
 
-    def add(self, stamp: float, embedding: Vector, face_px: float) -> Ballot:
-        """One frame's embedding of the tracked face; the ballot it cast."""
+    def add(
+        self,
+        stamp: float,
+        embedding: Vector,
+        face_px: float,
+        *,
+        det: float = 1.0,
+        frontal: bool | None = None,
+    ) -> Ballot:
+        """One frame's embedding of the tracked face, with its detector score and whether the
+        head faces the camera (``None``: unknown); the ballot it cast."""
         self._expire(stamp)
-        ballot = self._ballot(stamp, unit(embedding), face_px)
+        clear = det >= self.cfg.unknown_min_det and frontal is not False
+        ballot = self._ballot(stamp, unit(embedding), face_px, clear)
         self._window.append(ballot)
         self._last = stamp
         self._promote_guest()
@@ -269,7 +281,7 @@ class IdentityVote:
         if now - self._last > self.cfg.forget_after_s:
             self._window.clear()
 
-    def _ballot(self, stamp: float, e: Vector, face_px: float) -> Ballot:
+    def _ballot(self, stamp: float, e: Vector, face_px: float, clear: bool) -> Ballot:
         cfg = self.cfg
         family = self.gallery.match(e)
         label = decide(family, cfg)
@@ -278,7 +290,7 @@ class IdentityVote:
         guest = self.guests.match(e)
         if guest.name is not None and guest.cos >= cfg.guest_cos:
             return Ballot(stamp, guest.name, guest.cos, face_px, e)
-        return Ballot(stamp, UNKNOWN, family.cos, face_px, e)
+        return Ballot(stamp, UNKNOWN if clear else None, family.cos, face_px, e)
 
     def _promote_guest(self) -> None:
         """Turn agreeing unknown ballots of big enough faces into a new guest."""

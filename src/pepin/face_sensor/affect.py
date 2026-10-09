@@ -95,10 +95,11 @@ class AttentionWindow:
     def __init__(self, cfg: AttentionConfig) -> None:
         """An empty window."""
         self.cfg = cfg
-        self._samples: deque[tuple[float, Mesh]] = deque()
+        self._samples: deque[tuple[float, Mesh | None]] = deque()
 
-    def add(self, stamp: float, mesh: Mesh) -> None:
-        """One frame's landmarker reading."""
+    def add(self, stamp: float, mesh: Mesh | None) -> None:
+        """One frame's landmarker reading; ``None`` when it found no face in the crop (a face
+        turned away, or not a face): a not-looking sample with no jaw."""
         self._samples.append((stamp, mesh))
         self._trim(stamp)
 
@@ -107,8 +108,14 @@ class AttentionWindow:
         ``talk_window_s``) at ``now``; ``None`` when no reading is recent."""
         self._trim(now)
         cfg = self.cfg
-        look = [facing(m, cfg) for t, m in self._samples if t >= now - cfg.look_window_s]
-        jaw = [m.jaw_open for t, m in self._samples if t >= now - cfg.talk_window_s]
+        look = [
+            m is not None and facing(m, cfg)
+            for t, m in self._samples
+            if t >= now - cfg.look_window_s
+        ]
+        jaw = [
+            m.jaw_open for t, m in self._samples if m is not None and t >= now - cfg.talk_window_s
+        ]
         if not look and not jaw:
             return None
         looking = (2 * sum(look) >= len(look)) if look else None

@@ -237,6 +237,29 @@ def test_a_face_turned_away_gets_no_expression() -> None:
     assert expr.calls == 0
 
 
+def test_a_face_the_landmarker_cannot_read_gets_no_expression() -> None:
+    expr = FakeExpression()
+    p = pipeline(landmarker=FakeLandmarker([None]), expression=expr)
+    obs = p.process(Frame(1.0, 0, lambda: noise())).best
+    assert obs is not None and obs.mesh_read and obs.mesh is None
+    assert obs.expression is None and expr.calls == 0
+    assert obs.embedding is not None
+
+
+def test_a_profile_abstains_in_the_published_vote() -> None:
+    p = pipeline(
+        embedder=FakeEmbedder([direction(5)]),
+        landmarker=FakeLandmarker([Mesh(yaw=60, pitch=0, roll=0, jaw_open=0.0)]),
+    )
+    state = FaceState(CFG, IdentityVote(CFG.identity, Gallery({"artem": direction(1)})))
+    for i in range(5):
+        state.update(p.process(Frame(i / 3, i, lambda: noise())))
+    record = state.record(3.0)
+    assert record is not None
+    assert record["who"] == {"id": None, "cos": record["who"]["cos"], "votes": "0/5"}
+    assert record["attention"]["looking"] is False and record["expr"] is None
+
+
 def test_a_blurry_face_feeds_no_stage() -> None:
     embedder = FakeEmbedder([direction(1)])
     p = pipeline(embedder=embedder)

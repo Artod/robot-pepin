@@ -25,7 +25,7 @@ class ModelsConfig:
     blendshapes: bool = True
     detector_pack: str = "models/face/buffalo_l"
     det_size: int = 640
-    det_threshold: float = 0.5
+    det_threshold: float = 0.6
     expression_model: str = "models/face/enet_b0_8_va_mtl.onnx"
     expression_device: str = "cpu"
     landmarker_model: str = "models/face/face_landmarker.task"
@@ -56,6 +56,8 @@ class IdentityConfig:
     forget_after_s: float = 3.0
     guest_cos: float = 0.45
     enrol_min_px: int = 40
+    unknown_min_det: float = 0.7
+    max_yaw_deg: float = 35.0
 
 
 @dataclass(frozen=True)

@@ -49,6 +49,8 @@ def test_the_tracked_config_loads_with_its_measured_defaults() -> None:
     assert cfg.gate.min_identity_px == 18
     assert cfg.identity.vote_frames == 5
     assert cfg.models.expression_device == "cpu"
+    assert cfg.models.det_threshold == 0.6
+    assert cfg.identity.unknown_min_det == 0.7
     assert cfg.path(cfg.faces_dir) == REPO / "data" / "faces"
 
 
@@ -185,6 +187,17 @@ def test_looking_is_the_head_inside_the_cone_by_majority() -> None:
     assert state.talking is None  # three jaw readings, four needed
 
 
+def test_a_face_the_landmarker_cannot_read_is_not_looking() -> None:
+    window = AttentionWindow(AttentionConfig(look_window_s=1.0, min_talk_samples=2))
+    window.add(0.0, Mesh(0, 0, 0, 0.1))
+    window.add(0.4, None)
+    window.add(0.8, None)
+    state = window.state(0.8)
+    assert state is not None
+    assert state.looking is False
+    assert state.talking is None  # one jaw reading
+
+
 def test_talking_is_the_jaw_moving() -> None:
     cfg = AttentionConfig(talk_window_s=2.0, talk_jaw_std=0.04, min_talk_samples=4)
     still, talking = AttentionWindow(cfg), AttentionWindow(cfg)
@@ -243,6 +256,28 @@ def test_unknown_faces_become_one_session_guest_each() -> None:
     for i in range(3):
         vote.add(10.0 + i / 3, near(olga, 0.8, seed=40 + i), 60)
     assert vote.current(10.7).id == "guest-2"
+
+
+def test_only_a_clear_face_votes_unknown() -> None:
+    cfg = IdentityConfig(unknown_min_det=0.7)
+    vote = IdentityVote(cfg, Gallery({"artem": direction(1)}))
+    stranger = direction(5)
+    assert vote.add(0.0, stranger, 60, det=0.9, frontal=True).label == UNKNOWN
+    assert vote.add(0.1, stranger, 60, det=0.9, frontal=None).label == UNKNOWN
+    assert vote.add(0.2, stranger, 60, det=0.9, frontal=False).label is None  # a profile
+    assert vote.add(0.3, stranger, 60, det=0.62, frontal=True).label is None  # a doubtful box
+    # A match is evidence whatever the pose.
+    artem = vote.add(0.4, near(direction(1), 0.7), 60, det=0.62, frontal=False)
+    assert artem.label == "artem"
+
+
+def test_profiles_never_become_guests() -> None:
+    vote = IdentityVote(IdentityConfig(), Gallery({"artem": direction(1)}))
+    for i in range(5):
+        vote.add(i / 3, near(direction(5), 0.8, seed=i), 80, det=0.9, frontal=False)
+    who = vote.current(4 / 3)
+    assert who is not None and who.id is None
+    assert not vote.guests.centroids
 
 
 def test_small_unknown_faces_never_become_guests() -> None:

@@ -13,12 +13,12 @@
     "blendshapes": true,
     "detector_pack": "models/face/buffalo_l",
     "det_size": 640,
-    "det_threshold": 0.5,
+    "det_threshold": 0.6,
     "expression_model": "models/face/enet_b0_8_va_mtl.onnx",
     "expression_device": "cpu",
     "landmarker_model": "models/face/face_landmarker.task",
     "coreml_cache": "models/face/coreml_cache",
-    "note": "Which stages run (the detector always does) and the weights, relative to the repository root (models/ is gitignored). detector_pack: an InsightFace pack folder (buffalo_l: SCRFD-10GF + ResNet50 ArcFace, weights for non-commercial use; buffalo_s is the faster, slightly weaker pack). expression_model: EmotiEffLib's enet_b0_8_va_mtl.onnx (8 AffectNet classes + valence/arousal, Apache-2.0, trained on research-only data). landmarker_model: MediaPipe's face_landmarker.task (Apache-2.0). expression_device: the expression net's own device, cpu because it is MEASURED faster there (4.3 ms against 10.4 on coreml and mps, 2026-10-08) while the detector and ArcFace are 4x and 8x faster on coreml (6.6 / 2.0 ms against 26.4 / 17.0 on cpu). coreml_cache: CoreML's compiled networks, built at the first load. Enrolled people are tied to the pack: a gallery loads only the files its pack made."
+    "note": "Which stages run (the detector always does) and the weights, relative to the repository root (models/ is gitignored). detector_pack: an InsightFace pack folder (buffalo_l: SCRFD-10GF + ResNet50 ArcFace, weights for non-commercial use; buffalo_s is the faster, slightly weaker pack). expression_model: EmotiEffLib's enet_b0_8_va_mtl.onnx (8 AffectNet classes + valence/arousal, Apache-2.0, trained on research-only data). landmarker_model: MediaPipe's face_landmarker.task (Apache-2.0). expression_device: the expression net's own device, cpu because it is MEASURED faster there (4.3 ms against 10.4 on coreml and mps, 2026-10-08) while the detector and ArcFace are 4x and 8x faster on coreml (6.6 / 2.0 ms against 26.4 / 17.0 on cpu). coreml_cache: CoreML's compiled networks, built at the first load. Enrolled people are tied to the pack: a gallery loads only the files its pack made. det_threshold 0.6, MEASURED on the robot's own clips (2026-10-08: 126 clips, 10700 frames at 3 fps, 507 face crops labelled by eye): every false face scored under 0.7 (median 0.54; a teal plastic part, the robot's base seen from the neck, chairs with cloth, a flower print) and 0.6 drops 61 of the 85 false ones (0.8 % of frames -> 0.2 %) and 107 of the 422 real ones, nearly all profiles and heads bent down; Artem facing the camera at 46-200 px scored 0.57-0.88 (20 of 22 frames at 0.74 or more). The clean 18 px sweep face scored 0.59: the detection range ends nearer 20 px (~3.5 m) than 18."
   },
   "gate": {
     "min_identity_px": 18,
@@ -38,7 +38,9 @@
     "forget_after_s": 3.0,
     "guest_cos": 0.45,
     "enrol_min_px": 40,
-    "note": "A frame's embedding votes for the nearest enrolled centroid when its cosine is at least accept_cos and margin above the runner-up, votes unknown below unknown_cos, and abstains between; the published id is the label with min_votes of the last vote_frames ballots (null while undecided). The window empties after forget_after_s without a face. min_votes unknown ballots of faces at least enrol_min_px wide that agree to guest_cos become a session guest (guest-1, ...). enrol_min_px is also the smallest face enrolment takes. The cosines are a starting point, not a measurement: ArcFace puts different people at about -0.1..0.3 and the same person across photos at about 0.5..0.8; set them from enrolment crops taken with Pepin's own camera."
+    "unknown_min_det": 0.7,
+    "max_yaw_deg": 35.0,
+    "note": "A frame's embedding votes for the nearest enrolled centroid when its cosine is at least accept_cos and margin above the runner-up, votes unknown below unknown_cos, and abstains between; the published id is the label with min_votes of the last vote_frames ballots (null while undecided). The window empties after forget_after_s without a face. min_votes unknown ballots of faces at least enrol_min_px wide that agree to guest_cos become a session guest (guest-1, ...). enrol_min_px is also the smallest face enrolment takes. Only a clear face votes unknown: detector score at least unknown_min_det and not turned more than max_yaw_deg (MediaPipe's yaw, or the landmarker finding no face); anything else abstains. On the robot's clips Artem's profiles at a desk scored cosine -0.04..0.18 to his frontal enrolment and would have become guests, and no false face reached 0.7. The cosines are a starting point: on the robot's clips Artem's frontal faces (50-140 px) scored 0.37-0.72 to a centroid of one phone selfie (median about 0.53), his profiles about 0, strangers in InsightFace's samples at most 0.12; set them again from enrolment crops taken with Pepin's own camera."
   },
   "expression": {
     "window_s": 3.0,
@@ -52,7 +54,7 @@
     "talk_window_s": 2.0,
     "talk_jaw_std": 0.04,
     "min_talk_samples": 4,
-    "note": "looking: head yaw and pitch (MediaPipe on the face crop, 0 = facing the camera) both inside the cone, by majority of the last look_window_s. talking: the standard deviation of jawOpen over the last talk_window_s at least talk_jaw_std, null with fewer than min_talk_samples readings. talk_jaw_std is a guess until measured on someone talking to the robot."
+    "note": "looking: head yaw and pitch (MediaPipe on the face crop, 0 = facing the camera) both inside the cone, by majority of the last look_window_s; a face at least min_attention_px wide in which the landmarker finds no face counts as not looking (on the robot's clips it read 21 of 24 frontal faces and 55 of 281 faces overall: the rest were profiles and heads bent down). talking: the standard deviation of jawOpen over the last talk_window_s at least talk_jaw_std, null with fewer than min_talk_samples readings. talk_jaw_std is a guess until measured on someone talking to the robot."
   },
   "source": {
     "eye": "left",
