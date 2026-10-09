@@ -45,8 +45,9 @@ llm = [
     "mcp>=2.2.0",
 ]
 # The voice loops' local ears and voice: Whisper on the Mac's GPU (pepin.voice_live.wake.MlxWhisper),
-# Qwen3-TTS through mlx-audio and Praat's prosody through parselmouth (pepin.voice_cascade).
-# MLX is Apple silicon only; the unit tier never imports any of them.
+# Qwen3-TTS through mlx-audio, Praat's prosody through parselmouth and the Smart Turn end-of-turn
+# model through onnxruntime (pepin.voice_cascade). MLX is Apple silicon only; the unit tier never
+# imports any of them.
 voice = [
     "mlx-audio[tts]==0.5.8 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "mlx-whisper>=0.4.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
