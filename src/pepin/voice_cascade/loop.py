@@ -232,6 +232,10 @@ class CascadeLoop:
             await asyncio.gather(*tasks, return_exceptions=True)
             if self.conversation is not None:
                 self.close("stopped")
+            close = getattr(self.brain, "aclose", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
             stop_player.set()
             self._whisper.shutdown(wait=False)
             self._praat.shutdown(wait=False)

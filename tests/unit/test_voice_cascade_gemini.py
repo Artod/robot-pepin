@@ -56,6 +56,7 @@ class FakeModels:
     def __init__(self, rounds: list[list[SimpleNamespace]]) -> None:
         self.rounds = rounds
         self.requests: list[dict[str, Any]] = []
+        self.caches: Any = None
 
     async def generate_content_stream(self, **kwargs: Any) -> AsyncIterator[SimpleNamespace]:
         self.requests.append(kwargs)
@@ -72,11 +73,32 @@ class FakeModels:
         return SimpleNamespace(usage_metadata=metadata(5000, 0, 1))
 
 
+class FakeCaches:
+    """Context caches by name; keeps what was made, renewed and deleted."""
+
+    def __init__(self) -> None:
+        self.made: list[Any] = []
+        self.renewed: list[str] = []
+        self.deleted: list[str] = []
+
+    async def create(self, *, model: str, config: Any) -> SimpleNamespace:
+        self.made.append(config)
+        meta = SimpleNamespace(total_token_count=3251)
+        return SimpleNamespace(name=f"cachedContents/{len(self.made)}", usage_metadata=meta)
+
+    async def update(self, *, name: str, config: Any) -> None:
+        self.renewed.append(name)
+
+    async def delete(self, *, name: str) -> None:
+        self.deleted.append(name)
+
+
 def brain_over(
     rounds: list[list[SimpleNamespace]], **config: Any
 ) -> tuple[GeminiBrain, FakeModels]:
     models = FakeModels(rounds)
-    client = SimpleNamespace(aio=SimpleNamespace(models=models))
+    models.caches = FakeCaches()
+    client = SimpleNamespace(aio=SimpleNamespace(models=models, caches=models.caches))
     settings = {"provider": "gemini", "model": "gemini-3.5-flash-lite", "thinking": None,
                 "effort": None, "thinking_level": "minimal", **config}  # fmt: skip
     see = {"name": "see", "description": "Take a picture."}
@@ -201,8 +223,67 @@ def test_adjacent_user_turns_are_joined_for_gemini() -> None:
     assert [p.text for p in contents[0].parts] == ["(не роботу)", "Пепин"]
 
 
-def test_prewarm_is_one_short_call() -> None:
-    brain, models = brain_over([])
+def test_the_static_prefix_lives_in_a_context_cache() -> None:
+    rounds = [[chunk(call("see"))], [chunk(types.Part(text="Вижу."))]]
+    brain, models = brain_over(rounds, max_tool_rounds=1)
+
+    async def scenario() -> None:
+        warm = await brain.prewarm()
+        assert warm is not None and warm.cache_write == 3251 and warm.usd > 0
+        await brain.turn("что видишь?", lambda name, args: _ok(), lambda e: None)
+        await brain.aclose()
+
+    asyncio.run(scenario())
+    (made,) = models.caches.made
+    assert made.system_instruction.startswith("You are Pepin.") and made.ttl == "3600s"
+    first, last = (r["config"] for r in models.requests)
+    assert first.cached_content == "cachedContents/1"
+    assert first.system_instruction is None and first.tools is None
+    assert last.cached_content is None and last.tool_config is not None  # the last round
+    assert models.caches.deleted == ["cachedContents/1"]
+
+
+async def _ok() -> Result:
+    return {"ok": True}
+
+
+def test_new_places_go_uncached_while_a_new_cache_is_made() -> None:
+    brain, models = brain_over([[chunk(types.Part(text="Да."))], [chunk(types.Part(text="Да."))]])
+
+    async def scenario() -> None:
+        await brain.prewarm()
+        brain.begin(["home", "printer", "kitchen"])  # the system instruction changed
+        await brain.turn("Пепин", lambda name, args: _ok(), lambda e: None)
+        await asyncio.sleep(0)  # the remake runs in the background
+        await asyncio.sleep(0)
+        brain.commit()
+        await brain.turn("Пепин", lambda name, args: _ok(), lambda e: None)
+
+    asyncio.run(scenario())
+    assert models.requests[0]["config"].cached_content is None
+    assert models.requests[1]["config"].cached_content == "cachedContents/2"
+    assert "kitchen" in models.caches.made[1].system_instruction
+    assert models.caches.deleted == ["cachedContents/1"]
+
+
+def test_a_turn_renews_a_cache_close_to_its_end() -> None:
+    clock = [0.0]
+    brain, models = brain_over([[chunk(types.Part(text="Да."))]])
+    brain.clock = lambda: clock[0]
+
+    async def scenario() -> None:
+        await brain.prewarm()
+        clock[0] = 3600 - 300  # five minutes left
+        await brain.turn("Пепин", lambda name, args: _ok(), lambda e: None)
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+    assert models.requests[0]["config"].cached_content == "cachedContents/1"  # still valid
+    assert models.caches.renewed == ["cachedContents/1"]
+
+
+def test_prewarm_without_a_cache_is_one_short_call() -> None:
+    brain, models = brain_over([], cache=False)
     warm = asyncio.run(brain.prewarm())
     assert warm is not None and warm.input == 5000
     assert models.requests[0]["config"].max_output_tokens == 16

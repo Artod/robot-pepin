@@ -6,9 +6,17 @@ function declarations (as the Live loop renders them); thinking is the lowest ea
 (``thinking_budget`` or ``thinking_level`` from the preset). A round's streamed parts are kept
 as they came (Gemini 3 binds a thought signature to a function call part and wants it back);
 its function calls run in parallel; their results go back as function-response parts, and a
-picture a tool returns travels as an inline image part in the same turn. Gemini caches a long
-stable prefix implicitly (no write premium): the usage's ``cached_content_token_count`` is the
-cache read.
+picture a tool returns travels as an inline image part in the same turn.
+
+The static prefix (system instruction and tools, places included) lives in an explicit context
+cache (``brain.cache``): created at the prewarm with a one-hour TTL, the TTL renewed by a turn
+that finds it under ten minutes, a new cache made when the places change. Gemini's implicit
+cache needs 4096 tokens and the prefix is ~3.3k, so it hit once in a live session; the explicit
+one is read on every call (2026-10-09, Flash-Lite: 3251 of 3258 prompt tokens cached, function
+calls unchanged). A call with a cache may not set the system, the tools or the tool config, so
+the last round of a turn (tools forbidden) goes without it. The usage's
+``cached_content_token_count`` is the cache read; storing it costs ~1 USD per million tokens an
+hour (~0.3 US cents an hour here), and the cache is deleted at the end of the run.
 """
 
 from __future__ import annotations
@@ -46,6 +54,9 @@ from pepin.voice_cascade.text import SentenceSplitter
 # Gemini at its lowest thinking says "Сейчас гляну." and ends the reply without the call it
 # announced (2026-10-09: 4 of 4 on "посмотри на меня", Flash-Lite); asked to call first, it calls
 # (4 of 4), and the loop says the filler itself (pepin.voice_cascade.loop.SLOW_TOOLS).
+CACHE_TTL_S = 3600
+CACHE_RENEW_S = 600  # a turn renews the TTL when less than this is left
+CACHE_STORAGE_USD_PER_MTOK_HOUR = 1.0
 CALL_FIRST = (
     "# Tools on this model\n\nWhen a request needs a tool, call the tool at once, as the first"
     " thing in your reply, without any words before it: the robot says a short filler by itself"
@@ -101,27 +112,55 @@ class GeminiBrain:
         self._turn: list[Any] = []
         self._said: list[Sentence] = []
         self._acted = False
+        self._cache: str | None = None  # the cache's name
+        self._cache_key = ""  # the system instruction it holds
+        self._cache_until = 0.0  # when its TTL runs out (monotonic)
+        self._cache_task: asyncio.Task[None] | None = None
+        self.cache_tokens = 0
 
     # -- the request -----------------------------------------------------------------------
 
-    def request(self, *, final: bool = False, max_tokens: int | None = None) -> Any:
-        """The call's ``GenerateContentConfig``; ``final``: no more tool calls."""
-        t, cfg = self.types, self.config
-        thinking = None
-        if cfg.thinking_budget is not None or cfg.thinking_level is not None:
-            thinking = t.ThinkingConfig(
-                thinking_budget=cfg.thinking_budget, thinking_level=cfg.thinking_level
-            )
+    def system(self) -> str:
+        """The system instruction: the persona, the call-first rule, the places book."""
+        return f"{self.persona}\n\n{CALL_FIRST}\n\n{self.places_line}"
+
+    def thinking(self) -> Any:
+        """The preset's thinking setting, None when it sets none."""
+        cfg = self.config
+        if cfg.thinking_budget is None and cfg.thinking_level is None:
+            return None
+        return self.types.ThinkingConfig(
+            thinking_budget=cfg.thinking_budget, thinking_level=cfg.thinking_level
+        )
+
+    def tools(self) -> list[Any]:
+        """The function declarations as one Gemini tool."""
+        t = self.types
         functions = [
             t.FunctionDeclaration(
                 name=d["name"], description=d["description"], parameters=d.get("parameters")
             )
             for d in self.declarations
         ]
+        return [t.Tool(function_declarations=functions)]
+
+    def request(
+        self, *, final: bool = False, max_tokens: int | None = None, cache: str | None = None
+    ) -> Any:
+        """The call's ``GenerateContentConfig``; ``final``: no more tool calls; ``cache``: the
+        context cache holding the system and the tools (then not sent again)."""
+        t, cfg = self.types, self.config
+        if cache is not None and not final:
+            return t.GenerateContentConfig(
+                cached_content=cache,
+                thinking_config=self.thinking(),
+                max_output_tokens=max_tokens or cfg.max_tokens,
+                automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True),
+            )
         return t.GenerateContentConfig(
-            system_instruction=f"{self.persona}\n\n{CALL_FIRST}\n\n{self.places_line}",
-            tools=[t.Tool(function_declarations=functions)],
-            thinking_config=thinking,
+            system_instruction=self.system(),
+            tools=self.tools(),
+            thinking_config=self.thinking(),
             max_output_tokens=max_tokens or cfg.max_tokens,
             automatic_function_calling=t.AutomaticFunctionCallingConfig(disable=True),
             tool_config=t.ToolConfig(function_calling_config=t.FunctionCallingConfig(mode="NONE"))
@@ -160,11 +199,16 @@ class GeminiBrain:
         return self._acted
 
     async def prewarm(self) -> Usage | None:
-        """One short call with the conversation's system and tools: the connection is open
-        and a long enough prefix lands in Gemini's implicit cache."""
+        """Make the context cache now (the connection opens with it); without a cache, one
+        short call with the system and the tools opens the connection instead."""
         if not self.config.prewarm:
             return None
         t0 = self.clock()
+        if self.config.cache:
+            await self._make_cache()
+            storage = self.cache_tokens * CACHE_STORAGE_USD_PER_MTOK_HOUR * CACHE_TTL_S / 3600e6
+            ms = round((self.clock() - t0) * 1000)
+            return Usage(cache_write=self.cache_tokens, usd=storage, ms=ms)
         response = await self.client.aio.models.generate_content(
             model=self.config.model,
             contents=[self.user(self.types.Part(text=WARM_UP))],
@@ -172,6 +216,66 @@ class GeminiBrain:
         )
         ms = round((self.clock() - t0) * 1000)
         return gemini_usage(response.usage_metadata, self.price, None, ms)
+
+    async def _make_cache(self) -> None:
+        """A new context cache for the current system instruction (the old one deleted)."""
+        t = self.types
+        key = self.system()
+        created = await self.client.aio.caches.create(
+            model=self.config.model,
+            config=t.CreateCachedContentConfig(
+                system_instruction=key,
+                tools=self.tools(),
+                ttl=f"{CACHE_TTL_S}s",
+                display_name="pepin-voice-cascade",
+            ),
+        )
+        old = self._cache
+        self._cache, self._cache_key = created.name, key
+        self._cache_until = self.clock() + CACHE_TTL_S
+        meta = getattr(created, "usage_metadata", None)
+        self.cache_tokens = int(getattr(meta, "total_token_count", 0) or 0)
+        if old is not None:
+            await self._delete(old)
+
+    async def _renew_cache(self) -> None:
+        name = self._cache
+        if name is None:
+            return
+        await self.client.aio.caches.update(
+            name=name, config=self.types.UpdateCachedContentConfig(ttl=f"{CACHE_TTL_S}s")
+        )
+        self._cache_until = self.clock() + CACHE_TTL_S
+
+    async def _delete(self, name: str) -> None:
+        with contextlib.suppress(Exception):  # it expires by itself anyway
+            await self.client.aio.caches.delete(name=name)
+
+    def cache(self) -> str | None:
+        """The context cache to use now, or None; a cache that is stale (the places changed),
+        expired or close to it is remade or renewed in the background meanwhile."""
+        if not self.config.cache:
+            return None
+        busy = self._cache_task is not None and not self._cache_task.done()
+        now = self.clock()
+        fresh = self._cache is not None and self._cache_key == self.system()
+        if fresh and now < self._cache_until - CACHE_RENEW_S:
+            return self._cache
+        if not busy:
+            job = self._renew_cache() if fresh and now < self._cache_until else self._make_cache()
+            self._cache_task = asyncio.ensure_future(self._quietly(job))
+        return self._cache if fresh and now < self._cache_until else None
+
+    @staticmethod
+    async def _quietly(job: Any) -> None:
+        with contextlib.suppress(Exception):  # the turn goes on uncached
+            await job
+
+    async def aclose(self) -> None:
+        """Delete the context cache (the run ends)."""
+        if self._cache is not None:
+            await self._delete(self._cache)
+            self._cache = None
 
     async def turn(self, text: str, tools: ToolExecutor, emit: Emit) -> None:
         """One turn: calls until one ends without function calls (at most ``max_tool_rounds``
@@ -196,7 +300,9 @@ class GeminiBrain:
             stream = await self.client.aio.models.generate_content_stream(
                 model=self.config.model,
                 contents=self.contents(),
-                config=self.request(final=round_index == self.config.max_tool_rounds),
+                config=self.request(
+                    final=round_index == self.config.max_tool_rounds, cache=self.cache()
+                ),
             )
             async with contextlib.aclosing(stream):
                 async for chunk in stream:
