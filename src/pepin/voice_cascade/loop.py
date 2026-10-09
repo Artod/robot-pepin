@@ -222,9 +222,11 @@ class CascadeLoop:
             self._praat.shutdown(wait=False)
 
     def quiet(self) -> bool:
-        """Nothing in flight: no utterance being read, no reply, no queued input, no audio."""
+        """Nothing in flight: no utterance being read, no reply, no queued input, no audio, no
+        drive whose report is still to come."""
         return (
-            self.hearing == 0
+            not self.drives
+            and self.hearing == 0
             and self.current is None
             and self.inputs.empty()
             and self._ears_queue.empty()
