@@ -28,7 +28,7 @@ import urllib.parse
 import urllib.request
 import wave
 from collections.abc import Callable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -176,6 +176,7 @@ class HeadMove:
     pose: HeadPose | None
     why: str = ""
     ms: float = 0.0
+    report: dict[str, Any] = field(default_factory=dict)  # the arbiter's whole answer
 
 
 class Neck(Protocol):
@@ -273,7 +274,7 @@ class GazeNeck:
         )
         reached = answer.get("status") == "done" and bool(answer.get("reached"))
         why = "" if reached else str(answer.get("reason") or answer.get("status", ""))
-        return HeadMove(reached, pose, why, float(answer.get("took_ms", 0.0)))
+        return HeadMove(reached, pose, why, float(answer.get("took_ms", 0.0)), dict(answer))
 
     def keep(self) -> None:
         """Restart the last turn's TTL (``/renew``)."""

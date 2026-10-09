@@ -11,6 +11,7 @@ judged here.
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import math
 from collections.abc import Iterable
 from typing import Any
@@ -26,9 +27,12 @@ MAX_SEEN = 8  # labels reported per direction
 
 @tool
 def look(robot: Robot, pan_deg: float, tilt_deg: float | None = None) -> Result:
-    """Turn the head (the camera) and wait until it gets there; see() then gives the picture.
-    Angles are relative to the robot's body. The head stays there about ten seconds (each see()
-    restarts that) and then turns home by itself; a drive may take it for the road.
+    """Turn the head (the camera) somewhere else and wait until it gets there; see() then gives
+    the picture. Only for a direction the person names (left, behind, down at the floor, toward
+    something): to say what the robot sees now, call see() alone, without look. Angles are
+    relative to the robot's body. The head stays there about ten seconds (each see() restarts
+    that) and then turns home by itself; a drive may take it for the road. If the head does not
+    get there, see() still gives the picture from where it points.
 
     Args:
         pan_deg: degrees left of straight ahead (+) or right of it (-); the neck reaches about
@@ -36,10 +40,13 @@ def look(robot: Robot, pan_deg: float, tilt_deg: float | None = None) -> Result:
         tilt_deg: degrees below level (+) or above it (-), from about 20 up to 90 down; about 24
             is the working pose the robot drives in. Leave it out to keep the current tilt.
     """
-    refusal = robot.neck.reach().refusal(pan_deg, tilt_deg)
+    reach = robot.neck.reach()
+    refusal = reach.refusal(pan_deg, tilt_deg)
     if refusal:
         return fail(refusal)
-    return moved(robot.neck.turn(pan_deg, tilt_deg))
+    move = robot.neck.turn(pan_deg, tilt_deg)
+    target = {"pan_deg": pan_deg, "tilt_deg": tilt_deg}
+    return moved(move, target=target, reach=dataclasses.asdict(reach))
 
 
 @tool
@@ -62,8 +69,9 @@ def look_around(robot: Robot) -> Result:
 @tool
 def see(robot: Robot) -> Result:
     """One picture from the head camera, as the robot sees it now, with where the head points
-    (pan_deg left +, tilt_deg down +). Point the head with look first to see elsewhere; seeing
-    keeps the head where look put it a while longer."""
+    (pan_deg left +, tilt_deg down +). This is what answers "what do you see?" or "look at me":
+    call it alone; the head already faces forward. Only to see another direction, turn the head
+    with look first. Seeing keeps the head where look put it a while longer."""
     picture = robot.camera.snapshot()
     try:
         head: dict[str, Any] = robot.neck.pose().as_dict()
@@ -85,12 +93,27 @@ def sweep(robot: Robot, skip: float | None = None) -> list[float]:
     ]
 
 
-def moved(move: HeadMove) -> Result:
-    """A head move as a result: the pose it reached, or why it did not."""
+def moved(
+    move: HeadMove, target: dict[str, Any] | None = None, reach: dict[str, Any] | None = None
+) -> Result:
+    """A head move as a result: the pose it reached, or why it did not, with the neck's report
+    (the target, the reach, the arbiter's answer) and the way on (see still works)."""
     pose = move.pose.as_dict() if move.pose else {}
     if move.reached:
         return ok(**pose)
-    return fail(f"the head did not get there: {why_not(move)}", **pose)
+    neck: dict[str, Any] = {"took_ms": round(move.ms)}
+    if target is not None:
+        neck["target"] = target
+    if reach is not None:
+        neck["reach"] = reach
+    if move.report:
+        neck["arbiter"] = move.report
+    return fail(
+        f"the head did not get there: {why_not(move)}; see() still gives the picture from where"
+        " it points now",
+        **pose,
+        neck=neck,
+    )
 
 
 def why_not(move: HeadMove) -> str:

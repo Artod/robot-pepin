@@ -324,11 +324,15 @@ def test_look_past_the_reach_is_refused_before_anything_moves() -> None:
 def test_look_during_a_drive_says_to_wait_in_the_arbiters_words() -> None:
     robot = fake_robot()
     neck(robot).wheels_moving = True
-    why = call(robot, "look", pan_deg=30)["why"]
-    assert why == (
+    result = call(robot, "look", pan_deg=30)
+    assert result["why"] == (
         "the head did not get there: the head does not move during a drive (the base server"
-        " moves the neck only at rest): wait for the drive to end, or cancel it"
+        " moves the neck only at rest): wait for the drive to end, or cancel it; see() still"
+        " gives the picture from where it points now"
     )
+    report = result["neck"]
+    assert report["target"] == {"pan_deg": 30.0, "tilt_deg": None}
+    assert report["reach"]["pan_left_deg"] == 155.0
 
 
 def test_look_around_reports_each_direction_and_leaves_the_head_to_go_home() -> None:
