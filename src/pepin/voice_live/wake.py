@@ -141,6 +141,11 @@ class Segment:
         return len(self.pcm) / 2 / RATE
 
 
+DIGITAL_SILENCE_DB = -90.0  # below this a frame is zeros, not the room
+STUCK_OPEN_S = 2.0  # loud this long without one quiet frame: the floor is wrong
+FLOOR_CLIMB_DB = 0.25  # per frame while stuck (20 ms frames: ~12 dB/s)
+
+
 class Segmenter:
     """Speech out of the frame stream by loudness: a segment starts when the level stands
     ``start_db`` above the room's floor for three frames and ends after ``silence_s`` below it
@@ -167,16 +172,20 @@ class Segmenter:
         self._start = 0.0
         self.talking = False
         self.last_voice_s = 0.0  # when the last loud frame arrived
+        self.last_quiet_s = 0.0  # when the last quiet frame arrived (floor recovery)
 
     def feed(self, pcm: bytes, now: float) -> Segment | None:
         """One frame at laptop time ``now``; the segment it completes, if any."""
         db = rms_db(pcm)
+        real = db >= DIGITAL_SILENCE_DB  # zeros from a closed link are quiet, but not the room
         loud = db > self.floor + self.start_db
         if loud:
             self.last_voice_s = now
         if not self.talking:
             if not loud:
-                self.floor = 0.98 * self.floor + 0.02 * db
+                if real:
+                    self.floor = 0.98 * self.floor + 0.02 * db
+                self.last_quiet_s = now
             self._pre.append(pcm)
             del self._pre[: -self._pre_frames]
             self._loud_run = self._loud_run + 1 if loud else 0
@@ -187,6 +196,12 @@ class Segmenter:
         self._voiced.append(pcm)
         self._quiet = 0 if loud else self._quiet + 1
         quiet_s = self._quiet * FRAME_SAMPLES / RATE
+        if loud and real and now - self.last_quiet_s > STUCK_OPEN_S:
+            # no quiet frame for seconds: the floor sits below the room (it sank while the
+            # link was down); climb until the room counts as quiet again
+            self.floor += FLOOR_CLIMB_DB
+        if not loud:
+            self.last_quiet_s = now
         if quiet_s < self.silence_s and now - self._start < self.max_s:
             return None
         segment = Segment(b"".join(self._voiced), now - quiet_s)
