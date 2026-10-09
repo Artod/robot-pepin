@@ -72,6 +72,7 @@ PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
 # tools that take a while: the robot says its filler when the brain calls one before a word
 SLOW_TOOLS = frozenset(("see", "look", "look_around", "find", "recall", "map_tree"))
 BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
+HOLD_RELEASE_S = 0.3  # a held utterance waits this long after the person stopped without words
 
 
 class Mic(Protocol):
@@ -93,6 +94,7 @@ class Input:
     tag: str = ""
     goodbye: bool = False
     eot: dict[str, Any] | None = None  # the end-of-turn model's verdict on the utterance
+    fragments: int = 1  # utterances joined into this turn (the person went on)
 
 
 @dataclass
@@ -183,6 +185,10 @@ class CascadeLoop:
         self.last_call_s = 0.0
         self.last_reply_end_s = 0.0
         self.last_backchannel_s = -BACKCHANNEL_GAP_S
+        self.last_closed_s = -1e9  # when the ears last closed an utterance
+        self.held: Input | None = None  # an utterance waiting for the rest of the sentence
+        self.held_s = 0.0
+        self.hold_next = False  # the utterance being read is to be held, not answered
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
         self._whisper = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="whisper")
@@ -306,13 +312,51 @@ class CascadeLoop:
             if event.kind == "start":
                 if self.conversation is not None:
                     self.conversation.last_heard_s = event.t
+                cfg = self.config
+                if cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s:
+                    await self._continuation()
             elif event.kind == "pause":
                 self._backchannel()
             elif event.kind == "barge_in":
                 await self._barge_in(event, played if played is not None else 0.0)
             elif event.kind == "segment" and event.segment is not None:
+                self.last_closed_s = event.t
                 self.hearing += 1
                 self._spawn(self._hear(event))
+
+    async def _continuation(self) -> None:
+        """The person started again right after an utterance closed: if nothing of the reply
+        has played yet, that utterance waits for the rest (its brain call cancelled)."""
+        current = self.current
+        if (
+            current is not None
+            and not current.finished.is_set()
+            and current.input.kind == "person"
+            and not current.audio
+            and not current.acted
+        ):
+            await self._drop(current, "merged")
+            self._hold(current.input)
+        elif self.hearing > 0:
+            self.hold_next = True  # still being read: held when Whisper is done
+
+    def _hold(self, item: Input) -> None:
+        held = self.held
+        if held is not None:  # a third fragment: all of them wait together
+            item = Input(
+                "person", f"{held.text} {item.text}", item.timeline,
+                f"{held.words} {item.words}", item.tag, item.goodbye, item.eot,
+                held.fragments + item.fragments,
+            )  # fmt: skip
+        self.held, self.held_s = item, self.clock()
+        self._event("held", text=item.words)
+        print(f"  (the person goes on: holding {item.words!r})", flush=True)
+
+    def _release(self) -> None:
+        """The rest never came (noise, a cough): the held utterance is answered alone."""
+        if self.held is not None:
+            self.inputs.put_nowait(self.held)
+            self.held = None
 
     def _backchannel(self) -> None:
         cfg = self.config
@@ -371,6 +415,8 @@ class CascadeLoop:
             seconds=round(segment.duration_s, 2), voice_peak_db=voice_db,
         )  # fmt: skip
         if noise:
+            self.hold_next = False
+            self._release()
             return
         conversation.last_heard_s = read_s
         tag = tagger.line(prosody, text) if tagger is not None and prosody is not None else ""
@@ -381,15 +427,24 @@ class CascadeLoop:
             conversation.log.event("halt", self.clock(), answer=answer, why="stop heard")
             print(f"  (stop heard during a drive: {answer})", flush=True)
         self.heard_since_drive = True
-        said, words = (f"{tag} {text}" if tag else text), text
+        said, words, fragments = (f"{tag} {text}" if tag else text), text, 1
         current = self.current
         if current is not None and not current.audio and not current.acted:
             # the person went on before the robot said or did anything: one turn of both
             await self._drop(current, "merged")
             said, words = f"{current.input.text} {said}", f"{current.input.words} {text}"
-        self.inputs.put_nowait(
-            Input("person", said, timeline, words, tag, goodbye=is_goodbye(text), eot=eot)
-        )
+            fragments += current.input.fragments
+        held = self.held
+        if held is not None:
+            said, words = f"{held.text} {said}", f"{held.words} {words}"
+            fragments += held.fragments
+            self.held = None
+        item = Input("person", said, timeline, words, tag, is_goodbye(text), eot, fragments)
+        if self.hold_next:
+            self.hold_next = False
+            self._hold(item)
+            return
+        self.inputs.put_nowait(item)
 
     # -- turns ---------------------------------------------------------------------------------
 
@@ -567,16 +622,18 @@ class CascadeLoop:
         eot = reply.input.eot
         if eot is not None:
             row["eot"] = eot
+        if reply.input.fragments > 1:
+            row["merged"] = reply.input.fragments
         if reply.played is not None:
             row["heard"] = {"sentences": reply.played.sentences, "partial": reply.played.partial}
         self.ears.echo_peak_db = -120.0
         if reply.outcome != "merged":
             if row["reply"]:
                 print(f"pepin> {row['reply']}", flush=True)
-            eot_cell = ""
+            eot_cell = f" | merged {reply.input.fragments}" if reply.input.fragments > 1 else ""
             if eot is not None:
                 p = "-" if eot["p"] is None else f"{eot['p']:.2f}"
-                eot_cell = f" | eot {eot['closed_by']} p {p}, saved {eot['saved_ms']:.0f} ms"
+                eot_cell += f" | eot {eot['closed_by']} p {p}, saved {eot['saved_ms']:.0f} ms"
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
@@ -721,6 +778,14 @@ class CascadeLoop:
                 continue
             speaking = self.player.playback() == "reply"
             busy = self.current is not None or not self.inputs.empty() or self.hearing > 0
+            if (
+                self.held is not None
+                and not self.ears.gate.talking
+                and self.hearing == 0
+                and self._ears_queue.empty()
+                and now - self.held_s > HOLD_RELEASE_S
+            ):
+                self._release()  # the person stopped without a new utterance
             if not speaking:
                 state: State = "acting" if self.drives else "thinking" if busy else "listening"
                 self.events.emit(state)

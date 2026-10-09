@@ -80,6 +80,7 @@ class Rig:
         *,
         tool: Callable[[str, dict[str, Any]], dict[str, Any]] | None = None,
         brain_delay_s: float = 0.0,
+        whisper_delay_s: float = 0.0,
         seconds_per_char: float = 0.01,
         **config: Any,
     ) -> None:
@@ -91,7 +92,7 @@ class Rig:
         self.voice = ToneVoice(rate=RATE, seconds_per_char=seconds_per_char, chunk_s=0.1)
         self.player = Player(NullSpeaker(), rate=RATE, lead_s=0.1)
         self.speech = SpeechWorker(self.voice, self.player)
-        self.transcriber = ListTranscriber(texts)
+        self.transcriber = ListTranscriber(texts, whisper_delay_s)
         self.states: list[str] = []
         events = Events(lambda e: self.states.append(e.state) if e.state != "speaking" else None)
         self.loop = CascadeLoop(
@@ -186,6 +187,50 @@ def test_words_said_before_the_robot_answers_join_the_same_turn(tmp_path: Path) 
     assert rig.brain.outcomes == ["abandoned", "committed"]
     assert rig.brain.heard == ["Пепин, скажи", "Пепин, скажи ещё кое-что"]
     assert [t["outcome"] for t in rig.loop.turns] == ["merged", "committed"]
+
+
+def test_the_rest_of_a_sentence_said_before_the_answer_plays_joins_it(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["Пепин, какой сегодня", "день недели?"], brain_delay_s=1.0)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())  # closed after its silence; the brain starts thinking
+        await until(lambda: rig.loop.current is not None)
+        await rig.say(tone(0.4) + quiet(0.7))  # the rest of the sentence, within 0.8 s
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard[-1] == "Пепин, какой сегодня день недели?"
+    assert rig.brain.outcomes == ["abandoned", "committed"]
+    merged, answered = rig.loop.turns
+    assert merged["outcome"] == "merged" and answered["merged"] == 2
+
+
+def test_an_utterance_still_being_read_waits_for_the_rest(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["Пепин, какой сегодня", "день недели?"], whisper_delay_s=0.3)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.hearing > 0)  # Whisper is reading the first part
+        await rig.say(tone(0.4) + quiet(0.7))
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["Пепин, какой сегодня день недели?"]
+    assert rig.loop.turns[0]["merged"] == 2
+
+
+def test_a_held_utterance_is_answered_alone_when_only_noise_follows(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["Пепин, привет", "Продолжение следует..."], whisper_delay_s=0.3)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.hearing > 0)
+        await rig.say(tone(0.4) + quiet(0.7))  # a cough Whisper reads as its noise line
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["Пепин, привет"]
+    assert "merged" not in rig.loop.turns[0]
 
 
 def test_a_barge_in_cuts_the_reply_to_what_was_heard_and_answers_the_new_words(

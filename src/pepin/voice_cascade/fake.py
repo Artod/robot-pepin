@@ -152,13 +152,16 @@ class ListTranscriber:
     """:class:`pepin.voice_cascade.stages.Transcriber` that reads ``texts`` in order (the last
     one again once they run out)."""
 
-    def __init__(self, texts: Sequence[str]) -> None:
-        """What Whisper would hear, utterance by utterance."""
+    def __init__(self, texts: Sequence[str], delay_s: float = 0.0) -> None:
+        """What Whisper would hear, utterance by utterance, each after ``delay_s``."""
         self.texts = list(texts)
+        self.delay_s = delay_s
         self.heard: list[int] = []
 
     def transcribe(self, pcm: bytes) -> str:
         """The next text."""
+        if self.delay_s:
+            time.sleep(self.delay_s)
         self.heard.append(len(pcm))
         return self.texts[min(len(self.heard) - 1, len(self.texts) - 1)] if self.texts else ""
 

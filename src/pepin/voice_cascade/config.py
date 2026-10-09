@@ -88,6 +88,7 @@ class CascadeConfig:
     max_utterance_s: float = 15.0
     start_db: float = 10.0
     floor_min_dbfs: float = -75.0
+    continuation_s: float = 0.8
     turn_model: str | None = None
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
@@ -154,6 +155,7 @@ class CascadeConfig:
             max_utterance_s=float(ears.get("max_utterance_s", d.max_utterance_s)),
             start_db=float(ears.get("start_db", d.start_db)),
             floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
+            continuation_s=float(ears.get("continuation_s", d.continuation_s)),
             turn_model=ears.get("turn_model") or None,
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
