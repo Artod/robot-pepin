@@ -1,0 +1,72 @@
+{
+  "_note": "The face sensor (scripts/face_sensor.py, pepin.face_sensor): a laptop process that watches the head camera's left eye at rate_hz, takes the widest face through SCRFD detection, ArcFace identity, EmotiEffLib expression and MediaPipe landmarks, and rewrites data/face/latest.json at publish_hz for the voice loop (pepin.face_sensor.latest). Nothing here is read by the board.",
+  "rate_hz": 3.0,
+  "publish_hz": 1.0,
+  "hold_s": 1.0,
+  "stale_s": 3.0,
+  "rate_note": "rate_hz: frames processed per second; a turn that overruns takes the newest frame at once and drops the ones in between (never a queue). hold_s: how long the last face stays in the line after the detector stops seeing it. stale_s: pepin.face_sensor.latest answers None for a line whose frame is older than this.",
+  "device": "coreml",
+  "device_note": "onnxruntime's providers for the detector, the identity net and the expression net: coreml = the CoreML provider on every compute unit (Neural Engine, GPU, CPU), mps = the CoreML provider on CPU and GPU (Metal) only, cpu = the CPU provider. MediaPipe's landmarker runs on the CPU (XNNPACK) under every device.",
+  "models": {
+    "identity": true,
+    "expression": true,
+    "blendshapes": true,
+    "detector_pack": "models/face/buffalo_l",
+    "det_size": 640,
+    "det_threshold": 0.5,
+    "expression_model": "models/face/enet_b0_8_va_mtl.onnx",
+    "expression_device": "cpu",
+    "landmarker_model": "models/face/face_landmarker.task",
+    "coreml_cache": "models/face/coreml_cache",
+    "note": "Which stages run (the detector always does) and the weights, relative to the repository root (models/ is gitignored). detector_pack: an InsightFace pack folder (buffalo_l: SCRFD-10GF + ResNet50 ArcFace, weights for non-commercial use; buffalo_s is the faster, slightly weaker pack). expression_model: EmotiEffLib's enet_b0_8_va_mtl.onnx (8 AffectNet classes + valence/arousal, Apache-2.0, trained on research-only data). landmarker_model: MediaPipe's face_landmarker.task (Apache-2.0). expression_device: the expression net's own device, cpu because it is MEASURED faster there (4.3 ms against 10.4 on coreml and mps, 2026-10-08) while the detector and ArcFace are 4x and 8x faster on coreml (6.6 / 2.0 ms against 26.4 / 17.0 on cpu). coreml_cache: CoreML's compiled networks, built at the first load. Enrolled people are tied to the pack: a gallery loads only the files its pack made."
+  },
+  "gate": {
+    "min_identity_px": 18,
+    "min_expression_px": 48,
+    "min_attention_px": 30,
+    "min_sharpness": 10.0,
+    "min_brightness": 35.0,
+    "max_brightness": 235.0,
+    "note": "What a face must be for each stage, by its box width in pixels of the 800x600 eye (fx ~528 px raw: a 0.15 m face is ~79 px at 1 m, ~40 px at 2 m, ~26 px at 3 m) and by its crop: identity from 18 px (ArcFace kept cos 0.63 at 18 px, 0.87 at 30, 0.97 at 60 against the same photo), expression from 48 px (the expression nets answer at any size, so this gate is their only refusal), head pose and jaw from min_attention_px. min_sharpness is the Laplacian variance of the grey crop shrunk to 64 px wide, brightness its mean grey level (0-255); a crop outside them feeds no stage."
+  },
+  "identity": {
+    "accept_cos": 0.45,
+    "unknown_cos": 0.3,
+    "margin": 0.08,
+    "vote_frames": 5,
+    "min_votes": 3,
+    "forget_after_s": 3.0,
+    "guest_cos": 0.45,
+    "enrol_min_px": 40,
+    "note": "A frame's embedding votes for the nearest enrolled centroid when its cosine is at least accept_cos and margin above the runner-up, votes unknown below unknown_cos, and abstains between; the published id is the label with min_votes of the last vote_frames ballots (null while undecided). The window empties after forget_after_s without a face. min_votes unknown ballots of faces at least enrol_min_px wide that agree to guest_cos become a session guest (guest-1, ...). enrol_min_px is also the smallest face enrolment takes. The cosines are a starting point, not a measurement: ArcFace puts different people at about -0.1..0.3 and the same person across photos at about 0.5..0.8; set them from enrolment crops taken with Pepin's own camera."
+  },
+  "expression": {
+    "window_s": 3.0,
+    "min_samples": 2,
+    "note": "The published expression is the mean probability, valence and arousal of the frames of the last window_s (p_3s, valence_3s, arousal_3s), null with fewer than min_samples, for a face under min_expression_px, or for one not looking at the robot."
+  },
+  "attention": {
+    "max_yaw_deg": 20.0,
+    "max_pitch_deg": 20.0,
+    "look_window_s": 1.0,
+    "talk_window_s": 2.0,
+    "talk_jaw_std": 0.04,
+    "min_talk_samples": 4,
+    "note": "looking: head yaw and pitch (MediaPipe on the face crop, 0 = facing the camera) both inside the cone, by majority of the last look_window_s. talking: the standard deviation of jawOpen over the last talk_window_s at least talk_jaw_std, null with fewer than min_talk_samples readings. talk_jaw_std is a guess until measured on someone talking to the robot."
+  },
+  "source": {
+    "eye": "left",
+    "stamp": "grab",
+    "note": "eye: which half of the side-by-side stereo frame (left, right) or full; a frame that is not side by side is used whole. stamp: grab = the V4L2 capture moved onto the board's clock (needs ?extra_headers=1, config/camera.json), send = ustreamer's X-Timestamp, arrival = the laptop's clock. The stream URL and the module's upside_down come from config/camera.json's active rig."
+  },
+  "paths": {
+    "faces": "data/faces",
+    "out": "data/face",
+    "note": "faces: one <name>.npz per enrolled person. out: latest.json, <YYYY-MM-DD>.jsonl (each line with its stage milliseconds) and summary.json (stage p50/p90, frames, RAM) at exit. Both under the gitignored data/."
+  },
+  "bearing": {
+    "stereo_calibration": "config/stereo_calibration.json",
+    "hfov_deg": 94.0,
+    "note": "bearing_deg comes from the raw eye's lens in the stereo calibration (k_left/d_left; the face centre is undistorted first): pan positive left, tilt positive down, from the eye's optical axis, as the neck counts them. Without the file: the nominal pinhole of hfov_deg."
+  }
+}
