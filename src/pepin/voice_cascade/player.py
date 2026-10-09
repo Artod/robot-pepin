@@ -173,7 +173,7 @@ class Player:
             if start < played:
                 words = text.split()
                 share = (played - start) / max(end - start, 0.07 * len(text))
-                partial = " ".join(words[: int(len(words) * min(1.0, share))])
+                partial = " ".join(words[: round(len(words) * min(1.0, share))])
             break
         return Played(whole, partial)
 

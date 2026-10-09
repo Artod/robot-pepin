@@ -66,6 +66,7 @@ UNASKED_DRIVE = (
 )
 END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
+BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
 
 
 class Mic(Protocol):
@@ -173,6 +174,7 @@ class CascadeLoop:
         self.hearing = 0  # utterances being read
         self.last_call_s = 0.0
         self.last_reply_end_s = 0.0
+        self.last_backchannel_s = -BACKCHANNEL_GAP_S
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
         self._whisper = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="whisper")
@@ -306,8 +308,10 @@ class CascadeLoop:
         cfg = self.config
         if not (cfg.backchannel and cfg.backchannel_lines and self.conversation is not None):
             return
-        if self.player.speaking():
+        now = self.clock()
+        if self.player.speaking() or now - self.last_backchannel_s < BACKCHANNEL_GAP_S:
             return
+        self.last_backchannel_s = now
         line = self.rng.choice(cfg.backchannel_lines)
         self.speech.say(SpeechJob(self.last_turn, -1, line, "backchannel"))
         self._event("backchannel", text=line)
@@ -364,14 +368,14 @@ class CascadeLoop:
             conversation.log.event("halt", self.clock(), answer=answer, why="stop heard")
             print(f"  (stop heard during a drive: {answer})", flush=True)
         self.heard_since_drive = True
-        words = f"{tag} {text}" if tag else text
+        said, words = (f"{tag} {text}" if tag else text), text
         current = self.current
         if current is not None and not current.audio and not current.acted:
             # the person went on before the robot said or did anything: one turn of both
             await self._drop(current, "merged")
-            words = f"{current.input.text} {words}"
+            said, words = f"{current.input.text} {said}", f"{current.input.words} {text}"
         self.inputs.put_nowait(
-            Input("person", words, timeline, text, tag, goodbye=is_goodbye(text))
+            Input("person", said, timeline, words, tag, goodbye=is_goodbye(text))
         )
 
     # -- turns ---------------------------------------------------------------------------------
@@ -417,8 +421,8 @@ class CascadeLoop:
             print(f"  !! brain: {reply.error}", flush=True)
             self.brain.abandon()
             if not reply.audio and self.config.error_line:
-                self.speech.say(SpeechJob(reply.id, 0, self.config.error_line))
-                self.speech.say(SpeechJob(reply.id, 1, kind="end"))
+                self.speech.say(SpeechJob(reply.id, len(reply.sentences), self.config.error_line))
+            self.speech.say(SpeechJob(reply.id, len(reply.sentences) + 1, kind="end"))
         finally:
             if reply.outcome in ("committed", "error", "stopped"):
                 self._finish(reply)

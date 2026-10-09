@@ -93,7 +93,7 @@ class CascadeConfig:
     say_voice: str = "Milena"
     say_rate_wpm: int = 185
     # player
-    playback_lead_s: float = 0.3
+    playback_lead_s: float = 0.5
     playback_block_s: float = 0.04
     # flags
     barge_in: bool = False

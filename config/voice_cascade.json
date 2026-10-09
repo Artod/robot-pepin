@@ -42,9 +42,9 @@
     "note": "qwen3: Qwen3-TTS 0.6B CustomVoice through mlx-audio 0.5.8, loaded once on its own thread and kept hot; streams chunk_s chunks, first audio ~0.11 s warm (2.2 s cold: warmed at load), ~0.4x real time. hf_home: an HF cache already holding the weights (relative to the main checkout); missing there, the default cache is used. say: macOS say, whole sentences at 16 kHz, for a test without the model"
   },
   "player": {
-    "lead_s": 0.3,
+    "lead_s": 0.5,
     "block_s": 0.04,
-    "note": "the pacer runs lead_s ahead of the speaker (the jitter buffer over WiFi; also what a barge-in has to silence) in block_s blocks"
+    "note": "the pacer runs lead_s ahead of the speaker in block_s blocks: the jitter buffer over WiFi (0.5 s, as the Live loop), and what a barge-in has to silence (the board flushes it). It does not delay the first sample: the first block goes at once"
   },
   "flags": {
     "barge_in": false,
