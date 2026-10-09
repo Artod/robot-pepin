@@ -89,6 +89,8 @@ def test_a_long_first_clause_is_cut_at_its_comma() -> None:
 
 def test_speech_text_loses_its_markup() -> None:
     assert speakable("**Да**, `ок` # заголовок") == "Да , ок заголовок"
+    assert speakable("Еду. [The drive has started.] (смеётся)") == "Еду."
+    assert speakable("[note only]") == ""
     assert syllables("Привет, Pepin") == 4
 
 

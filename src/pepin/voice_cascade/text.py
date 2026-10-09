@@ -7,6 +7,7 @@ import re
 _END = re.compile(r"[.!?…]+[\"»”')\]]*(?:\s+|$)|\n+")
 _SOFT = re.compile(r"[,;:]\s|\s[—–-]\s")  # noqa: RUF001 -- the dashes are meant
 _MARKUP = re.compile(r"[*_#`~>|]+")
+_ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)")  # [notes] and (stage directions) are not speech
 _SPACES = re.compile(r"\s+")
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
 
@@ -62,8 +63,9 @@ class SentenceSplitter:
 
 
 def speakable(text: str) -> str:
-    """``text`` without the markup a voice would read out (asterisks, hashes, backticks)."""
-    return _SPACES.sub(" ", _MARKUP.sub(" ", text)).strip()
+    """``text`` without what a voice must not read out: markup (asterisks, hashes, backticks)
+    and asides in brackets or parentheses (a model's notes to itself)."""
+    return _SPACES.sub(" ", _MARKUP.sub(" ", _ASIDE.sub(" ", text))).strip()
 
 
 def syllables(text: str) -> int:

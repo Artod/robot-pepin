@@ -164,7 +164,10 @@ class Player:
         partial = ""
         for index, text in enumerate(texts):
             mark = marks.get(index)
-            if mark is None:
+            if mark is None:  # not spoken (an aside), or not reached yet
+                if any(i > index and start < played for i, (start, _) in marks.items()):
+                    whole = index + 1
+                    continue
                 break
             start, end = mark
             if end <= played + 0.05:

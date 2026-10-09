@@ -116,6 +116,8 @@ class SpeechWorker:
             return
         resampler = Resampler(self.voice.rate, self.player.rate)
         text = speakable(job.text)
+        if not text and job.pcm is None and job.text not in self.clips:
+            return  # nothing to say aloud (an aside)
         ready = job.pcm if job.pcm is not None else self.clips.get(job.text)
         chunks = iter([ready]) if ready is not None else self.voice.stream(text)
         player_kind: Literal["reply", "backchannel"] = (

@@ -61,7 +61,7 @@ UNDER_WAY = (
     f"under way: a {ROBOT_REPORT} message reports the drive's end; do not call it again meanwhile"
 )
 ACKNOWLEDGED = (
-    "; you have already said your acknowledgement in this reply: add nothing now (an empty reply)"
+    "; your acknowledgement is already said: do not speak again until the [robot] report comes"
 )
 UNASKED_DRIVE = (
     "not driving: no one has asked for another drive since the last one; never repeat a drive"
