@@ -60,6 +60,9 @@ ROBOT_REPORT = "[robot]"
 UNDER_WAY = (
     f"under way: a {ROBOT_REPORT} message reports the drive's end; do not call it again meanwhile"
 )
+ACKNOWLEDGED = (
+    "; you have already said your acknowledgement in this reply: add nothing now (an empty reply)"
+)
 UNASKED_DRIVE = (
     "not driving: no one has asked for another drive since the last one; never repeat a drive"
     " unless a person asks again"
@@ -604,7 +607,8 @@ class CascadeLoop:
             self.drives.discard(task)
             return task.result()
         task.add_done_callback(lambda t: self._drive_ended(name, args, t))
-        return {**started.result(), "note": UNDER_WAY}
+        said = self.current is not None and bool(self.current.sentences)
+        return {**started.result(), "note": UNDER_WAY + (ACKNOWLEDGED if said else "")}
 
     def _drive_ended(self, name: str, args: dict[str, Any], task: asyncio.Task[Result]) -> None:
         self.drives.discard(task)

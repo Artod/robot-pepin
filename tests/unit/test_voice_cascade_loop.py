@@ -276,7 +276,8 @@ def test_a_drive_is_acknowledged_when_it_starts_and_reported_when_it_ends(tmp_pa
     asyncio.run(rig.run(scenario))
     first, report = rig.loop.turns
     assert first["tools"][0]["name"] == "go_to"
-    assert "driving" in first["tools"][0]["result"] and "under way" in first["tools"][0]["result"]
+    result = first["tools"][0]["result"]
+    assert "driving" in result and "under way" in result and "already said" in result
     assert report["kind"] == "robot" and report["reply"] == "Я на месте."
     assert rig.brain.heard[1].startswith("[robot] the drive go_to(place='printer') has ended")
     assert '"arrived": true' in rig.brain.heard[1]
