@@ -123,7 +123,9 @@ class Ears:
         if not self.config.barge_in:
             return []
         self._preroll.append((pcm, t))
-        self._loud_s = self._loud_s + FRAME_S if db > self.threshold_db() else 0.0
+        # speech dips between syllables: a quiet frame costs half a frame, not the whole run
+        loud = db > self.threshold_db()
+        self._loud_s = self._loud_s + FRAME_S if loud else max(0.0, self._loud_s - FRAME_S / 2)
         if self._loud_s < self.config.barge_in_hold_s - 1e-9:
             return []
         self._barged, self._loud_s = True, 0.0
