@@ -49,6 +49,16 @@ llm = [
 voice = [
     "mlx-whisper>=0.4.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
 ]
+# The face sensor on the laptop (pepin.face_sensor, scripts/face_sensor.py): SCRFD + ArcFace through
+# onnxruntime (its macOS wheel carries the CoreML provider) and MediaPipe's Face Landmarker; the
+# EmotiEffLib expression net is its ONNX file run by onnxruntime (the emotiefflib package reads
+# weights only from ~/.emotiefflib). Pinned to the versions measured together; the unit tier never
+# imports them.
+face = [
+    "insightface==2.1",
+    "mediapipe==1.1.0",
+    "onnxruntime==1.30.0",
+]
 
 
 [build-system]
@@ -63,6 +73,13 @@ packages = ["src/pepin"]
 # board never installs from this file (board/README.md: src/pepin is rsynced).
 [tool.uv]
 default-groups = ["dev", "macos", "llm", "voice"]
+# OpenCV comes once, as lerobot's opencv-python-headless: insightface asks for opencv-python and
+# mediapipe for opencv-contrib-python, and the three wheels write the same cv2 package over each
+# other. Neither calls anything the headless build lacks (the face group runs on it, 2026-10-08).
+override-dependencies = [
+    "opencv-python ; sys_platform == 'never'",
+    "opencv-contrib-python ; sys_platform == 'never'",
+]
 
 [tool.ruff]
 line-length = 100
