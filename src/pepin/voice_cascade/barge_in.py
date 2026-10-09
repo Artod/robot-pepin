@@ -40,6 +40,12 @@ if TYPE_CHECKING:
 
 FRAME_S = FRAME_SAMPLES / RATE
 SILERO_REPO, SILERO_FILE = "onnx-community/silero-vad", "onnx/model.onnx"  # v5, MIT, 2.2 MB
+# v6.2.3 from Silero's own repository (MIT, 2.3 MB), pinned by tag and checked by its SHA-256
+SILERO_V6 = (
+    "https://raw.githubusercontent.com/snakers4/silero-vad/v6.2.3/src/silero_vad/data/silero_vad.onnx",
+    "1a153a22f4509e292a94e67d6f9b85e8deb25b4988682b7e174c65279d8788e3",
+)
+MODEL_CACHE = Path("~/.cache/pepin").expanduser()
 # words that keep the listener's turn going rather than take it (and Whisper's spellings)
 BACKCHANNELS = frozenset(
     ("угу", "ага", "мм", "ммм", "хм", "ну", "да", "ок", "окей", "ясно", "понятно", "ааа", "м")  # noqa: RUF001
@@ -377,9 +383,38 @@ def echo_level(
     return level
 
 
-def model_path(path: str | None) -> Path | None:
-    """A configured model file (relative to the working directory), or None for the default."""
-    return Path(path).expanduser() if path else None
+def fetch(url: str) -> bytes:
+    """The body at ``url``."""
+    import urllib.request
+
+    with urllib.request.urlopen(url, timeout=30) as response:
+        body: bytes = response.read()
+    return body
+
+
+def model_path(
+    name: str | None, cache: Path = MODEL_CACHE, get: Callable[[str], bytes] = fetch
+) -> Path | None:
+    """The VAD model ``barge_in.vad_model`` names: None or ``silero-v5`` for the Hub's v5
+    (None: :class:`SileroVad` fetches it), ``silero-v6`` for v6.2.3 (fetched into ``cache``
+    once and checked), or a local file."""
+    if name in (None, "", "silero-v5"):
+        return None
+    if name != "silero-v6":
+        return Path(name).expanduser()
+    url, sha256 = SILERO_V6
+    path = cache / f"silero_vad_v6.2.3_{sha256[:12]}.onnx"
+    if not path.exists():
+        import hashlib
+
+        body = get(url)
+        if hashlib.sha256(body).hexdigest() != sha256:
+            raise ValueError(f"{url}: not the pinned Silero VAD v6.2.3 (SHA-256 differs)")
+        cache.mkdir(parents=True, exist_ok=True)
+        partial = path.with_suffix(".part")
+        partial.write_bytes(body)
+        partial.replace(path)
+    return path
 
 
 def build_detector(

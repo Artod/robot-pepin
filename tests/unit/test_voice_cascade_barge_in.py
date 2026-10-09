@@ -6,6 +6,9 @@ the ears acting on them, and the player's level history they predict the echo fr
 from __future__ import annotations
 
 import concurrent.futures
+import hashlib
+from pathlib import Path
+from unittest import mock
 
 import numpy as np
 import pytest
@@ -13,6 +16,7 @@ import pytest
 from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.voice_cascade.barge_in import (
     NO_ECHO_DB,
+    SILERO_V6,
     BargeInDetector,
     Frame,
     FuturePending,
@@ -23,6 +27,7 @@ from pepin.voice_cascade.barge_in import (
     build_detector,
     echo_level,
     interrupting_words,
+    model_path,
     own_echo,
 )
 from pepin.voice_cascade.config import CascadeConfig
@@ -294,3 +299,22 @@ def test_the_playout_clock_keeps_each_block_s_level_until_a_flush() -> None:
     playout.flush()
     assert playout.level_between(100.3, 101.0) == NO_ECHO_DB  # never played
     assert playout.level_between(100.1, 100.15) == pytest.approx(-13.5, abs=0.5)
+
+
+def test_the_v6_model_is_fetched_once_and_checked(tmp_path: Path) -> None:
+    assert model_path(None) is None and model_path("silero-v5") is None
+    assert model_path("~/vad.onnx") == Path("~/vad.onnx").expanduser()
+    with pytest.raises(ValueError, match="SHA-256"):
+        model_path("silero-v6", tmp_path, get=lambda url: b"not the model")
+    fetched: list[str] = []
+
+    def get(url: str) -> bytes:
+        fetched.append(url)
+        return b"model"
+
+    pinned = (SILERO_V6[0], hashlib.sha256(b"model").hexdigest())
+    with mock.patch("pepin.voice_cascade.barge_in.SILERO_V6", pinned):
+        first = model_path("silero-v6", tmp_path, get=get)
+        again = model_path("silero-v6", tmp_path, get=get)
+    assert first == again and first is not None and first.read_bytes() == b"model"
+    assert fetched == [SILERO_V6[0]]
