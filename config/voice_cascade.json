@@ -67,10 +67,22 @@
     "note": "barge_in: while Pepin speaks, a voice over the barge_in threshold for hold_s flushes the speaker at once and cuts the conversation to what was heard; the person's words become the next turn (off: the mic is shut while Pepin speaks, as in the Live loop). backchannel: a short local clip when the person pauses mid-utterance. prosody_tags: Praat's numbers against the running baseline as a tag line in front of the person's words"
   },
   "barge_in": {
+    "detector": "vad",
     "over_floor_db": 25.0,
     "min_dbfs": -45.0,
     "hold_s": 0.25,
-    "note": "a frame is a voice cutting in when it stands over_floor_db above the room's floor and at least min_dbfs; the echo of the robot's own voice sits ~40 dB under the person's (XVF3800 echo cancellation). Every turn logs echo_peak_db (the loudest frame while the reply played) and every utterance voice_peak_db: set these from those two"
+    "vad_threshold": 0.5,
+    "vad_hold_s": 0.1,
+    "vad_min_dbfs": -50.0,
+    "vad_model": "silero-v6",
+    "echo_loss_db": 40.0,
+    "echo_lag_s": 0.1,
+    "echo_margin_db": 10.0,
+    "words_gate": "vad",
+    "words_listen_s": 0.4,
+    "words_window_s": 1.5,
+    "words_every_s": 0.3,
+    "note": "detector (pepin.voice_cascade.barge_in) decides that the person cuts in while a reply plays. level: a frame over_floor_db above the room's floor and at least min_dbfs is voice, hold_s of voice cuts in (a quiet frame takes back half a frame). vad: Silero VAD (vad_model silero-v6: v6.2.3 from its repository, MIT, 2.3 MB, fetched once into ~/.cache/pepin and SHA-256 checked; silero-v5: the Hub's v5; or a file), 0.08 ms a 32 ms chunk; a frame is voice at p >= vad_threshold, at least vad_min_dbfs and echo_margin_db over the robot's predicted echo (the level the player sent echo_lag_s earlier, less echo_loss_db), vad_hold_s of it cuts in. words: words_gate held words_listen_s sends the voice (at most words_window_s, a call at most every words_every_s) to Whisper; a word that is not a backchannel, laughter, a noise line or the robot's own sentence cuts in. 2026-10-09, 16 live conversations, 184 replies, 52 with the person's words over them (scripts/barge_in_eval.py: each loud moment of a reply read by Whisper), caught / false / median reaction after the voice's onset: the live runs (level) 41/9/239 ms; level 43/6/289; vad v5 hold 0.2 41/0/540, hold 0.1 44/1/407; vad v6 hold 0.2 42/1/359, 0.15 43/1/315, 0.1 45/2/245 (the two false: laughter at a reply's start, and a sound Whisper reads as its noise lines); words 36/2/740 (both false ones late catches of real speech: the canceller mangles a voice over the robot's and Whisper needs ~0.5 s more). The false barge-ins of the level gate are the room (knocks, rustle: 10.5 bursts a minute while the robot speaks, 13.7 while silent), not the echo: the mic sits at the room's floor while the robot plays at -18.5 dBFS, so the echo guard (>= 45 dB of loss measured) does not bind today; it is there for a canceller that loses convergence. Every barge-in is logged (events.jsonl barge_in: reason, level, the array's direction)"
   },
   "backchannel": {
     "delay_s": 0.3,

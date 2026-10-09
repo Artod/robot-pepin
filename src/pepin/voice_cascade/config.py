@@ -131,11 +131,11 @@ class CascadeConfig:
     barge_in_over_floor_db: float = 25.0
     barge_in_min_dbfs: float = -45.0
     barge_in_hold_s: float = 0.25
-    barge_in_detector: str = "level"
+    barge_in_detector: str = "level"  # the file picks vad; without it no model is loaded
     barge_in_vad_threshold: float = 0.5
-    barge_in_vad_hold_s: float = 0.2
+    barge_in_vad_hold_s: float = 0.1
     barge_in_vad_min_dbfs: float = -50.0
-    barge_in_vad_model: str | None = None
+    barge_in_vad_model: str | None = "silero-v6"
     barge_in_echo_loss_db: float = 40.0
     barge_in_echo_lag_s: float = 0.1
     barge_in_echo_margin_db: float = 10.0
