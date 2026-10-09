@@ -16,7 +16,7 @@ import wave
 from collections.abc import Callable
 from pathlib import Path
 
-from pepin.audio_link import FRAME_SAMPLES, RATE, AudioClient
+from pepin.audio_link import FRAME_SAMPLES, RATE, AudioClient, DoaReading
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,10 @@ class BoardLink:
     def flush(self) -> None:
         """Silence the speaker now."""
         self._client.flush()
+
+    def latest_doa(self) -> DoaReading | None:
+        """The array's newest direction of arrival (None before the first)."""
+        return self._client.latest_doa()
 
     def close(self) -> None:
         """Stop the threads and drop the link."""

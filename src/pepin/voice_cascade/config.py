@@ -26,6 +26,8 @@ VOICE_ENGINES = ("qwen3", "say")
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
+BARGE_IN_DETECTORS = ("level", "vad", "words")  # pepin.voice_cascade.barge_in
+WORDS_GATES = ("vad", "level")
 
 
 @dataclass(frozen=True)
@@ -129,6 +131,17 @@ class CascadeConfig:
     barge_in_over_floor_db: float = 25.0
     barge_in_min_dbfs: float = -45.0
     barge_in_hold_s: float = 0.25
+    barge_in_detector: str = "level"
+    barge_in_vad_threshold: float = 0.5
+    barge_in_vad_hold_s: float = 0.2
+    barge_in_vad_min_dbfs: float = -50.0
+    barge_in_echo_loss_db: float = 40.0
+    barge_in_echo_lag_s: float = 0.1
+    barge_in_echo_margin_db: float = 10.0
+    barge_in_words_gate: str = "vad"
+    barge_in_words_listen_s: float = 0.4
+    barge_in_words_window_s: float = 1.5
+    barge_in_words_every_s: float = 0.3
     backchannel: bool = False
     backchannel_delay_s: float = 0.3
     backchannel_min_speech_s: float = 0.8
@@ -195,6 +208,17 @@ class CascadeConfig:
             barge_in_over_floor_db=float(barge.get("over_floor_db", d.barge_in_over_floor_db)),
             barge_in_min_dbfs=float(barge.get("min_dbfs", d.barge_in_min_dbfs)),
             barge_in_hold_s=float(barge.get("hold_s", d.barge_in_hold_s)),
+            barge_in_detector=str(barge.get("detector", d.barge_in_detector)),
+            barge_in_vad_threshold=float(barge.get("vad_threshold", d.barge_in_vad_threshold)),
+            barge_in_vad_hold_s=float(barge.get("vad_hold_s", d.barge_in_vad_hold_s)),
+            barge_in_vad_min_dbfs=float(barge.get("vad_min_dbfs", d.barge_in_vad_min_dbfs)),
+            barge_in_echo_loss_db=float(barge.get("echo_loss_db", d.barge_in_echo_loss_db)),
+            barge_in_echo_lag_s=float(barge.get("echo_lag_s", d.barge_in_echo_lag_s)),
+            barge_in_echo_margin_db=float(barge.get("echo_margin_db", d.barge_in_echo_margin_db)),
+            barge_in_words_gate=str(barge.get("words_gate", d.barge_in_words_gate)),
+            barge_in_words_listen_s=float(barge.get("words_listen_s", d.barge_in_words_listen_s)),
+            barge_in_words_window_s=float(barge.get("words_window_s", d.barge_in_words_window_s)),
+            barge_in_words_every_s=float(barge.get("words_every_s", d.barge_in_words_every_s)),
             backchannel_delay_s=float(back.get("delay_s", d.backchannel_delay_s)),
             backchannel_min_speech_s=float(back.get("min_speech_s", d.backchannel_min_speech_s)),
             backchannel_lines=tuple(str(x) for x in back.get("lines", d.backchannel_lines)),
@@ -262,6 +286,14 @@ class CascadeConfig:
             )
         if not 0.1 <= self.silence_s <= 3.0 or self.barge_in_hold_s <= 0:
             raise ValueError("ears.silence_s in 0.1..3 s and barge_in.hold_s > 0")
+        if self.barge_in_detector not in BARGE_IN_DETECTORS:
+            raise ValueError(f"barge_in.detector: one of {', '.join(BARGE_IN_DETECTORS)}")
+        if self.barge_in_words_gate not in WORDS_GATES:
+            raise ValueError(f"barge_in.words_gate: one of {', '.join(WORDS_GATES)}")
+        if not 0.0 < self.barge_in_vad_threshold < 1.0 or self.barge_in_vad_hold_s <= 0:
+            raise ValueError("barge_in.vad_threshold in 0..1 and barge_in.vad_hold_s > 0")
+        if not 0.0 < self.barge_in_words_listen_s < self.barge_in_words_window_s <= 8.0:
+            raise ValueError("barge_in.words_listen_s above 0 and under words_window_s (<= 8 s)")
         if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:
             raise ValueError("conversation.idle_close_s > 0 and money.daily_budget_cad > 0")
         if b.model not in self.prices:

@@ -5,7 +5,8 @@ Every reply sentence is marked by where its audio sits in the stream fed to the 
 speaker is wrapped (:class:`PlayoutClock`) so the time each block plays is known. A barge-in
 asks :meth:`Player.flush` how far the stream had played: that, against the marks, is which
 sentences the person heard (:meth:`Player.heard`). The same clock times the speaker's start and
-end of each turn.
+end of each turn, and keeps each block's level (:meth:`PlayoutClock.level_between`): the
+reference a barge-in detector predicts the robot's own echo from.
 """
 
 from __future__ import annotations
@@ -18,10 +19,12 @@ from typing import Literal
 
 from pepin.audio_link import SAMPLE_BYTES, Speaker
 from pepin.voice_cascade.stages import Played
+from pepin.voice_live.wake import rms_db
 
 Kind = Literal["reply", "backchannel"]
 Playback = Literal["silent", "reply", "backchannel"]
 HISTORY_BLOCKS = 3000  # ~2 min of 40 ms blocks: enough to time any turn's end
+NOTHING_DB = -120.0  # the level of no block
 
 
 class PlayoutClock:
@@ -36,13 +39,16 @@ class PlayoutClock:
         self.sent_s = 0.0  # stream seconds sent and not flushed away
         self.cursor = 0.0  # when the last block sent ends
         self._blocks: deque[tuple[float, float, float]] = deque(maxlen=HISTORY_BLOCKS)
+        self._levels: deque[tuple[float, float, float]] = deque(maxlen=HISTORY_BLOCKS)
 
     def play(self, pcm: bytes) -> None:
-        """Send a block; note where in the stream it is and when it plays."""
+        """Send a block; note where in the stream it is, when it plays and how loud it is."""
         duration = len(pcm) / SAMPLE_BYTES / self.rate
+        db = rms_db(pcm)
         with self._lock:
             start = max(self.cursor, self.clock())
             self._blocks.append((self.sent_s, start, duration))
+            self._levels.append((start, start + duration, db))
             self.sent_s += duration
             self.cursor = start + duration
         self.speaker.play(pcm)
@@ -57,7 +63,23 @@ class PlayoutClock:
             now = self.clock()
             self.sent_s -= max(0.0, self.cursor - now)
             self.cursor = min(self.cursor, now)
+            while self._levels and self._levels[-1][0] >= now:  # never to play
+                self._levels.pop()
+            if self._levels and self._levels[-1][1] > now:
+                start, _, db = self._levels.pop()
+                self._levels.append((start, now, db))
         self.speaker.flush()
+
+    def level_between(self, t0: float, t1: float) -> float:
+        """The loudest block playing at any moment of ``t0..t1`` (dBFS; -120 for none)."""
+        loudest = NOTHING_DB
+        with self._lock:
+            for start, end, db in reversed(self._levels):  # in play order, none overlapping
+                if end <= t0:
+                    break
+                if start < t1:
+                    loudest = max(loudest, db)
+        return loudest
 
     def played(self) -> float:
         """Stream seconds played by now."""

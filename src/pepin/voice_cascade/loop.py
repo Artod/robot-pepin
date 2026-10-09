@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pepin.tools.registry import Result, fail, ok, progress_to, render
+from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
 from pepin.voice_cascade.brain import END_CONVERSATION
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.ears import EarEvent, Ears
@@ -171,7 +172,15 @@ class CascadeLoop:
         self.clock, self.wall, self.tick_s = clock, wall, tick_s
         self._whisper = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="whisper")
         early = self._read_early if config.early_s > 0 else None
-        self.ears = Ears(config, player.playback, turn, early)
+        detector = None
+        if config.barge_in:
+            detector = build_detector(
+                config,
+                reader=self._read_words,
+                own_text=self._own_text,
+                played=player.playout.level_between,
+            )
+        self.ears = Ears(config, player.playback, turn, early, detector)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
         self.replies: dict[int, Reply] = {}
@@ -379,6 +388,15 @@ class CascadeLoop:
         """Whisper on an utterance not yet closed (the ears call this from the mic's thread)."""
         return self._whisper.submit(self.transcriber.transcribe, pcm)
 
+    def _read_words(self, pcm: bytes, t: float) -> Pending:
+        """Whisper on a voice over the reply (the barge-in detector, from the mic's thread)."""
+        return FuturePending(self._whisper.submit(self.transcriber.transcribe, pcm))
+
+    def _own_text(self) -> str:
+        """The sentences of the reply in play so far (read from the mic's thread)."""
+        reply = self.replies.get(self.last_turn)
+        return " ".join(list(reply.sentences)) if reply is not None else ""
+
     async def _hear(self, event: EarEvent) -> None:
         assert event.segment is not None
         try:
@@ -573,8 +591,11 @@ class CascadeLoop:
         reply.outcome = "interrupted"
         await self._cancel(reply)
         self.brain.interrupt(reply.played)
+        self._event("barge_in", turn=reply.id, level_db=round(event.level_db, 1), why=event.why,
+                    played_s=round(played, 3), doa=self._doa())  # fmt: skip
         print(
-            f"  (barge-in at {event.level_db:.0f} dBFS: heard {reply.played.sentences} sentences"
+            f"  (barge-in at {event.level_db:.0f} dBFS, {event.why}: heard"
+            f" {reply.played.sentences} sentences"
             f"{' + ' + repr(reply.played.partial) if reply.played.partial else ''})",
             flush=True,
         )
@@ -826,6 +847,14 @@ class CascadeLoop:
         task = asyncio.create_task(coroutine)
         self._background.add(task)
         task.add_done_callback(self._background.discard)
+
+    def _doa(self) -> dict[str, Any] | None:
+        """The array's latest direction of arrival, when the mic is the board's link."""
+        latest = getattr(self.mic, "latest_doa", None)
+        reading = latest() if callable(latest) else None
+        if reading is None:
+            return None
+        return {"deg": reading.deg, "speech": reading.speech, "board_s": round(reading.stamp_s, 3)}
 
     def _event(self, kind: str, **fields: Any) -> None:
         conversation = self.conversation

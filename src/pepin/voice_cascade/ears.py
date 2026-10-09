@@ -4,12 +4,13 @@ A loudness gate (:class:`pepin.voice_live.wake.Segmenter`) cuts utterances: ``st
 person begins, ``pause`` when they have been quiet ``backchannel_delay_s`` mid-utterance (the
 cue for a backchannel "мм"), ``segment`` when the silence has lasted ``silence_s`` (the end of
 the turn). While the robot's reply plays, the gate is held shut (the echo is not the person); with
-``barge_in`` on, a voice ``barge_in_over_floor_db`` above the room's floor (and at least
-``barge_in_min_dbfs``) for ``barge_in_hold_s`` is the person cutting in: ``barge_in``, and the
-gate reopens on the speech that triggered it, so their words are heard from the start. The
-XVF3800's echo canceller keeps the robot's own voice ~40 dB under the person's, which is what
-makes a level threshold safe. While only a backchannel plays, the gate stays open and the
-frames under that threshold count as silence. The loudest echo of each reply is kept
+``barge_in`` on, a :class:`pepin.voice_cascade.barge_in.BargeInDetector` (``barge_in.detector``:
+loudness, a voice-activity model, or Whisper's words) decides that the person is cutting in:
+``barge_in``, and the gate reopens on the speech that triggered it (the detector's preroll), so
+their words are heard from the start. The XVF3800's echo canceller keeps the robot's own voice
+~40 dB under the person's. While only a backchannel plays, the gate stays open and the frames
+under the level threshold (``barge_in_over_floor_db`` over the floor, at least
+``barge_in_min_dbfs``) count as silence. The loudest echo of each reply is kept
 (:attr:`Ears.echo_peak_db`) to set the threshold from data.
 
 With an end-of-turn model (``ears.turn_model``, :mod:`pepin.voice_cascade.turn`), a pause of
@@ -28,6 +29,7 @@ from dataclasses import dataclass, replace
 from typing import Literal
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.voice_cascade.barge_in import BargeInDetector, Frame, LevelDetector
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.player import Playback
 from pepin.voice_cascade.turn import TurnAnswer, TurnWorker
@@ -36,21 +38,22 @@ from pepin.voice_live.wake import Segment, Segmenter, rms_db
 EarKind = Literal["start", "pause", "segment", "barge_in"]
 EarlyReader = Callable[[bytes], "concurrent.futures.Future[str]"]  # Whisper, started early
 FRAME_S = FRAME_SAMPLES / RATE
-PREROLL_S = 0.6  # the speech before a barge-in is confirmed, given to the gate when it is
 SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
 
 
 @dataclass(frozen=True)
 class EarEvent:
     """One moment: what, when (laptop monotonic seconds), the segment (``segment`` only), the
-    frame's level (``barge_in``: the voice that cut in), and for a segment with an end-of-turn
-    model: what closed it (``model`` or ``silence``), the model's p for its last pause, the
-    model's milliseconds and the time saved against the fixed silence."""
+    frame's level and the detector's reason (``barge_in``: the voice that cut in), and for a
+    segment with an end-of-turn model: what closed it (``model`` or ``silence``), the model's p
+    for its last pause, the model's milliseconds and the time saved against the fixed
+    silence."""
 
     kind: EarKind
     t: float
     segment: Segment | None = None
     level_db: float = 0.0
+    why: str | None = None
     closed_by: str | None = None
     p: float | None = None
     model_ms: float | None = None
@@ -97,10 +100,12 @@ class Ears:
         playback: Callable[[], Playback],
         turn: TurnWorker | None = None,
         early: EarlyReader | None = None,
+        detector: BargeInDetector | None = None,
     ) -> None:
         """``playback`` says what the speaker is doing now (the player's); ``turn`` is the
         end-of-turn model's worker (None: the fixed silence alone); ``early`` starts Whisper on
-        the utterance so far (None: Whisper waits for the close)."""
+        the utterance so far (None: Whisper waits for the close); ``detector`` decides a
+        barge-in (None: the level threshold of the config)."""
         self.config = config
         self.playback = playback
         self.turn = turn
@@ -117,8 +122,14 @@ class Ears:
         self._window: deque[bytes] = deque(maxlen=round(config.turn_window_s / FRAME_S))
         self._requests = 0
         self._asked: int | None = None  # the request of the pause in progress
-        self._preroll: deque[tuple[bytes, float]] = deque(maxlen=int(PREROLL_S / FRAME_S))
-        self._loud_s = 0.0
+        self.detector: BargeInDetector = detector or LevelDetector(
+            over_floor_db=config.barge_in_over_floor_db,
+            min_dbfs=config.barge_in_min_dbfs,
+            hold_s=config.barge_in_hold_s,
+        )
+        self._preroll: deque[tuple[bytes, float]] = deque(
+            maxlen=int(self.detector.preroll_s / FRAME_S)
+        )
         self._barged = False
         self._paused = False
         self._frames = 0  # frames of the utterance in progress
@@ -136,10 +147,11 @@ class Ears:
         mode = self.playback()
         db = rms_db(pcm)
         if mode == "silent":
-            self._barged, self._loud_s = False, 0.0
+            self._barged = False
             self._preroll.clear()  # a later barge-in starts from that reply's own frames
         if mode == "reply" and not self._barged:
             return self._during_reply(pcm, t, db)
+        self.detector.feed(Frame(pcm, t, db, self.gate.floor), speaking=False)
         if mode == "backchannel" and db < self.threshold_db():
             pcm = SILENT_FRAME
         return self._listen(pcm, t, db)
@@ -150,20 +162,20 @@ class Ears:
             self.gate.reset()
             self._asked = None
             self._drop_early()
+        frame = Frame(pcm, t, db, self.gate.floor)
         if not self.config.barge_in:
+            self.detector.feed(frame, speaking=False)
             return []
         self._preroll.append((pcm, t))
-        # speech dips between syllables: a quiet frame costs half a frame, not the whole run
-        loud = db > self.threshold_db()
-        self._loud_s = self._loud_s + FRAME_S if loud else max(0.0, self._loud_s - FRAME_S / 2)
-        if self._loud_s < self.config.barge_in_hold_s - 1e-9:
+        why = self.detector.feed(frame, speaking=True)
+        if why is None:
             return []
-        self._barged, self._loud_s = True, 0.0
-        events = [EarEvent("barge_in", t, level_db=db)]
+        self._barged = True
+        events = [EarEvent("barge_in", t, level_db=db, why=why)]
         frames = list(self._preroll)
         self._preroll.clear()
-        for frame, at in frames:
-            events += self._listen(frame, at, rms_db(frame))
+        for heard, at in frames:
+            events += self._listen(heard, at, rms_db(heard))
         return events
 
     def _listen(self, pcm: bytes, t: float, db: float) -> list[EarEvent]:

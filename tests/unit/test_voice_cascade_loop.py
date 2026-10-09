@@ -260,6 +260,11 @@ def test_a_barge_in_cuts_the_reply_to_what_was_heard_and_answers_the_new_words(
     cut = rig.loop.turns[0]
     assert cut["outcome"] == "interrupted" and cut["heard"]["sentences"] == 1
     assert cut["ms"]["speaker_end"] is not None
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    (barge,) = [r for r in rows if r["event"] == "barge_in"]
+    assert barge["turn"] == cut["turn"] and barge["why"].startswith("level")
+    assert barge["played_s"] > 0.6 and barge["doa"] is None  # a fake mic has no direction
 
 
 def test_a_pause_in_a_long_utterance_gets_a_backchannel_before_the_answer(
