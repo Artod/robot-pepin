@@ -150,6 +150,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | Script | Does | Run |
 |---|---|---|
 | `arm_boxes.py` | Fits the SO-101 links' collision boxes to the upstream meshes | `uv run python scripts/arm_boxes.py [--check]` |
+| `barge_in_eval.py` | Barge-in detectors replayed on a day's recorded conversations: interruptions caught, false barge-ins, reaction | `uv run python scripts/barge_in_eval.py data/voice/DAY [--detectors live level vad words] [--set K=V] [-v]` |
 | `build_map.py` | Occupancy map from a recorded session, optionally scan-matched | `uv run python scripts/build_map.py data/sessions/S.jsonl [--match]` |
 | `calibrate_camera.py` | Checkerboard calibration of the neck camera | `ros/calibrate.sh` |
 | `calibrate_neck.py` | Neck and head servo calibration | `uv run python scripts/calibrate_neck.py --port PORT` |

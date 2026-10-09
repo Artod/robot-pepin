@@ -202,6 +202,8 @@ def test_which_words_take_the_turn() -> None:
     assert interrupting_words("температуры сервоприводов", own) == []
     assert interrupting_words("Угу. Да.", own) == []
     assert interrupting_words("Субтитры сделал DimaTorzok", own) == []
+    assert interrupting_words("Хе-хе-хе. Гррр! Ух!", own) == []  # laughter, a growl
+    assert interrupting_words("Эй, а сердечко?", own) == ["эй", "а", "сердечко"]
     assert own_echo(["экраны"], own) is False  # one word proves nothing
     assert own_echo(["на", "экране"], own) is True
 

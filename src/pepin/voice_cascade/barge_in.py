@@ -22,6 +22,7 @@ follows the room.
 from __future__ import annotations
 
 import concurrent.futures
+import re
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -43,6 +44,8 @@ SILERO_REPO, SILERO_FILE = "onnx-community/silero-vad", "onnx/model.onnx"  # v5,
 BACKCHANNELS = frozenset(
     ("угу", "ага", "мм", "ммм", "хм", "ну", "да", "ок", "окей", "ясно", "понятно", "ааа", "м")  # noqa: RUF001
 )
+# sounds that are not words: laughter, a growl, exclamations, hesitation (Whisper's spellings)
+NOT_WORDS = re.compile("(?:х[аеиоэы]|гр+|[ауоэ]х|ой|ай|э+м*|м+|хм+|а+|о+)")  # noqa: RUF001
 NO_ECHO_DB = -120.0  # the predicted echo when nothing has played
 
 Samples = npt.NDArray[np.float32]
@@ -289,11 +292,11 @@ def own_echo(said: list[str], own: str) -> bool:
 
 def interrupting_words(text: str, own: str) -> list[str]:
     """The words of a transcript that take the turn: none for Whisper's noise lines, the
-    robot's own text heard back, or backchannels alone."""
+    robot's own text heard back, or backchannels, laughter and exclamations alone."""
     said = words(text)
     if not said or is_hallucination(text) or own_echo(said, own):
         return []
-    if all(w in BACKCHANNELS for w in said):
+    if all(w in BACKCHANNELS or NOT_WORDS.fullmatch(w) for w in said):
         return []
     return said
 
