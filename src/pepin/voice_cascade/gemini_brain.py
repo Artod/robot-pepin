@@ -209,7 +209,8 @@ class GeminiBrain:
                             getattr(candidate.finish_reason, "value", candidate.finish_reason)
                         )
                     for part in (candidate.content.parts if candidate.content else None) or []:
-                        parts.append(part)
+                        if part.text or part.function_call is not None or part.thought_signature:
+                            parts.append(part)  # an empty part carries nothing to send back
                         if part.function_call is not None:
                             calls.append(part.function_call)
                             rest = splitter.flush()  # the words before a call end here
