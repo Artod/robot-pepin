@@ -112,6 +112,12 @@ def report(turns: Sequence[Mapping[str, Any]]) -> list[str]:
     lines += histogram(ms, [key for key, _, _ in STAGES])
     lines += ["", "each stage on its own (ms):"]
     lines += histogram(steps, [name for name, _, _ in STEPS])
+    eot = [t["eot"] for t in turns if t.get("eot")]
+    if eot:
+        by_model = sum(1 for e in eot if e["closed_by"] == "model")
+        lines += ["", f"end-of-turn model ({by_model} of {len(eot)} closed by it):"]
+        lines += histogram(eot, ["saved_ms", "model_ms"])
+        lines += histogram(eot, ["p"], digits=2)[1:]
     if usage:
         cents = [{"usd_cents": u["usd"] * 100} for u in usage]
         lines += ["", "brain per turn (tokens, model calls; US cents):"]

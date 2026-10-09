@@ -11,6 +11,12 @@ XVF3800's echo canceller keeps the robot's own voice ~40 dB under the person's, 
 makes a level threshold safe. While only a backchannel plays, the gate stays open and the
 frames under that threshold count as silence. The loudest echo of each reply is kept
 (:attr:`Ears.echo_peak_db`) to set the threshold from data.
+
+With an end-of-turn model (``ears.turn_model``, :mod:`pepin.voice_cascade.turn`), a pause of
+``turn.min_silence_s`` inside an utterance sends its last ``turn.window_s`` seconds to the
+model's worker, and the utterance closes on the first frame after the answer when
+p >= ``turn.threshold`` (unless the person spoke again meanwhile); otherwise the fixed silence
+closes it as before. The segment event carries p, the model's milliseconds and the time saved.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ from typing import Literal
 from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.player import Playback
+from pepin.voice_cascade.turn import TurnAnswer, TurnWorker
 from pepin.voice_live.wake import Segment, Segmenter, rms_db
 
 EarKind = Literal["start", "pause", "segment", "barge_in"]
@@ -33,25 +40,54 @@ SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
 
 @dataclass(frozen=True)
 class EarEvent:
-    """One moment: what, when (laptop monotonic seconds), the segment (``segment`` only) and
-    the frame's level (``barge_in``: the voice that cut in)."""
+    """One moment: what, when (laptop monotonic seconds), the segment (``segment`` only), the
+    frame's level (``barge_in``: the voice that cut in), and for a segment with an end-of-turn
+    model: what closed it (``model`` or ``silence``), the model's p for its last pause, the
+    model's milliseconds and the time saved against the fixed silence."""
 
     kind: EarKind
     t: float
     segment: Segment | None = None
     level_db: float = 0.0
+    closed_by: str | None = None
+    p: float | None = None
+    model_ms: float | None = None
+    saved_ms: float | None = None
+
+
+class TurnSegmenter(Segmenter):
+    """The loudness gate, with the end of an utterance callable from outside."""
+
+    def close(self, ended_s: float) -> Segment | None:
+        """End the utterance in progress now (its last voiced frame at ``ended_s``); None when
+        it is shorter than the gate's minimum."""
+        if not self.talking:
+            return None
+        segment = Segment(b"".join(self._voiced), ended_s)
+        self.reset()
+        return segment if segment.duration_s >= self.min_s else None
 
 
 class Ears:
     """The gate and the barge-in detector; :meth:`feed` one 20 ms frame at a time."""
 
-    def __init__(self, config: CascadeConfig, playback: Callable[[], Playback]) -> None:
-        """``playback`` says what the speaker is doing now (the player's)."""
+    def __init__(
+        self,
+        config: CascadeConfig,
+        playback: Callable[[], Playback],
+        turn: TurnWorker | None = None,
+    ) -> None:
+        """``playback`` says what the speaker is doing now (the player's); ``turn`` is the
+        end-of-turn model's worker (None: the fixed silence alone)."""
         self.config = config
         self.playback = playback
-        self.gate = Segmenter(
+        self.turn = turn
+        self.gate = TurnSegmenter(
             start_db=config.start_db, silence_s=config.silence_s, max_s=config.max_utterance_s
         )
+        self._window: deque[bytes] = deque(maxlen=round(config.turn_window_s / FRAME_S))
+        self._requests = 0
+        self._asked: int | None = None  # the request of the pause in progress
         self._preroll: deque[tuple[bytes, float]] = deque(maxlen=int(PREROLL_S / FRAME_S))
         self._loud_s = 0.0
         self._barged = False
@@ -83,6 +119,7 @@ class Ears:
         self.echo_peak_db = max(self.echo_peak_db, db)
         if self.gate.talking:
             self.gate.reset()
+            self._asked = None
         if not self.config.barge_in:
             return []
         self._preroll.append((pcm, t))
@@ -103,17 +140,38 @@ class Ears:
         steps."""
         events: list[EarEvent] = []
         loud = rms_db(pcm) > self.gate.floor + self.gate.start_db  # the gate's own test
+        answer = self._answer()
+        if (
+            answer is not None
+            and self.gate.talking
+            and not loud
+            and answer.p >= self.config.turn_threshold
+        ):
+            quiet_s = self._quiet * FRAME_S
+            segment = self.gate.close(t - quiet_s)
+            self._asked = None
+            if segment is not None:
+                saved_ms = (self.config.silence_s - quiet_s) * 1000
+                events.append(
+                    EarEvent("segment", t, segment, closed_by="model", p=answer.p,
+                             model_ms=answer.ms, saved_ms=saved_ms)
+                )  # fmt: skip
+            return events
         was_talking = self.gate.talking
         segment = self.gate.feed(pcm, t)
         if not was_talking and self.gate.talking:
             self._frames = self._quiet = 0
             self._paused = False
+            self._asked = None
+            self._window.clear()
             self.voice_peak_db = db
             events.append(EarEvent("start", t))
         if self.gate.talking:
             self.voice_peak_db = max(self.voice_peak_db, db)
+            self._window.append(pcm)
             self._frames += 1
             self._quiet = 0 if loud else self._quiet + 1
+            self._ask()
             quiet_s = self._quiet * FRAME_S
             spoken_s = (self._frames - self._quiet) * FRAME_S
             if not self._quiet:
@@ -126,5 +184,33 @@ class Ears:
                 self._paused = True
                 events.append(EarEvent("pause", t))
         if segment is not None:
-            events.append(EarEvent("segment", t, segment))
+            last = self._answer()
+            self._asked = None
+            if self.turn is None:
+                events.append(EarEvent("segment", t, segment))
+            else:
+                events.append(
+                    EarEvent("segment", t, segment, closed_by="silence",
+                             p=last.p if last else None, model_ms=last.ms if last else None,
+                             saved_ms=0.0)
+                )  # fmt: skip
         return events
+
+    def _ask(self) -> None:
+        """At ``turn.min_silence_s`` into a pause, hand its audio to the model (once a pause);
+        a voiced frame ends the pause, and its question with it."""
+        if self.turn is None:
+            return
+        if not self._quiet:
+            self._asked = None
+        elif self._asked is None and self._quiet * FRAME_S >= self.config.turn_min_silence_s - 1e-9:
+            self._requests += 1
+            self._asked = self._requests
+            self.turn.ask(self._requests, b"".join(self._window))
+
+    def _answer(self) -> TurnAnswer | None:
+        """The model's answer for the pause in progress, once it has come."""
+        if self.turn is None or self._asked is None:
+            return None
+        latest = self.turn.latest
+        return latest if latest is not None and latest.id == self._asked else None

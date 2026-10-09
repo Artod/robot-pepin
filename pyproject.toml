@@ -50,6 +50,7 @@ llm = [
 voice = [
     "mlx-audio[tts]==0.5.8 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
     "mlx-whisper>=0.4.3 ; platform_machine == 'arm64' and sys_platform == 'darwin'",
+    "onnxruntime>=1.20",
     "praat-parselmouth>=0.4.7",
 ]
 

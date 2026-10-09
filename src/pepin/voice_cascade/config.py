@@ -21,6 +21,8 @@ THINKING_MODES = ("disabled", "between_tools", "adaptive")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 VOICE_ENGINES = ("qwen3", "say")
 EMOTION_MODELS = ("audeering", "emotion2vec")
+# end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
+TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
 
 
 @dataclass(frozen=True)
@@ -77,6 +79,9 @@ class CascadeConfig:
     max_utterance_s: float = 15.0
     start_db: float = 10.0
     turn_model: str | None = None
+    turn_min_silence_s: float = 0.2
+    turn_window_s: float = 8.0
+    turn_threshold: float = 0.5
     # transcriber
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
     language: str = "ru"
@@ -128,6 +133,7 @@ class CascadeConfig:
         barge = data.get("barge_in", {})
         back = data.get("backchannel", {})
         pros = data.get("prosody", {})
+        turn = data.get("turn", {})
         conv = data.get("conversation", {})
         money = data.get("money", {})
         d = cls()
@@ -137,6 +143,9 @@ class CascadeConfig:
             max_utterance_s=float(ears.get("max_utterance_s", d.max_utterance_s)),
             start_db=float(ears.get("start_db", d.start_db)),
             turn_model=ears.get("turn_model") or None,
+            turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
+            turn_window_s=float(turn.get("window_s", d.turn_window_s)),
+            turn_threshold=float(turn.get("threshold", d.turn_threshold)),
             whisper_repo=str(tr.get("whisper_repo", d.whisper_repo)),
             language=str(tr.get("language", d.language)),
             whisper_prompt=tr.get("initial_prompt") or None,
@@ -205,8 +214,14 @@ class CascadeConfig:
             raise ValueError(f"voice.engine: one of {', '.join(VOICE_ENGINES)}")
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
-        if self.turn_model is not None:
-            raise ValueError("ears.turn_model: no end-of-turn model is wired yet; use null")
+        if self.turn_model is not None and self.turn_model not in TURN_MODELS:
+            raise ValueError(f"ears.turn_model: one of {', '.join(TURN_MODELS)} or null")
+        if not 0 < self.turn_min_silence_s < self.silence_s:
+            raise ValueError("turn.min_silence_s: above 0 and under ears.silence_s")
+        if not 1.0 <= self.turn_window_s <= 8.0 or not 0.0 < self.turn_threshold <= 1.0:
+            raise ValueError(
+                "turn.window_s in 1..8 s (the model's input) and turn.threshold in 0..1"
+            )
         if not 0.1 <= self.silence_s <= 3.0 or self.barge_in_hold_s <= 0:
             raise ValueError("ears.silence_s in 0.1..3 s and barge_in.hold_s > 0")
         if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:

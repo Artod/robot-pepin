@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import math
+import time
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -169,3 +170,21 @@ def loudness_measurer(pcm: bytes) -> Prosody:
         return Prosody(active_s=0.0, loudness_db=-120.0)
     rms = math.sqrt(float(np.mean(x * x))) / 32768 + 1e-9
     return Prosody(active_s=len(x) / 16_000, loudness_db=20 * math.log10(rms) + 94)
+
+
+class ScriptedTurn:
+    """:class:`pepin.voice_cascade.turn.TurnDetector` that answers ``ps`` in order (the last
+    one again once they run out), after ``delay_s``; it keeps how much audio it was given."""
+
+    def __init__(self, ps: Sequence[float], delay_s: float = 0.0) -> None:
+        """The probabilities to say, one a call."""
+        self.ps = list(ps)
+        self.delay_s = delay_s
+        self.heard: list[int] = []
+
+    def probability(self, pcm: bytes) -> float:
+        """The next p."""
+        if self.delay_s:
+            time.sleep(self.delay_s)
+        self.heard.append(len(pcm))
+        return self.ps[min(len(self.heard) - 1, len(self.ps) - 1)]

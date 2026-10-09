@@ -12,6 +12,7 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     set -a; . ./.env; set +a
     uv run python scripts/voice_cascade.py                          # the robot, for real
     uv run python scripts/voice_cascade.py --brain sonnet --set flags.barge_in=true
+    uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -54,6 +55,7 @@ from pepin.voice_cascade.speech import SpeechWorker
 from pepin.voice_cascade.stages import Brain, Tagger, Voice
 from pepin.voice_cascade.tagger import ProsodyTagger, emotion_model
 from pepin.voice_cascade.timeline import report
+from pepin.voice_cascade.turn import SmartTurn, TurnWorker
 from pepin.voice_cascade.voice import QwenVoice, SayVoice
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
@@ -226,6 +228,10 @@ def main() -> int:
     print(f"loading the voice ({config.voice_engine}) and Whisper ({config.whisper_repo})...")
     speech.start()  # the voice loads on its own thread meanwhile
     whisper = MlxWhisper(config.whisper_repo, config.language, config.whisper_prompt)
+    turn: TurnWorker | None = None
+    if config.turn_model is not None:
+        print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
+        turn = TurnWorker(SmartTurn(config.turn_model))
     tagger: Tagger | None = None
     if config.prosody_tags:
         tagger = ProsodyTagger(config.prosody, emotion=emotion_model(config.prosody.emotion_model))
@@ -269,13 +275,15 @@ def main() -> int:
         events=events,
         logs=args.logs,
         ledger=ledger,
+        turn=turn,
     )
     holder.append(loop)
     b = config.brain
     print(
         f"listening: {b.model} (thinking {b.thinking}, effort {b.effort}, cache {b.cache}),"
         f" voice {config.voice_engine}, wake {config.wake}; barge_in {config.barge_in},"
-        f" backchannel {config.backchannel}, prosody_tags {config.prosody_tags}. Logs: {args.logs}",
+        f" backchannel {config.backchannel}, prosody_tags {config.prosody_tags},"
+        f" turn_model {config.turn_model}. Logs: {args.logs}",
         flush=True,
     )
     try:
@@ -286,6 +294,8 @@ def main() -> int:
             print("halt:", robot.halt(), flush=True)
     finally:
         speech.close()
+        if turn is not None:
+            turn.close()
         if face is not None:
             face.close()
         for closable in (mic, speaker):
@@ -300,6 +310,7 @@ def main() -> int:
         out.parent.mkdir(parents=True, exist_ok=True)
         summary = {
             "model": b.model,
+            "turn_model": config.turn_model,
             "thinking": b.thinking,
             "effort": b.effort,
             "voice": config.voice_engine,

@@ -51,6 +51,7 @@ from pepin.voice_cascade.stages import (
     Usage,
 )
 from pepin.voice_cascade.timeline import Timeline
+from pepin.voice_cascade.turn import TurnWorker
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.events import Events, State
 from pepin.voice_live.sources import FrameSink
@@ -89,6 +90,7 @@ class Input:
     words: str = ""
     tag: str = ""
     goodbye: bool = False
+    eot: dict[str, Any] | None = None  # the end-of-turn model's verdict on the utterance
 
 
 @dataclass
@@ -151,6 +153,7 @@ class CascadeLoop:
         wall: Callable[[], float] = time.time,
         tick_s: float = 0.1,
         seed: int = 0,
+        turn: TurnWorker | None = None,
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
@@ -161,7 +164,7 @@ class CascadeLoop:
         self.tools, self.allowed, self.moving, self.halt = tools, allowed, moving, halt
         self.events, self.logs, self.ledger = events, logs, ledger
         self.clock, self.wall, self.tick_s = clock, wall, tick_s
-        self.ears = Ears(config, player.playback)
+        self.ears = Ears(config, player.playback, turn)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
         self.replies: dict[int, Reply] = {}
@@ -306,7 +309,7 @@ class CascadeLoop:
                 await self._barge_in(event, played if played is not None else 0.0)
             elif event.kind == "segment" and event.segment is not None:
                 self.hearing += 1
-                self._spawn(self._hear(event.segment, event.t))
+                self._spawn(self._hear(event))
 
     def _backchannel(self) -> None:
         cfg = self.config
@@ -320,14 +323,17 @@ class CascadeLoop:
         self.speech.say(SpeechJob(self.last_turn, -1, line, "backchannel"))
         self._event("backchannel", text=line)
 
-    async def _hear(self, segment: Segment, closed_s: float) -> None:
+    async def _hear(self, event: EarEvent) -> None:
+        assert event.segment is not None
         try:
             async with self._order:  # utterances are answered in the order they were said
-                await self._read(segment, closed_s)
+                await self._read(event.segment, event.t, eot_of(event))
         finally:
             self.hearing -= 1
 
-    async def _read(self, segment: Segment, closed_s: float) -> None:
+    async def _read(
+        self, segment: Segment, closed_s: float, eot: dict[str, Any] | None = None
+    ) -> None:
         loop = asyncio.get_running_loop()
         timeline = Timeline(segment.ended_s)
         timeline.mark("closed", closed_s)
@@ -379,7 +385,7 @@ class CascadeLoop:
             await self._drop(current, "merged")
             said, words = f"{current.input.text} {said}", f"{current.input.words} {text}"
         self.inputs.put_nowait(
-            Input("person", said, timeline, words, tag, goodbye=is_goodbye(text))
+            Input("person", said, timeline, words, tag, goodbye=is_goodbye(text), eot=eot)
         )
 
     # -- turns ---------------------------------------------------------------------------------
@@ -550,15 +556,23 @@ class CascadeLoop:
             "echo_peak_db": round(self.ears.echo_peak_db, 1),
             "error": reply.error,
         }
+        eot = reply.input.eot
+        if eot is not None:
+            row["eot"] = eot
         if reply.played is not None:
             row["heard"] = {"sentences": reply.played.sentences, "partial": reply.played.partial}
         self.ears.echo_peak_db = -120.0
         if reply.outcome != "merged":
             if row["reply"]:
                 print(f"pepin> {row['reply']}", flush=True)
+            eot_cell = ""
+            if eot is not None:
+                p = "-" if eot["p"] is None else f"{eot['p']:.2f}"
+                eot_cell = f" | eot {eot['closed_by']} p {p}, saved {eot['saved_ms']:.0f} ms"
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
-                f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents",
+                f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
+                + eot_cell,
                 flush=True,
             )
         conversation = self.conversation
@@ -727,3 +741,15 @@ class CascadeLoop:
         conversation = self.conversation
         if conversation is not None:
             conversation.log.event(kind, self.clock(), **fields)
+
+
+def eot_of(event: EarEvent) -> dict[str, Any] | None:
+    """The end-of-turn model's verdict carried by a segment event (None without a model)."""
+    if event.closed_by is None:
+        return None
+    return {
+        "closed_by": event.closed_by,
+        "p": None if event.p is None else round(event.p, 3),
+        "model_ms": None if event.model_ms is None else round(event.model_ms, 1),
+        "saved_ms": None if event.saved_ms is None else round(event.saved_ms),
+    }
