@@ -70,7 +70,8 @@ class Ears:
         mode = self.playback()
         db = rms_db(pcm)
         if mode == "silent":
-            self._barged = False
+            self._barged, self._loud_s = False, 0.0
+            self._preroll.clear()  # a later barge-in starts from that reply's own frames
         if mode == "reply" and not self._barged:
             return self._during_reply(pcm, t, db)
         if mode == "backchannel" and db < self.threshold_db():
