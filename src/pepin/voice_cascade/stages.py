@@ -124,6 +124,7 @@ class Usage:
 
 
 BrainEvent = FirstToken | Sentence | ToolUse | ToolDone | Usage
+FOLLOW_UP = "follow_up"  # a tool result's key: False ends the turn without another model call
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Result]]
 Emit = Callable[[BrainEvent], None]
 

@@ -204,6 +204,18 @@ def test_an_empty_reply_leaves_no_empty_message() -> None:
     assert roles == ["user", "user"]  # the API joins them into one turn
 
 
+def test_a_result_that_needs_no_answer_ends_the_turn_without_another_call() -> None:
+    rounds = [(["Еду."], [tool_block("t1", "go_to", {"place": "printer"})])]
+    brain, messages = brain_over(rounds)
+    brain.begin(None)
+    events = run_turn(brain, "к принтеру", {"go_to": {"status": "driving", "follow_up": False}})
+    assert len(messages.requests) == 1
+    done = [e for e in events if isinstance(e, ToolDone)]
+    assert "follow_up" not in done[0].result
+    brain.commit()
+    assert [m["role"] for m in brain.history] == ["user", "assistant", "user"]
+
+
 def test_the_round_limit_forbids_more_tools() -> None:
     rounds = [([], [tool_block("t1", "see", {})]), (["Готово."], [])]
     brain, messages = brain_over(rounds, max_tool_rounds=1)

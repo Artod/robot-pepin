@@ -21,6 +21,7 @@ from pepin.tools.registry import Registry, Result, render
 from pepin.tools.schemas import anthropic_tool_result, anthropic_tools
 from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
+    FOLLOW_UP,
     Emit,
     FirstToken,
     Played,
@@ -211,19 +212,24 @@ class ClaudeBrain:
             self._acted = True
             for use in uses:
                 emit(ToolUse(use.id, use.name, dict(use.input or {})))
-            results = await asyncio.gather(
+            done = await asyncio.gather(
                 *(self._run(tools, use.id, use.name, dict(use.input or {}), emit) for use in uses)
             )
-            self._turn.append({"role": "user", "content": list(results)})
+            self._turn.append({"role": "user", "content": [block for block, _ in done]})
+            if not any(follow for _, follow in done):
+                return  # every result said there is nothing to add: no call to hear it
 
     async def _run(
         self, tools: ToolExecutor, use_id: str, name: str, args: dict[str, Any], emit: Emit
-    ) -> dict[str, Any]:
+    ) -> tuple[dict[str, Any], bool]:
+        """One tool: its result block, and whether the model should speak after it (a result
+        with ``follow_up: false`` needs no answer: the robot said its line already)."""
         t0 = self.clock()
-        result: Result = await tools(name, args)
+        result: Result = dict(await tools(name, args))
+        follow = bool(result.pop(FOLLOW_UP, True))
         text, _ = render(result)
         emit(ToolDone(use_id, name, text, round((self.clock() - t0) * 1000)))
-        return anthropic_tool_result(use_id, result)
+        return anthropic_tool_result(use_id, result), follow
 
     def commit(self) -> None:
         """The turn ran to its end: it joins the history."""

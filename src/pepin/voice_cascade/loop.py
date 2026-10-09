@@ -37,6 +37,7 @@ from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import (
+    FOLLOW_UP,
     Brain,
     BrainEvent,
     FirstToken,
@@ -60,9 +61,7 @@ ROBOT_REPORT = "[robot]"
 UNDER_WAY = (
     f"under way: a {ROBOT_REPORT} message reports the drive's end; do not call it again meanwhile"
 )
-ACKNOWLEDGED = (
-    "; your acknowledgement is already said: do not speak again until the [robot] report comes"
-)
+ACKNOWLEDGED = "; your acknowledgement is already said"
 UNASKED_DRIVE = (
     "not driving: no one has asked for another drive since the last one; never repeat a drive"
     " unless a person asks again"
@@ -607,8 +606,9 @@ class CascadeLoop:
             self.drives.discard(task)
             return task.result()
         task.add_done_callback(lambda t: self._drive_ended(name, args, t))
-        said = self.current is not None and bool(self.current.sentences)
-        return {**started.result(), "note": UNDER_WAY + (ACKNOWLEDGED if said else "")}
+        if self.current is not None and self.current.sentences:  # the acknowledgement is said
+            return {**started.result(), "note": UNDER_WAY + ACKNOWLEDGED, FOLLOW_UP: False}
+        return {**started.result(), "note": UNDER_WAY}
 
     def _drive_ended(self, name: str, args: dict[str, Any], task: asyncio.Task[Result]) -> None:
         self.drives.discard(task)

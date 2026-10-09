@@ -13,6 +13,7 @@ from typing import Any
 import numpy as np
 
 from pepin.voice_cascade.stages import (
+    FOLLOW_UP,
     Emit,
     FirstToken,
     Played,
@@ -77,7 +78,8 @@ class ScriptedBrain:
                 name, args = step
                 self._acted = True
                 emit(ToolUse(f"call-{n}-{round_index}", name, args))
-                result = await tools(name, args)
+                result = dict(await tools(name, args))
+                result.pop(FOLLOW_UP, None)
                 emit(ToolDone(f"call-{n}-{round_index}", name, str(result), 0))
                 round_index += 1
                 continue
