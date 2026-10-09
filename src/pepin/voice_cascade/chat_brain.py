@@ -53,6 +53,7 @@ END_FUNCTION = {
         "parameters": {"type": "object", "properties": {}},
     },
 }
+PICTURE_GONE = "(the picture the tool took was shown here; it is not kept)"
 NO_PICTURES = "the picture could not be shown: this model takes no images"
 FIRST_SENTENCE = re.compile(r"^(.+?[.!?])(?:\s|$)", re.DOTALL)
 
@@ -353,10 +354,24 @@ class ChatBrain:
                 kept.append(m)
             round_messages[:] = kept
 
+    @staticmethod
+    def _without_pictures(messages: list[Message]) -> list[Message]:
+        """The messages with every picture replaced by a line of text: a picture is for the
+        turn that asked for it; kept in the history it costs input every turn and some models
+        (qwen3.8-27b on Groq, 2026-10-09) answer in two tokens once one sits behind them."""
+        out: list[Message] = []
+        for m in messages:
+            if m["role"] == "user" and isinstance(m.get("content"), list):
+                out.append({"role": "user", "content": PICTURE_GONE})
+            else:
+                out.append(m)
+        return out
+
     def commit(self) -> None:
-        """The turn ran to its end: it joins the history."""
+        """The turn ran to its end: it joins the history, its pictures as a line of text."""
         if self._user is not None:
-            self.history += [self._user, *(m for r in self._rounds for m in r)]
+            rounds = [m for r in self._rounds for m in r]
+            self.history += [self._user, *self._without_pictures(rounds)]
         self._reset()
 
     def abandon(self) -> None:
@@ -389,5 +404,5 @@ class ChatBrain:
             heard.append(played.partial)
         if heard:
             kept.append({"role": "assistant", "content": " ".join(heard) + INTERRUPTED})
-        self.history += kept
+        self.history += self._without_pictures(kept)
         self._reset()
