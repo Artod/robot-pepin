@@ -13,6 +13,7 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py                          # the robot, for real
     uv run python scripts/voice_cascade.py --brain sonnet --set flags.barge_in=true
     uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
+    uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
@@ -46,9 +47,10 @@ from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
-from pepin.tools.schemas import gemini_function_declarations
+from pepin.tools.schemas import gemini_function_declarations, openai_tools
 from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.brain import ClaudeBrain, tool_definitions
+from pepin.voice_cascade.chat_brain import ChatBrain
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.fake import ScriptedBrain
 from pepin.voice_cascade.gemini_brain import GeminiBrain
@@ -108,8 +110,8 @@ def main() -> int:
     )  # fmt: skip
     ap.add_argument(
         "--brain",
-        help="a brain preset (haiku, sonnet, opus, flashlite, flash, flash38), or echo: no API,"
-        " repeats the words",
+        help="a brain preset (haiku, sonnet, opus, flashlite, flash, flash38, groq-oss,"
+        " groq-qwen), or echo: no API, repeats the words",
     )
     ap.add_argument("--voice", choices=["qwen3", "say"], help="override voice.engine")
     ap.add_argument("--host", default=board_host(), help="the board (PEPIN_HOST)")
@@ -150,6 +152,8 @@ def main() -> int:
             print(f"unknown tools: {', '.join(sorted(unknown))}; the tools are {', '.join(names)}")
             return 2
         names = [n for n in names if n in wanted]
+    if config.brain.tools is not None:  # the preset offers fewer (a compact prompt)
+        names = [n for n in names if n in config.brain.tools]
     allowed = set(names)
     moving = {t.name for t in TOOLS if t.moves and t.name in allowed}
 
@@ -158,7 +162,9 @@ def main() -> int:
     if echo:
         brain = ScriptedBrain()
     else:
-        key = "GEMINI_API_KEY" if config.brain.provider == "gemini" else "ANTHROPIC_API_KEY"
+        key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
+            config.brain.provider, config.brain.api_key_env or ""
+        )
         if not os.environ.get(key):
             print(f"{key} missing: set -a; . ./.env; set +a (the main checkout's .env)")
             return 2
@@ -168,7 +174,10 @@ def main() -> int:
             print(f"refusing to start: {refusal}")
             return 3
         persona = config_file(config.brain.persona_file).read_text()
-        if config.brain.provider == "gemini":
+        if config.brain.provider == "openai":
+            functions = [t for t in openai_tools(TOOLS) if t["function"]["name"] in allowed]
+            brain = ChatBrain(config.brain, persona=persona, tools=functions, price=config.price)
+        elif config.brain.provider == "gemini":
             declarations = [d for d in gemini_function_declarations(TOOLS) if d["name"] in allowed]
             brain = GeminiBrain(
                 config.brain, persona=persona, declarations=declarations, price=config.price

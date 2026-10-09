@@ -19,7 +19,8 @@ CONFIG_FILE = "voice_cascade.json"
 WAKE_MODES = ("name", "always")
 THINKING_MODES = ("disabled", "between_tools", "adaptive")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
-PROVIDERS = ("anthropic", "gemini")
+PROVIDERS = ("anthropic", "gemini", "openai")  # openai: any OpenAI-compatible endpoint (Groq)
+TOOL_CHOICES = ("auto", "required")
 THINKING_LEVELS = ("minimal", "low", "medium", "high")  # Gemini's
 VOICE_ENGINES = ("qwen3", "say")
 EMOTION_MODELS = ("audeering", "emotion2vec")
@@ -45,6 +46,9 @@ DEFAULT_PRICES = {
     "gemini-3.5-flash-lite": ModelPrice(0.30, 2.50, 0.03, 0.30),
     "gemini-3.5-flash": ModelPrice(1.50, 9.00, 0.15, 1.50),
     "gemini-3.8-flash": ModelPrice(0.75, 3.75, 0.075, 0.75),
+    # Groq (no caching)
+    "openai/gpt-oss-120b": ModelPrice(0.15, 0.60, 0.15, 0.15),
+    "qwen/qwen3.8-27b": ModelPrice(0.80, 4.00, 0.80, 0.80),
 }
 
 
@@ -58,6 +62,13 @@ class BrainConfig:
     effort: str | None = "low"  # Claude; None: left out
     thinking_budget: int | None = None  # Gemini; None: left out
     thinking_level: str | None = None  # Gemini; None: left out
+    base_url: str | None = None  # OpenAI-compatible: the endpoint
+    api_key_env: str | None = None  # OpenAI-compatible: the variable holding the key
+    reasoning_effort: str | None = None  # OpenAI-compatible; None: left out
+    tool_choice: str = "auto"  # OpenAI-compatible: "required" forces a call in the first round
+    extra_body: Mapping[str, Any] = field(default_factory=dict)  # provider-specific fields
+    tools: tuple[str, ...] | None = None  # the registry tools offered (None: all)
+    compact_tools: bool = False  # descriptions cut to their first sentence (a small prompt)
     max_tokens: int = 400
     persona_file: str = "voice_cascade_persona.md"
     cache: bool = True
@@ -223,6 +234,10 @@ class CascadeConfig:
         b = self.brain
         if b.provider not in PROVIDERS:
             raise ValueError(f"brain.provider: one of {', '.join(PROVIDERS)}")
+        if b.provider == "openai" and not (b.base_url and b.api_key_env):
+            raise ValueError("brain.base_url and brain.api_key_env: an OpenAI-compatible endpoint")
+        if b.tool_choice not in TOOL_CHOICES:
+            raise ValueError(f"brain.tool_choice: one of {', '.join(TOOL_CHOICES)}")
         if b.thinking_level is not None and b.thinking_level not in THINKING_LEVELS:
             raise ValueError(f"brain.thinking_level: one of {', '.join(THINKING_LEVELS)} or null")
         if self.wake not in WAKE_MODES:
@@ -278,6 +293,7 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
     merged = {**(presets.get(name, {}) if name else {}), **section}
     d = BrainConfig()
     budget = merged.get("thinking_budget", d.thinking_budget)
+    tools = merged.get("tools")
     return BrainConfig(
         provider=str(merged.get("provider", d.provider)),
         model=str(merged.get("model", d.model)),
@@ -285,6 +301,13 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         effort=merged.get("effort", d.effort),
         thinking_budget=None if budget is None else int(budget),
         thinking_level=merged.get("thinking_level", d.thinking_level),
+        base_url=merged.get("base_url", d.base_url),
+        api_key_env=merged.get("api_key_env", d.api_key_env),
+        reasoning_effort=merged.get("reasoning_effort", d.reasoning_effort),
+        tool_choice=str(merged.get("tool_choice", d.tool_choice)),
+        extra_body=dict(merged.get("extra_body", {})),
+        tools=None if tools is None else tuple(str(name) for name in tools),
+        compact_tools=bool(merged.get("compact_tools", d.compact_tools)),
         max_tokens=int(merged.get("max_tokens", d.max_tokens)),
         persona_file=str(merged.get("persona_file", d.persona_file)),
         cache=bool(merged.get("cache", d.cache)),

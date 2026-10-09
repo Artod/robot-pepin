@@ -43,6 +43,7 @@ llm = [
     "anthropic>=1.9.0",
     "google-genai>=1.0",
     "mcp>=2.2.0",
+    "openai>=1.60",
 ]
 # The voice loops' local ears and voice: Whisper on the Mac's GPU (pepin.voice_live.wake.MlxWhisper),
 # Qwen3-TTS through mlx-audio, Praat's prosody through parselmouth and the Smart Turn end-of-turn
