@@ -182,12 +182,13 @@ class ChatBrain:
         return self._acted
 
     async def prewarm(self) -> Usage | None:
-        """Open the connection with a free request (the model's card): a token-billed warm-up
-        would eat the free tier's tokens per minute."""
+        """Open the connection with a free request (the model list): a token-billed warm-up
+        would eat the free tier's tokens per minute. (Not the model's own card: Groq answers
+        404 to the escaped slash of "openai/gpt-oss-120b".)"""
         if not self.config.prewarm:
             return None
         t0 = self.clock()
-        await self.client.models.retrieve(self.config.model)
+        await self.client.models.list()
         return Usage(ms=round((self.clock() - t0) * 1000))
 
     async def turn(self, text: str, tools: ToolExecutor, emit: Emit) -> None:

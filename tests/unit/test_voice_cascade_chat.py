@@ -84,7 +84,7 @@ class FakeCompletions:
 
 def brain_over(rounds: list[Any], **config: Any) -> tuple[ChatBrain, FakeCompletions]:
     completions = FakeCompletions(rounds)
-    models = SimpleNamespace(retrieve=lambda model: _none())
+    models = SimpleNamespace(list=lambda: _none())
     client = SimpleNamespace(chat=SimpleNamespace(completions=completions), models=models)
     settings = {"provider": "openai", "model": "openai/gpt-oss-120b", "thinking": None,
                 "effort": None, "base_url": "https://api.groq.com/openai/v1",
@@ -222,3 +222,9 @@ def test_compact_tools_keep_the_first_sentence() -> None:
     (small,) = compact([SEE])
     assert small["function"]["description"] == "One picture from the head camera."
     assert SEE["function"]["description"].endswith("what you see.")  # the original is untouched
+
+
+def test_prewarm_opens_the_connection_without_tokens() -> None:
+    brain, completions = brain_over([])
+    warm = asyncio.run(brain.prewarm())
+    assert warm is not None and warm.usd == 0 and completions.requests == []
