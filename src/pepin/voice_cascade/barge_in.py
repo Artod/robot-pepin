@@ -377,6 +377,11 @@ def echo_level(
     return level
 
 
+def model_path(path: str | None) -> Path | None:
+    """A configured model file (relative to the working directory), or None for the default."""
+    return Path(path).expanduser() if path else None
+
+
 def build_detector(
     config: CascadeConfig,
     *,
@@ -387,7 +392,8 @@ def build_detector(
 ) -> BargeInDetector:
     """The detector ``barge_in.detector`` names. ``reader``: Whisper for ``words``; ``own_text``:
     the robot's sentences in play; ``played``: the speaker's level history for the echo guard
-    (None: no guard); ``vad``: the model (None: Silero, loaded here)."""
+    (None: no guard); ``vad``: the model (None: Silero, loaded here from ``vad_model``, a local
+    ONNX file, or the Hub's v5)."""
     level = LevelDetector(
         over_floor_db=config.barge_in_over_floor_db,
         min_dbfs=config.barge_in_min_dbfs,
@@ -404,7 +410,7 @@ def build_detector(
                 played, lag_s=config.barge_in_echo_lag_s, loss_db=config.barge_in_echo_loss_db
             )
         voice = VadDetector(
-            vad if vad is not None else SileroVad(),
+            vad if vad is not None else SileroVad(model_path(config.barge_in_vad_model)),
             threshold=config.barge_in_vad_threshold,
             hold_s=config.barge_in_vad_hold_s,
             min_dbfs=config.barge_in_vad_min_dbfs,

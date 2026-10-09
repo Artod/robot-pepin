@@ -135,6 +135,7 @@ class CascadeConfig:
     barge_in_vad_threshold: float = 0.5
     barge_in_vad_hold_s: float = 0.2
     barge_in_vad_min_dbfs: float = -50.0
+    barge_in_vad_model: str | None = None
     barge_in_echo_loss_db: float = 40.0
     barge_in_echo_lag_s: float = 0.1
     barge_in_echo_margin_db: float = 10.0
@@ -212,6 +213,7 @@ class CascadeConfig:
             barge_in_vad_threshold=float(barge.get("vad_threshold", d.barge_in_vad_threshold)),
             barge_in_vad_hold_s=float(barge.get("vad_hold_s", d.barge_in_vad_hold_s)),
             barge_in_vad_min_dbfs=float(barge.get("vad_min_dbfs", d.barge_in_vad_min_dbfs)),
+            barge_in_vad_model=barge.get("vad_model") or None,
             barge_in_echo_loss_db=float(barge.get("echo_loss_db", d.barge_in_echo_loss_db)),
             barge_in_echo_lag_s=float(barge.get("echo_lag_s", d.barge_in_echo_lag_s)),
             barge_in_echo_margin_db=float(barge.get("echo_margin_db", d.barge_in_echo_margin_db)),

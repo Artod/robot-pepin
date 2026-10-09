@@ -35,7 +35,7 @@ from pepin.voice_cascade.barge_eval import (
     judge,
     replay,
 )
-from pepin.voice_cascade.barge_in import BargeInDetector, SileroVad, build_detector
+from pepin.voice_cascade.barge_in import BargeInDetector, build_detector
 from pepin.voice_cascade.config import CascadeConfig
 
 DETECTORS = ("live", "level", "vad", "words")
@@ -117,8 +117,7 @@ def triggers_of(
 
     def make(own_text: Callable[[], str]) -> BargeInDetector:
         reader = models.reader() if detector == "words" else None
-        vad = SileroVad() if detector != "level" else None
-        return build_detector(cfg, reader=reader, own_text=own_text, played=rec.played, vad=vad)
+        return build_detector(cfg, reader=reader, own_text=own_text, played=rec.played)
 
     return replay(rec, config, make)
 

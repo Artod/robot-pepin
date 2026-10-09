@@ -221,14 +221,19 @@ def sound_events(
 
 
 def is_speech(sound: Sound, reply: str) -> bool:
-    """The truth's rule: Whisper hears words (no-speech probability under 0.6, mean
-    log-probability over -2.5: the canceller mangles a voice over the robot's, and Whisper
-    reads "Пепин, покажи" as "Паркетин, по кази" at -2.1) over at least 0.15 s, and they take
-    the turn (:func:`pepin.voice_cascade.barge_in.interrupting_words`); the robot's own words
-    count as its echo only when quiet (under -35 dBFS: the person is louder)."""
-    if sound.end - sound.start < 0.15 or sound.no_speech >= 0.6 or sound.logprob <= -2.5:
-        return False
+    """The truth's rule: Whisper hears words over at least 0.15 s (no-speech probability under
+    0.6) and they take the turn (:func:`pepin.voice_cascade.barge_in.interrupting_words`). The
+    canceller mangles a voice over the robot's, so Whisper's confidence only has to beat a mean
+    log-probability of -2.5 ("Пепин, покажи" read as "Паркетин, по кази" at -2.1), and none at
+    all for a sound of 0.6 s or more read as two words or more ("покажи температуру" as "раз
+    sit и раз communicator" at -4.2). The robot's own words count as its echo only when quiet
+    (under -35 dBFS: the person is louder)."""
     said = words(sound.text)
+    long_and_wordy = sound.end - sound.start >= 0.6 and len(said) >= 2
+    if sound.end - sound.start < 0.15 or sound.no_speech >= 0.6:
+        return False
+    if sound.logprob <= -2.5 and not long_and_wordy:
+        return False
     if not said or is_hallucination(sound.text):
         return False
     if sound.peak_db < -35.0 and own_echo(said, reply):

@@ -117,6 +117,8 @@ def test_the_truth_s_speech_rule() -> None:
     assert not is_speech(Sound(1.0, 1.6, -20.0, "Угу.", **sure), "")
     assert not is_speech(Sound(1.0, 1.1, -20.0, "Покажи.", **sure), "")  # too short for it
     assert not is_speech(Sound(1.0, 1.6, -20.0, "Покажи.", no_speech=0.0, logprob=-3.0), "")
+    garbled = Sound(1.0, 2.0, -6.0, "раз sit и раз communicator", no_speech=0.0, logprob=-4.2)
+    assert is_speech(garbled, "")  # a long loud sound read as words is a mangled voice
     reply = "Вывел температуры сервоприводов на экран."
     assert not is_speech(Sound(1.0, 1.6, -45.0, "сервоприводов на экран", **sure), reply)
     assert is_speech(Sound(1.0, 1.6, -15.0, "сервоприводов на экран", **sure), reply)
