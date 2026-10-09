@@ -15,7 +15,7 @@ import pytest
 openai = pytest.importorskip("openai")
 
 from pepin.tools.registry import Image, Result  # noqa: E402
-from pepin.voice_cascade.brain import INTERRUPTED, NOT_AWAITED  # noqa: E402
+from pepin.voice_cascade.brain import NOT_AWAITED  # noqa: E402
 from pepin.voice_cascade.chat_brain import NO_PICTURES, ChatBrain, compact  # noqa: E402
 from pepin.voice_cascade.config import DEFAULT_PRICES, BrainConfig  # noqa: E402
 from pepin.voice_cascade.stages import BrainEvent, Played, Sentence, ToolUse, Usage  # noqa: E402
@@ -195,7 +195,7 @@ def test_an_interrupt_keeps_the_call_and_the_words_heard() -> None:
     brain.interrupt(Played(sentences=1, partial="На"))
     roles = [m["role"] for m in brain.history]
     assert roles == ["user", "assistant", "tool", "assistant"]
-    assert brain.history[-1]["content"] == "Вижу стол. На" + INTERRUPTED
+    assert brain.history[-1]["content"] == "Вижу стол. На …"
 
 
 def test_an_interrupt_while_a_call_runs_answers_it_as_not_awaited() -> None:
