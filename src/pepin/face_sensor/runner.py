@@ -80,7 +80,7 @@ class Stats:
             "wall_s": round(wall, 1),
             "fps": round(self.frames / wall, 2) if wall > 0 else 0.0,
             "capacity_fps": round(self.frames / busy_s, 1) if busy_s > 0 else 0.0,
-            "ms": {stage: percentiles(values) for stage, values in self.ms.items()},
+            "ms": {stage: percentiles(values) for stage, values in self.ms.items() if values},
             "rss_peak_mb": round(peak_rss_mb(), 1),
         }
 

@@ -124,6 +124,7 @@ files = [
     "scripts/timesync.py",
     "scripts/extrinsics.py",
     "scripts/voice_live.py",
+    "scripts/face_sensor.py",
     "apps/macos",
 ]
 strict = true
