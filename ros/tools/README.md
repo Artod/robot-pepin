@@ -155,6 +155,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `calibrate_neck.py` | Neck and head servo calibration | `uv run python scripts/calibrate_neck.py --port PORT` |
 | `dashboard.py` | Live rerun dashboard: scan, camera, ToF, board vitals, log | `uv run python scripts/dashboard.py [--map data/maps/M.npz]` |
 | `extrinsics.py` | Library: the camera's yaw against the lidar from the two range fans | imported by `tests/unit/test_extrinsics.py` |
+| `face_sensor.py` | Who is in front of the head camera, where, looking and talking, expression: a JSON line a second in `data/face/latest.json`; enrolment and a bench | `uv run --group face python scripts/face_sensor.py run \| bench FILE... \| enrol NAME FILE... \| list \| forget NAME` |
 | `health_check.py` | Launch-readiness check of every subsystem: GO or NO GO | `uv run python scripts/health_check.py [--quick]` |
 | `jog.py` | Gentle single-motor jog for bring-up | `uv run python scripts/jog.py wheel \| neck --port PORT --id N` |
 | `setup_motor_id.py` | Assigns a bus ID to one Feetech servo | `uv run python scripts/setup_motor_id.py --port PORT --id N` |
