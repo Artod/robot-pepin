@@ -69,6 +69,8 @@ UNASKED_DRIVE = (
 )
 END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
+# tools that take a while: the robot says its filler when the brain calls one before a word
+SLOW_TOOLS = frozenset(("see", "look", "look_around", "find", "recall", "map_tree"))
 BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
 
 
@@ -106,6 +108,7 @@ class Reply:
     tools: list[dict[str, Any]] = field(default_factory=list)
     audio: bool = False  # some of its audio reached the player
     acted: bool = False  # it ran a tool
+    filled: bool = False  # the local filler was said for a slow tool
     generated: bool = False  # the brain's stream ended
     spoken: asyncio.Event = field(default_factory=asyncio.Event)  # the voice did its last job
     finished: asyncio.Event = field(default_factory=asyncio.Event)
@@ -453,6 +456,11 @@ class CascadeLoop:
             if log is not None:
                 log.event("sentence", now, turn=reply.id, index=index, text=event.text)
         elif isinstance(event, ToolUse):
+            if event.name in SLOW_TOOLS and not reply.sentences and not reply.filled:
+                reply.filled = True  # nothing said yet: the wait is announced locally
+                if self.config.tool_filler:
+                    filler = SpeechJob(reply.id, -1, self.config.tool_filler, "backchannel")
+                    self.speech.say(filler)
             reply.acted = True
             print(f"  -> {event.name}({json.dumps(event.args, ensure_ascii=False)})", flush=True)
             if log is not None:

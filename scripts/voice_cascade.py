@@ -12,6 +12,7 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     set -a; . ./.env; set +a
     uv run python scripts/voice_cascade.py                          # the robot, for real
     uv run python scripts/voice_cascade.py --brain sonnet --set flags.barge_in=true
+    uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
@@ -45,10 +46,12 @@ from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
+from pepin.tools.schemas import gemini_function_declarations
 from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.brain import ClaudeBrain, tool_definitions
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.fake import ScriptedBrain
+from pepin.voice_cascade.gemini_brain import GeminiBrain
 from pepin.voice_cascade.loop import CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
@@ -74,12 +77,15 @@ def main_checkout() -> Path:
     return REPO.parents[2] if REPO.parent.parent.name == ".claude" else REPO
 
 
-def grey_jpeg() -> bytes:
-    """A small valid JPEG for the fake camera (the model refuses a broken one)."""
-    from PIL import Image
+def fake_view_jpeg() -> bytes:
+    """The fake camera's picture: a red circle on white, a valid JPEG a model can describe
+    (it refuses a broken one; a description naming the circle proves the picture arrived)."""
+    from PIL import Image, ImageDraw
 
     out = io.BytesIO()
-    Image.new("RGB", (160, 120), (128, 128, 128)).save(out, format="JPEG")
+    picture = Image.new("RGB", (320, 240), (255, 255, 255))
+    ImageDraw.Draw(picture).ellipse((110, 70, 210, 170), fill=(220, 20, 20))
+    picture.save(out, format="JPEG")
     return out.getvalue()
 
 
@@ -101,7 +107,9 @@ def main() -> int:
         help="override one config value for this run (JSON value), e.g. flags.barge_in=true",
     )  # fmt: skip
     ap.add_argument(
-        "--brain", help="a brain preset (haiku, sonnet, opus), or echo: no API, repeats the words"
+        "--brain",
+        help="a brain preset (haiku, sonnet, opus, flashlite, flash, flash38), or echo: no API,"
+        " repeats the words",
     )
     ap.add_argument("--voice", choices=["qwen3", "say"], help="override voice.engine")
     ap.add_argument("--host", default=board_host(), help="the board (PEPIN_HOST)")
@@ -150,8 +158,9 @@ def main() -> int:
     if echo:
         brain = ScriptedBrain()
     else:
-        if not os.environ.get("ANTHROPIC_API_KEY"):
-            print("ANTHROPIC_API_KEY missing: set -a; . ./.env; set +a (the main checkout's .env)")
+        key = "GEMINI_API_KEY" if config.brain.provider == "gemini" else "ANTHROPIC_API_KEY"
+        if not os.environ.get(key):
+            print(f"{key} missing: set -a; . ./.env; set +a (the main checkout's .env)")
             return 2
         ledger = ledger_for(config, args.logs / "cascade_ledger.jsonl")
         refusal = ledger.refusal()
@@ -159,12 +168,18 @@ def main() -> int:
             print(f"refusing to start: {refusal}")
             return 3
         persona = config_file(config.brain.persona_file).read_text()
-        brain = ClaudeBrain(
-            config.brain,
-            persona=persona,
-            tools=tool_definitions(TOOLS, allowed),
-            price=config.price,
-        )
+        if config.brain.provider == "gemini":
+            declarations = [d for d in gemini_function_declarations(TOOLS) if d["name"] in allowed]
+            brain = GeminiBrain(
+                config.brain, persona=persona, declarations=declarations, price=config.price
+            )
+        else:
+            brain = ClaudeBrain(
+                config.brain,
+                persona=persona,
+                tools=tool_definitions(TOOLS, allowed),
+                price=config.price,
+            )
 
     bench = args.bench is not None
     fake_drive_s = args.fake_robot if args.fake_robot is not None else 5.0 if bench else None
@@ -172,7 +187,7 @@ def main() -> int:
         clock = WallClock()
         step_s = max(0.0, fake_drive_s - FAKE_ACCEPT_S) / 3  # accepted, 2 reports, done
         goals = FakeGoalServer(clock, step_s=step_s, accept_s=FAKE_ACCEPT_S)
-        robot = fake_robot(clock=clock, goals=goals, camera=FakeCamera(jpeg=grey_jpeg()))
+        robot = fake_robot(clock=clock, goals=goals, camera=FakeCamera(jpeg=fake_view_jpeg()))
         print(f"FAKE ROBOT: nothing moves; a drive takes {fake_drive_s:.1f} s", flush=True)
     else:
         robot = Robot.connect()
@@ -223,7 +238,8 @@ def main() -> int:
         )
     else:
         voice = SayVoice(config.say_voice, config.say_rate_wpm)
-    clips = config.backchannel_lines if config.backchannel else ()
+    clips = (*(config.backchannel_lines if config.backchannel else ()), config.tool_filler)
+    clips = tuple(line for line in clips if line)
     speech = SpeechWorker(voice, player, clips=clips)
     print(f"loading the voice ({config.voice_engine}) and Whisper ({config.whisper_repo})...")
     speech.start()  # the voice loads on its own thread meanwhile
