@@ -279,8 +279,8 @@ class ChatBrain:
                 return
 
     async def _create(self, kwargs: dict[str, Any]) -> Any:
-        """One streamed call: a 429 is printed; a model refusing pictures has them taken out
-        of the turn (answered in words) and is asked again."""
+        """One streamed call: a 429 is printed; a request refused while it carries pictures is
+        sent again without them (the calls answered in words), for the rest of the run."""
         import openai
 
         try:
@@ -289,9 +289,10 @@ class ChatBrain:
             after = getattr(getattr(error, "response", None), "headers", {}).get("retry-after")
             print(f"  !! {self.config.model}: 429 rate limit (retry after {after} s)", flush=True)
             raise
-        except openai.BadRequestError as error:
-            if not (self._has_pictures() and "image" in str(error).lower()):
+        except openai.BadRequestError:
+            if not self._has_pictures():
                 raise
+            # gpt-oss-120b on Groq: "messages[4].content must be a string" for a picture
             self.pictures = False
             self._drop_pictures()
             kwargs["messages"] = self.messages()

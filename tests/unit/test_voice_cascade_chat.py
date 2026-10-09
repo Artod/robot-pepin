@@ -160,7 +160,7 @@ def test_a_call_from_deltas_is_answered_with_a_tool_message_and_its_picture() ->
 
 
 def test_a_model_that_refuses_pictures_gets_the_call_answered_in_words() -> None:
-    refused = http_error(openai.BadRequestError, 400, "image input is not supported")
+    refused = http_error(openai.BadRequestError, 400, "messages[4].content must be a string")
     rounds = [
         [call(0, "c1", "see", "{}"), done()],
         refused,
