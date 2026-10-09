@@ -135,6 +135,8 @@ class BoardStream:
                             return
                         yield Frame(_stamp(headers, self._stamp), index, self._decoder(body))
                         index += 1
+                if self._closed.is_set():
+                    return
                 logger.warning("camera stream ended; reconnecting")
             except Exception as error:
                 # Whatever a dropped WiFi or a restarting board throws (a reset socket, a
