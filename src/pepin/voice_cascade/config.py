@@ -63,7 +63,7 @@ class ProsodyConfig:
     speaker: str = "Артём"
     min_baseline: int = 5
     window: int = 200
-    z: float = 1.0
+    z: float = 2.0
     emotion_model: str | None = None
 
 

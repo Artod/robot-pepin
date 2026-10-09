@@ -68,9 +68,9 @@
     "speaker": "Артём",
     "min_baseline": 5,
     "window": 200,
-    "z": 1.0,
+    "z": 2.0,
     "emotion_model": null,
-    "note": "the tag line names speaker (no speaker ID yet), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean: loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
+    "note": "the tag line names speaker (no speaker ID yet), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean (2.0: Artem's deliberate contrasts sit at 2.7-6 sd, and with five numbers z 1.0 flagged 8 of the 10 tagged phrases of the 2026-10-08 bench): loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
   },
   "conversation": {
     "idle_close_s": 20.0,
