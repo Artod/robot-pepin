@@ -341,3 +341,25 @@ def test_sentences_are_spoken_in_order_and_a_cut_turn_is_dropped() -> None:
     assert heard[0] == (1, 0) and (2, 0) not in heard and (2, -1) in heard and (3, 0) in heard
     assert voice.spoken == ["мм", "Раз два.", "последнее"]  # the backchannel came from memory
     assert player.span(1) is not None and player.span(2) is None
+
+
+def test_openers_are_found_among_the_clips_by_their_words() -> None:
+    from pepin.voice_cascade.text import clip_key
+
+    assert clip_key("Сейчас гляну.") == clip_key("сейчас  гляну!") == "сейчас гляну"
+    assert clip_key("Да?") == "да?" and clip_key("Да.") == "да"
+    assert clip_key("Всё, понял.") == "все понял"
+
+
+def test_an_opener_said_by_the_brain_plays_from_memory() -> None:
+    player = Player(Sink(), rate=RATE, lead_s=100.0, clock=Clock())
+    voice = ToneVoice(rate=24_000, seconds_per_char=0.01)
+    done = threading.Event()
+    worker = SpeechWorker(voice, player, clips=["Да?"], on_done=lambda job, t: done.set())
+    worker.start()
+    assert worker.ready.wait(2.0)
+    worker.say(SpeechJob(1, 0, "да?"))
+    assert done.wait(2.0)
+    worker.close()
+    assert voice.spoken == ["Да?"]  # made once at load, not again for the reply
+    assert player.span(1) is not None

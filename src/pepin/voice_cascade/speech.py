@@ -18,7 +18,7 @@ from typing import Literal
 
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.stages import Voice
-from pepin.voice_cascade.text import speakable
+from pepin.voice_cascade.text import clip_key, speakable
 from pepin.voice_live.audio import Resampler
 
 logger = logging.getLogger(__name__)
@@ -56,8 +56,9 @@ class SpeechWorker:
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """``on_audio`` hears every chunk handed to the player; ``on_done`` every job finished
-        (cut or not); both on this worker's thread. ``clips``: short lines (backchannels)
-        synthesised once at load and played from memory."""
+        (cut or not); both on this worker's thread. ``clips``: short lines (backchannels,
+        fillers, the commonest openers) synthesised once at load and played from memory when a
+        job says one of them (:func:`pepin.voice_cascade.text.clip_key`)."""
         self.voice, self.player = voice, player
         self.clip_lines = tuple(clips)
         self.clips: dict[str, bytes] = {}
@@ -94,7 +95,7 @@ class SpeechWorker:
         try:
             self.voice.load()
             for line in self.clip_lines:
-                self.clips[line] = b"".join(self.voice.stream(speakable(line)))
+                self.clips[clip_key(line)] = b"".join(self.voice.stream(speakable(line)))
         except BaseException as error:  # the run cannot speak: the caller reports it
             self.error = error
             self.ready.set()
@@ -116,9 +117,9 @@ class SpeechWorker:
             return
         resampler = Resampler(self.voice.rate, self.player.rate)
         text = speakable(job.text)
-        if not text and job.pcm is None and job.text not in self.clips:
+        if not text and job.pcm is None:
             return  # nothing to say aloud (an aside)
-        ready = job.pcm if job.pcm is not None else self.clips.get(job.text)
+        ready = job.pcm if job.pcm is not None else self.clips.get(clip_key(text))
         chunks = iter([ready]) if ready is not None else self.voice.stream(text)
         player_kind: Literal["reply", "backchannel"] = (
             "backchannel" if job.kind == "backchannel" else "reply"

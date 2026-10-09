@@ -105,8 +105,9 @@ class CascadeConfig:
     tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
     tts_voice: str = "serena"
     tts_language: str = "russian"
-    tts_chunk_s: float = 0.5
+    tts_chunk_s: float = 0.2
     tts_hf_home: str | None = "scratch/tts_voices/hf"
+    openers: tuple[str, ...] = ("Секунду.", "Сейчас гляну.", "Да?", "Слушаю.", "Понял.", "Хорошо.")
     say_voice: str = "Milena"
     say_rate_wpm: int = 185
     # player
@@ -172,6 +173,7 @@ class CascadeConfig:
             tts_language=str(voice.get("language", d.tts_language)),
             tts_chunk_s=float(voice.get("chunk_s", d.tts_chunk_s)),
             tts_hf_home=voice.get("hf_home", d.tts_hf_home) or None,
+            openers=tuple(str(x) for x in voice.get("openers", d.openers)),
             say_voice=str(voice.get("say_voice", d.say_voice)),
             say_rate_wpm=int(voice.get("say_rate_wpm", d.say_rate_wpm)),
             playback_lead_s=float(player.get("lead_s", d.playback_lead_s)),

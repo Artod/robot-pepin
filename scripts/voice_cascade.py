@@ -238,7 +238,11 @@ def main() -> int:
         )
     else:
         voice = SayVoice(config.say_voice, config.say_rate_wpm)
-    clips = (*(config.backchannel_lines if config.backchannel else ()), config.tool_filler)
+    clips = (
+        *(config.backchannel_lines if config.backchannel else ()),
+        config.tool_filler,
+        *config.openers,
+    )
     clips = tuple(line for line in clips if line)
     speech = SpeechWorker(voice, player, clips=clips)
     print(f"loading the voice ({config.voice_engine}) and Whisper ({config.whisper_repo})...")

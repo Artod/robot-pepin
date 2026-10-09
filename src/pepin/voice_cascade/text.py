@@ -9,6 +9,7 @@ _SOFT = re.compile(r"[,;:]\s|\s[—–-]\s")  # noqa: RUF001 -- the dashes are m
 _MARKUP = re.compile(r"[*_#`~>|]+")
 _ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)")  # [notes] and (stage directions) are not speech
 _SPACES = re.compile(r"\s+")
+_WORDS = re.compile(r"\w+")
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
 
 
@@ -66,6 +67,13 @@ def speakable(text: str) -> str:
     """``text`` without what a voice must not read out: markup (asterisks, hashes, backticks)
     and asides in brackets or parentheses (a model's notes to itself)."""
     return _SPACES.sub(" ", _MARKUP.sub(" ", _ASIDE.sub(" ", text))).strip()
+
+
+def clip_key(text: str) -> str:
+    """How a short line is looked up among the clips made at load: lower case, the words only,
+    a question kept apart from a statement ("Да?" is not "Да.")."""
+    words = " ".join(_WORDS.findall(text.lower().replace("\u0451", "\u0435")))  # yo read as ie
+    return words + "?" if text.rstrip().endswith("?") else words
 
 
 def syllables(text: str) -> int:

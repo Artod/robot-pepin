@@ -46,11 +46,12 @@
     "model": "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit",
     "voice": "serena",
     "language": "russian",
-    "chunk_s": 0.5,
+    "chunk_s": 0.2,
     "hf_home": "scratch/tts_voices/hf",
+    "openers": ["Секунду.", "Сейчас гляну.", "Да?", "Слушаю.", "Понял.", "Хорошо."],
     "say_voice": "Milena",
     "say_rate_wpm": 185,
-    "note": "qwen3: Qwen3-TTS 0.6B CustomVoice through mlx-audio 0.5.8, loaded once on its own thread and kept hot; streams chunk_s chunks, first audio ~0.11 s warm (2.2 s cold: warmed at load), ~0.4x real time. hf_home: an HF cache already holding the weights (relative to the main checkout); missing there, the default cache is used. say: macOS say, whole sentences at 16 kHz, for a test without the model"
+    "note": "qwen3: Qwen3-TTS 0.6B CustomVoice through mlx-audio 0.5.8, loaded once on its own thread and kept hot; streams chunk_s chunks, first audio ~0.11 s warm (2.2 s cold: warmed at load), ~0.4x real time. chunk_s 0.2 (2026-10-09, 1 to 15 words, 5 runs each): first chunk 61-115 ms against 185-203 ms at 0.5, with 0.07 s or more of audio always queued ahead of the speaker (no gap); the first chunk barely depends on the sentence's length. hf_home: an HF cache already holding the weights (relative to the main checkout); missing there, the default cache is used. openers: the commonest first sentences, synthesised at load and played from memory when the brain says one (no TTS wait). say: macOS say, whole sentences at 16 kHz, for a test without the model"
   },
   "player": {
     "lead_s": 0.5,
