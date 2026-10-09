@@ -261,20 +261,29 @@ def _expand(paths: Sequence[Path]) -> list[Path]:
 def _still_line(row: dict[str, Any]) -> str:
     if "face_px" not in row:
         return f"{row['file']:<24} no face"
-    ident = row.get("identity") or {}
-    expr = row.get("expr") or {}
-    mesh = row.get("mesh") or {}
-    pub = row.get("published") or {}
-    who = (pub.get("who") or {}).get("id")
-    top = expr.get("top3", [["-", 0]])[0]
-    return (
-        f"{row['file']:<24} {row['face_px']:>4} px det {row['det']:.2f} {row['gate']:<6}"
-        f" sharp {row['sharpness']:>5} | cos {ident.get('cos', float('nan')):.3f}"
-        f" {ident.get('verdict') or '-':<8} -> {who or '-':<8} | {top[0]} {top[1]:.2f}"
-        f" V{expr.get('valence', 0):+.2f} A{expr.get('arousal', 0):+.2f}"
-        f" | yaw {mesh.get('yaw', float('nan')):+.0f} pitch {mesh.get('pitch', float('nan')):+.0f}"
-        f" jaw {mesh.get('jaw', float('nan')):.2f}"
+    ident = row.get("identity")
+    expr = row.get("expr")
+    mesh = row.get("mesh")
+    who = ((row.get("published") or {}).get("who") or {}).get("id")
+    parts = [
+        f"{row['face_px']:>4} px det {row['det']:.2f} {row['gate']:<6} sharp {row['sharpness']:>5}"
+    ]
+    parts.append(
+        f"cos {ident['cos']:.3f} {ident['verdict'] or '-':<8} -> {who or '-':<8}"
+        if ident
+        else "identity -"
     )
+    if expr:
+        top, p = expr["top3"][0]
+        parts.append(f"{top} {p:.2f} V{expr['valence']:+.2f} A{expr['arousal']:+.2f}")
+    else:
+        parts.append("expr -")
+    parts.append(
+        f"yaw {mesh['yaw']:+.0f} pitch {mesh['pitch']:+.0f} jaw {mesh['jaw']:.2f}"
+        if mesh
+        else "mesh -"
+    )
+    return f"{row['file']:<24} " + " | ".join(parts)
 
 
 def _clip_line(row: dict[str, Any]) -> str:

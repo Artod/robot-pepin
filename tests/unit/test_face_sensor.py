@@ -335,4 +335,6 @@ def test_report_line_says_who_where_and_how() -> None:
     assert "look yes talk -" in line
     assert "detect 6 total 20" in line
     empty = report_line({"stamp": 1000.0, "faces": 0, "fps": 2.7, "face_px": None}, {})
-    assert "no face" in empty
+    assert "no face" in empty and "STALE" not in empty
+    assert "STALE 4.0 s" in report_line(record, {}, age_s=4.0)
+    assert "STALE" not in report_line(record, {}, age_s=0.4)

@@ -64,12 +64,17 @@ class Publisher:
         self.lines += 1
 
 
-def report_line(record: Mapping[str, Any], ms: Mapping[str, float]) -> str:
+def report_line(
+    record: Mapping[str, Any], ms: Mapping[str, float], *, age_s: float | None = None
+) -> str:
     """The 1 Hz terminal line: who, size and bearing, expression, attention, quality, rate and
-    the stage milliseconds."""
+    the stage milliseconds; ``age_s`` over :data:`STALE_S` marks a line whose frame is old (the
+    stream stalled, or the board's clock is off)."""
     clock = time.strftime("%H:%M:%S", time.localtime(float(record["stamp"])))
     stages = " ".join(f"{k} {v:.0f}" for k, v in ms.items())
     head = f"face {clock} {record.get('fps', 0):.1f} fps n={record.get('faces', 0)}"
+    if age_s is not None and age_s > STALE_S:
+        head += f" STALE {age_s:.1f} s"
     if record.get("face_px") is None:
         return f"{head} | no face | ms {stages}"
     who = record.get("who") or {}

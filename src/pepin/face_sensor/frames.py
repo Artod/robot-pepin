@@ -18,7 +18,6 @@ import contextlib
 import logging
 import threading
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass
@@ -137,7 +136,10 @@ class BoardStream:
                         yield Frame(_stamp(headers, self._stamp), index, self._decoder(body))
                         index += 1
                 logger.warning("camera stream ended; reconnecting")
-            except (OSError, urllib.error.URLError, ValueError) as error:
+            except Exception as error:
+                # Whatever a dropped WiFi or a restarting board throws (a reset socket, a
+                # truncated part, a response closed under the read by close()) costs one
+                # reconnection, never the sensor.
                 if self._closed.is_set():
                     return
                 logger.warning("camera stream not reachable (%s); retrying", error)

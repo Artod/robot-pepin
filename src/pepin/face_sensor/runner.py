@@ -90,8 +90,10 @@ def _publish(
     stats: Stats,
     publisher: Publisher | None,
     report: Report | None,
+    wall: Callable[[], float] | None = None,
 ) -> dict[str, Any] | None:
-    """One line out (file and terminal) from the state as it is now."""
+    """One line out (file and terminal) from the state as it is now; ``wall`` (live runs) is
+    the clock the line's age is told against."""
     last = state.last
     if last is None:
         return None
@@ -102,7 +104,8 @@ def _publish(
     if publisher is not None:
         publisher.publish(record, ms)
     if report is not None:
-        report(report_line(record, ms))
+        age = wall() - float(record["stamp"]) if wall is not None else None
+        report(report_line(record, ms, age_s=age))
     return record
 
 
@@ -136,7 +139,10 @@ def run_live(
                 stats.add(result)
             next_turn = max(next_turn + period, clock())
             if clock() >= next_publish:
-                if _publish(state, stats, publisher, report) is None and report is not None:
+                if (
+                    _publish(state, stats, publisher, report, time.time) is None
+                    and report is not None
+                ):
                     report("face: no frame from the source yet")
                 next_publish = max(next_publish + publish_period, clock())
             if newest.ended and frame is None:
