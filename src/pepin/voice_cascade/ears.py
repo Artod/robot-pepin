@@ -56,7 +56,20 @@ class EarEvent:
 
 
 class TurnSegmenter(Segmenter):
-    """The loudness gate, with the end of an utterance callable from outside."""
+    """The loudness gate, with the end of an utterance callable from outside and a floor that
+    never follows the room below ``floor_min_db``."""
+
+    def __init__(self, *, floor_min_db: float = -75.0, **gate: float) -> None:
+        """``gate``: the :class:`pepin.voice_live.wake.Segmenter` thresholds."""
+        super().__init__(**gate)
+        self.floor_min_db = floor_min_db
+        self.floor = max(self.floor, floor_min_db)
+
+    def feed(self, pcm: bytes, now: float) -> Segment | None:
+        """One frame, as the gate; then the floor held at its minimum."""
+        segment = super().feed(pcm, now)
+        self.floor = max(self.floor, self.floor_min_db)
+        return segment
 
     def close(self, ended_s: float) -> Segment | None:
         """End the utterance in progress now (its last voiced frame at ``ended_s``); None when
@@ -83,7 +96,10 @@ class Ears:
         self.playback = playback
         self.turn = turn
         self.gate = TurnSegmenter(
-            start_db=config.start_db, silence_s=config.silence_s, max_s=config.max_utterance_s
+            floor_min_db=config.floor_min_dbfs,
+            start_db=config.start_db,
+            silence_s=config.silence_s,
+            max_s=config.max_utterance_s,
         )
         self._window: deque[bytes] = deque(maxlen=round(config.turn_window_s / FRAME_S))
         self._requests = 0

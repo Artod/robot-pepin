@@ -19,6 +19,8 @@ CONFIG_FILE = "voice_cascade.json"
 WAKE_MODES = ("name", "always")
 THINKING_MODES = ("disabled", "between_tools", "adaptive")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
+PROVIDERS = ("anthropic", "gemini")
+THINKING_LEVELS = ("minimal", "low", "medium", "high")  # Gemini's
 VOICE_ENGINES = ("qwen3", "say")
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
@@ -39,16 +41,23 @@ DEFAULT_PRICES = {
     "claude-haiku-5-5": ModelPrice(0.10, 0.50, 0.01, 0.125),
     "claude-sonnet-5-5": ModelPrice(2.00, 10.00, 0.20, 2.50),
     "claude-opus-5-5": ModelPrice(4.00, 20.00, 0.20, 5.00),
+    # Gemini: implicit caching, no write premium (a cached token is billed at the cached rate)
+    "gemini-3.5-flash-lite": ModelPrice(0.30, 2.50, 0.03, 0.30),
+    "gemini-3.5-flash": ModelPrice(1.50, 9.00, 0.15, 1.50),
+    "gemini-3.8-flash": ModelPrice(0.75, 3.75, 0.075, 0.75),
 }
 
 
 @dataclass(frozen=True)
 class BrainConfig:
-    """The talker: which Claude, how it thinks, its persona, and the prompt cache."""
+    """The talker: whose model, how it thinks, its persona, and the prompt cache."""
 
+    provider: str = "anthropic"
     model: str = "claude-haiku-5-5"
-    thinking: str | None = "disabled"  # None: the parameter is left out (the model's default)
-    effort: str | None = "low"  # None: left out
+    thinking: str | None = "disabled"  # Claude; None: the parameter is left out
+    effort: str | None = "low"  # Claude; None: left out
+    thinking_budget: int | None = None  # Gemini; None: left out
+    thinking_level: str | None = None  # Gemini; None: left out
     max_tokens: int = 400
     persona_file: str = "voice_cascade_persona.md"
     cache: bool = True
@@ -78,6 +87,7 @@ class CascadeConfig:
     silence_s: float = 0.5
     max_utterance_s: float = 15.0
     start_db: float = 10.0
+    floor_min_dbfs: float = -75.0
     turn_model: str | None = None
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
@@ -116,6 +126,7 @@ class CascadeConfig:
     max_session_s: float = 900.0
     report_drive_start: bool = True
     error_line: str = "Извини, у меня сбой связи."  # noqa: RUF001
+    tool_filler: str = "Секунду."
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -142,6 +153,7 @@ class CascadeConfig:
             silence_s=float(ears.get("silence_s", d.silence_s)),
             max_utterance_s=float(ears.get("max_utterance_s", d.max_utterance_s)),
             start_db=float(ears.get("start_db", d.start_db)),
+            floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
             turn_model=ears.get("turn_model") or None,
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
@@ -180,6 +192,7 @@ class CascadeConfig:
             max_session_s=float(conv.get("max_session_s", d.max_session_s)),
             report_drive_start=bool(conv.get("report_drive_start", d.report_drive_start)),
             error_line=str(conv.get("error_line", d.error_line)),
+            tool_filler=str(conv.get("tool_filler", d.tool_filler)),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -202,6 +215,10 @@ class CascadeConfig:
     def check(self) -> None:
         """``ValueError`` when a value cannot work."""
         b = self.brain
+        if b.provider not in PROVIDERS:
+            raise ValueError(f"brain.provider: one of {', '.join(PROVIDERS)}")
+        if b.thinking_level is not None and b.thinking_level not in THINKING_LEVELS:
+            raise ValueError(f"brain.thinking_level: one of {', '.join(THINKING_LEVELS)} or null")
         if self.wake not in WAKE_MODES:
             raise ValueError(f"ears.wake: one of {', '.join(WAKE_MODES)}")
         if b.thinking is not None and b.thinking not in THINKING_MODES:
@@ -254,10 +271,14 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         raise ValueError(f"brain.preset {name!r}: one of {', '.join(presets)}")
     merged = {**(presets.get(name, {}) if name else {}), **section}
     d = BrainConfig()
+    budget = merged.get("thinking_budget", d.thinking_budget)
     return BrainConfig(
+        provider=str(merged.get("provider", d.provider)),
         model=str(merged.get("model", d.model)),
         thinking=merged.get("thinking", d.thinking),
         effort=merged.get("effort", d.effort),
+        thinking_budget=None if budget is None else int(budget),
+        thinking_level=merged.get("thinking_level", d.thinking_level),
         max_tokens=int(merged.get("max_tokens", d.max_tokens)),
         persona_file=str(merged.get("persona_file", d.persona_file)),
         cache=bool(merged.get("cache", d.cache)),
