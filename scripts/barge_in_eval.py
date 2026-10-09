@@ -91,15 +91,17 @@ class Models:
 def truth_of(
     recording: Recording, cache: Path, read: Callable[[], Detailed], fresh: bool
 ) -> dict[int, list[Sound]]:
-    """The recording's truth, from the cache or read now (and cached)."""
+    """The recording's truth, from the cache (when it has every window: a conversation read
+    while it was still being recorded has fewer) or read now (and cached)."""
     path = cache / f"{recording.name}.json"
     if path.exists() and not fresh:
         rows = json.loads(path.read_text())
         truth = {int(turn): [Sound(**s) for s in sounds] for turn, sounds in rows.items()}
-        for w in recording.windows:  # the rule may have changed since the reading
-            for sound in truth.get(w.turn, []):
-                sound.speech = is_speech(sound, w.reply)
-        return truth
+        if all(w.turn in truth for w in recording.windows):
+            for w in recording.windows:  # the rule may have changed since the reading
+                for sound in truth[w.turn]:
+                    sound.speech = is_speech(sound, w.reply)
+            return truth
     truth = ground_truth(recording, read())
     cache.mkdir(parents=True, exist_ok=True)
     rows = {turn: [s.row() for s in sounds] for turn, sounds in truth.items()}
