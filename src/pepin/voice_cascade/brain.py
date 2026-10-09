@@ -199,10 +199,15 @@ class ClaudeBrain:
                 say(rest)
             ms = round((self.clock() - t0) * 1000)
             emit(usage_of(message.usage, self.price, message.stop_reason, ms))
-            self._turn.append({"role": "assistant", "content": message.content})
             uses = [block for block in message.content if block.type == "tool_use"]
             if message.stop_reason != "tool_use" or not uses:
+                # a call cut by max_tokens leaves no tool call to answer; an empty reply (speech
+                # not meant for the robot) leaves no message: the API refuses an empty one
+                kept = [block for block in message.content if block.type != "tool_use"]
+                if kept:
+                    self._turn.append({"role": "assistant", "content": kept})
                 return
+            self._turn.append({"role": "assistant", "content": message.content})
             self._acted = True
             for use in uses:
                 emit(ToolUse(use.id, use.name, dict(use.input or {})))

@@ -194,6 +194,16 @@ def test_a_tool_round_says_its_announcement_first_then_answers_with_the_result()
     assert len(brain.history) == 4 and not brain.acted
 
 
+def test_an_empty_reply_leaves_no_empty_message() -> None:
+    brain, messages = brain_over([([], []), (["Да?"], [])])
+    brain.begin(None)
+    run_turn(brain, "(разговор не с роботом)")
+    brain.commit()
+    run_turn(brain, "Пепин")
+    roles = [m["role"] for m in messages.requests[1]["messages"]]
+    assert roles == ["user", "user"]  # the API joins them into one turn
+
+
 def test_the_round_limit_forbids_more_tools() -> None:
     rounds = [([], [tool_block("t1", "see", {})]), (["Готово."], [])]
     brain, messages = brain_over(rounds, max_tool_rounds=1)
