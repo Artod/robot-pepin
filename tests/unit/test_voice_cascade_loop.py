@@ -19,7 +19,7 @@ from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
-from pepin.voice_cascade.control import Requests, Switchboard, answers_to, write_request
+from pepin.voice_cascade.control import ControlFile, Switchboard, answers_to, write_request
 from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
 from pepin.voice_cascade.loop import CascadeLoop
@@ -169,6 +169,7 @@ def test_only_the_name_opens_and_a_turn_is_timed_and_logged(tmp_path: Path) -> N
         (False, False),
         (False, True),
     ]
+    assert {r["engine"] for r in heard} == {"fake:list"}
     (conversation,) = day.glob("cascade_*/")
     summary = json.loads((conversation / "summary.json").read_text())
     assert summary["turns"] == 1 and summary["close"] == "stopped"
@@ -349,7 +350,7 @@ def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: 
         return BrainSetup(late_brain, config, name, {"where_am_i"}, set(), paid=False)
 
     board = Switchboard(
-        Requests(tmp_path),
+        ControlFile(tmp_path),
         configure=lambda brain, voice: CascadeConfig().with_changes(
             voice=VoiceConfig(preset=voice, engine="say")
         ),

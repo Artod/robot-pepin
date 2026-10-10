@@ -492,6 +492,7 @@ class CascadeLoop:
         read_s = self.clock()
         noise = not text or is_hallucination(text)
         whisper_ms = round((read_s - closed_s) * 1000)
+        engine = getattr(self.transcriber, "name", None)  # the engine in use (switchable)
         voice_db = round(self.ears.voice_peak_db, 1)
         if self.conversation is None:
             woke = not noise and (self.config.wake == "always" or is_wake(text))
@@ -500,7 +501,10 @@ class CascadeLoop:
                 + ("  -> WAKE" if woke else "  (Whisper's noise line)" if noise else ""),
                 flush=True,
             )
-            row = {"t": round(self.wall(), 3), "text": text, "wake": woke, "noise": noise}
+            row = {
+                "t": round(self.wall(), 3), "text": text, "wake": woke, "noise": noise,
+                "whisper_ms": whisper_ms, "engine": engine,
+            }  # fmt: skip
             append_line(day_dir(self.logs, self.wall()) / "cascade_heard.jsonl", row)
             if not woke or not self.open(segment.pcm):
                 return
@@ -508,7 +512,7 @@ class CascadeLoop:
         assert conversation is not None
         conversation.log.event(
             "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms, early=early is not None,
-            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db,
+            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db, engine=engine,
         )  # fmt: skip
         if noise:
             self.hold_next = False
@@ -892,7 +896,7 @@ class CascadeLoop:
             now = self.clock()
             conversation = self.conversation
             if self.switchboard is not None:
-                request = self.switchboard.requests.poll()
+                request = self.switchboard.control.poll()
                 if request is not None:
                     self._switch(request)
             if cfg.brain.keep_warm_s > 0 and now - self.last_call_s > cfg.brain.keep_warm_s:
@@ -937,12 +941,17 @@ class CascadeLoop:
 
     def _switch(self, request: Request) -> None:
         """A request from the control file: each part built in the background, then swapped
-        in (the brain at the next turn, the voice at its next sentence)."""
-        print(f"  (switch asked: brain {request.brain}, voice {request.voice})", flush=True)
+        in (the brain at the next turn, the voice at its next sentence, the transcriber
+        between utterances)."""
+        asked = (("brain", request.brain), ("voice", request.voice),
+                 ("transcriber", request.transcriber))  # fmt: skip
+        print("  (switch asked: " + ", ".join(f"{k} {v}" for k, v in asked if v) + ")", flush=True)
         if request.brain:
             self._spawn(self._switch_brain(request.id, request.brain))
         if request.voice:
             self._switch_voice(request.id, request.voice)
+        if request.transcriber and self.switchboard is not None:
+            self.switchboard.switch_transcriber(request.id, request.transcriber)
 
     async def _switch_brain(self, request: str, name: str) -> None:
         board = self.switchboard

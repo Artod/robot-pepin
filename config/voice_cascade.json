@@ -17,11 +17,21 @@
     "note": "with ears.turn_model smart-turn-v3.2 (pipecat-ai/smart-turn-v3, smart-turn-v3.2-cpu.onnx: 8 MB int8 ONNX on the CPU, BSD-2-Clause, 23 languages with Russian at 93.5 % on its own benchmark; ~9 ms a call here): at min_silence_s of quiet inside an utterance the model reads its last window_s seconds (zeros in front, as it was trained) on a worker thread, and the utterance closes when it says p >= threshold (0.85: at 0.5 it cut 'сегодня день.' live at p 0.97, and at either it fires in most 0.25 s mid-sentence pauses, which the continuation merge joins back); otherwise ears.silence_s closes it as before. Every turn logs p, the model's own ms and the time saved against the fixed silence"
   },
   "transcriber": {
-    "whisper_repo": "mlx-community/whisper-large-v3-turbo",
+    "engine": "mlx",
+    "mlx": {
+      "model": "mlx-community/whisper-large-v3-turbo"
+    },
+    "whispercpp": {
+      "model": "large-v3-turbo",
+      "dir": "scratch/whisper_cpp",
+      "threads": 4,
+      "gpu": false,
+      "coreml_units": "ane"
+    },
     "language": "ru",
     "initial_prompt": null,
     "early_s": 0.15,
-    "note": "Whisper turbo on the Mac's GPU, ~0.26 s a phrase; Russian forced. early_s: Whisper starts on an utterance at this much quiet inside it, while the end-of-turn silence is still running, so its words are ready when the utterance closes (0: only after the close). A call costs ~230 ms whatever the length (the 30 s encoder window: 0.5 s of audio 233 ms, 5 s 299 ms, 8 s 326 ms on the M5, 2026-10-09), so decoding only the tail would not get under it; a pause the person talks through wastes one call. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
+    "note": "Whisper large-v3-turbo, Russian forced. engine mlx: on the Mac's GPU (mlx-whisper); whispercpp: whisper.cpp's server with the encoder on the Neural Engine through CoreML and the decoder on the CPU (pepin.voice_live.whisper_cpp; whispercpp.dir holds bin/whisper-server and models/ggml-<model>.bin beside its -encoder.mlmodelc). 2026-10-09, 15 of Artem's cuts x3 on the M5 Pro (scratch/whisper_ane/bench.py), p50 ms quiet / 12 busy CPU cores / a GPU matmul loop: mlx turbo 174 / 185 / 565, whispercpp turbo 435 / 578 / 445, whispercpp large-v3 842 / 1789 / 976; the GPU runs the 32-layer encoder 2.5x faster than the Neural Engine, so mlx stays the default and whispercpp is the engine for a busy GPU (the voice, the depth and localisation nets), using 0.5 core and no GPU. Words against mlx: turbo 6 edits in 92 words, large-v3 3, the wake name found alike. One run: --set transcriber.engine=whispercpp (whispercpp.model large-v3 for the slower large model); while running: the key transcriber of data/voice/control.json ('mlx', 'whispercpp', 'whispercpp:large-v3' or {engine, model}), acted on when the file changes, the new engine loaded beside the old one and swapped between utterances. coreml_units: ane (CPU and Neural Engine), all (CoreML picks the GPU here: 236 ms), gpu, cpu (912 ms); gpu: the decoder on Metal. The first start of an encoder compiles it for the Neural Engine (34 s turbo, 27 s large-v3, once; then 1-3 s). early_s: Whisper starts on an utterance at this much quiet inside it, while the end-of-turn silence is still running, so its words are ready when the utterance closes (0: only after the close). A call costs ~230 ms whatever the length (the 30 s encoder window: 0.5 s of audio 233 ms, 5 s 299 ms, 8 s 326 ms on the M5, 2026-10-09), so decoding only the tail would not get under it; a pause the person talks through wastes one call. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
   },
   "brain": {
     "preset": "haiku",

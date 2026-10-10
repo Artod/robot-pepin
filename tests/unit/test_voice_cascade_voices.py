@@ -5,6 +5,7 @@ control file of a switch."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
+import json
 import threading
 import time
 from collections.abc import Iterator
@@ -15,13 +16,26 @@ from typing import Any
 import pytest
 
 from pepin.audio_link import RATE
-from pepin.voice_cascade.config import DEFAULT_PRICES
-from pepin.voice_cascade.control import Request, Requests, answer, answers_to, write_request
+from pepin.voice_cascade.config import DEFAULT_PRICES, CascadeConfig
+from pepin.voice_cascade.control import (
+    ControlFile,
+    Request,
+    Switchboard,
+    answer,
+    answers_to,
+    write_request,
+)
 from pepin.voice_cascade.fake import ToneVoice
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import Billed, VoiceBill
 from pepin.voice_cascade.text import speakable, split_style
+from pepin.voice_cascade.transcriber import (
+    Choice,
+    SwitchingTranscriber,
+    configured,
+    wanted_from,
+)
 from pepin.voice_cascade.voice import QwenVoice, instruction
 
 pytest.importorskip("google.genai.types")
@@ -29,6 +43,7 @@ pytest.importorskip("google.genai.types")
 from pepin.voice_cascade.gemini_voice import RETRY_S, GeminiVoice, rate_of
 
 LITE = DEFAULT_PRICES["gemini-3.8-flash-lite-tts"]
+CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
 
 
 # -- the style marker -----------------------------------------------------------------------
@@ -272,18 +287,69 @@ def test_a_new_voice_loads_beside_the_one_speaking_and_takes_the_next_sentence()
 
 def test_a_switch_request_is_handed_out_once_and_an_old_one_never(tmp_path: Path) -> None:
     old = write_request(tmp_path, "sonnet", None)
-    requests = Requests(tmp_path)
-    assert requests.poll() is None  # an earlier run's request
+    control = ControlFile(tmp_path)
+    assert control.poll() is None  # an earlier run's request
     time.sleep(0.01)
-    new = write_request(tmp_path, None, "gemini-lite")
-    got = requests.poll()
-    assert got == Request(new.id, None, "gemini-lite") and got.id != old.id
-    assert requests.poll() is None
+    new = write_request(tmp_path, None, "gemini-lite", "whispercpp")
+    got = control.poll()
+    assert got == Request(new.id, None, "gemini-lite", "whispercpp") and got.id != old.id
+    assert control.poll() is None
+    assert control.latest("transcriber") == "whispercpp" and control.latest("brain") is None
+    time.sleep(0.01)
+    (tmp_path / "control.json").write_text(json.dumps({"voice_preset": "qwen3-vd"}))  # by hand
+    by_hand = control.poll()
+    assert by_hand is not None and by_hand.voice == "qwen3-vd" and by_hand.id.startswith("file-")
+    assert control.latest("transcriber") == "whispercpp"  # left out: unchanged
     answer(tmp_path, new.id, "voice", "gemini-lite", "loading")
     answer(tmp_path, old.id, "brain", "sonnet", "applied")
     answer(tmp_path, new.id, "voice", "gemini-lite", "applied", ms=900)
     rows = answers_to(tmp_path, new.id)
     assert [r["state"] for r in rows] == ["loading", "applied"] and rows[1]["ms"] == 900
-    assert Request.from_dict({"id": "x", "voice_preset": "qwen3-vd", "voice": "say"}).voice == (
-        "qwen3-vd"
-    )
+
+
+class Engine:
+    """A transcriber engine that answers with its own name."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def transcribe(self, pcm: bytes) -> str:
+        return self.name
+
+
+def test_the_transcriber_key_loads_the_engine_and_answers_its_outcome(tmp_path: Path) -> None:
+    config = CascadeConfig.load(CONFIG)
+    control = ControlFile(tmp_path)
+    built: list[Choice] = []
+
+    def build(choice: Choice) -> Engine:
+        if choice.model == "missing":
+            raise FileNotFoundError("ggml-missing.bin")
+        built.append(choice)
+        return Engine(choice.label)
+
+    switching = SwitchingTranscriber(
+        Engine("mlx"), configured(config), build, wanted_from(control, config),
+        report=lambda line: None, spawn=lambda work: work(),
+    )  # fmt: skip
+    board = Switchboard(
+        control, configure=lambda b, v: config, build_brain=lambda c, n: None,  # type: ignore[arg-type,return-value]
+        build_voice=lambda v: ToneVoice(), brain="haiku", voice="qwen3-0.6b",
+        transcriber=switching,
+    )  # fmt: skip
+
+    def ask(value: str) -> list[str]:
+        time.sleep(0.01)
+        request = write_request(tmp_path, None, None, value)
+        got = control.poll()
+        assert got is not None and got.transcriber == value
+        board.switch_transcriber(got.id, got.transcriber)
+        return [f"{r['name']} {r['state']}" for r in answers_to(tmp_path, request.id)]
+
+    assert ask("whispercpp") == ["whispercpp:large-v3-turbo loading",
+                                 "whispercpp:large-v3-turbo applied"]  # fmt: skip
+    assert switching.transcribe(b"") == "whispercpp:large-v3-turbo"
+    assert ask("whispercpp") == ["whispercpp:large-v3-turbo applied"]  # already in use
+    assert ask("whispercpp:missing") == ["whispercpp:missing loading", "whispercpp:missing failed"]
+    assert ask("whispercpp:missing")[-1] == "whispercpp:missing failed"  # not tried again
+    assert ask("vosk") == ["vosk failed"] and len(built) == 1

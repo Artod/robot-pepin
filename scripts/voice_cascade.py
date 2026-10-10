@@ -15,12 +15,15 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
     uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
+    uv run python scripts/voice_cascade.py --set transcriber.engine=whispercpp  # Neural Engine
     uv run python scripts/voice_cascade.py --voice gemini-lite   # Gemini TTS (GEMINI_API_KEY)
 
-Switch the brain or the voice of the running loop (from another terminal; it answers within a
-second for a brain, after the model loads for a voice; the loop's answers are printed):
+Switch the brain, the voice or the speech-to-text engine of the running loop (from another
+terminal; it writes data/voice/control.json and prints the loop's answers: a brain is ready in
+about a second, a voice once its model has loaded, a transcriber between utterances):
 
     uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
+    uv run python scripts/voice_cascade.py switch --transcriber whispercpp
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -57,7 +60,7 @@ from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import CONFIG_FILE, CascadeConfig, voice_preset
 from pepin.voice_cascade.control import (
     DONE_STATES,
-    Requests,
+    ControlFile,
     Switchboard,
     answers_to,
     write_request,
@@ -73,15 +76,22 @@ from pepin.voice_cascade.engines import (
 from pepin.voice_cascade.loop import CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import Tagger
+from pepin.voice_cascade.stages import Tagger, Transcriber
 from pepin.voice_cascade.tagger import ProsodyTagger, emotion_model
 from pepin.voice_cascade.timeline import report
+from pepin.voice_cascade.transcriber import (
+    Choice,
+    SwitchingTranscriber,
+    build_transcriber,
+    choice_of,
+    configured,
+    wanted_from,
+)
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
 from pepin.voice_live.events import Events, StatePrinter
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker, synthesize
-from pepin.voice_live.wake import MlxWhisper
 
 REPO = Path(__file__).resolve().parents[1]
 FAKE_ACCEPT_S = 0.3  # a fake drive is taken this long after the go
@@ -117,19 +127,21 @@ def ledger_for(config: CascadeConfig, path: Path) -> Ledger:
 
 
 def switch(argv: list[str]) -> int:
-    """``switch --brain X --voice Y``: ask the running loop for a switch and print its answers
-    until each part is applied or has failed."""
+    """``switch --brain X --voice Y --transcriber Z``: ask the running loop for a switch and
+    print its answers until each part is applied or has failed."""
     ap = argparse.ArgumentParser(
-        prog="voice_cascade.py switch", description="switch the running loop's brain or voice"
+        prog="voice_cascade.py switch",
+        description="switch the running loop's brain, voice or speech-to-text engine",
     )
     ap.add_argument("--brain", help="a brain preset, or echo")
     ap.add_argument("--voice", help="a voice preset (or an engine's name: qwen3, gemini, say)")
+    ap.add_argument("--transcriber", help="mlx, whispercpp or engine:model (whispercpp:large-v3)")
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
     ap.add_argument("--wait-s", type=float, default=SWITCH_WAIT_S)
     args = ap.parse_args(argv)
-    if not (args.brain or args.voice):
-        ap.error("--brain, --voice or both")
+    if not (args.brain or args.voice or args.transcriber):
+        ap.error("--brain, --voice, --transcriber, or several")
     data = json.loads((args.config or config_file(CONFIG_FILE)).read_text())
     brains = [*data.get("brain", {}).get("presets", {}), ECHO]
     if args.brain and args.brain not in brains:
@@ -141,9 +153,17 @@ def switch(argv: list[str]) -> int:
         except ValueError as error:
             print(error)
             return 2
-    request = write_request(args.logs, args.brain, args.voice)
-    print(f"asked ({request.id}): brain {args.brain}, voice {args.voice}", flush=True)
-    parts = {what for what, name in (("brain", args.brain), ("voice", args.voice)) if name}
+    if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
+        print(f"transcriber {args.transcriber!r}: mlx, whispercpp or engine:model")
+        return 2
+    request = write_request(args.logs, args.brain, args.voice, args.transcriber)
+    print(
+        f"asked ({request.id}): brain {args.brain}, voice {args.voice},"
+        f" transcriber {args.transcriber}",
+        flush=True,
+    )
+    asked = (("brain", args.brain), ("voice", args.voice), ("transcriber", args.transcriber))
+    parts = {what for what, name in asked if name}
     deadline = time.monotonic() + args.wait_s
     shown = 0
     failed = False
@@ -299,9 +319,22 @@ def main() -> int:
     )
     clips = tuple(line for line in clips if line)
     speech = SpeechWorker(voice, player, clips=clips)
-    print(f"loading the voice ({config.voice.name}) and Whisper ({config.whisper_repo})...")
+    choice = configured(config)
+    print(f"loading the voice ({config.voice.name}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile
-    whisper = MlxWhisper(config.whisper_repo, config.language, config.whisper_prompt)
+    server_log = args.logs / "whisper_server.log"
+
+    def load_transcriber(chosen: Choice) -> Transcriber:
+        return build_transcriber(config, chosen, main_checkout(), log=server_log)
+
+    control = ControlFile(args.logs)  # the one reader of control.json; the loop polls it
+    transcriber = SwitchingTranscriber(
+        load_transcriber(choice),
+        choice,
+        load_transcriber,
+        wanted_from(control, config),
+        report=lambda line: print(line, flush=True),
+    )
     turn: TurnWorker | None = None
     if config.turn_model is not None:
         print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
@@ -335,19 +368,20 @@ def main() -> int:
         mic = link or BoardLink(args.host)
 
     switchboard = Switchboard(
-        Requests(args.logs),
+        control,
         configure=lambda brain, voice: configure(brain, voice),
         build_brain=make_brain,
         build_voice=shop.voice,
         brain=setup.name,
         voice=config.voice.name,
         keep_voice=shop.keep,
+        transcriber=transcriber,
     )
     loop = CascadeLoop(
         config,
         mic=mic,
         player=player,
-        transcriber=whisper,
+        transcriber=transcriber,
         tagger=tagger,
         brain=brain,
         speech=speech,
@@ -382,6 +416,7 @@ def main() -> int:
         speech.close()
         if turn is not None:
             turn.close()
+        transcriber.close()  # whisper.cpp's server, when that engine is in use
         if face is not None:
             face.close()
         for closable in (mic, speaker):

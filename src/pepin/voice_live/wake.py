@@ -4,7 +4,9 @@ matched for the robot's name (open) or a goodbye (close).
 Nothing reaches the Live API until :func:`is_wake` accepts a local transcript: a segment of room
 audio (:class:`Segmenter`) goes to Whisper on the Mac's GPU (:class:`MlxWhisper`, mlx-whisper),
 and only a transcript holding "Пепин" (or what Whisper makes of it: Пепен, Пипин, Pepin) opens
-the session. Inside a session the goodbye is read from Live's own input transcription
+the session (:class:`pepin.voice_live.whisper_cpp.WhisperCppTranscriber` reads the same way with
+its encoder on the Neural Engine). Inside a session the goodbye is read from Live's own input
+transcription
 (:func:`is_goodbye`); Whisper runs while the robot is idle, and while it drives, when the mic is
 withheld from Live and only speech naming the robot or saying stop (:func:`is_stop`) reaches it.
 Whisper's hallucinations on room noise — the closing lines of the subtitled videos it learned
@@ -25,6 +27,7 @@ from pepin.audio_link import FRAME_SAMPLES, RATE
 _WAKE_CYRILLIC = re.compile("п[еэиы]п{1,2}[еэиы]н[\u0430-\u044f]{0,3}")
 _WAKE_LATIN = re.compile("p[eiy]pp?[eiy]n[a-z]{0,2}")
 _WORD = re.compile("[a-z\u0430-\u044f]+")
+_SPACES = re.compile(r"\s+")
 _NAME_CORES = ("пепин", "пипин", "пепен")
 _NAME_ENDINGS = ("пин", "пен")
 # real words, and what Whisper makes of them (Репин -> Крепин)
@@ -70,6 +73,12 @@ _FAREWELL_FILLERS = frozenset(
 def words(text: str) -> list[str]:
     """Lower-case words of ``text``, the letter yo read as ie, punctuation dropped."""
     return _WORD.findall(text.lower().replace("\u0451", "\u0435"))
+
+
+def clean_transcript(text: str) -> str:
+    """A transcript as every engine hands it on: one line, single spaces, no padding (whisper.cpp
+    starts each segment with a space and ends it with a newline; MLX joins them with spaces)."""
+    return _SPACES.sub(" ", text).strip()
 
 
 def is_name(word: str) -> bool:
@@ -216,7 +225,7 @@ class Segmenter:
 
 
 class Transcriber(Protocol):
-    """Speech to text on the Mac."""
+    """Speech to text on the Mac; every engine's text goes through :func:`clean_transcript`."""
 
     def transcribe(self, pcm: bytes) -> str:
         """The words in 16 kHz s16le mono ``pcm``."""
@@ -239,6 +248,7 @@ class MlxWhisper:
         import mlx_whisper  # lazy: macOS-only, and the unit tests never load a model
         import numpy as np
 
+        self.name = f"mlx:{repo.rsplit('/', 1)[-1]}"
         self._np = np
         self._transcribe: Callable[..., dict[str, Any]] = mlx_whisper.transcribe
         self._kwargs = {"path_or_hf_repo": repo, "language": language}
@@ -249,4 +259,4 @@ class MlxWhisper:
     def transcribe(self, pcm: bytes) -> str:
         """The words in ``pcm``."""
         audio = self._np.frombuffer(pcm, dtype=self._np.int16).astype(self._np.float32) / 32768
-        return str(self._transcribe(audio, **self._kwargs).get("text", "")).strip()
+        return clean_transcript(str(self._transcribe(audio, **self._kwargs).get("text", "")))
