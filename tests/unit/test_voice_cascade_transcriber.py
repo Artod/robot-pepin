@@ -10,14 +10,15 @@ from pathlib import Path
 import pytest
 
 from pepin.voice_cascade.config import CascadeConfig
+from pepin.voice_cascade.control import ControlFile
 from pepin.voice_cascade.stages import Transcriber
 from pepin.voice_cascade.transcriber import (
     Choice,
-    ControlFile,
     SwitchingTranscriber,
     build_transcriber,
     choice_of,
     configured,
+    wanted_from,
 )
 
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
@@ -76,18 +77,24 @@ def test_the_control_file_counts_only_after_it_changes(tmp_path: Path) -> None:
     config = CascadeConfig.load(CONFIG)
     path = tmp_path / "control.json"
     path.write_text(json.dumps({"transcriber": "whispercpp", "voice": "say"}))
-    control = ControlFile(path, config)
-    assert control() is None  # left from an earlier run: this run's config wins
+    control = ControlFile(tmp_path)  # the one reader; the loop polls it
+    wanted = wanted_from(control, config)
+    assert control.poll() is None and wanted() is None  # an earlier run's: the config wins
     path.write_text(json.dumps({"voice": "qwen3", "transcriber": "whispercpp:large-v3"}))
     os.utime(path, ns=(1, 2_000_000_000))
-    assert control() == Choice("whispercpp", "large-v3")
+    request = control.poll()
+    assert request is not None and request.transcriber == "whispercpp:large-v3"
+    assert wanted() == Choice("whispercpp", "large-v3")
     path.write_text("{ half written")
     os.utime(path, ns=(1, 3_000_000_000))
-    assert control() == Choice("whispercpp", "large-v3")  # the last good choice
+    assert control.poll() is None
+    assert wanted() == Choice("whispercpp", "large-v3")  # the last good choice
     path.write_text(json.dumps({"voice": "say"}))
     os.utime(path, ns=(1, 4_000_000_000))
-    assert control() == Choice("whispercpp", "large-v3")  # no transcriber key: no change
-    assert ControlFile(tmp_path / "absent.json", config)() is None
+    assert control.poll() is not None
+    assert wanted() == Choice("whispercpp", "large-v3")  # no transcriber key: no change
+    absent = ControlFile(tmp_path / "absent")
+    assert absent.poll() is None and wanted_from(absent, config)() is None
 
 
 def test_the_engine_is_swapped_between_utterances_and_the_old_one_closed() -> None:
@@ -142,14 +149,17 @@ def test_an_engine_that_fails_to_load_is_reported_once_and_the_old_one_kept() ->
         calls.append(choice)
         raise FileNotFoundError("ggml-large-v3.bin")
 
+    outcomes: list[tuple[Choice, BaseException | None]] = []
     switch = SwitchingTranscriber(
         first, Choice("mlx", "a"), broken, lambda: Choice("whispercpp", "large-v3"),
-        report=lines.append, spawn=now,
+        report=lines.append, spawn=now, on_loaded=lambda c, e: outcomes.append((c, e)),
     )  # fmt: skip
     switch.poll()
     switch.poll()
     assert len(calls) == 1 and switch.transcribe(b"") == "first" and not first.closed
     assert "failed to load" in lines[0] and "keeping mlx:a" in lines[0]
+    assert switch.failed == Choice("whispercpp", "large-v3")
+    assert len(outcomes) == 1 and isinstance(outcomes[0][1], FileNotFoundError)
 
 
 def test_a_whispercpp_build_without_its_files_names_the_missing_one(tmp_path: Path) -> None:

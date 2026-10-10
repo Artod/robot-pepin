@@ -125,4 +125,14 @@ def report(turns: Sequence[Mapping[str, Any]]) -> list[str]:
         lines += histogram(cents, ["usd_cents"], digits=4)[1:]
         total = sum(u["usd"] for u in usage)
         lines.append(f"total {total * 100:.3f} US cents over {len(usage)} turns")
+    bills = [b for t in turns for b in t.get("voice_bills", [])]
+    if bills:
+        stood_in = sum(1 for b in bills if b.get("fallback"))
+        calls = sum(int(b.get("calls", 0)) for b in bills)
+        cents = [{"usd_cents": b["usd"] * 100} for b in bills]
+        lines += ["", f"paid voice per sentence ({len(bills)}: {calls} calls, {stood_in} said"
+                  " by the fallback; first audio after the call, ms; US cents):"]  # fmt: skip
+        lines += histogram([b for b in bills if b.get("calls")], ["first_audio_ms"])
+        lines += histogram(cents, ["usd_cents"], digits=4)[1:]
+        lines.append(f"total {sum(b['usd'] for b in bills) * 100:.3f} US cents for the voice")
     return lines

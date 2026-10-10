@@ -3,7 +3,8 @@
 The file is read into :class:`CascadeConfig`; ``--set section.key=value`` on the command line
 patches the file's object before it is read (:func:`apply_overrides`), so any number or flag is
 switched for one run without an edit. ``brain.preset`` picks a named group of brain settings
-(model, thinking mode, effort) from ``brain.presets``; keys given beside it win.
+(model, thinking mode, effort) from ``brain.presets``, ``voice.preset`` one of voice settings
+(engine, model, speaker) from ``voice.presets``; keys given beside a preset win.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROVIDERS = ("anthropic", "gemini", "openai")  # openai: any OpenAI-compatible endpoint (Groq)
 TOOL_CHOICES = ("auto", "required")
 THINKING_LEVELS = ("minimal", "low", "medium", "high")  # Gemini's
-VOICE_ENGINES = ("qwen3", "say")
+VOICE_ENGINES = ("qwen3", "gemini", "say")  # gemini: a cloud voice with a local fallback
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
@@ -54,6 +55,9 @@ DEFAULT_PRICES = {
     # Groq (no caching)
     "openai/gpt-oss-120b": ModelPrice(0.15, 0.60, 0.15, 0.15),
     "qwen/qwen3.8-27b": ModelPrice(0.80, 4.00, 0.80, 0.80),
+    # Gemini TTS: text in, audio out (25 audio tokens a second); no cache
+    "gemini-3.8-flash-lite-tts": ModelPrice(0.50, 6.00, 0.50, 0.50),
+    "gemini-3.8-flash-tts": ModelPrice(0.50, 9.00, 0.50, 0.50),
 }
 
 
@@ -63,6 +67,7 @@ class BrainConfig:
 
     provider: str = "anthropic"
     model: str = "claude-haiku-5-5"
+    preset: str | None = None  # the name it was built from
     thinking: str | None = "disabled"  # Claude; None: the parameter is left out
     effort: str | None = "low"  # Claude; None: left out
     thinking_budget: int | None = None  # Gemini; None: left out
@@ -81,6 +86,33 @@ class BrainConfig:
     keep_warm_s: float = 270.0  # 0: never refreshed while idle
     max_tool_rounds: int = 4
     timeout_s: float = 20.0
+
+
+@dataclass(frozen=True)
+class VoiceConfig:
+    """The voice: its engine and model, the speaker, whether the brain's style reaches it, and,
+    for a cloud voice, its timeout and the local voice that speaks when the cloud does not."""
+
+    preset: str | None = None  # the name it was built from
+    engine: str = "qwen3"
+    model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
+    voice: str | None = "serena"  # a Qwen speaker or a Gemini voice; None for VoiceDesign
+    voice_description: str | None = None  # Qwen VoiceDesign: the voice in words
+    use_style: bool = False  # the brain's style reaches the engine (Qwen 1.7B instruct, Gemini)
+    seed: int | None = None  # Qwen: the sampler seeded before each sentence (None: not)
+    language: str = "russian"
+    chunk_s: float = 0.2
+    hf_home: str | None = "scratch/tts_voices/hf"
+    cloud_timeout_s: float = 2.0  # Gemini: no audio this long after the call -> the fallback
+    cloud_max_calls: int | None = None  # Gemini: calls a run may make (None: no cap)
+    fallback: VoiceConfig | None = None  # Gemini: the local voice when the call fails
+    say_voice: str = "Milena"
+    say_rate_wpm: int = 185
+
+    @property
+    def name(self) -> str:
+        """The preset's name, or the engine's when it was built from none."""
+        return self.preset or self.engine
 
 
 @dataclass(frozen=True)
@@ -123,15 +155,8 @@ class CascadeConfig:
     # brain
     brain: BrainConfig = field(default_factory=BrainConfig)
     # voice
-    voice_engine: str = "qwen3"
-    tts_model: str = "mlx-community/Qwen3-TTS-12Hz-0.6B-CustomVoice-8bit"
-    tts_voice: str = "serena"
-    tts_language: str = "russian"
-    tts_chunk_s: float = 0.2
-    tts_hf_home: str | None = "scratch/tts_voices/hf"
+    voice: VoiceConfig = field(default_factory=VoiceConfig)
     openers: tuple[str, ...] = ("Секунду.", "Сейчас гляну.", "Да?", "Слушаю.", "Понял.", "Хорошо.")
-    say_voice: str = "Milena"
-    say_rate_wpm: int = 185
     # player
     playback_lead_s: float = 0.5
     playback_block_s: float = 0.04
@@ -209,15 +234,8 @@ class CascadeConfig:
             whisper_prompt=tr.get("initial_prompt") or None,
             early_s=float(tr.get("early_s", d.early_s)),
             brain=brain_config(data.get("brain", {})),
-            voice_engine=str(voice.get("engine", d.voice_engine)),
-            tts_model=str(voice.get("model", d.tts_model)),
-            tts_voice=str(voice.get("voice", d.tts_voice)),
-            tts_language=str(voice.get("language", d.tts_language)),
-            tts_chunk_s=float(voice.get("chunk_s", d.tts_chunk_s)),
-            tts_hf_home=voice.get("hf_home", d.tts_hf_home) or None,
+            voice=voice_config(voice),
             openers=tuple(str(x) for x in voice.get("openers", d.openers)),
-            say_voice=str(voice.get("say_voice", d.say_voice)),
-            say_rate_wpm=int(voice.get("say_rate_wpm", d.say_rate_wpm)),
             playback_lead_s=float(player.get("lead_s", d.playback_lead_s)),
             playback_block_s=float(player.get("block_s", d.playback_block_s)),
             barge_in=bool(flags.get("barge_in", d.barge_in)),
@@ -291,8 +309,7 @@ class CascadeConfig:
             raise ValueError(f"brain.effort: one of {', '.join(EFFORTS)} or null")
         if b.max_tokens < 16 or b.max_tool_rounds < 0:
             raise ValueError("brain.max_tokens >= 16 and brain.max_tool_rounds >= 0")
-        if self.voice_engine not in VOICE_ENGINES:
-            raise ValueError(f"voice.engine: one of {', '.join(VOICE_ENGINES)}")
+        self.check_voice(self.voice)
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
         if self.turn_model is not None and self.turn_model not in TURN_MODELS:
@@ -325,6 +342,22 @@ class CascadeConfig:
         if b.model not in self.prices:
             raise ValueError(f"no price for {b.model}: add it to money.prices_usd_per_mtok")
 
+    def check_voice(self, v: VoiceConfig) -> None:
+        """``ValueError`` when the voice (or its fallback) cannot work."""
+        if v.engine not in VOICE_ENGINES:
+            raise ValueError(f"voice.engine: one of {', '.join(VOICE_ENGINES)}")
+        if v.cloud_timeout_s <= 0 or v.chunk_s <= 0:
+            raise ValueError("voice.cloud_timeout_s > 0 and voice.chunk_s > 0")
+        if v.engine == "gemini":
+            if v.model not in self.prices:
+                raise ValueError(f"no price for {v.model}: add it to money.prices_usd_per_mtok")
+            if not v.voice:
+                raise ValueError("voice.voice: a Gemini voice name (Kore)")
+        if v.fallback is not None:
+            if v.fallback.engine == "gemini":
+                raise ValueError("voice.fallback: a local voice (a qwen3 or say preset)")
+            self.check_voice(v.fallback)
+
     def with_changes(self, **changes: Any) -> CascadeConfig:
         """A copy with the given fields replaced (None leaves a field alone), checked again."""
         config = replace(self, **{k: v for k, v in changes.items() if v is not None})
@@ -355,6 +388,7 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
     return BrainConfig(
         provider=str(merged.get("provider", d.provider)),
         model=str(merged.get("model", d.model)),
+        preset=name,
         thinking=merged.get("thinking", d.thinking),
         effort=merged.get("effort", d.effort),
         thinking_budget=None if budget is None else int(budget),
@@ -373,6 +407,58 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         keep_warm_s=float(merged.get("keep_warm_s", d.keep_warm_s)),
         max_tool_rounds=int(merged.get("max_tool_rounds", d.max_tool_rounds)),
         timeout_s=float(merged.get("timeout_s", d.timeout_s)),
+    )
+
+
+def voice_preset(section: Mapping[str, Any], name: str) -> str:
+    """The preset ``name`` stands for: one of ``voice.presets``, or an engine's name (that
+    engine's first preset in the file); ``ValueError`` for neither."""
+    presets = section.get("presets", {})
+    if name in presets:
+        return name
+    for preset, body in presets.items():
+        if isinstance(body, Mapping) and body.get("engine") == name:
+            return str(preset)
+    raise ValueError(f"voice {name!r}: one of {', '.join(presets)} (or an engine's name)")
+
+
+def voice_config(
+    section: Mapping[str, Any], name: str | None = None, *, stand_in: bool = False
+) -> VoiceConfig:
+    """The voice's settings: preset ``name`` (default: ``voice.preset``), overridden by the keys
+    beside it; a cloud voice's ``fallback`` names the local preset that stands in for it (a
+    ``stand_in`` has none of its own)."""
+    if name is None:
+        name = section.get("preset")
+    if name is not None:
+        name = voice_preset(section, str(name))
+    beside = {k: v for k, v in section.items() if k not in ("preset", "presets", "note")}
+    merged = {**(section.get("presets", {}).get(name, {}) if name else {}), **beside}
+    d = VoiceConfig()
+    engine = str(merged.get("engine", d.engine))
+    fallback = merged.get("fallback")
+    seed = merged.get("seed", d.seed)
+    cap = merged.get("cloud_max_calls", d.cloud_max_calls)
+    return VoiceConfig(
+        preset=name,
+        engine=engine,
+        model=str(merged.get("model", d.model)),
+        voice=merged.get("voice", d.voice) or None,
+        voice_description=merged.get("voice_description") or None,
+        use_style=bool(merged.get("use_style", d.use_style)),
+        seed=None if seed is None else int(seed),
+        language=str(merged.get("language", d.language)),
+        chunk_s=float(merged.get("chunk_s", d.chunk_s)),
+        hf_home=merged.get("hf_home", d.hf_home) or None,
+        cloud_timeout_s=float(merged.get("cloud_timeout_s", d.cloud_timeout_s)),
+        cloud_max_calls=None if cap is None else int(cap),
+        fallback=(
+            voice_config(section, str(fallback), stand_in=True)
+            if engine == "gemini" and fallback and not stand_in
+            else None
+        ),
+        say_voice=str(merged.get("say_voice", d.say_voice)),
+        say_rate_wpm=int(merged.get("say_rate_wpm", d.say_rate_wpm)),
     )
 
 

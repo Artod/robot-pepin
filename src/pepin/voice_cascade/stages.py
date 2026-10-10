@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
-from typing import Any, Protocol
+from typing import Any, Protocol, runtime_checkable
 
 from pepin.tools.registry import Result
 
@@ -58,11 +58,35 @@ class Voice(Protocol):
     rate: int  # Hz of the PCM it yields
 
     def load(self) -> None:
-        """Load and warm up, on the thread that will synthesise (MLX keeps per-thread state)."""
+        """Load and warm up (a second call does nothing)."""
         ...
 
-    def stream(self, text: str) -> Iterator[bytes]:
-        """``text`` spoken as s16le mono chunks at :attr:`rate`, each yielded when ready."""
+    def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+        """``text`` spoken as s16le mono chunks at :attr:`rate`, each yielded when ready;
+        ``style`` ("шёпотом", "грустно") says how, and a voice that cannot do it ignores it."""
+        ...
+
+
+@dataclass(frozen=True)
+class VoiceBill:
+    """One sentence of a voice that pays per call: who said it, how soon, at what price."""
+
+    engine: str  # the model that spoke (the fallback's name when it stood in)
+    first_audio_ms: int | None = None  # the call's start to its first audio
+    usd: float = 0.0
+    text_tokens: int = 0
+    audio_tokens: int = 0
+    calls: int = 0  # cloud calls made (0: served from the cache or by the fallback alone)
+    fallback: str | None = None  # why the local voice spoke instead (None: it did not)
+
+
+@runtime_checkable
+class Billed(Protocol):
+    """A voice that pays per sentence (a cloud voice): no clips are made with it at load (each
+    would be a call), and each sentence leaves a bill."""
+
+    def bill(self) -> VoiceBill | None:
+        """The bill of the sentence last streamed to its end (or cut), taken once."""
         ...
 
 

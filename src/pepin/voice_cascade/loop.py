@@ -12,7 +12,14 @@ robot before the brain hears it. A conversation closes after ``idle_close_s`` of
 goodbye, on ``end_conversation`` or at a cap.
 
 Every turn prints one line of its timeline (:mod:`pepin.voice_cascade.timeline`) with the
-brain's cache tokens and price, and logs it with everything else (:mod:`pepin.voice_cascade.log`).
+brain's cache tokens and price, the brain and the voice that spoke (and a cloud voice's first
+audio and price), and logs it with everything else (:mod:`pepin.voice_cascade.log`).
+
+A sentence the brain starts with ``{шёпотом}`` is said in that style, and so is the rest of the
+reply until another marker (``{}``: the plain voice again). With a switchboard
+(:mod:`pepin.voice_cascade.control`) the brain and the voice are switched while it runs: a
+new brain is built and warmed, then takes over at the next turn (the conversation starts
+afresh with it); a new voice loads beside the one speaking and takes over at its next sentence.
 """
 
 from __future__ import annotations
@@ -25,14 +32,15 @@ import random
 import threading
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pepin.tools.registry import Result, fail, ok, progress_to, render
 from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
 from pepin.voice_cascade.brain import END_CONVERSATION
-from pepin.voice_cascade.config import CascadeConfig
+from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
+from pepin.voice_cascade.control import Request, Switchboard
 from pepin.voice_cascade.ears import EarEvent, Ears
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
 from pepin.voice_cascade.player import Player
@@ -50,9 +58,12 @@ from pepin.voice_cascade.stages import (
     ToolUse,
     Transcriber,
     Usage,
+    VoiceBill,
 )
+from pepin.voice_cascade.text import speakable, split_style
 from pepin.voice_cascade.timeline import Timeline
 from pepin.voice_cascade.turn import TurnWorker
+from pepin.voice_live.audio import Resampler
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.events import Events, State
 from pepin.voice_live.sources import FrameSink
@@ -119,6 +130,11 @@ class Reply:
     played: Played | None = None
     barged_s: float | None = None
     error: str | None = None
+    brain: str = ""  # the brain's preset when the turn began
+    voice: str = ""  # the voice's preset when the turn began
+    style: str = ""  # the style the brain asked for, in force for its next sentences
+    styles: list[str] = field(default_factory=list)  # every style it asked for
+    bills: list[VoiceBill] = field(default_factory=list)  # a paid voice's, one per sentence
 
 
 @dataclass
@@ -132,7 +148,13 @@ class Conversation:
     last_heard_s: float
     turns: list[dict[str, Any]] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
+    voice_usd: float = 0.0  # a paid voice's estimate
     closing: str | None = None
+
+    @property
+    def usd(self) -> float:
+        """The conversation's estimate: the brain's calls and a paid voice's."""
+        return self.usage.usd + self.voice_usd
 
 
 class CascadeLoop:
@@ -160,10 +182,11 @@ class CascadeLoop:
         tick_s: float = 0.1,
         seed: int = 0,
         turn: TurnWorker | None = None,
+        switchboard: Switchboard | None = None,
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
-        brain)."""
+        brain); ``switchboard``: the brain and the voice may be switched while it runs."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         self.brain, self.speech = brain, speech
@@ -205,8 +228,17 @@ class CascadeLoop:
         self._praat = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="prosody")
         self._loop: asyncio.AbstractEventLoop | None = None
         self._background: set[asyncio.Task[Any]] = set()
+        self.switchboard = switchboard
+        self.paid_ledger = ledger  # the ledger a paid brain switched in records into
+        self.brain_name = (
+            switchboard.brain
+            if switchboard is not None
+            else config.brain.preset or config.brain.model
+        )
+        self._log_resampler: tuple[int, int, Resampler] | None = None
         speech.on_audio = self._on_audio
         speech.on_done = self._on_spoken
+        speech.on_bill = self._on_bill
 
     # -- the run -----------------------------------------------------------------------------
 
@@ -306,17 +338,46 @@ class CascadeLoop:
     def _on_audio(self, job: SpeechJob, pcm: bytes, t: float) -> None:
         conversation = self.conversation
         if conversation is not None:
-            conversation.log.voice.write(pcm)
+            conversation.log.voice.write(self._at_log_rate(pcm, conversation.log.voice.rate))
         reply = self.replies.get(job.turn)
         if reply is not None and job.kind == "reply":
             reply.audio = True
             reply.input.timeline.mark("tts_first_audio", t)
+
+    def _at_log_rate(self, pcm: bytes, rate: int) -> bytes:
+        """A voice chunk at the rate the conversation's out.wav was opened with (a voice
+        switched in since may speak at another)."""
+        voice_rate = self.speech.job_rate
+        if voice_rate == rate:
+            return pcm
+        held = self._log_resampler
+        if held is None or held[:2] != (voice_rate, rate):
+            held = self._log_resampler = (voice_rate, rate, Resampler(voice_rate, rate))
+        return held[2].process(pcm)
 
     def _on_spoken(self, job: SpeechJob, t: float) -> None:
         reply = self.replies.get(job.turn)
         if reply is not None and job.kind == "end" and self._loop is not None:
             with contextlib.suppress(RuntimeError):
                 self._loop.call_soon_threadsafe(reply.spoken.set)
+
+    def _on_bill(self, job: SpeechJob, bill: VoiceBill) -> None:
+        """A paid voice's sentence (on the voice's thread): to the turn and the conversation."""
+        if self._loop is not None:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(self._billed, job, bill)
+
+    def _billed(self, job: SpeechJob, bill: VoiceBill) -> None:
+        conversation = self.conversation
+        if conversation is not None:
+            conversation.voice_usd += bill.usd
+            conversation.log.event("voice_bill", self.clock(), turn=job.turn, index=job.index,
+                                   style=job.style, **vars(bill))  # fmt: skip
+        reply = self.replies.get(job.turn)
+        if reply is not None:
+            reply.bills.append(bill)
+        if bill.fallback is not None:
+            print(f"  (voice: {bill.engine} spoke instead: {bill.fallback})", flush=True)
 
     # -- the ears ------------------------------------------------------------------------------
 
@@ -395,7 +456,7 @@ class CascadeLoop:
     def _own_text(self) -> str:
         """The sentences of the reply in play so far (read from the mic's thread)."""
         reply = self.replies.get(self.last_turn)
-        return " ".join(list(reply.sentences)) if reply is not None else ""
+        return " ".join(speakable(s) for s in list(reply.sentences)) if reply is not None else ""
 
     async def _hear(self, event: EarEvent) -> None:
         assert event.segment is not None
@@ -497,7 +558,7 @@ class CascadeLoop:
                 while self.player.speaking() and self.clock() < deadline:
                     await asyncio.sleep(self.tick_s)
             self.last_turn += 1
-            reply = Reply(self.last_turn, item)
+            reply = Reply(self.last_turn, item, brain=self.brain_name, voice=self.voice_name)
             self.replies[reply.id] = reply
             self.current = reply
             self.events.emit("thinking")
@@ -546,9 +607,14 @@ class CascadeLoop:
             timeline.mark("first_sentence", now)
             index = len(reply.sentences)
             reply.sentences.append(event.text)
-            self.speech.say(SpeechJob(reply.id, index, event.text))
+            style, _ = split_style(event.text)
+            if style is not None:  # in force for the rest of the reply
+                reply.style = style
+                reply.styles.append(style)
+            self.speech.say(SpeechJob(reply.id, index, event.text, style=reply.style))
             if log is not None:
-                log.event("sentence", now, turn=reply.id, index=index, text=event.text)
+                log.event("sentence", now, turn=reply.id, index=index, text=event.text,
+                          style=reply.style)  # fmt: skip
         elif isinstance(event, ToolUse):
             if event.name in SLOW_TOOLS and not reply.sentences and not reply.filled:
                 reply.filled = True  # nothing said yet: the wait is announced locally
@@ -591,7 +657,8 @@ class CascadeLoop:
         if reply is None or reply.finished.is_set():
             return
         reply.barged_s = event.t
-        reply.played = self.player.heard(reply.id, played, list(reply.sentences))
+        said = [split_style(s)[1] for s in reply.sentences]  # the style marker was not heard
+        reply.played = self.player.heard(reply.id, played, said)
         reply.outcome = "interrupted"
         await self._cancel(reply)
         self.brain.interrupt(reply.played)
@@ -660,7 +727,13 @@ class CascadeLoop:
             "tools": reply.tools,
             "echo_peak_db": round(self.ears.echo_peak_db, 1),
             "error": reply.error,
+            "brain": reply.brain,
+            "voice": reply.voice,
         }
+        if reply.styles:
+            row["styles"] = reply.styles
+        if reply.bills:
+            row["voice_bills"] = [vars(bill) for bill in reply.bills]
         eot = reply.input.eot
         if eot is not None:
             row["eot"] = eot
@@ -679,7 +752,7 @@ class CascadeLoop:
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
-                + eot_cell,
+                f" | {voice_cell(reply)}" + eot_cell,
                 flush=True,
             )
         conversation = self.conversation
@@ -760,11 +833,15 @@ class CascadeLoop:
         cfg = self.config
         log.event("open", now, model=cfg.brain.model, thinking=cfg.brain.thinking,
                   effort=cfg.brain.effort, wake=cfg.wake, places=self.places,
+                  brain=self.brain_name, voice=self.voice_name,
                   flags={"barge_in": cfg.barge_in, "backchannel": cfg.backchannel,
                          "prosody_tags": cfg.prosody_tags})  # fmt: skip
         if self.ledger is not None:
             self.ledger.record(sid, wall, 0.0)
-        print(f"  conversation open ({cfg.brain.model}); log {log.dir}", flush=True)
+        print(
+            f"  conversation open ({self.brain_name} > {self.voice_name}); log {log.dir}",
+            flush=True,
+        )
         self._spawn(self._refresh_places())
         return True
 
@@ -793,27 +870,35 @@ class CascadeLoop:
             "seconds": round(now - conversation.t_open, 1),
             "turns": len(person),
             "usage": vars(u),
-            "usd_est": round(u.usd, 6),
-            "cad_est": round(u.usd * self.config.usd_to_cad, 6),
+            "voice": self.voice_name,
+            "voice_usd_est": round(conversation.voice_usd, 6),
+            "usd_est": round(conversation.usd, 6),
+            "cad_est": round(conversation.usd * self.config.usd_to_cad, 6),
         }
-        conversation.log.event("close", now, reason=reason, usd_est=round(u.usd, 6))
+        conversation.log.event("close", now, reason=reason, usd_est=round(conversation.usd, 6))
         conversation.log.close(summary)
         if self.ledger is not None:
-            self.ledger.record(conversation.sid, conversation.t_open_wall, u.usd, closed=True)
+            self.ledger.record(
+                conversation.sid, conversation.t_open_wall, conversation.usd, closed=True
+            )
         print(
-            f"  conversation closed ({reason}): {len(person)} turns, ~{u.usd * 100:.3f} US cents"
-            f" (estimate); log {conversation.log.dir}",
+            f"  conversation closed ({reason}): {len(person)} turns, ~{conversation.usd * 100:.3f}"
+            f" US cents (estimate); log {conversation.log.dir}",
             flush=True,
         )
         self.events.emit("idle")
 
     async def _watch(self) -> None:
         """The state shown, the idle close, the caps, the warm cache."""
-        cfg = self.config
         while True:
             await asyncio.sleep(self.tick_s)
+            cfg = self.config  # a switch may have replaced it
             now = self.clock()
             conversation = self.conversation
+            if self.switchboard is not None:
+                request = self.switchboard.control.poll()
+                if request is not None:
+                    self._switch(request)
             if cfg.brain.keep_warm_s > 0 and now - self.last_call_s > cfg.brain.keep_warm_s:
                 self._spawn(self.prewarm("keep warm"))
             if conversation is None:
@@ -836,7 +921,7 @@ class CascadeLoop:
             if now - conversation.t_open > cfg.max_session_s:
                 conversation.closing = conversation.closing or "max_session_s"
             if self.ledger is not None and self.ledger.over_budget(
-                conversation.sid, conversation.usage.usd
+                conversation.sid, conversation.usd
             ):
                 conversation.closing = conversation.closing or "daily budget"
             quiet_since = max(conversation.last_heard_s, self.last_reply_end_s)
@@ -846,6 +931,103 @@ class CascadeLoop:
                 self.close(conversation.closing)
             elif now - quiet_since > cfg.idle_close_s:
                 self.close("idle")
+
+    # -- switching ------------------------------------------------------------------------------
+
+    @property
+    def voice_name(self) -> str:
+        """The voice's preset."""
+        return self.config.voice.name
+
+    def _switch(self, request: Request) -> None:
+        """A request from the control file: each part built in the background, then swapped
+        in (the brain at the next turn, the voice at its next sentence, the transcriber
+        between utterances)."""
+        asked = (("brain", request.brain), ("voice", request.voice),
+                 ("transcriber", request.transcriber))  # fmt: skip
+        print("  (switch asked: " + ", ".join(f"{k} {v}" for k, v in asked if v) + ")", flush=True)
+        if request.brain:
+            self._spawn(self._switch_brain(request.id, request.brain))
+        if request.voice:
+            self._switch_voice(request.id, request.voice)
+        if request.transcriber and self.switchboard is not None:
+            self.switchboard.switch_transcriber(request.id, request.transcriber)
+
+    async def _switch_brain(self, request: str, name: str) -> None:
+        board = self.switchboard
+        assert board is not None
+        start = self.clock()
+        board.answer(request, "brain", name, "loading")
+        try:
+            setup = await asyncio.to_thread(board.brain_setup, name)
+            setup.brain.begin(self.places)
+            warm = await setup.brain.prewarm()
+        except Exception as error:
+            why = f"{type(error).__name__}: {error}"[:300]
+            board.answer(request, "brain", name, "failed", error=why)
+            print(f"  !! switch to brain {name}: {why}", flush=True)
+            return
+        current = self.current
+        while current is not None and not current.finished.is_set():
+            await current.finished.wait()  # the turn in flight ends with the brain it began with
+            current = self.current
+        old = self.brain
+        self.brain = setup.brain
+        self.allowed, self.moving = setup.allowed, setup.moving
+        self.config = replace(setup.config, voice=self.config.voice)
+        self.ledger = self.paid_ledger if setup.paid else None
+        self.brain_name = board.brain = setup.name
+        self.last_call_s = self.clock()
+        ms = round((self.clock() - start) * 1000)
+        model = setup.config.brain.model if setup.paid else setup.name
+        self._event("switch", brain=setup.name, model=model, ms=ms)
+        board.answer(request, "brain", setup.name, "applied", ms=ms, model=model,
+                     warm_ms=warm.ms if warm is not None else None)  # fmt: skip
+        afresh = "; the conversation goes on with it afresh" if self.conversation else ""
+        print(f"  (brain: {setup.name} ({model}), ready in {ms} ms{afresh})", flush=True)
+        close = getattr(old, "aclose", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+
+    def _switch_voice(self, request: str, name: str) -> None:
+        board = self.switchboard
+        assert board is not None
+        start = self.clock()
+        try:
+            config = board.voice_config(name)
+            voice = board.build_voice(config)
+        except Exception as error:
+            why = f"{type(error).__name__}: {error}"[:300]
+            board.answer(request, "voice", name, "failed", error=why)
+            print(f"  !! switch to voice {name}: {why}", flush=True)
+            return
+        board.answer(request, "voice", config.name, "loading")
+        loop = asyncio.get_running_loop()
+
+        def ready(error: BaseException | None) -> None:  # on the voice's loading thread
+            with contextlib.suppress(RuntimeError):
+                loop.call_soon_threadsafe(self._voice_ready, request, config, error, start)
+
+        self.speech.swap(voice, ready)
+
+    def _voice_ready(
+        self, request: str, config: VoiceConfig, error: BaseException | None, start: float
+    ) -> None:
+        board = self.switchboard
+        assert board is not None
+        ms = round((self.clock() - start) * 1000)
+        if error is not None:
+            why = f"{type(error).__name__}: {error}"[:300]
+            board.answer(request, "voice", config.name, "failed", error=why, ms=ms)
+            print(f"  !! switch to voice {config.name}: {why}", flush=True)
+            return
+        self.config = replace(self.config, voice=config)
+        board.voice = config.name
+        board.keep_voice(config)
+        self._event("switch", voice=config.name, ms=ms)
+        board.answer(request, "voice", config.name, "applied", ms=ms, model=config.model)
+        print(f"  (voice: {config.name}, ready in {ms} ms)", flush=True)
 
     def _spawn(self, coroutine: Any) -> None:
         task = asyncio.create_task(coroutine)
@@ -864,6 +1046,26 @@ class CascadeLoop:
         conversation = self.conversation
         if conversation is not None:
             conversation.log.event(kind, self.clock(), **fields)
+
+
+def voice_cell(reply: Reply) -> str:
+    """``haiku > gemini-lite 520 ms 0.0310 US cents`` (the brain's preset, the voice's, a paid
+    voice's first audio after its first call and its price, the sentences a fallback said)."""
+    cell = f"{reply.brain} > {reply.voice}"
+    styles = [style for style in reply.styles if style]
+    if styles:
+        cell += " {" + ", ".join(styles) + "}"
+    bills = reply.bills
+    if not bills:
+        return cell
+    first = next((b.first_audio_ms for b in bills if b.first_audio_ms is not None), None)
+    if first is not None:
+        cell += f" {first} ms"
+    cell += f" {sum(b.usd for b in bills) * 100:.4f} US cents"
+    stood_in = [b for b in bills if b.fallback is not None]
+    if stood_in:
+        cell += f", {len(stood_in)} of {len(bills)} by {stood_in[0].engine}"
+    return cell
 
 
 def eot_of(event: EarEvent) -> dict[str, Any] | None:

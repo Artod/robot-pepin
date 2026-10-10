@@ -34,9 +34,35 @@ def test_the_file_reads_with_the_haiku_preset() -> None:
     assert config.brain.model == "claude-haiku-5-5"
     assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
     assert config.wake == "name" and config.silence_s == 0.4
-    assert config.voice_engine == "qwen3" and config.tts_voice == "serena"
+    assert config.voice.engine == "qwen3" and config.voice.voice == "serena"
+    assert config.voice.name == "qwen3-0.6b" and not config.voice.use_style
+    assert "0.6B" in config.voice.model and config.voice.fallback is None
     assert not config.barge_in and not config.backchannel and config.prosody_tags
     assert config.price.input == pytest.approx(0.10)
+    assert config.brain.preset == "haiku"
+
+
+def test_a_voice_preset_or_an_engine_s_name_picks_the_voice() -> None:
+    lite = CascadeConfig.load(CONFIG, ["voice.preset=gemini"])  # the engine's first preset
+    v = lite.voice
+    assert (v.name, v.engine, v.model, v.voice) == (
+        "gemini-lite", "gemini", "gemini-3.8-flash-lite-tts", "Kore",
+    )  # fmt: skip
+    assert v.use_style and v.cloud_timeout_s == 2.0
+    assert v.fallback is not None and v.fallback.name == "qwen3-0.6b"
+    assert v.fallback.voice == "serena" and v.fallback.fallback is None
+    assert lite.prices[v.model].output == pytest.approx(6.00)
+    flash = CascadeConfig.load(CONFIG, ["voice.preset=gemini-flash"]).voice
+    assert flash.model == "gemini-3.8-flash-tts" and lite.prices[flash.model].output == 9.00
+    big = CascadeConfig.load(CONFIG, ["voice.preset=qwen3-1.7b"]).voice
+    assert "1.7B-CustomVoice" in big.model and big.use_style and big.voice == "serena"
+    design = CascadeConfig.load(CONFIG, ["voice.preset=qwen3-vd", "voice.seed=7"]).voice
+    assert design.voice is None and design.voice_description and design.seed == 7
+    assert CascadeConfig.load(CONFIG, ["voice.preset=say"]).voice.engine == "say"
+    with pytest.raises(ValueError, match="voice 'elevenlabs'"):
+        CascadeConfig.load(CONFIG, ["voice.preset=elevenlabs"])
+    with pytest.raises(ValueError, match="fallback"):
+        CascadeConfig.load(CONFIG, ["voice.preset=gemini-lite", "voice.fallback=gemini-flash"])
 
 
 def test_overrides_switch_a_preset_and_a_flag_for_one_run() -> None:
@@ -121,6 +147,17 @@ def test_percentiles_and_the_report() -> None:
     lines = report([turn, turn])
     assert any(line.startswith("transcript") and "760" in line for line in lines)
     assert lines[-1] == "total 0.020 US cents over 2 turns"
+    paid = {**turn, "voice_bills": [
+        {"engine": "gemini", "first_audio_ms": 500, "usd": 0.0006, "calls": 1, "fallback": None},
+        {"engine": "gemini", "first_audio_ms": 0, "usd": 0.0, "calls": 0, "fallback": None},
+        {"engine": "qwen3-0.6b", "first_audio_ms": None, "usd": 0.0, "calls": 1,
+         "fallback": "TimeoutError"},
+    ]}  # fmt: skip
+    lines = report([paid])
+    assert "3: 2 calls, 1 said by the fallback" in "\n".join(lines)
+    (first,) = [line for line in lines if line.startswith("first_audio_ms")]
+    assert first.split()[1:3] == ["1", "500"]  # the cached line is not a call
+    assert lines[-1] == "total 0.060 US cents for the voice"
 
 
 # -- the player -----------------------------------------------------------------------------

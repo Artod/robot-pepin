@@ -6,26 +6,26 @@ whisper.cpp with the encoder on the Neural Engine
 and the CPU to the ROS stack. Each engine has its own model (``transcriber.mlx.model``,
 ``transcriber.whispercpp.model``). :class:`SwitchingTranscriber` holds the one in use and
 replaces it between utterances when the control file (``data/voice/control.json``, key
-``transcriber``) names another after the start: the new engine loads on its own thread while the
-old one keeps reading, and the swap waits for the call in flight.
+``transcriber``, read by :class:`pepin.voice_cascade.control.ControlFile`) names another after
+the start: the new engine loads on its own thread while the old one keeps reading, and the swap
+waits for the call in flight.
 """
 
 from __future__ import annotations
 
-import json
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pepin.voice_cascade.config import TRANSCRIBER_ENGINES, CascadeConfig
 from pepin.voice_cascade.stages import Transcriber
 
-CONTROL_FILE = "control.json"  # in the voice logs' folder (data/voice)
-CONTROL_KEY = "transcriber"
+CONTROL_KEY = "transcriber"  # the control file's key
 POLL_S = 0.5
+Loaded = Callable[["Choice", BaseException | None], None]  # (the engine asked for, its error)
 
 
 @dataclass(frozen=True)
@@ -92,34 +92,19 @@ def build_transcriber(
     )
 
 
-class ControlFile:
-    """The ``transcriber`` the control file names, once the file has changed since the start (a
-    choice left in it from an earlier run does not override this run's config)."""
+class Latest(Protocol):
+    """The control file as its one reader keeps it (:class:`pepin.voice_cascade.control.
+    ControlFile`): the latest value of a key since the start."""
 
-    def __init__(self, path: Path, config: CascadeConfig) -> None:
-        """``path``: a JSON object; other keys belong to other parts of the loop."""
-        self.path, self.config = path, config
-        self._seen = self._stamp()
-        self._choice: Choice | None = None
+    def latest(self, key: str) -> Any:
+        """The value ``key`` had in the latest change that set it (None: none yet)."""
+        ...
 
-    def _stamp(self) -> int | None:
-        try:
-            return self.path.stat().st_mtime_ns
-        except OSError:
-            return None
 
-    def __call__(self) -> Choice | None:
-        """The choice of the file's latest change (None: no change yet, or no valid choice)."""
-        stamp = self._stamp()
-        if stamp is not None and stamp != self._seen:
-            try:
-                data = json.loads(self.path.read_text())
-            except (OSError, ValueError):
-                return self._choice  # mid-write: read again on the next change or poll
-            self._seen = stamp
-            if isinstance(data, dict) and CONTROL_KEY in data:
-                self._choice = choice_of(data[CONTROL_KEY], self.config)
-        return self._choice
+def wanted_from(control: Latest, config: CascadeConfig) -> Callable[[], Choice | None]:
+    """The ``transcriber`` the control file's latest change named, as a choice (None: none
+    since the start, or not a valid one); a choice left from an earlier run never counts."""
+    return lambda: choice_of(control.latest(CONTROL_KEY), config)
 
 
 class SwitchingTranscriber:
@@ -137,10 +122,13 @@ class SwitchingTranscriber:
         *,
         report: Callable[[str], None] = print,
         spawn: Callable[[Callable[[], None]], None] | None = None,
+        on_loaded: Loaded | None = None,
     ) -> None:
         """``build`` loads an engine; ``wanted`` is polled (:meth:`poll`, or every
-        ``POLL_S`` after :meth:`start`)."""
+        ``POLL_S`` after :meth:`start`); ``on_loaded`` hears each load's outcome (None: the
+        engine is in use) on the loading thread."""
         self.choice = choice
+        self.on_loaded = on_loaded
         self._current = current
         self._build, self._wanted, self._report = build, wanted, report
         self._spawn = spawn or _thread
@@ -174,6 +162,8 @@ class SwitchingTranscriber:
         except Exception as error:  # a missing file, a failed server: keep the one in use
             self._failed, self._loading = want, None
             self._report(f"transcriber: {want.label} failed to load ({error}); keeping {self.name}")
+            if self.on_loaded is not None:
+                self.on_loaded(want, error)
             return
         with self._lock:
             old, was = self._current, self.name
@@ -183,6 +173,13 @@ class SwitchingTranscriber:
         self._report(
             f"transcriber: {was} -> {want.label} (loaded in {time.monotonic() - t0:.1f} s)"
         )
+        if self.on_loaded is not None:
+            self.on_loaded(want, None)
+
+    @property
+    def failed(self) -> Choice | None:
+        """The engine that last failed to load (not tried again until another is wanted)."""
+        return self._failed
 
     def start(self, every_s: float = POLL_S) -> SwitchingTranscriber:
         """Poll ``wanted()`` every ``every_s`` on a daemon thread until :meth:`close`."""

@@ -7,7 +7,9 @@ import re
 _END = re.compile(r"[.!?…]+[\"»”')\]]*(?:\s+|$)|\n+")
 _SOFT = re.compile(r"[,;:]\s|\s[—–-]\s")  # noqa: RUF001 -- the dashes are meant
 _MARKUP = re.compile(r"[*_#`~>|]+")
-_ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)")  # [notes] and (stage directions) are not speech
+# [notes], (stage directions) and {style markers} are not speech
+_ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")
+_STYLE = re.compile(r"\s*\{\s*(?:style\s*:\s*)?([^{}]*?)\s*\}\s*", re.IGNORECASE)
 _SPACES = re.compile(r"\s+")
 _WORDS = re.compile(r"\w+")
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
@@ -64,9 +66,19 @@ class SentenceSplitter:
 
 
 def speakable(text: str) -> str:
-    """``text`` without what a voice must not read out: markup (asterisks, hashes, backticks)
-    and asides in brackets or parentheses (a model's notes to itself)."""
+    """``text`` without what a voice must not read out: markup (asterisks, hashes, backticks),
+    asides in brackets or parentheses (a model's notes to itself) and style markers in braces."""
     return _SPACES.sub(" ", _MARKUP.sub(" ", _ASIDE.sub(" ", text))).strip()
+
+
+def split_style(sentence: str) -> tuple[str | None, str]:
+    """A sentence's leading style marker and the rest: ``"{шёпотом} Я тут."`` is
+    ``("шёпотом", "Я тут.")`` (``{style: шёпотом}`` too); ``{}`` is ``""``, back to the plain
+    voice; ``(None, sentence)`` when it starts with no marker."""
+    match = _STYLE.match(sentence)
+    if match is None:
+        return None, sentence
+    return _SPACES.sub(" ", match.group(1)).strip(), sentence[match.end() :]
 
 
 def clip_key(text: str) -> str:

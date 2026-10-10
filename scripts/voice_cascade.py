@@ -16,9 +16,14 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
     uv run python scripts/voice_cascade.py --set transcriber.engine=whispercpp  # Neural Engine
+    uv run python scripts/voice_cascade.py --voice gemini-lite   # Gemini TTS (GEMINI_API_KEY)
 
-While it runs, the key "transcriber" of data/voice/control.json ("mlx", "whispercpp",
-"whispercpp:large-v3") switches the speech-to-text engine between utterances.
+Switch the brain, the voice or the speech-to-text engine of the running loop (from another
+terminal; it writes data/voice/control.json and prints the loop's answers: a brain is ready in
+about a second, a voice once its model has loaded, a transcriber between utterances):
+
+    uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
+    uv run python scripts/voice_cascade.py switch --transcriber whispercpp
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -38,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import io
 import json
 import logging
@@ -51,37 +57,46 @@ from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
-from pepin.tools.schemas import gemini_function_declarations, openai_tools
 from pepin.voice_cascade.bench import ReplayMic, utterances
-from pepin.voice_cascade.brain import ClaudeBrain, tool_definitions
-from pepin.voice_cascade.chat_brain import ChatBrain
-from pepin.voice_cascade.config import CascadeConfig
-from pepin.voice_cascade.fake import ScriptedBrain
-from pepin.voice_cascade.gemini_brain import GeminiBrain
+from pepin.voice_cascade.config import CONFIG_FILE, CascadeConfig, voice_preset
+from pepin.voice_cascade.control import (
+    DONE_STATES,
+    ControlFile,
+    Switchboard,
+    answers_to,
+    write_request,
+)
+from pepin.voice_cascade.engines import (
+    ECHO,
+    NOT_FOR_THE_BRAIN,
+    BrainSetup,
+    VoiceShop,
+    brain_key,
+    build_brain,
+)
 from pepin.voice_cascade.loop import CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import Brain, Tagger, Transcriber, Voice
+from pepin.voice_cascade.stages import Tagger, Transcriber
 from pepin.voice_cascade.tagger import ProsodyTagger, emotion_model
 from pepin.voice_cascade.timeline import report
 from pepin.voice_cascade.transcriber import (
-    CONTROL_FILE,
     Choice,
-    ControlFile,
     SwitchingTranscriber,
     build_transcriber,
+    choice_of,
     configured,
+    wanted_from,
 )
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
-from pepin.voice_cascade.voice import QwenVoice, SayVoice
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
 from pepin.voice_live.events import Events, StatePrinter
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker, synthesize
 
 REPO = Path(__file__).resolve().parents[1]
-NOT_FOR_THE_BRAIN = {"say"}  # the brain speaks through the voice, not through a tool
 FAKE_ACCEPT_S = 0.3  # a fake drive is taken this long after the go
+SWITCH_WAIT_S = 120.0  # a voice's model may take a minute to load the first time
 
 
 def main_checkout() -> Path:
@@ -112,7 +127,69 @@ def ledger_for(config: CascadeConfig, path: Path) -> Ledger:
     return Ledger(path, caps)
 
 
+def switch(argv: list[str]) -> int:
+    """``switch --brain X --voice Y --transcriber Z``: ask the running loop for a switch and
+    print its answers until each part is applied or has failed."""
+    ap = argparse.ArgumentParser(
+        prog="voice_cascade.py switch",
+        description="switch the running loop's brain, voice or speech-to-text engine",
+    )
+    ap.add_argument("--brain", help="a brain preset, or echo")
+    ap.add_argument("--voice", help="a voice preset (or an engine's name: qwen3, gemini, say)")
+    ap.add_argument("--transcriber", help="mlx, whispercpp or engine:model (whispercpp:large-v3)")
+    ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
+    ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
+    ap.add_argument("--wait-s", type=float, default=SWITCH_WAIT_S)
+    args = ap.parse_args(argv)
+    if not (args.brain or args.voice or args.transcriber):
+        ap.error("--brain, --voice, --transcriber, or several")
+    data = json.loads((args.config or config_file(CONFIG_FILE)).read_text())
+    brains = [*data.get("brain", {}).get("presets", {}), ECHO]
+    if args.brain and args.brain not in brains:
+        print(f"brain {args.brain!r}: one of {', '.join(brains)}")
+        return 2
+    if args.voice:
+        try:
+            voice_preset(data.get("voice", {}), args.voice)
+        except ValueError as error:
+            print(error)
+            return 2
+    if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
+        print(f"transcriber {args.transcriber!r}: mlx, whispercpp or engine:model")
+        return 2
+    request = write_request(args.logs, args.brain, args.voice, args.transcriber)
+    print(
+        f"asked ({request.id}): brain {args.brain}, voice {args.voice},"
+        f" transcriber {args.transcriber}",
+        flush=True,
+    )
+    asked = (("brain", args.brain), ("voice", args.voice), ("transcriber", args.transcriber))
+    parts = {what for what, name in asked if name}
+    deadline = time.monotonic() + args.wait_s
+    shown = 0
+    failed = False
+    while time.monotonic() < deadline:
+        rows = answers_to(args.logs, request.id)
+        for row in rows[shown:]:
+            extra = {k: v for k, v in row.items() if k not in ("id", "t", "what", "name", "state")}
+            print(f"  {row['what']} {row['name']}: {row['state']} {json.dumps(extra)}", flush=True)
+        shown = len(rows)
+        done = {row["what"] for row in rows if row["state"] in DONE_STATES}
+        failed = any(row["state"] == "failed" for row in rows)
+        if parts <= done:
+            return 1 if failed else 0
+        time.sleep(0.2)
+    if not shown:
+        print(f"no answer in {args.wait_s:.0f} s: is scripts/voice_cascade.py running"
+              f" (logs {args.logs})?")  # fmt: skip
+    else:
+        print(f"not finished in {args.wait_s:.0f} s")
+    return 3
+
+
 def main() -> int:
+    if sys.argv[1:2] == ["switch"]:
+        return switch(sys.argv[2:])
     ap = argparse.ArgumentParser(description=(__doc__ or "").split("\n")[0])
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument(
@@ -124,7 +201,11 @@ def main() -> int:
         help="a brain preset (haiku, sonnet, opus, flashlite, flash, flash38, groq-oss,"
         " groq-qwen), or echo: no API, repeats the words",
     )
-    ap.add_argument("--voice", choices=["qwen3", "say"], help="override voice.engine")
+    ap.add_argument(
+        "--voice",
+        help="a voice preset (qwen3-0.6b, qwen3-1.7b, qwen3-vd, gemini-lite, gemini-flash, say)"
+        " or an engine's name (qwen3, gemini, say: its first preset)",
+    )
     ap.add_argument("--host", default=board_host(), help="the board (PEPIN_HOST)")
     ap.add_argument("--say", action="append", help="speak this into the loop instead of the mic")
     ap.add_argument("--speaker-wav", type=Path, help="write the robot's speech here, no sound")
@@ -145,61 +226,43 @@ def main() -> int:
     args = ap.parse_args()
     logging.basicConfig(level=logging.WARNING, format="%(levelname).1s %(name)s: %(message)s")
 
-    overrides = list(args.set)
-    echo = args.brain == "echo"
-    if args.brain and not echo:
-        overrides.append(f"brain.preset={args.brain}")
-    if args.voice:
-        overrides.append(f"voice.engine={args.voice}")
+    base = list(args.set)
     if args.bench is not None:
-        overrides.append("ears.wake=always")
-    config = CascadeConfig.load(args.config, overrides)
+        base.append("ears.wake=always")
+    echo = args.brain == ECHO
 
-    names = [t.name for t in TOOLS if t.name not in NOT_FOR_THE_BRAIN]
+    def configure(brain: str | None, voice: str | None) -> CascadeConfig:
+        """The run's config with these presets (None or the echo: the file's own)."""
+        extra = [f"brain.preset={brain}"] if brain and brain != ECHO else []
+        extra += [f"voice.preset={voice}"] if voice else []
+        return CascadeConfig.load(args.config, [*base, *extra])
+
+    config = configure(args.brain, args.voice)
+
+    wanted: set[str] | None = None
     if args.tools:
+        names = [t.name for t in TOOLS if t.name not in NOT_FOR_THE_BRAIN]
         wanted = {n.strip() for n in args.tools.split(",") if n.strip()}
         unknown = wanted - set(names)
         if unknown:
             print(f"unknown tools: {', '.join(sorted(unknown))}; the tools are {', '.join(names)}")
             return 2
-        names = [n for n in names if n in wanted]
-    if config.brain.tools is not None:  # the preset offers fewer (a compact prompt)
-        names = [n for n in names if n in config.brain.tools]
-    allowed = set(names)
-    moving = {t.name for t in TOOLS if t.moves and t.name in allowed}
 
-    brain: Brain
-    ledger: Ledger | None = None
-    if echo:
-        brain = ScriptedBrain()
-    else:
-        key = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(
-            config.brain.provider, config.brain.api_key_env or ""
-        )
+    def make_brain(config: CascadeConfig, name: str) -> BrainSetup:
+        return build_brain(config, echo=name == ECHO, wanted=wanted)
+
+    ledger = ledger_for(config, args.logs / "cascade_ledger.jsonl")
+    if not echo:
+        key = brain_key(config)
         if not os.environ.get(key):
             print(f"{key} missing: set -a; . ./.env; set +a (the main checkout's .env)")
             return 2
-        ledger = ledger_for(config, args.logs / "cascade_ledger.jsonl")
         refusal = ledger.refusal()
         if refusal:
             print(f"refusing to start: {refusal}")
             return 3
-        persona = config_file(config.brain.persona_file).read_text()
-        if config.brain.provider == "openai":
-            functions = [t for t in openai_tools(TOOLS) if t["function"]["name"] in allowed]
-            brain = ChatBrain(config.brain, persona=persona, tools=functions, price=config.price)
-        elif config.brain.provider == "gemini":
-            declarations = [d for d in gemini_function_declarations(TOOLS) if d["name"] in allowed]
-            brain = GeminiBrain(
-                config.brain, persona=persona, declarations=declarations, price=config.price
-            )
-        else:
-            brain = ClaudeBrain(
-                config.brain,
-                persona=persona,
-                tools=tool_definitions(TOOLS, allowed),
-                price=config.price,
-            )
+    setup = make_brain(config, ECHO if echo else config.brain.preset or config.brain.model)
+    brain, allowed, moving = setup.brain, setup.allowed, setup.moving
 
     bench = args.bench is not None
     fake_drive_s = args.fake_robot if args.fake_robot is not None else 5.0 if bench else None
@@ -244,20 +307,12 @@ def main() -> int:
         on_level=lambda value: events.emit("speaking", value),
     )
 
-    voice: Voice
-    if config.voice_engine == "qwen3":
-        hf_home = Path(config.tts_hf_home) if config.tts_hf_home else None
-        if hf_home is not None and not hf_home.is_absolute():
-            hf_home = main_checkout() / hf_home
-        voice = QwenVoice(
-            config.tts_model,
-            voice=config.tts_voice,
-            language=config.tts_language,
-            chunk_s=config.tts_chunk_s,
-            hf_home=hf_home,
-        )
-    else:
-        voice = SayVoice(config.say_voice, config.say_rate_wpm)
+    shop = VoiceShop(config, main_checkout())
+    try:
+        voice = shop.voice(config.voice)
+    except RuntimeError as error:  # a cloud voice without its key
+        print(error)
+        return 2
     clips = (
         *(config.backchannel_lines if config.backchannel else ()),
         config.tool_filler,
@@ -266,20 +321,21 @@ def main() -> int:
     clips = tuple(line for line in clips if line)
     speech = SpeechWorker(voice, player, clips=clips)
     choice = configured(config)
-    print(f"loading the voice ({config.voice_engine}) and the transcriber ({choice.label})...")
+    print(f"loading the voice ({config.voice.name}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile
     server_log = args.logs / "whisper_server.log"
 
     def load_transcriber(chosen: Choice) -> Transcriber:
         return build_transcriber(config, chosen, main_checkout(), log=server_log)
 
+    control = ControlFile(args.logs)  # the one reader of control.json; the loop polls it
     transcriber = SwitchingTranscriber(
         load_transcriber(choice),
         choice,
         load_transcriber,
-        ControlFile(args.logs / CONTROL_FILE, config),
+        wanted_from(control, config),
         report=lambda line: print(line, flush=True),
-    ).start()
+    )
     turn: TurnWorker | None = None
     if config.turn_model is not None:
         print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
@@ -312,6 +368,16 @@ def main() -> int:
     else:
         mic = link or BoardLink(args.host)
 
+    switchboard = Switchboard(
+        control,
+        configure=lambda brain, voice: configure(brain, voice),
+        build_brain=make_brain,
+        build_voice=shop.voice,
+        brain=setup.name,
+        voice=config.voice.name,
+        keep_voice=shop.keep,
+        transcriber=transcriber,
+    )
     loop = CascadeLoop(
         config,
         mic=mic,
@@ -326,16 +392,19 @@ def main() -> int:
         halt=robot.halt,
         events=events,
         logs=args.logs,
-        ledger=ledger,
+        ledger=ledger if setup.paid else None,
         turn=turn,
+        switchboard=switchboard,
     )
+    loop.paid_ledger = ledger
     holder.append(loop)
     b = config.brain
     print(
-        f"listening: {b.model} (thinking {b.thinking}, effort {b.effort}, cache {b.cache}),"
-        f" voice {config.voice_engine}, wake {config.wake}; barge_in {config.barge_in},"
-        f" backchannel {config.backchannel}, prosody_tags {config.prosody_tags},"
-        f" turn_model {config.turn_model}. Logs: {args.logs}",
+        f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
+        f" {b.cache}), voice {config.voice.name} ({config.voice.model}), wake {config.wake};"
+        f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
+        f" {config.prosody_tags}, turn_model {config.turn_model}. Logs: {args.logs}; switch:"
+        " scripts/voice_cascade.py switch --brain NAME --voice NAME",
         flush=True,
     )
     try:
@@ -372,7 +441,8 @@ def main() -> int:
             "turn_model": config.turn_model,
             "thinking": b.thinking,
             "effort": b.effort,
-            "voice": config.voice_engine,
+            "voice": config.voice.name,
+            "voice_model": config.voice.model,
             "source": str(args.bench),
             "report": report(person),
             "whisper_early": {"asked": loop.ears.early_asked, "dropped": loop.ears.early_dropped},
@@ -380,10 +450,18 @@ def main() -> int:
         }
         out.write_text(json.dumps(summary, ensure_ascii=False, indent=1, default=str))
         print(f"bench: {out}", flush=True)
-    if ledger is not None:
+    if loop.ledger is not None or not echo:
         print(f"today's cascade estimate: {ledger.today_usd() * config.usd_to_cad:.4f} CAD")
     return 0
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # Everything is written and closed by now. MLX (0.32) destroys its thread-local compile
+    # cache after Python has finalised and now and then segfaults there (2 of 6 runs with a
+    # switched voice, 2026-10-10: exit 139 after the report), so the Python exit handlers run
+    # and the C teardown is skipped.
+    atexit._run_exitfuncs()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
