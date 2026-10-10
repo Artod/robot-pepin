@@ -130,14 +130,16 @@ class ToneVoice:
         self.sleep = sleep
         self.loaded = 0
         self.spoken: list[str] = []
+        self.styles: list[str] = []
 
     def load(self) -> None:
         """Counted."""
         self.loaded += 1
 
-    def stream(self, text: str) -> Iterator[bytes]:
-        """The hum, chunk by chunk."""
+    def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+        """The hum, chunk by chunk (the style kept, not heard)."""
         self.spoken.append(text)
+        self.styles.append(style)
         if self.delay_s and self.sleep is not None:
             self.sleep(self.delay_s)
         total = max(1, int(len(text) * self.seconds_per_char * self.rate))
