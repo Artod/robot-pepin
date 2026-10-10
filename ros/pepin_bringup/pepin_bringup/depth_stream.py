@@ -80,7 +80,8 @@ The flags and knobs (:data:`FLAGS` and config/knobs.json, ``ros/flags.sh set dep
 scale the law may be fitted to, ``tf_dead_s``, how stale a TF edge may be before no frame waits for
 it, ``imu_lean``, ``lean_min_quality`` and ``scan_hz``, the cap on how often ``/depth_scan`` is
 published (5 Hz, the board's local costmap's own ``update_frequency`` — every frame is still
-processed, the cap is on the publisher); their state is printed in every report line.
+processed, the cap is on the publisher), and ``parked_pairs_hz`` and ``parked_after_s`` (the
+parked gate, below); their state is printed in every report line.
 
 THE GAZE GATE (``gaze_gate`` and the ``gate_*`` knobs, :mod:`pepin.gaze_gate`): a picture whose
 exposure overlaps a head saccade (``/gaze/state``) or a body yaw above ``gate_yaw_dps`` is dropped
@@ -91,6 +92,17 @@ Under ``gate_dark`` a frame too dark to measure (``/camera/brightness`` under ``
 until it climbs past the floor plus ``gate_dark_hyst``) is dropped the same way and counted as
 dark: it neither marks nor carves, and each one is told to the gaze arbiter on ``/depth/dark`` at
 its stamp, so a look waiting for still frames knows they are not coming.
+
+THE PARKED GATE (``parked_pairs_hz``, ``parked_after_s``, :mod:`pepin.parked`): RAFT-Stereo is the
+laptop GPU's heaviest steady load, and a parked robot sees the same room in every pair. So while
+the base's twist on ``/odometry/filtered`` has stayed under 0.02 m/s and 1 deg/s and the camera's
+pan and tilt (the neck's live TF edge, read at each picture's arrival) within 0.5 deg, both for
+``parked_after_s``, a raft pair reaches the matcher once every ``1 / parked_pairs_hz`` seconds and
+the rest are dropped at the door, after the gaze gate, counted. One moving sample ends it: the
+next pair goes through at full rate, to a host that never unloaded. Every pair that does go
+through is measured, published and fanned as before, so ``/depth_scan`` keeps arriving at the
+parked rate (a clearing-only source on the costmaps: a slower fan leaves marks standing, never
+erases one). SGBM and the mono network are not thinned; ``parked_pairs_hz`` 0 is off.
 """
 
 from __future__ import annotations
@@ -108,6 +120,7 @@ from typing import Any, Protocol
 
 import numpy as np
 import numpy.typing as npt
+from nav_msgs.msg import Odometry
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import CameraInfo, Image, LaserScan
@@ -152,6 +165,7 @@ from pepin.depth_service import (
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.frame_pose import FramePoser, settled_pose
 from pepin.gaze_gate import DARK, DARK_FRAME_TOPIC, DARK_KNOBS, GATE_DARK, GATE_KNOBS, GAZE_GATE
+from pepin.parked import ParkedGate
 from pepin.stereo_depth import (
     MATCHERS as STEREO_MATCHERS,
 )
@@ -198,6 +212,14 @@ RIGHT_INFO = "/camera/right/camera_info"
 PAIR_WAIT_S = 0.05
 PAIR_BUFFER = 8  # right eyes held while their left halves are matched; the newest wins anyway
 DEFAULT_MODEL = "depth-anything/Depth-Anything-V2-Metric-Indoor-Small-hf"
+# The parked gate's witness of the base: the board's EKF, not the wheels' /odom. On the ~15 s at
+# rest before 44 drives' first command (0356-0414) its twist never crossed the gate's thresholds
+# in 33120 samples, where /odom's yaw rate — quantised by one encoder tick a 20 ms line to ~0.5
+# deg/s steps — read 1.01-1.04 deg/s on 19 samples of 3 drives, each a false "moving" worth two
+# seconds of full-rate pairs; the price is ~40 ms at the start (over a threshold 242 against 204 ms
+# after the first command, p50). 50 Hz, already crossing to the laptop for the VIO's keeper and the
+# drive bags; this node holds its subscription for its whole life, never one per run.
+PARKED_ODOM = "/odometry/filtered"
 SCAN_RANGE_M = 6.0
 STAGES = ("network", "pose", "samples", "pipeline", "scan", "publish")
 CARRY_WAIT_S = 0.2  # how long TF is given to cover a frame's stamp (the carry, the camera pose)
@@ -659,6 +681,15 @@ class DepthStream(Node):
             self._pipeline.set(name, self._switches.on(name))
         set_scale_ceiling(float(self._switches["scale_ceiling"]))  # and the law's bound
         self._tally = Tally(STAGES)
+        # THE PARKED GATE (pepin.parked): while the base and the head have both stood still for
+        # parked_after_s, RAFT pairs reach the matcher at parked_pairs_hz and the rest are dropped
+        # at the door. Its witnesses are read only on a stereo head, the one source it thins.
+        self._monotonic: Callable[[], float] = time.monotonic  # the gate's clock (a test's fake)
+        self._parked = ParkedGate(
+            pairs_hz=float(self._switches["parked_pairs_hz"]),
+            after_s=float(self._switches["parked_after_s"]),
+        )
+        self._odometry = False  # whether PARKED_ODOM is subscribed (_listen_odometry)
         self._lean = LeanFeed(
             self,
             config.parent,
@@ -708,6 +739,7 @@ class DepthStream(Node):
             )
             self.create_subscription(CameraInfo, RIGHT_INFO, self._on_right_info, reliable)
             self.create_subscription(Image, RIGHT_IMAGE, self._on_right, newest)
+        self._listen_odometry()
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
         self._tf.expect_static(
             self, camera_static_edges(), lambda: float(self._switches["tf_static_wait_s"])
@@ -716,6 +748,9 @@ class DepthStream(Node):
         # edge already dead (the board's TF route gone) is refused instead, and the caller's
         # fallback runs on this frame — the camera pose from the config, the scan uncarried.
         self._history = self._guarded(CARRY_WAIT_S)
+        # The head's pose for the parked gate: the same buffer, asked without the failure count —
+        # a neck with no edge yet is the gate's "head pose unknown", not a TF failure a picture.
+        self._neck = TfHistory(TfLookup(self, buffer=self._tf.buffer))
         self._poser = self._new_poser(self._history)
         self._camera_frame, self._base_frame = self._poser.camera, self._poser.base
         self._lidar_mount: RigidPose | None = None
@@ -822,8 +857,9 @@ class DepthStream(Node):
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``depth_backend`` is the switch's mode, ``scale_ceiling`` the law's
         upper bound, ``imu_lean`` the poser's and the estimator's, ``lean_min_quality`` the
-        poser's floor under a lean, the ``gate_*`` knobs and ``gate_dark`` the gaze gate's, a
-        stage's flag switches that stage of the pipeline."""
+        poser's floor under a lean, the ``gate_*`` knobs and ``gate_dark`` the gaze gate's, the
+        ``parked_*`` knobs the parked gate's, a stage's flag switches that stage of the
+        pipeline."""
         if name == "depth_backend":
             self._net.mode = str(new)
         elif name == "stereo_matcher":
@@ -841,6 +877,11 @@ class DepthStream(Node):
             self._gaze.set(name, float(new))
         elif name == "gate_dark":
             self._gaze.set_dark(bool(new))
+        elif name == "parked_pairs_hz":
+            self._parked.pairs_hz = float(new)  # from the next picture on
+            self._listen_odometry()
+        elif name == "parked_after_s":
+            self._parked.after_s = float(new)
         elif name in self._pipeline.switches:
             self._pipeline.set(name, bool(new))
 
@@ -1018,10 +1059,69 @@ class DepthStream(Node):
             while newest - stamp_seconds(self._scans[0].header.stamp) > SCAN_WINDOW_S:
                 self._scans.popleft()
 
+    def _listen_odometry(self) -> None:
+        """Subscribe the parked gate's base witness, once: on a stereo head with
+        ``parked_pairs_hz`` above 0, so a node with the gate off carries the subscriptions it had.
+        Reliable, as the EKF publishes it: a best-effort reader of a reliable writer over the
+        bridge hears nothing."""
+        if self._odometry or not self._stereo_on or self._parked.pairs_hz <= 0.0:
+            return
+        self.create_subscription(
+            Odometry,
+            PARKED_ODOM,
+            self._on_odometry,
+            QoSProfile(depth=10, reliability=ReliabilityPolicy.RELIABLE),
+        )
+        self._odometry = True
+
+    def _on_odometry(self, msg: Odometry) -> None:
+        """The base's measured twist for the parked gate: the speed in the plane and the yaw
+        rate."""
+        twist = msg.twist.twist
+        self._parked.observe_base(
+            self._monotonic(),
+            math.hypot(float(twist.linear.x), float(twist.linear.y)),
+            abs(math.degrees(float(twist.angular.z))),
+        )
+
+    def _watch_head(self, msg: Image, now: float) -> None:
+        """The neck's newest pose for the parked gate, read at every picture's arrival — the
+        moment a pair is let through or not — from what TF already holds (no wait): the camera's
+        pan and tilt in base_link off the encoders' live edge. An edge missing, or more than
+        CAMERA_TF_MAX_AGE_S behind the picture (a dead route), leaves the head unknown, and an
+        unknown head is never parked."""
+        latest = self._neck.latest_pose(self._camera_frame, self._base_frame)
+        if latest is None or stamp_seconds(msg.header.stamp) - latest[1] > CAMERA_TF_MAX_AGE_S:
+            self._parked.lose_head()
+            return
+        tilt, pan = optical_heading(latest[0].rotation)
+        self._parked.observe_head(now, pan, tilt)
+
+    def _thinned(self) -> bool:
+        """Whether the parked gate applies: a stereo head matched by RAFT, the GPU's. SGBM costs
+        the container 17 ms a pair and the mono network is another source; both run as before."""
+        return self._stereo_on and self._switches["stereo_matcher"] == "raft"
+
+    def _admit(self, now: float) -> bool:
+        """Whether this picture goes on to the worker: always, unless the parked gate thins the
+        RAFT pairs of a parked robot (:meth:`pepin.parked.ParkedGate.admit`); one held back is
+        counted, and so is every picture that arrives while parked."""
+        if not self._thinned():
+            return True
+        if self._parked.parked(now):
+            self._tally.count("parked_images")
+        if self._parked.admit(now):
+            return True
+        self._tally.count("parked_dropped")
+        return False
+
     def _on_image(self, msg: Image) -> None:
         if self._fatal.leaving:
             return  # nothing can answer: no more frames on the way out
         self._tally.count("images")
+        now = self._monotonic()
+        if self._stereo_on:
+            self._watch_head(msg, now)  # before any gate: a saccade's pictures show the move
         if self._switches.on("gaze_gate"):
             # Judged before the worker is offered it: a frame of a saccade must not push out
             # the still frame waiting before it.
@@ -1031,6 +1131,8 @@ class DepthStream(Node):
                 if verdict == DARK:
                     self._dark_pub.publish(Header(stamp=msg.header.stamp, frame_id=DARK))
                 return
+        if not self._admit(now):
+            return  # parked: the matcher idles until the next pair is due
         if self._worker.offer(msg):
             self._tally.count("dropped")
 
@@ -1043,6 +1145,8 @@ class DepthStream(Node):
             views = self._views(msg)
             if views is None:
                 return
+            if views.right is not None:
+                tally.count("pairs")  # what reached the matcher: the parked gate's rate
             try:
                 depth = self._source(views)
             except DepthModelError as exc:
@@ -1114,7 +1218,7 @@ class DepthStream(Node):
         hz = float(self._switches["scan_hz"])
         if hz <= 0.0:
             return True
-        now = time.monotonic()
+        now = self._monotonic()  # monotonic, the parked gate's clock too
         if now - self._scan_at < 1.0 / hz:
             self._tally.count("scans_thinned")
             return False
@@ -1353,7 +1457,8 @@ class DepthStream(Node):
             f" {self._pipeline.report()};"
             f" {c['verdicts']} lidar verdicts ({per_verdict:.0f} pairs each; held {c['held']} of"
             f" {c['processed']} frames){self._extras(w)}, source {self._source.name}:"
-            f" {self._source.report()}, {self._gate_line(w)}, flags: {self._switches.state()},"
+            f" {self._source.report()}, {self._gate_line(w)}{self._parked_line(w)},"
+            f" flags: {self._switches.state()},"
             f" ms median/max: {w.stages()}"
         )
         self._pipeline.reset_stats()
@@ -1377,6 +1482,26 @@ class DepthStream(Node):
         if not self._switches.on("gaze_gate"):
             return "gaze gate off"
         return f"gaze gate: {gate_counts(w.counts, w.counts['images'])}; {self._gaze.text()}"
+
+    def _parked_line(self, w: Window) -> str:
+        """The parked gate's clause, on a stereo head: parked or moving and why, the pairs a
+        second that reached the matcher this window, how many pictures arrived parked and how
+        many pairs were held back. Nothing on the mono network, which the gate never thins."""
+        if not self._stereo_on:
+            return ""
+        gate = self._parked
+        said = f"{gate.text(self._monotonic())}, {w.rate('pairs'):.1f} pairs/s"
+        if gate.pairs_hz <= 0.0:
+            return f", parked gate off (parked_pairs_hz 0): {said}"
+        if not self._thinned():
+            matcher = self._switches["stereo_matcher"]
+            return f", parked gate idle under {matcher} (it thins raft pairs only): {said}"
+        c = w.counts
+        return (
+            f", parked gate {gate.pairs_hz:g}/s after {gate.after_s:g} s still: {said},"
+            f" {c['parked_images']} of {c['images']} pictures parked,"
+            f" {c['parked_dropped']} pairs dropped while parked"
+        )
 
     def _blind_because(self, counts: Counter[str]) -> str:
         """Why no beam judged the depth this window, in the words of the counter that won:

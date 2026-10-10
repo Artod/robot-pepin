@@ -24,6 +24,7 @@ import numpy as np
 import pytest
 import ros_stubs
 import stereo_scenes as scenes
+import yaml
 
 RCLPY = ros_stubs.install()
 
@@ -1307,3 +1308,206 @@ def test_the_real_matcher_measures_a_rendered_room_through_the_whole_node(build:
     assert both.mean() > 0.3, "the real matcher answered for almost nothing"
     assert float(np.median(np.abs(measured[both] - truth[both]) / truth[both])) < 0.03
     assert not np.isfinite(measured[:, :128]).any(), "the band no right eye reaches is unknown"
+
+
+# ---- the parked gate (pepin.parked) ----------------------------------------------------------
+T0 = 100.0  # the node's monotonic clock at the start of a parked test
+ODOM_HZ = 64  # /odometry/filtered in these tests (50 Hz on the robot): binary-exact times,
+PARKED_FPS = 8  # ...and so are the pictures', so a 1 s period is exactly eight of them
+
+
+class FakeClock:
+    """The node's monotonic clock, moved by the test: the parked gate's and the scan cap's."""
+
+    def __init__(self, t: float = T0) -> None:
+        self.t = t
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def _odometry(vx: float = 0.0, wz_dps: float = 0.0) -> Any:
+    """One /odometry/filtered message: the EKF's twist of the cart, in base_link."""
+    msg = ros_stubs.Odometry()
+    msg.twist.twist.linear.x = vx
+    msg.twist.twist.angular.z = math.radians(wz_dps)
+    return msg
+
+
+def _stamp_at(t: float) -> Any:
+    """The board's stamp of the moment the node's clock reads ``t``."""
+    board = 1_000.0 + (t - T0)
+    sec = math.floor(board)
+    return ros_stubs.Time(sec=sec, nanosec=round((board - sec) * 1e9))
+
+
+def parked_node(build: Build, **params: Any) -> tuple[DepthStream, FakeMatcher, FakeClock]:
+    """A stereo node on raft (the default) with the neck's live edge in TF, a scripted matcher,
+    its worker stopped so the test sees what the door lets through, and the test's clock."""
+    params.setdefault("lidar_anchor", False)
+    node, _net = build(
+        depth_source="stereo", stereo_reach_m=10.0, camera_edge=_optical_edge(25.0), **params
+    )
+    matcher = rig(node)
+    node._worker.stop()
+    clock = FakeClock()
+    node._monotonic = clock
+    return node, matcher, clock
+
+
+def drive(
+    node: DepthStream,
+    matcher: FakeMatcher,
+    clock: FakeClock,
+    seconds: float,
+    *,
+    vx: float = 0.0,
+    wz_dps: float = 0.0,
+    pan_deg: float = 0.0,
+    process: bool = False,
+) -> list[float]:
+    """``seconds`` of the robot as the node hears it, from the clock's time on: the EKF's twist
+    at ODOM_HZ, the neck's edge at ``pan_deg`` restamped with every picture, a stereo pair at
+    PARKED_FPS offered at the door. A pair let through is processed here when ``process`` (the
+    worker is stopped) and forgotten otherwise. Returns the clock times of the pairs let
+    through; the clock ends ``seconds`` later."""
+    edges = node._tf.buffer.transforms
+    if ("base_link", "camera_optical") in edges:
+        edges[("base_link", "camera_optical")].transform = _optical_edge(25.0, pan_deg).transform
+    disparity = _disparity(_scene(CONFIG_CAM, 2.0))
+    through: list[float] = []
+    for i in range(round(seconds * ODOM_HZ)):
+        node.subs["/odometry/filtered"][1](_odometry(vx, wz_dps))
+        if i % (ODOM_HZ // PARKED_FPS) == 0:
+            stamp = _stamp_at(clock.t)
+            for edge in edges.values():
+                edge.header.stamp = stamp
+            node.subs["/camera/right/image"][1](_right_image(stamp))
+            image = _image(stamp)
+            node._on_image(image)
+            if node._worker.waiting:
+                node._worker.clear()
+                through.append(clock.t)
+                if process:
+                    matcher.disparities.append(disparity)
+                    node._process(image)
+        clock.t += 1.0 / ODOM_HZ
+    return through
+
+
+def test_a_still_robot_parks_after_parked_after_s_and_its_raft_pairs_thin_to_one_a_second(
+    build: Build,
+) -> None:
+    """Base and head still: every pair goes to RAFT for parked_after_s (2 s), then one a second
+    from the last that went — the other seven of every eight never reach the matcher."""
+    node, matcher, clock = parked_node(build)
+    assert node._switches["parked_pairs_hz"] == 1.0 and node._switches["parked_after_s"] == 2.0
+    first = drive(node, matcher, clock, 2.0)
+    assert len(first) == 2 * PARKED_FPS, "not parked yet: every pair"
+    parked = drive(node, matcher, clock, 4.0)
+    assert parked == [T0 + 2.875, T0 + 3.875, T0 + 4.875, T0 + 5.875], "one a second"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "parked gate 1/s after 2 s still: parked (still 6 s)" in line
+
+
+def test_a_wheel_twist_ends_parked_and_the_next_pair_goes_at_full_rate(build: Build) -> None:
+    """No hysteresis on the way out: one twist over 0.02 m/s — or a turn over 1 deg/s — and the
+    very next picture reaches the matcher, a fraction of a second after the last; in again only
+    after parked_after_s of stillness."""
+    node, matcher, clock = parked_node(build)
+    drive(node, matcher, clock, 3.0)
+    assert not drive(node, matcher, clock, 0.5), "parked: nothing due in half a second"
+    node.subs["/odometry/filtered"][1](_odometry(vx=0.05))
+    assert drive(node, matcher, clock, 0.125) == [clock.t - 0.125], "the next pair goes"
+    assert len(drive(node, matcher, clock, 1.0, vx=0.05)) == PARKED_FPS, "full rate"
+    assert len(drive(node, matcher, clock, 2.0)) == 2 * PARKED_FPS, "2 s still before parked"
+    assert len(drive(node, matcher, clock, 1.0)) == 1, "parked again"
+    assert len(drive(node, matcher, clock, 0.5, wz_dps=3.0)) == PARKED_FPS // 2, "a turn moves"
+    node._report()
+    assert "moving (base still 0.0 s, head still" in node.logger.texts("info")[-1]
+
+
+def test_a_head_move_ends_parked_and_the_next_pair_goes_at_full_rate(build: Build) -> None:
+    """The neck's pan read off TF at each picture: within half a degree of where the stillness
+    began is still (encoder jitter, a settling neck); past it, the very next pair goes."""
+    node, matcher, clock = parked_node(build)
+    drive(node, matcher, clock, 3.0)
+    assert len(drive(node, matcher, clock, 2.0, pan_deg=0.2)) == 2, "jitter: still parked"
+    assert drive(node, matcher, clock, 0.125, pan_deg=2.0) == [clock.t - 0.125], "a look"
+    assert len(drive(node, matcher, clock, 1.0, pan_deg=2.0)) == PARKED_FPS, "2 s still again"
+    del node._tf.buffer.transforms[("base_link", "camera_optical")]
+    drive(node, matcher, clock, 3.0)
+    assert len(drive(node, matcher, clock, 1.0)) == PARKED_FPS, "a head nobody sees moves"
+    node._report()
+    assert "head pose unknown" in node.logger.texts("info")[-1]
+
+
+def test_parked_pairs_hz_zero_turns_the_gate_off_and_sgbm_is_never_thinned(build: Build) -> None:
+    """0 is full rate always, as before the gate — and a node built with it off does not even
+    listen to the odometry until the knob is raised. Under sgbm (17 ms a pair in the
+    container, not the GPU) the gate idles whatever the robot does; a mono node has no gate."""
+    node, matcher, clock = parked_node(build, parked_pairs_hz=0.0)
+    assert "/odometry/filtered" not in node.subs, "off: the subscriptions it always had"
+    assert node.set_parameters([Param("parked_pairs_hz", 1.0)])[0].successful
+    assert "/odometry/filtered" in node.subs
+    assert node.set_parameters([Param("parked_pairs_hz", 0.0)])[0].successful
+    assert len(drive(node, matcher, clock, 5.0)) == 5 * PARKED_FPS, "every pair, parked or not"
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "parked gate off (parked_pairs_hz 0): parked (still 5 s)" in line
+    assert "parked_pairs_hz=0.0" in line, "the knob's own state, as every switch's"
+    assert node.set_parameters([Param("parked_pairs_hz", 1.0)])[0].successful
+    assert len(drive(node, matcher, clock, 1.0)) == 1, "raised live: thinned from the next"
+    assert node.set_parameters([Param("stereo_matcher", "sgbm")])[0].successful
+    assert len(drive(node, matcher, clock, 1.0)) == PARKED_FPS
+    node._report()
+    assert "parked gate idle under sgbm (it thins raft pairs only)" in node.logger.texts("info")[-1]
+    mono, _net = build()
+    assert "/odometry/filtered" not in mono.subs
+    mono._report()
+    assert "parked gate" not in mono.logger.texts("info")[-1]
+
+
+def test_the_pairs_dropped_while_parked_are_counted_in_the_report_line(build: Build) -> None:
+    """The window's own counts: how many pictures arrived parked, how many pairs the door held
+    back, and the pairs a second that reached the matcher — the GPU's dose."""
+    node, matcher, clock = parked_node(build)
+    drive(node, matcher, clock, 6.0, process=True)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "32 of 48 pictures parked, 28 pairs dropped while parked" in line
+    assert "pairs/s" in line and len(matcher.disparities) == 0, "every pair let through matched"
+    drive(node, matcher, clock, 1.0)
+    node._report()
+    assert "8 of 8 pictures parked, 7 pairs dropped while parked" in node.logger.texts("info")[-1]
+
+
+def test_a_parked_robot_still_publishes_its_depth_scan_and_nothing_clears_the_costmap(
+    build: Build,
+) -> None:
+    """Every pair the door lets through is measured and published whole: under the shipped
+    5 Hz cap a 1 Hz stream is never thinned, each fan is its own picture's and the very fan a
+    moving robot publishes of the same room, and nothing else goes out on /depth_scan between
+    them. On the costmap's side the fan only CLEARS (the camera's marks are depth_fusion's
+    volume, /depth_marks) and no layer expects a rate of it, so a slower fan can leave a mark
+    standing longer but can never erase one, nor make the layer stale."""
+    node, matcher, clock = parked_node(build, scan_hz=5.0, parked_after_s=0.5)
+    moving = drive(node, matcher, clock, 0.5, process=True)
+    assert len(moving) == PARKED_FPS // 2
+    fans = list(published(node)[1])
+    assert len(fans) == 2, "while moving the 5 Hz cap holds back every other fan, as ever"
+    parked = drive(node, matcher, clock, 4.0, process=True)
+    assert parked == [T0 + 1.375, T0 + 2.375, T0 + 3.375, T0 + 4.375]
+    out = published(node)[1][len(fans) :]
+    assert [f.header.stamp for f in out] == [_stamp_at(t) for t in parked], "one per pair"
+    for fan in out:
+        np.testing.assert_array_equal(np.asarray(fan.ranges), np.asarray(fans[0].ranges))
+    assert np.isfinite(np.asarray(fans[0].ranges)).any(), "a fan that says something"
+    params = yaml.safe_load((REPO / "ros/params/nav2_params.yaml").read_text())
+    for costmap in ("local_costmap", "global_costmap"):
+        layer = params[costmap][costmap]["ros__parameters"]["camera_layer"]
+        fan = layer["depth_scan"]
+        assert fan["topic"] == "/depth_scan" and fan["clearing"] is True, costmap
+        assert fan["marking"] is False, "a missing fan can never take a mark away"
+        assert fan["expected_update_rate"] == 0.0, "no rate expected: never stale at 1 Hz"
