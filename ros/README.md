@@ -359,6 +359,21 @@ a row the host is left alone and probed again every 30 s. **The checkpoint** liv
 device are in `config/camera.json`'s `net` block. The model's source is vendored under
 `src/pepin/vendor/raft_stereo/` (MIT, princeton-vl/RAFT-Stereo at 6e93ed2).
 
+### Parked: one pair a second
+
+While the robot is parked, RAFT gets one pair a second (`parked_pairs_hz`, default 1; 0 is off).
+Parked means the base's twist on `/odometry/filtered` under 0.02 m/s and 1 deg/s and the camera's
+pan and tilt (the neck's TF) within 0.5 deg, both for `parked_after_s` (2 s). The other pairs are
+dropped before the matcher, so the GPU idles; the first moving sample lets the next pair through
+at full rate, and the host never unloads, so nothing warms up. Why: on this laptop RAFT at 5.9
+pairs/s slowed the voice's Whisper from 190 to 276 ms an utterance and stretched the TTS's
+first-chunk p90 from 96 to 469 ms; at 1 pair/s Whisper was back at 198 ms. Every pair that goes
+through is published as before, so `/depth_scan` keeps coming at the parked rate, and in the
+costmaps it only clears (the camera's marks come from the volume, `/depth_marks`): a slower fan
+leaves a mark standing longer, never erases one. The report line says `parked` or `moving` and
+why, the pairs a second that reached the matcher, and the pairs dropped while parked. SGBM and the
+mono network are never thinned.
+
 ## The head IMU and the visual-inertial odometry
 
 The head ESP32 reads an MPU6050 glued to the stereo module; `pepin.head_server` (board,
@@ -702,6 +717,8 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `depth_stream` | `tf_dead_s` | number 0..600 | 3.0 | how far behind a frame's stamp TF's newest edge may be before that edge is taken for dead and no lookup on the frame's path waits for it: the camera pose falls to config/camera.json's mount and the lidar's scan passes uncarried, both at once and both counted. 0 turns the guard off — every lookup waits CARRY_WAIT_S again |
 | `depth_stream` | `depth_reach_m` | number 0.3..12 | 4.0 | metres past which the published depth is NaN; the same number /depth_scan is capped at |
 | `depth_stream` | `scan_hz` | number 0..30 | 5.0 | the cap on how often /depth_scan is PUBLISHED, in hertz; 0 publishes one fan per frame, which is what this topic did until 2026-09-22. The cap is on the publisher alone: every frame still goes through the network and the whole pipeline, every law is still fitted from it, and the depth image on /camera/depth is not thinned at all |
+| `depth_stream` | `parked_pairs_hz` | number 0..6 | 1.0 | stereo pairs a second RAFT-Stereo is given while the robot is PARKED: the base under 0.02 m/s and 1 deg/s on /odometry/filtered and the camera's pan and tilt within 0.5 deg (the neck's TF), both for parked_after_s. The other pairs are dropped before the matcher, so the laptop's GPU idles; the first moving sample lets the next pair through at full rate. Only raft is thinned (sgbm and the mono network run as before); the depth image, /depth_scan and the law are made from every pair that goes through. 0 is off: every pair at full rate. Why: RAFT at 5.9 pairs/s took Whisper 190 -> 276 ms an utterance and the TTS's first-chunk p90 96 -> 469 ms on this laptop; at 1 pair/s Whisper was 198 ms (2026-10-09) |
+| `depth_stream` | `parked_after_s` | number 0.5..60 | 2.0 | seconds the base and the head must both stay still before the robot counts as parked (parked_pairs_hz); leaving takes one moving sample, entering takes this long: no hysteresis on the way out |
 | `depth_stream` | `gate_exposure_s` | number 0..0.2 | 0.0 | half the exposure window the gaze gate judges a frame by: stamp +- this, because whether ustreamer stamps the start or the end of the exposure is not known (with gate_stamp_end 1: [stamp - 2 * this, stamp + 10 ms]); 0 (the default) follows the camera's rate, config/camera.json's active rig's rate.fps, read at the node's start (kick it after a rate change) as 0.35 frame periods, the 0.035 s it was at 10 fps (a window of 0.7 periods: an auto exposure cannot integrate longer than one). With a manual exposure (config/camera.json's exposure block) set it to that exposure |
 | `depth_stream` | `gate_settle_s` | number 0..1 | 0.0 | how long after the head settled (the since of the phase it settled into, /gaze/state) a frame is still blind: the gaze contract's one frame period; 0 (the default) follows the camera's rate, config/camera.json's active rig's rate.fps, read at the node's start (kick it after a rate change) as one period (0.1 s at 10 fps, its value until 2026-10-07); raise it if the mast is seen ringing after a saccade |
 | `depth_stream` | `gate_yaw_dps` | number 0..360 | 0.0 | a frame whose exposure window holds an IMU sample turning faster than this about base_link z (deg/s) is dropped like a saccade frame; 0 is off (as shipped: the base turns at most 57 deg/s and nothing has measured where its blur starts to cost) |
