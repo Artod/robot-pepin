@@ -28,6 +28,9 @@ EMOTION_MODELS = ("audeering", "emotion2vec")
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
 BARGE_IN_DETECTORS = ("level", "vad", "words")  # pepin.voice_cascade.barge_in
 WORDS_GATES = ("vad", "level")
+# speech to text: mlx (Whisper on the GPU), whispercpp (the encoder on the Neural Engine)
+TRANSCRIBER_ENGINES = ("mlx", "whispercpp")
+COREML_UNITS = ("ane", "all", "gpu", "cpu")  # pepin.voice_live.whisper_cpp
 
 
 @dataclass(frozen=True)
@@ -107,7 +110,13 @@ class CascadeConfig:
     turn_window_s: float = 8.0
     turn_threshold: float = 0.85
     # transcriber
-    whisper_repo: str = "mlx-community/whisper-large-v3-turbo"
+    transcriber_engine: str = "mlx"
+    whisper_repo: str = "mlx-community/whisper-large-v3-turbo"  # the mlx engine's model
+    whispercpp_model: str = "large-v3-turbo"
+    whispercpp_dir: str = "scratch/whisper_cpp"  # bin/whisper-server and models/ggml-<model>.bin
+    whispercpp_threads: int = 4
+    whispercpp_gpu: bool = False  # the decoder on Metal instead of the CPU
+    whispercpp_units: str = "ane"  # where CoreML runs the encoder
     language: str = "ru"
     whisper_prompt: str | None = None
     early_s: float = 0.15
@@ -166,6 +175,8 @@ class CascadeConfig:
         """From the file's object; ``ValueError`` naming a value out of range."""
         ears = data.get("ears", {})
         tr = data.get("transcriber", {})
+        mlx = tr.get("mlx", {})
+        cpp = tr.get("whispercpp", {})
         voice = data.get("voice", {})
         player = data.get("player", {})
         flags = data.get("flags", {})
@@ -187,7 +198,13 @@ class CascadeConfig:
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
             turn_threshold=float(turn.get("threshold", d.turn_threshold)),
-            whisper_repo=str(tr.get("whisper_repo", d.whisper_repo)),
+            transcriber_engine=str(tr.get("engine", d.transcriber_engine)),
+            whisper_repo=str(mlx.get("model", d.whisper_repo)),
+            whispercpp_model=str(cpp.get("model", d.whispercpp_model)),
+            whispercpp_dir=str(cpp.get("dir", d.whispercpp_dir)),
+            whispercpp_threads=int(cpp.get("threads", d.whispercpp_threads)),
+            whispercpp_gpu=bool(cpp.get("gpu", d.whispercpp_gpu)),
+            whispercpp_units=str(cpp.get("coreml_units", d.whispercpp_units)),
             language=str(tr.get("language", d.language)),
             whisper_prompt=tr.get("initial_prompt") or None,
             early_s=float(tr.get("early_s", d.early_s)),
@@ -296,6 +313,13 @@ class CascadeConfig:
             raise ValueError("barge_in.vad_threshold in 0..1 and barge_in.vad_hold_s > 0")
         if not 0.0 < self.barge_in_words_listen_s < self.barge_in_words_window_s <= 8.0:
             raise ValueError("barge_in.words_listen_s above 0 and under words_window_s (<= 8 s)")
+        if self.transcriber_engine not in TRANSCRIBER_ENGINES:
+            raise ValueError(f"transcriber.engine: one of {', '.join(TRANSCRIBER_ENGINES)}")
+        if self.whispercpp_units not in COREML_UNITS or self.whispercpp_threads < 1:
+            raise ValueError(
+                f"transcriber.whispercpp.coreml_units: one of {', '.join(COREML_UNITS)};"
+                " threads >= 1"
+            )
         if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:
             raise ValueError("conversation.idle_close_s > 0 and money.daily_budget_cad > 0")
         if b.model not in self.prices:

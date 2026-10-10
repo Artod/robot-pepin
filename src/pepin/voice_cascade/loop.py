@@ -431,6 +431,7 @@ class CascadeLoop:
         read_s = self.clock()
         noise = not text or is_hallucination(text)
         whisper_ms = round((read_s - closed_s) * 1000)
+        engine = getattr(self.transcriber, "name", None)  # the engine in use (switchable)
         voice_db = round(self.ears.voice_peak_db, 1)
         if self.conversation is None:
             woke = not noise and (self.config.wake == "always" or is_wake(text))
@@ -439,7 +440,10 @@ class CascadeLoop:
                 + ("  -> WAKE" if woke else "  (Whisper's noise line)" if noise else ""),
                 flush=True,
             )
-            row = {"t": round(self.wall(), 3), "text": text, "wake": woke, "noise": noise}
+            row = {
+                "t": round(self.wall(), 3), "text": text, "wake": woke, "noise": noise,
+                "whisper_ms": whisper_ms, "engine": engine,
+            }  # fmt: skip
             append_line(day_dir(self.logs, self.wall()) / "cascade_heard.jsonl", row)
             if not woke or not self.open(segment.pcm):
                 return
@@ -447,7 +451,7 @@ class CascadeLoop:
         assert conversation is not None
         conversation.log.event(
             "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms, early=early is not None,
-            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db,
+            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db, engine=engine,
         )  # fmt: skip
         if noise:
             self.hold_next = False

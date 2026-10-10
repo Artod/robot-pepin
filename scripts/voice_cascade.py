@@ -15,6 +15,10 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
     uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
+    uv run python scripts/voice_cascade.py --set transcriber.engine=whispercpp  # Neural Engine
+
+While it runs, the key "transcriber" of data/voice/control.json ("mlx", "whispercpp",
+"whispercpp:large-v3") switches the speech-to-text engine between utterances.
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -57,16 +61,23 @@ from pepin.voice_cascade.gemini_brain import GeminiBrain
 from pepin.voice_cascade.loop import CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import Brain, Tagger, Voice
+from pepin.voice_cascade.stages import Brain, Tagger, Transcriber, Voice
 from pepin.voice_cascade.tagger import ProsodyTagger, emotion_model
 from pepin.voice_cascade.timeline import report
+from pepin.voice_cascade.transcriber import (
+    CONTROL_FILE,
+    Choice,
+    ControlFile,
+    SwitchingTranscriber,
+    build_transcriber,
+    configured,
+)
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
 from pepin.voice_cascade.voice import QwenVoice, SayVoice
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
 from pepin.voice_live.events import Events, StatePrinter
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker, synthesize
-from pepin.voice_live.wake import MlxWhisper
 
 REPO = Path(__file__).resolve().parents[1]
 NOT_FOR_THE_BRAIN = {"say"}  # the brain speaks through the voice, not through a tool
@@ -254,9 +265,21 @@ def main() -> int:
     )
     clips = tuple(line for line in clips if line)
     speech = SpeechWorker(voice, player, clips=clips)
-    print(f"loading the voice ({config.voice_engine}) and Whisper ({config.whisper_repo})...")
+    choice = configured(config)
+    print(f"loading the voice ({config.voice_engine}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile
-    whisper = MlxWhisper(config.whisper_repo, config.language, config.whisper_prompt)
+    server_log = args.logs / "whisper_server.log"
+
+    def load_transcriber(chosen: Choice) -> Transcriber:
+        return build_transcriber(config, chosen, main_checkout(), log=server_log)
+
+    transcriber = SwitchingTranscriber(
+        load_transcriber(choice),
+        choice,
+        load_transcriber,
+        ControlFile(args.logs / CONTROL_FILE, config),
+        report=lambda line: print(line, flush=True),
+    ).start()
     turn: TurnWorker | None = None
     if config.turn_model is not None:
         print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
@@ -293,7 +316,7 @@ def main() -> int:
         config,
         mic=mic,
         player=player,
-        transcriber=whisper,
+        transcriber=transcriber,
         tagger=tagger,
         brain=brain,
         speech=speech,
@@ -325,6 +348,7 @@ def main() -> int:
         speech.close()
         if turn is not None:
             turn.close()
+        transcriber.close()  # whisper.cpp's server, when that engine is in use
         if face is not None:
             face.close()
         for closable in (mic, speaker):

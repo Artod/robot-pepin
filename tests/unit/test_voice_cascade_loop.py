@@ -165,6 +165,7 @@ def test_only_the_name_opens_and_a_turn_is_timed_and_logged(tmp_path: Path) -> N
         (False, False),
         (False, True),
     ]
+    assert {r["engine"] for r in heard} == {"fake:list"}
     (conversation,) = day.glob("cascade_*/")
     summary = json.loads((conversation / "summary.json").read_text())
     assert summary["turns"] == 1 and summary["close"] == "stopped"

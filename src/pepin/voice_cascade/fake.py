@@ -157,6 +157,7 @@ class ListTranscriber:
         self.texts = list(texts)
         self.delay_s = delay_s
         self.heard: list[int] = []
+        self.name = "fake:list"  # the engine named in the logs
 
     def transcribe(self, pcm: bytes) -> str:
         """The next text."""
