@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import atexit
 import io
 import json
 import logging
@@ -455,4 +456,12 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    code = main()
+    # Everything is written and closed by now. MLX (0.32) destroys its thread-local compile
+    # cache after Python has finalised and now and then segfaults there (2 of 6 runs with a
+    # switched voice, 2026-10-10: exit 139 after the report), so the Python exit handlers run
+    # and the C teardown is skipped.
+    atexit._run_exitfuncs()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
