@@ -359,6 +359,21 @@ a row the host is left alone and probed again every 30 s. **The checkpoint** liv
 device are in `config/camera.json`'s `net` block. The model's source is vendored under
 `src/pepin/vendor/raft_stereo/` (MIT, princeton-vl/RAFT-Stereo at 6e93ed2).
 
+### Parked: one pair a second
+
+While the robot is parked, RAFT gets one pair a second (`parked_pairs_hz`, default 1; 0 is off).
+Parked means the base's twist on `/odometry/filtered` under 0.02 m/s and 1 deg/s and the camera's
+pan and tilt (the neck's TF) within 0.5 deg, both for `parked_after_s` (2 s). The other pairs are
+dropped before the matcher, so the GPU idles; the first moving sample lets the next pair through
+at full rate, and the host never unloads, so nothing warms up. Why: on this laptop RAFT at 5.9
+pairs/s slowed the voice's Whisper from 190 to 276 ms an utterance and stretched the TTS's
+first-chunk p90 from 96 to 469 ms; at 1 pair/s Whisper was back at 198 ms. Every pair that goes
+through is published as before, so `/depth_scan` keeps coming at the parked rate, and in the
+costmaps it only clears (the camera's marks come from the volume, `/depth_marks`): a slower fan
+leaves a mark standing longer, never erases one. The report line says `parked` or `moving` and
+why, the pairs a second that reached the matcher, and the pairs dropped while parked. SGBM and the
+mono network are never thinned.
+
 ## The head IMU and the visual-inertial odometry
 
 The head ESP32 reads an MPU6050 glued to the stereo module; `pepin.head_server` (board,
