@@ -18,7 +18,9 @@ import pytest
 from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
-from pepin.voice_cascade.config import CascadeConfig
+from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
+from pepin.voice_cascade.control import Requests, Switchboard, answers_to, write_request
+from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import Player
@@ -82,6 +84,7 @@ class Rig:
         brain_delay_s: float = 0.0,
         whisper_delay_s: float = 0.0,
         seconds_per_char: float = 0.01,
+        switchboard: Switchboard | None = None,
         **config: Any,
     ) -> None:
         self.config = CascadeConfig().with_changes(
@@ -111,6 +114,7 @@ class Rig:
             logs=tmp,
             ledger=None,
             tick_s=0.01,
+            switchboard=switchboard,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -333,3 +337,48 @@ def test_a_drive_is_acknowledged_when_it_starts_and_reported_when_it_ends(tmp_pa
     assert rig.brain.heard[1].startswith("[robot] the drive go_to(place='printer') has ended")
     assert '"arrived": true' in rig.brain.heard[1]
     assert rig.loop.person_turns == 1
+
+
+def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: Path) -> None:
+    late_brain = ScriptedBrain(script=[["Теперь я другой."]])
+    late_voice = ToneVoice(rate=RATE, seconds_per_char=0.01, chunk_s=0.1)
+    built: list[str] = []
+
+    def build_brain(config: CascadeConfig, name: str) -> BrainSetup:
+        built.append(name)
+        return BrainSetup(late_brain, config, name, {"where_am_i"}, set(), paid=False)
+
+    board = Switchboard(
+        Requests(tmp_path),
+        configure=lambda brain, voice: CascadeConfig().with_changes(
+            voice=VoiceConfig(preset=voice, engine="say")
+        ),
+        build_brain=build_brain,
+        build_voice=lambda v: late_voice,
+        brain="first",
+        voice="first-voice",
+    )
+    script: list[list[Step]] = [["{грустно} Мне жаль.", "Но всё пройдёт.", "{} Ладно."]]
+    rig = Rig(tmp_path, ["Пепин, грустно", "Пепин, а теперь?"], script, switchboard=board)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+        request = write_request(tmp_path, "second", "second-voice")
+
+        def applied() -> int:
+            return sum(r["state"] == "applied" for r in answers_to(tmp_path, request.id))
+
+        await until(lambda: applied() == 2)
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    first, second = rig.loop.turns
+    assert rig.voice.spoken == ["Мне жаль.", "Но всё пройдёт.", "Ладно."]  # markers unsaid
+    assert rig.voice.styles == ["грустно", "грустно", ""]  # sticky until {} resets it
+    assert first["styles"] == ["грустно", ""] and first["brain"] == "first"
+    assert built == ["second"] and late_brain.heard == ["Пепин, а теперь?"]
+    assert second["brain"] == "second" and second["voice"] == "second-voice"
+    assert late_voice.spoken[-1] == "Теперь я другой." and rig.loop.allowed == {"where_am_i"}
+    assert rig.brain.heard == ["Пепин, грустно"]  # the first brain never heard the second
