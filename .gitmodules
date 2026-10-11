@@ -1,0 +1,3 @@
+[submodule "companion"]
+	path = companion
+	url = git@github.com:Artod/pepin-companion.git
