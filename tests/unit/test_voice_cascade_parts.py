@@ -37,7 +37,7 @@ def test_the_file_reads_with_the_haiku_preset() -> None:
     assert config.voice.engine == "qwen3" and config.voice.voice == "serena"
     assert config.voice.name == "qwen3-0.6b" and not config.voice.use_style
     assert "0.6B" in config.voice.model and config.voice.fallback is None
-    assert not config.barge_in and not config.backchannel and config.prosody_tags
+    assert config.barge_in and not config.backchannel and config.prosody_tags
     assert config.price.input == pytest.approx(0.10)
     assert config.brain.preset == "haiku"
 
@@ -400,3 +400,32 @@ def test_an_opener_said_by_the_brain_plays_from_memory() -> None:
     worker.close()
     assert voice.spoken == ["Да?"]  # made once at load, not again for the reply
     assert player.span(1) is not None
+
+
+class _Deaf:
+    """A barge-in detector whose model hears no speech (p 0): a loud rustle, not a voice."""
+
+    preroll_s = 0.6
+    p = 0.0
+
+    def feed(self, frame: object, speaking: bool) -> str | None:
+        return None
+
+    def reset(self) -> None:
+        pass
+
+
+def test_a_loud_sound_the_vad_calls_no_speech_opens_no_utterance() -> None:
+    deaf = _Deaf()
+    ears = Ears(CascadeConfig().with_changes(silence_s=0.5), lambda: "silent", detector=deaf)
+    assert hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8)) == []
+    deaf.p = 0.9  # now the model hears speech
+    kinds = [k for k, _ in hear(ears, tone(1.0) + quiet(0.8), t0=2.3)]
+    assert kinds[0] == "start" and kinds[-1] == "segment"
+
+
+def test_vad_open_at_zero_is_loudness_alone() -> None:
+    config = CascadeConfig().with_changes(silence_s=0.5, vad_open=0.0)
+    ears = Ears(config, lambda: "silent", detector=_Deaf())
+    kinds = [k for k, _ in hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8))]
+    assert kinds[0] == "start" and kinds[-1] == "segment"

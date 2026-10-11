@@ -135,6 +135,7 @@ class CascadeConfig:
     silence_s: float = 0.4
     max_utterance_s: float = 15.0
     start_db: float = 10.0
+    vad_open: float = 0.5  # Silero speech probability to open an utterance; 0 = loudness alone
     floor_min_dbfs: float = -85.0
     continuation_s: float = 0.8
     turn_model: str | None = None
@@ -217,6 +218,7 @@ class CascadeConfig:
             silence_s=float(ears.get("silence_s", d.silence_s)),
             max_utterance_s=float(ears.get("max_utterance_s", d.max_utterance_s)),
             start_db=float(ears.get("start_db", d.start_db)),
+            vad_open=float(ears.get("vad_open", d.vad_open)),
             floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
             continuation_s=float(ears.get("continuation_s", d.continuation_s)),
             turn_model=ears.get("turn_model") or None,

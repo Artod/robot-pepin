@@ -130,6 +130,7 @@ class Ears:
         self._preroll: deque[tuple[bytes, float]] = deque(
             maxlen=int(self.detector.preroll_s / FRAME_S)
         )
+        self.gate.speech = self._speech_now
         self._barged = False
         self._paused = False
         self._frames = 0  # frames of the utterance in progress
@@ -141,6 +142,15 @@ class Ears:
         """The level a voice must reach to cut in."""
         cfg = self.config
         return max(self.gate.floor + cfg.barge_in_over_floor_db, cfg.barge_in_min_dbfs)
+
+    def _speech_now(self) -> bool:
+        """Whether the barge-in model hears speech in the latest frames (``ears.vad_open``):
+        the gate's second opinion before a loud run opens an utterance. True without a
+        probability (a level or words detector) or with the knob at 0: loudness alone."""
+        p = getattr(self.detector, "p", None)
+        if self.config.vad_open <= 0 or not isinstance(p, float):
+            return True
+        return p >= self.config.vad_open
 
     def feed(self, pcm: bytes, t: float) -> list[EarEvent]:
         """One frame at laptop time ``t``; the moments it makes."""
