@@ -162,6 +162,33 @@ def test_an_engine_that_fails_to_load_is_reported_once_and_the_old_one_kept() ->
     assert len(outcomes) == 1 and isinstance(outcomes[0][1], FileNotFoundError)
 
 
+def test_a_switch_back_while_another_engine_loads_keeps_the_one_in_use() -> None:
+    first, slow = Named("first"), Named("slow")
+    loads: list[Callable[[], None]] = []  # the loads asked for, run by hand
+    wanted: list[Choice | None] = [Choice("whispercpp", "b")]
+    outcomes: list[tuple[str, Choice, BaseException | None]] = []
+    switch = SwitchingTranscriber(
+        first, Choice("mlx", "a"), lambda choice: slow, lambda: wanted[0],
+        report=lambda _: None, spawn=loads.append,
+    )  # fmt: skip
+    switch.on_loaded = lambda c, e: outcomes.append(("asked", c, e))
+    switch.poll()  # whispercpp starts loading (34 s the first time: CoreML compiles)
+    wanted[0] = Choice("mlx", "a")  # asked back meanwhile: the one in use
+    switch.on_loaded = lambda c, e: outcomes.append(("asked back", c, e))
+    switch.poll()
+    assert len(loads) == 1  # nothing new to load
+    loads[0]()  # the slow load finishes
+    assert switch.transcribe(b"") == "first" and switch.name == "mlx:a" and not first.closed
+    assert slow.closed  # built, never used
+    ((who, choice, error),) = outcomes
+    assert who == "asked" and choice == Choice("whispercpp", "b")  # answered to its own request
+    assert isinstance(error, RuntimeError) and "superseded" in str(error)
+    wanted[0] = Choice("whispercpp", "b")
+    switch.poll()  # asked for again: loaded again
+    loads[1]()
+    assert switch.transcribe(b"") == "slow"
+
+
 def test_a_whispercpp_build_without_its_files_names_the_missing_one(tmp_path: Path) -> None:
     config = CascadeConfig.load(CONFIG, ["transcriber.engine=whispercpp"])
     with pytest.raises(FileNotFoundError, match="bin/whisper-server"):

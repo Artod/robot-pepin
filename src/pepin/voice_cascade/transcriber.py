@@ -111,7 +111,8 @@ class SwitchingTranscriber:
     """The transcriber in use, replaced between utterances when ``wanted()`` names another: the
     new one is built on its own thread (``spawn``) while the old one keeps reading, swapped in
     once no call is in flight, and the old one closed. A choice that fails to load is reported
-    and not tried again until ``wanted()`` changes."""
+    and not tried again until ``wanted()`` changes; one no longer wanted once it has loaded (the
+    person switched back meanwhile) is closed unused."""
 
     def __init__(
         self,
@@ -153,28 +154,41 @@ class SwitchingTranscriber:
         if want is None or want in (self.choice, self._loading, self._failed):
             return
         self._loading = want
-        self._spawn(lambda: self._load(want))
+        on_loaded = self.on_loaded  # this load's outcome goes to whoever asked for it
+        self._spawn(lambda: self._load(want, on_loaded))
 
-    def _load(self, want: Choice) -> None:
+    def _load(self, want: Choice, on_loaded: Loaded | None = None) -> None:
         t0 = time.monotonic()
         try:
             fresh = self._build(want)
         except Exception as error:  # a missing file, a failed server: keep the one in use
-            self._failed, self._loading = want, None
+            self._failed = want
+            if self._loading == want:
+                self._loading = None
             self._report(f"transcriber: {want.label} failed to load ({error}); keeping {self.name}")
-            if self.on_loaded is not None:
-                self.on_loaded(want, error)
+            if on_loaded is not None:
+                on_loaded(want, error)
+            return
+        if self._wanted() != want:  # another engine (or the one in use) was asked for meanwhile
+            _close(fresh)
+            if self._loading == want:
+                self._loading = None
+            self._report(f"transcriber: {want.label} no longer wanted; keeping {self.name}")
+            if on_loaded is not None:
+                on_loaded(want, RuntimeError("superseded by a later switch"))
             return
         with self._lock:
             old, was = self._current, self.name
             self._current, self.choice = fresh, want
-        self._loading, self._failed = None, None
+        if self._loading == want:
+            self._loading = None
+        self._failed = None
         _close(old)
         self._report(
             f"transcriber: {was} -> {want.label} (loaded in {time.monotonic() - t0:.1f} s)"
         )
-        if self.on_loaded is not None:
-            self.on_loaded(want, None)
+        if on_loaded is not None:
+            on_loaded(want, None)
 
     @property
     def failed(self) -> Choice | None:
