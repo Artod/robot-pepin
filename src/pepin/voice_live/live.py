@@ -200,6 +200,7 @@ def live_config(config: LiveConfig, tools: list[Any], handle: str | None, system
             sliding_window=types.SlidingWindow(target_tokens=config.compression_target_tokens),
         ),
         session_resumption=types.SessionResumptionConfig(handle=handle),
+        enable_affective_dialog=config.affective_dialog or None,
     )
 
 
