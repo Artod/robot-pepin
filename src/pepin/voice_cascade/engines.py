@@ -114,13 +114,13 @@ class VoiceShop:
 
     def voice(self, v: VoiceConfig) -> Voice:
         """The voice ``v`` names (a cloud voice with its fallback from the local ones), at
-        ``v.gain_db``."""
-        built = self._cloud(v) if v.engine == "gemini" else self.local(v)
-        if not v.gain_db:
-            return built
-        from pepin.voice_cascade.voice import GainedVoice
+        ``v.gain_db``: a cloud voice scales its own audio only, its fallback speaks at the
+        fallback's gain."""
+        if v.engine == "gemini":
+            return self._cloud(v)
+        from pepin.voice_cascade.voice import gained
 
-        return GainedVoice(built, v.gain_db)
+        return gained(self.local(v), v.gain_db)
 
     def _cloud(self, v: VoiceConfig) -> Voice:
         from pepin.voice_cascade.gemini_voice import GeminiVoice
@@ -131,11 +131,12 @@ class VoiceShop:
             v.model,
             voice=v.voice or "Kore",
             price=self.prices[v.model],
-            fallback=self.local(v.fallback) if v.fallback is not None else None,
+            fallback=self.voice(v.fallback) if v.fallback is not None else None,
             fallback_name=v.fallback.name if v.fallback is not None else "none",
             timeout_s=v.cloud_timeout_s,
             max_calls=v.cloud_max_calls,
             cache_dir=self.cache_dir,
+            gain_db=v.gain_db,
         )
 
     def local(self, v: VoiceConfig) -> Voice:

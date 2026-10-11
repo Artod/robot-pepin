@@ -256,6 +256,98 @@ def test_a_paid_voice_makes_no_clips_and_bills_every_sentence() -> None:
     assert [i for i, _ in bills] == [0] and bills[0][1].engine == "cloud"
 
 
+class CloudLike(ToneVoice):
+    """A voice that pays per sentence and writes the bill as its stream ends (Gemini's way);
+    after its first chunk it waits for ``gate``."""
+
+    def __init__(self, gate: threading.Event) -> None:
+        super().__init__(rate=24_000, seconds_per_char=0.01, chunk_s=0.01)
+        self.gate = gate
+        self._bill: VoiceBill | None = None
+
+    def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+        made = 0
+        try:
+            for pcm in super().stream(text, style):
+                if made == 1:
+                    assert self.gate.wait(5.0)
+                made += 1
+                yield pcm
+        finally:
+            self._bill = VoiceBill("cloud", audio_tokens=made, calls=1)
+
+    def bill(self) -> VoiceBill | None:
+        bill, self._bill = self._bill, None
+        return bill
+
+
+def test_a_paid_voice_at_a_gain_stays_billed_even_for_a_sentence_cut_short() -> None:
+    from pepin.voice_cascade.voice import GainedVoice, gained
+
+    plain = ToneVoice(rate=24_000)
+    assert gained(plain, 0.0) is plain and not isinstance(gained(plain, -3.0), Billed)
+    gate = threading.Event()
+    voice = gained(CloudLike(gate), -10.0)
+    assert isinstance(voice, GainedVoice) and isinstance(voice, Billed)
+    bills: list[VoiceBill] = []
+    worker, done = worker_with(voice, ("Секунду.",))  # type: ignore[arg-type]
+    worker.on_bill = lambda job, bill: bills.append(bill)
+    assert worker.clips == {}  # no paid clips at load
+    worker.say(SpeechJob(1, 0, "Длинная фраза, которую перебьют на середине."))
+    wait_for(lambda: worker.player.span(1) is not None)  # its first chunk is out
+    worker.cut(1)
+    gate.set()
+    wait_for(lambda: len(done) == 1)
+    worker.close()
+    assert [b.audio_tokens for b in bills] == [2]  # the cut sentence's bill, through the gain
+
+
+def test_a_gained_voice_takes_the_rate_its_engine_learns_at_load() -> None:
+    from pepin.voice_cascade.voice import gained
+
+    class Retuned(ToneVoice):
+        def load(self) -> None:
+            super().load()
+            self.rate = 22_050  # a codec's own rate, known once the model is loaded
+
+    voice = gained(Retuned(rate=24_000), -3.0)
+    voice.load()
+    assert voice.rate == 22_050
+
+
+def test_a_cloud_voice_s_gain_scales_its_own_audio_never_its_fallback(tmp_path: Path) -> None:
+    loud = b"\x10\x27" * 100  # 10000
+    fallback = ToneVoice(rate=24_000, seconds_per_char=0.01)
+    voice = gemini(FakeModels([chunk(loud)], ConnectionError("offline")), tmp_path,
+                   fallback=fallback, gain_db=-20.0)  # fmt: skip
+    cloud = b"".join(voice.stream("Да?", ""))
+    assert cloud == b"\xe8\x03" * 100  # 1000: -20 dB
+    assert b"".join(voice.stream("Да?", "")) == cloud  # kept on disk as it came, said at the gain
+    said = b"".join(voice.stream("Секунду, гляну.", ""))  # the call fails: the fallback says it
+    reference = b"".join(ToneVoice(rate=24_000, seconds_per_char=0.01).stream("Секунду, гляну."))
+    assert said == reference  # at the fallback's own level
+
+
+def test_the_shop_puts_a_cloud_voice_s_gain_inside_it_and_wraps_a_local_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from dataclasses import replace
+
+    from pepin.voice_cascade.engines import VoiceShop
+    from pepin.voice_cascade.voice import GainedVoice
+
+    monkeypatch.setenv("GEMINI_API_KEY", "test")  # nothing is loaded: no call is made
+    config = CascadeConfig.load(CONFIG, ["voice.preset=gemini-lite"])
+    shop = VoiceShop(config, tmp_path, cache_dir=tmp_path)
+    cloud = shop.voice(config.voice)
+    assert isinstance(cloud, GeminiVoice) and cloud.gain_db == -10.0
+    assert config.voice.fallback is not None
+    assert isinstance(cloud.fallback, QwenVoice)  # no gain around the fallback
+    assert shop.voice(config.voice.fallback) is cloud.fallback  # one model for both
+    quieter = shop.voice(replace(config.voice.fallback, gain_db=-3.0))
+    assert isinstance(quieter, GainedVoice) and quieter.inner is cloud.fallback
+
+
 def test_a_new_voice_loads_beside_the_one_speaking_and_takes_the_next_sentence() -> None:
     old = ToneVoice(rate=24_000, seconds_per_char=0.01)
     worker, done = worker_with(old, ("мм",))

@@ -106,7 +106,9 @@ class VoiceConfig:
     cloud_timeout_s: float = 2.0  # Gemini: no audio this long after the call -> the fallback
     cloud_max_calls: int | None = None  # Gemini: calls a run may make (None: no cap)
     fallback: VoiceConfig | None = None  # Gemini: the local voice when the call fails
-    gain_db: float = 0.0  # applied to the engine's PCM; cloud voices come ~10 dB hotter than Qwen
+    # applied to the engine's PCM (a cloud voice's own, never its fallback's); cloud voices come
+    # ~10 dB hotter than Qwen
+    gain_db: float = 0.0
     say_voice: str = "Milena"
     say_rate_wpm: int = 185
 

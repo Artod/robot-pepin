@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from pepin.audio_link import RATE
+from pepin.voice_cascade.stages import Billed, Voice, VoiceBill
 from pepin.voice_live.sources import synthesize
 
 QWEN_RATE = 24_000  # Hz: what Qwen3-TTS's codec decodes to
@@ -142,7 +143,8 @@ class SayVoice:
 class GainedVoice:
     """A voice's PCM scaled by ``gain_db`` (clipped at full scale): one loudness for every
     engine, so the room and the echo guard meet the same level whoever speaks. Everything
-    else (the bill, the fallback's name) is the wrapped voice's."""
+    else (the bill, the fallback's name) is the wrapped voice's; build it with :func:`gained`,
+    which keeps a paying voice :class:`pepin.voice_cascade.stages.Billed`."""
 
     def __init__(self, inner: Any, gain_db: float) -> None:
         """``inner``: the engine; ``gain_db``: negative quietens."""
@@ -152,14 +154,42 @@ class GainedVoice:
     def load(self) -> None:
         """See :class:`pepin.voice_cascade.stages.Voice`."""
         self.inner.load()
+        self.rate = self.inner.rate  # an engine may learn its rate as it loads (Qwen's codec)
 
     def stream(self, text: str, style: str = "") -> Iterator[bytes]:
-        """The engine's chunks, each scaled."""
-        for pcm in self.inner.stream(text, style):
-            yield with_gain(pcm, self.gain_db)
+        """The engine's chunks, each scaled; a sentence cut short closes the engine's stream
+        at once (a paying voice writes its bill as its stream ends)."""
+        chunks = self.inner.stream(text, style)
+        try:
+            for pcm in chunks:
+                yield with_gain(pcm, self.gain_db)
+        finally:
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self.inner, name)
+
+
+class BilledGainedVoice(GainedVoice):
+    """:class:`GainedVoice` over a voice that pays per sentence. A runtime protocol check
+    looks attributes up statically and never sees ``__getattr__``, so the bill is declared
+    here: without it the speech worker would make paid clips at load and drop every bill."""
+
+    def bill(self) -> VoiceBill | None:
+        """See :class:`pepin.voice_cascade.stages.Billed`."""
+        bill: VoiceBill | None = self.inner.bill()
+        return bill
+
+
+def gained(inner: Voice, gain_db: float) -> Voice:
+    """``inner`` at ``gain_db`` (``inner`` itself at 0 dB), still billed when it pays."""
+    if not gain_db:
+        return inner
+    if isinstance(inner, Billed):
+        return BilledGainedVoice(inner, gain_db)
+    return GainedVoice(inner, gain_db)
 
 
 def with_gain(pcm: bytes, gain_db: float) -> bytes:
