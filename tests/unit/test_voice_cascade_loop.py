@@ -238,6 +238,69 @@ def test_a_held_utterance_is_answered_alone_when_only_noise_follows(tmp_path: Pa
     assert "merged" not in rig.loop.turns[0]
 
 
+def test_noise_after_a_phrase_neither_holds_the_turn_nor_restarts_the_brain(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, ["Пепин, привет", "Продолжение следует..."], brain_delay_s=1.0)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())  # closed; the brain starts thinking
+        await until(lambda: rig.loop.current is not None)
+        await rig.say(tone(0.4) + quiet(0.7))  # a rustle within 0.8 s: Whisper's noise line
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["Пепин, привет"]  # one call, never cancelled
+    assert rig.brain.outcomes == ["committed"]
+    (turn,) = rig.loop.turns
+    assert turn["outcome"] == "committed" and "merged" not in turn
+    assert rig.voice.spoken == ["Ты сказал: Пепин, привет"]
+    day = next(tmp_path.iterdir())
+    (conversation,) = day.glob("cascade_*/")
+    kinds = [json.loads(line)["event"] for line in (conversation / "events.jsonl").open()]
+    assert "held" not in kinds
+    assert [k for k in kinds if k in ("muted", "resumed")] == ["muted", "resumed"]
+
+
+def test_a_tool_asked_for_while_the_person_goes_on_never_runs_when_words_follow(
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    def tool(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        calls.append(name)
+        return {"ok": True, "places": [{"name": "home"}]}
+
+    script: list[list[Step]] = [[("where_am_i", {}), "Я дома."], ["Понял, на кухню."]]
+    rig = Rig(
+        tmp_path,
+        ["Пепин, где ты", "и поезжай на кухню"],
+        script,
+        tool=tool,
+        brain_delay_s=0.15,
+        whisper_delay_s=0.4,
+    )
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None)
+        await rig.say(tone(0.4) + quiet(0.7))  # the rest, read after the brain asked a tool
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    day = next(tmp_path.iterdir())
+    (conversation,) = day.glob("cascade_*/")
+    kinds = [json.loads(line)["event"] for line in (conversation / "events.jsonl").open()]
+    assert "tool_call" in kinds and "tool_result" not in kinds  # asked for while silent
+    assert [c for c in calls if c != "list_places"] == []  # it waited, then was dropped
+    assert rig.brain.outcomes == ["abandoned", "committed"]
+    assert rig.brain.heard[-1] == "Пепин, где ты и поезжай на кухню"
+    merged, answered = rig.loop.turns
+    assert merged["outcome"] == "merged" and answered["merged"] == 2
+    summary = json.loads((conversation / "summary.json").read_text())
+    assert summary["turns"] == 1  # the merged fragment is part of the turn after it
+
+
 def test_a_barge_in_cuts_the_reply_to_what_was_heard_and_answers_the_new_words(
     tmp_path: Path,
 ) -> None:
@@ -383,3 +446,83 @@ def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: 
     assert second["brain"] == "second" and second["voice"] == "second-voice"
     assert late_voice.spoken[-1] == "Теперь я другой." and rig.loop.allowed == {"where_am_i"}
     assert rig.brain.heard == ["Пепин, грустно"]  # the first brain never heard the second
+
+
+class BrokenVoice(ToneVoice):
+    """A voice whose model never loads."""
+
+    def load(self) -> None:
+        raise RuntimeError("no weights")
+
+
+def test_a_failed_switch_keeps_what_runs_and_a_later_switch_supersedes_a_slow_one(
+    tmp_path: Path,
+) -> None:
+    slow_gate = threading.Event()
+    brains = {"slow": ScriptedBrain(), "fast": ScriptedBrain()}
+
+    def build_brain(config: CascadeConfig, name: str) -> BrainSetup:
+        if name == "broken":
+            raise ValueError("no such preset")
+        if name == "slow":
+            assert slow_gate.wait(5.0)
+        return BrainSetup(brains[name], config, name, {"where_am_i"}, set(), paid=False)
+
+    board = Switchboard(
+        ControlFile(tmp_path),
+        configure=lambda brain, voice: CascadeConfig().with_changes(
+            voice=VoiceConfig(preset=voice, engine="say")
+        ),
+        build_brain=build_brain,
+        build_voice=lambda v: BrokenVoice(rate=RATE),
+        brain="first",
+        voice="first-voice",
+    )
+    rig = Rig(tmp_path, [], switchboard=board)
+
+    asked: dict[str, str] = {}
+
+    def states(name: str) -> list[str]:
+        return [f"{r['what']} {r['state']}" for r in answers_to(tmp_path, asked[name])]
+
+    async def scenario(rig: Rig) -> None:
+        try:
+            asked["broken"] = write_request(tmp_path, "broken", "bad-voice").id
+            await until(lambda: {"brain failed", "voice failed"} <= set(states("broken")))
+            asked["slow"] = write_request(tmp_path, "slow", None).id
+            await until(lambda: states("slow") == ["brain loading"])
+            asked["fast"] = write_request(tmp_path, "fast", None).id
+            await until(lambda: states("fast")[-1:] == ["brain applied"])
+        finally:
+            slow_gate.set()
+        await until(lambda: states("slow")[-1:] == ["brain failed"])
+
+    asyncio.run(rig.run(scenario))
+    assert rig.speech.voice is rig.voice and rig.loop.voice_name == "qwen3"  # the old voice
+    assert rig.loop.brain is brains["fast"] and rig.loop.brain_name == "fast"
+    superseded = answers_to(tmp_path, asked["slow"])[-1]
+    assert superseded["error"] == "superseded by a later switch"
+
+
+def test_what_a_conversation_spent_reaches_the_ledger_whatever_brain_closes_it(
+    tmp_path: Path,
+) -> None:
+    from pepin.voice_live.budget import Ledger
+    from pepin.voice_live.config import LiveConfig
+
+    rig = Rig(tmp_path, [])
+    ledger = Ledger(tmp_path / "ledger.jsonl", LiveConfig())
+    rig.loop.paid_ledger = ledger  # the run's ledger; the echo brain itself records nothing
+
+    async def conversation() -> None:
+        assert rig.loop.ledger is None and rig.loop.open(b"")
+        assert rig.loop.conversation is not None
+        rig.loop.conversation.voice_usd = 0.002  # a paid voice, or a paid brain switched out
+        rig.loop.close("idle")
+        assert rig.loop.open(b"")
+        rig.loop.close("idle")  # nothing spent: nothing recorded
+
+    asyncio.run(conversation())
+    rig.speech.close()
+    assert ledger.today_usd() == pytest.approx(0.002)
+    assert len((tmp_path / "ledger.jsonl").read_text().splitlines()) == 1
