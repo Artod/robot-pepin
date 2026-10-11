@@ -4,7 +4,8 @@ Reads the events.jsonl of each session directory (data/voice/<day>/cascade_<HHMM
 row per session so combinations can be set side by side: the person's turns, time to the robot's
 first sound (p50 / p90, counted from the person's last loud frame, the closing silence included),
 the stage medians (Whisper, the brain's first token, the first sentence, the TTS's first chunk),
-the turns that called a tool and their first token, the barge-ins, and the price per reply.
+the turns that called a tool and their first token, the barge-ins, and the price per reply (the
+brain's calls and a paid voice's sentences).
 
     uv run python scripts/cascade_stats.py data/voice/20261011 [data/voice/20261010 ...]
     uv run python scripts/cascade_stats.py data/voice/20261011/cascade_141459 -v  # every turn
@@ -47,9 +48,14 @@ def _events(directory: Path) -> list[dict[str, Any]]:
 
 
 def session_row(directory: Path) -> dict[str, Any] | None:
-    """One session's numbers, or None when it has no person turns."""
+    """One session's numbers, or None when it has no person turns. A merged fragment is part
+    of the turn after it; the cost is everything the session paid: every model call (the
+    robot's own reports and the fragments included) and every sentence of a paid voice."""
     events = _events(directory)
-    turns = [e for e in events if e.get("event") == "turn" and e.get("kind", "person") == "person"]
+    rows = [e for e in events if e.get("event") == "turn"]
+    turns = [
+        e for e in rows if e.get("kind", "person") == "person" and e.get("outcome") != "merged"
+    ]
     if not turns:
         return None
     opened = next((e for e in events if e.get("event") == "open"), {})
@@ -70,11 +76,12 @@ def session_row(directory: Path) -> dict[str, Any] | None:
     tooled = [t for t in turns if t.get("turn") in tools]
     sound = [v for t in plain if (v := ms(t, "speaker_start")) is not None]
     sound_tools = [v for t in tooled if (v := ms(t, "speaker_start")) is not None]
-    usd = sum(float((t.get("usage") or {}).get("usd") or 0.0) for t in turns)
-    cache_read = sum(int((t.get("usage") or {}).get("cache_read") or 0) for t in turns)
+    usd = sum(float((t.get("usage") or {}).get("usd") or 0.0) for t in rows)
+    usd += sum(float(e.get("usd") or 0.0) for e in events if e.get("event") == "voice_bill")
+    cache_read = sum(int((t.get("usage") or {}).get("cache_read") or 0) for t in rows)
     inputs = sum(
         int((t.get("usage") or {}).get(k) or 0)
-        for t in turns
+        for t in rows
         for k in ("input", "cache_read", "cache_write")
     )
     whisper = [w for e in heard if (w := e.get("whisper_ms")) is not None and w > 20]
