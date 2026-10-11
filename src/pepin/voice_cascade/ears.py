@@ -44,10 +44,10 @@ SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
 @dataclass(frozen=True)
 class EarEvent:
     """One moment: what, when (laptop monotonic seconds), the segment (``segment`` only), the
-    frame's level and the detector's reason (``barge_in``: the voice that cut in), and for a
-    segment with an end-of-turn model: what closed it (``model`` or ``silence``), the model's p
-    for its last pause, the model's milliseconds and the time saved against the fixed
-    silence."""
+    frame's level and the detector's reason (``barge_in``: the voice that cut in), the lead-in
+    kept in front of the opening (``start``: seconds), and for a segment with an end-of-turn
+    model: what closed it (``model`` or ``silence``), the model's p for its last pause, the
+    model's milliseconds and the time saved against the fixed silence."""
 
     kind: EarKind
     t: float
@@ -59,6 +59,7 @@ class EarEvent:
     model_ms: float | None = None
     saved_ms: float | None = None
     early: concurrent.futures.Future[str] | None = None  # Whisper on it, started in its pause
+    lead_s: float | None = None  # start: the audio kept from before the opening
 
 
 class TurnSegmenter(Segmenter):
@@ -118,6 +119,7 @@ class Ears:
             start_db=config.start_db,
             silence_s=config.silence_s,
             max_s=config.max_utterance_s,
+            pre_s=config.lead_s,
         )
         self._window: deque[bytes] = deque(maxlen=round(config.turn_window_s / FRAME_S))
         self._requests = 0
@@ -130,6 +132,7 @@ class Ears:
         self._preroll: deque[tuple[bytes, float]] = deque(
             maxlen=int(self.detector.preroll_s / FRAME_S)
         )
+        self.gate.speech = self._speech_now
         self._barged = False
         self._paused = False
         self._frames = 0  # frames of the utterance in progress
@@ -141,6 +144,15 @@ class Ears:
         """The level a voice must reach to cut in."""
         cfg = self.config
         return max(self.gate.floor + cfg.barge_in_over_floor_db, cfg.barge_in_min_dbfs)
+
+    def _speech_now(self) -> bool:
+        """Whether the barge-in model hears speech in the latest frames (``ears.vad_open``):
+        the gate's second opinion before a loud run opens an utterance. True without a
+        probability (a level or words detector) or with the knob at 0: loudness alone."""
+        p = getattr(self.detector, "p", None)
+        if self.config.vad_open <= 0 or not isinstance(p, float):
+            return True
+        return p >= self.config.vad_open
 
     def feed(self, pcm: bytes, t: float) -> list[EarEvent]:
         """One frame at laptop time ``t``; the moments it makes."""
@@ -210,7 +222,9 @@ class Ears:
             self._drop_early()
             self._window.clear()
             self.voice_peak_db = db
-            events.append(EarEvent("start", t))
+            # measured here, on the mic's thread: the loop reads the event frames later
+            lead_s = len(self.gate.audio()) / 2 / RATE
+            events.append(EarEvent("start", t, lead_s=lead_s))
         if self.gate.talking:
             self.voice_peak_db = max(self.voice_peak_db, db)
             self._window.append(pcm)

@@ -11,6 +11,12 @@ reports its end as the robot's own turn (``[robot] ...``). "Стоп" heard duri
 robot before the brain hears it. A conversation closes after ``idle_close_s`` of quiet, on a
 goodbye, on ``end_conversation`` or at a cap.
 
+The person starting again within ``continuation_s`` of an utterance's close, before the reply
+to it has sent anything to the voice, keeps that reply silent: its brain goes on, its
+sentences and tools wait until the new utterance is read. Words join both utterances into one
+turn (the reply is dropped and the brain asked again); Whisper's noise line lets the reply go
+on as if nothing had been heard.
+
 Every turn prints one line of its timeline (:mod:`pepin.voice_cascade.timeline`) with the
 brain's cache tokens and price, the brain and the voice that spoke (and a cloud voice's first
 audio and price), and logs it with everything else (:mod:`pepin.voice_cascade.log`).
@@ -84,7 +90,9 @@ PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
 # tools that take a while: the robot says its filler when the brain calls one before a word
 SLOW_TOOLS = frozenset(("see", "look", "look_around", "find", "recall", "map_tree"))
 BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
-HOLD_RELEASE_S = 0.3  # a held utterance waits this long after the person stopped without words
+# a held utterance (or a reply kept silent) waits this long after the person stopped without
+# an utterance to read
+HOLD_RELEASE_S = 0.3
 
 
 class Mic(Protocol):
@@ -107,6 +115,12 @@ class Input:
     goodbye: bool = False
     eot: dict[str, Any] | None = None  # the end-of-turn model's verdict on the utterance
     fragments: int = 1  # utterances joined into this turn (the person went on)
+
+
+def _set_event() -> asyncio.Event:
+    event = asyncio.Event()
+    event.set()
+    return event
 
 
 @dataclass
@@ -135,6 +149,9 @@ class Reply:
     style: str = ""  # the style the brain asked for, in force for its next sentences
     styles: list[str] = field(default_factory=list)  # every style it asked for
     bills: list[VoiceBill] = field(default_factory=list)  # a paid voice's, one per sentence
+    muted: bool = False  # the person may be going on: its voice jobs and tools wait
+    waiting: list[SpeechJob] = field(default_factory=list)  # its voice jobs while muted
+    free: asyncio.Event = field(default_factory=_set_event)  # set while not muted
 
 
 @dataclass
@@ -223,6 +240,10 @@ class CascadeLoop:
         self.held: Input | None = None  # an utterance waiting for the rest of the sentence
         self.held_s = 0.0
         self.hold_next = False  # the utterance being read is to be held, not answered
+        self.continuing = 0  # utterances begun as a continuation, not yet read (replies wait)
+        self.continuing_s = 0.0  # when the latest of them began
+        self._continues = False  # the utterance in progress began as a continuation
+        self._brain_switches = 0  # brain switches asked for (an older one finishing is dropped)
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
         self._praat = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="prosody")
@@ -387,9 +408,12 @@ class CascadeLoop:
             if event.kind == "start":
                 if self.conversation is not None:
                     self.conversation.last_heard_s = event.t
+                    lead_s = round(event.lead_s, 2) if event.lead_s is not None else None
+                    self.conversation.log.event("start", event.t, lead_s=lead_s)
                 cfg = self.config
+                self._continues = False
                 if cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s:
-                    await self._continuation()
+                    self._continues = await self._continuation()
             elif event.kind == "pause":
                 self._backchannel()
             elif event.kind == "barge_in":
@@ -397,23 +421,71 @@ class CascadeLoop:
             elif event.kind == "segment" and event.segment is not None:
                 self.last_closed_s = event.t
                 self.hearing += 1
-                self._spawn(self._hear(event))
+                continues, self._continues = self._continues, False
+                self._spawn(self._hear(event, continues))
 
-    async def _continuation(self) -> None:
-        """The person started again right after an utterance closed: if nothing of the reply
-        has played yet, that utterance waits for the rest (its brain call cancelled)."""
+    async def _continuation(self) -> bool:
+        """The person started again right after an utterance closed. A reply that has sent
+        nothing to the voice yet is kept silent until the new utterance is read (True: its words
+        decide). One whose first sentence is on its way to the speaker is dropped and its words
+        held; an utterance still being read is held when Whisper is done."""
         current = self.current
-        if (
-            current is not None
-            and not current.finished.is_set()
-            and current.input.kind == "person"
-            and not current.audio
-            and not current.acted
-        ):
+        if current is not None and self._droppable(current):
+            if current.muted or not current.sentences:
+                self._mute(current)
+                self.continuing += 1
+                self.continuing_s = self.clock()
+                return True
             await self._drop(current, "merged")
             self._hold(current.input)
         elif self.hearing > 0:
             self.hold_next = True  # still being read: held when Whisper is done
+        return False
+
+    @staticmethod
+    def _droppable(reply: Reply) -> bool:
+        """The person's turn in flight has said and done nothing yet (a tool asked for while
+        it was silent has not run)."""
+        return (
+            not reply.finished.is_set()
+            and reply.input.kind == "person"
+            and not reply.audio
+            and (reply.muted or not reply.acted)
+        )
+
+    def _mute(self, reply: Reply) -> None:
+        """Keep ``reply`` silent: its voice jobs and tools wait for :meth:`_unmute`."""
+        if reply.muted:
+            return
+        reply.muted = True
+        reply.free.clear()
+        self._event("muted", turn=reply.id, text=reply.input.words)
+        print(f"  (the person goes on: the reply to {reply.input.words!r} waits)", flush=True)
+
+    def _unmute(self, reply: Reply | None, why: str) -> None:
+        """Let ``reply`` speak and act: its waiting jobs go to the voice in order."""
+        if reply is None or not reply.muted:
+            return
+        reply.muted = False
+        jobs, reply.waiting = reply.waiting, []
+        for job in jobs:
+            self.speech.say(job)
+        reply.free.set()
+        self._event("resumed", turn=reply.id, jobs=len(jobs), why=why)
+        print(f"  ({why}: the reply to {reply.input.words!r} goes on)", flush=True)
+
+    def _resume(self, why: str) -> None:
+        """The reply in flight goes on once no continuation is waiting to be read."""
+        current = self.current
+        if self.continuing == 0 and current is not None and not current.finished.is_set():
+            self._unmute(current, why)
+
+    def _say(self, reply: Reply, job: SpeechJob) -> None:
+        """A voice job of ``reply``: to the voice, or kept while the reply is silent."""
+        if reply.muted:
+            reply.waiting.append(job)
+        else:
+            self.speech.say(job)
 
     def _hold(self, item: Input) -> None:
         held = self.held
@@ -458,11 +530,11 @@ class CascadeLoop:
         reply = self.replies.get(self.last_turn)
         return " ".join(speakable(s) for s in list(reply.sentences)) if reply is not None else ""
 
-    async def _hear(self, event: EarEvent) -> None:
+    async def _hear(self, event: EarEvent, continues: bool = False) -> None:
         assert event.segment is not None
         try:
             async with self._order:  # utterances are answered in the order they were said
-                await self._read(event.segment, event.t, eot_of(event), event.early)
+                await self._read(event.segment, event.t, eot_of(event), event.early, continues)
         finally:
             self.hearing -= 1
 
@@ -472,7 +544,11 @@ class CascadeLoop:
         closed_s: float,
         eot: dict[str, Any] | None = None,
         early: concurrent.futures.Future[str] | None = None,
+        continues: bool = False,
     ) -> None:
+        """Whisper (and Praat) on one utterance, then its fate: the name opens a conversation,
+        a noise line is dropped, words become the next turn (or join the one in flight).
+        ``continues``: it began as a continuation, so a silent reply waits for its words."""
         loop = asyncio.get_running_loop()
         timeline = Timeline(segment.ended_s)
         timeline.mark("closed", closed_s)
@@ -491,6 +567,8 @@ class CascadeLoop:
         prosody: Prosody | None = await measuring if measuring is not None else None
         read_s = self.clock()
         noise = not text or is_hallucination(text)
+        if continues:
+            self.continuing = max(0, self.continuing - 1)
         whisper_ms = round((read_s - closed_s) * 1000)
         engine = getattr(self.transcriber, "name", None)  # the engine in use (switchable)
         voice_db = round(self.ears.voice_peak_db, 1)
@@ -517,6 +595,7 @@ class CascadeLoop:
         if noise:
             self.hold_next = False
             self._release()
+            self._resume("only noise followed")  # never cancelled, never asked again
             return
         conversation.last_heard_s = read_s
         tag = tagger.line(prosody, text) if tagger is not None and prosody is not None else ""
@@ -529,8 +608,9 @@ class CascadeLoop:
         self.heard_since_drive = True
         said, words, fragments = (f"{tag} {text}" if tag else text), text, 1
         current = self.current
-        if current is not None and not current.audio and not current.acted:
-            # the person went on before the robot said or did anything: one turn of both
+        if current is not None and not current.audio and (current.muted or not current.acted):
+            # the person went on before the robot said or did anything: one turn of both (a
+            # silent reply's tool call is still waiting: it never runs)
             await self._drop(current, "merged")
             said, words = f"{current.input.text} {said}", f"{current.input.words} {text}"
             fragments += current.input.fragments
@@ -560,6 +640,8 @@ class CascadeLoop:
             self.last_turn += 1
             reply = Reply(self.last_turn, item, brain=self.brain_name, voice=self.voice_name)
             self.replies[reply.id] = reply
+            if self.continuing and item.kind == "person":
+                self._mute(reply)  # the person is still going on: it waits for their words
             self.current = reply
             self.events.emit("thinking")
             reply.task = asyncio.create_task(self._reply(reply), name=f"reply-{reply.id}")
@@ -574,7 +656,7 @@ class CascadeLoop:
         try:
             await self.brain.turn(reply.input.text, self._tool, lambda e: self._heard(reply, e))
             reply.generated = True
-            self.speech.say(SpeechJob(reply.id, len(reply.sentences), kind="end"))
+            self._say(reply, SpeechJob(reply.id, len(reply.sentences), kind="end"))
             await self._played_out(reply)
             self.brain.commit()
             reply.outcome = "committed"
@@ -588,6 +670,7 @@ class CascadeLoop:
             reply.outcome = "error"
             print(f"  !! brain: {reply.error}", flush=True)
             self.brain.abandon()
+            self._unmute(reply, "the brain failed")  # what it said before the error, in order
             if not reply.audio and self.config.error_line:
                 self.speech.say(SpeechJob(reply.id, len(reply.sentences), self.config.error_line))
             self.speech.say(SpeechJob(reply.id, len(reply.sentences) + 1, kind="end"))
@@ -611,7 +694,7 @@ class CascadeLoop:
             if style is not None:  # in force for the rest of the reply
                 reply.style = style
                 reply.styles.append(style)
-            self.speech.say(SpeechJob(reply.id, index, event.text, style=reply.style))
+            self._say(reply, SpeechJob(reply.id, index, event.text, style=reply.style))
             if log is not None:
                 log.event("sentence", now, turn=reply.id, index=index, text=event.text,
                           style=reply.style)  # fmt: skip
@@ -620,7 +703,7 @@ class CascadeLoop:
                 reply.filled = True  # nothing said yet: the wait is announced locally
                 if self.config.tool_filler:
                     filler = SpeechJob(reply.id, -1, self.config.tool_filler, "backchannel")
-                    self.speech.say(filler)
+                    self._say(reply, filler)
             reply.acted = True
             print(f"  -> {event.name}({json.dumps(event.args, ensure_ascii=False)})", flush=True)
             if log is not None:
@@ -765,7 +848,11 @@ class CascadeLoop:
 
     async def _tool(self, name: str, args: dict[str, Any]) -> Result:
         """A tool the brain called. A drive answers when the goal server takes it; its end
-        comes back as the robot's own turn."""
+        comes back as the robot's own turn. While the person may be going on (the reply is
+        silent) nothing runs: their words drop the reply, and the call with it."""
+        reply = self.current
+        if reply is not None:
+            await reply.free.wait()
         if name == END_CONVERSATION:
             if self.conversation is not None:
                 self.conversation.closing = self.conversation.closing or END_CONVERSATION
@@ -858,7 +945,9 @@ class CascadeLoop:
         self.conversation = None
         now = self.clock()
         u = conversation.usage
-        person = [t for t in conversation.turns if t["kind"] == "person"]
+        person = [
+            t for t in conversation.turns if t["kind"] == "person" and t["outcome"] != "merged"
+        ]  # a merged fragment is part of the turn after it
         summary = {
             "sid": conversation.sid,
             "t": round(conversation.t_open_wall, 3),
@@ -877,10 +966,12 @@ class CascadeLoop:
         }
         conversation.log.event("close", now, reason=reason, usd_est=round(conversation.usd, 6))
         conversation.log.close(summary)
-        if self.ledger is not None:
-            self.ledger.record(
-                conversation.sid, conversation.t_open_wall, conversation.usd, closed=True
-            )
+        ledger = self.ledger
+        if ledger is None and conversation.usd > 0:
+            # spent all the same: a paid brain switched to the echo meanwhile, or a paid voice
+            ledger = self.paid_ledger
+        if ledger is not None:
+            ledger.record(conversation.sid, conversation.t_open_wall, conversation.usd, closed=True)
         print(
             f"  conversation closed ({reason}): {len(person)} turns, ~{conversation.usd * 100:.3f}"
             f" US cents (estimate); log {conversation.log.dir}",
@@ -901,6 +992,15 @@ class CascadeLoop:
                     self._switch(request)
             if cfg.brain.keep_warm_s > 0 and now - self.last_call_s > cfg.brain.keep_warm_s:
                 self._spawn(self.prewarm("keep warm"))
+            if (
+                self.continuing
+                and not self.ears.gate.talking
+                and self.hearing == 0
+                and self._ears_queue.empty()
+                and now - self.continuing_s > HOLD_RELEASE_S
+            ):
+                self.continuing = 0  # the person stopped without an utterance to read
+                self._resume("no words followed")
             if conversation is None:
                 continue
             speaking = self.player.playback() == "reply"
@@ -957,6 +1057,8 @@ class CascadeLoop:
         board = self.switchboard
         assert board is not None
         start = self.clock()
+        self._brain_switches += 1
+        number = self._brain_switches
         board.answer(request, "brain", name, "loading")
         try:
             setup = await asyncio.to_thread(board.brain_setup, name)
@@ -971,6 +1073,14 @@ class CascadeLoop:
         while current is not None and not current.finished.is_set():
             await current.finished.wait()  # the turn in flight ends with the brain it began with
             current = self.current
+        if number != self._brain_switches:  # a later switch was asked meanwhile: it decides
+            board.answer(request, "brain", name, "failed", error="superseded by a later switch")
+            print(f"  (switch to brain {name}: superseded by a later switch)", flush=True)
+            close = getattr(setup.brain, "aclose", None)
+            if close is not None:
+                with contextlib.suppress(Exception):
+                    await close()
+            return
         old = self.brain
         self.brain = setup.brain
         self.allowed, self.moving = setup.allowed, setup.moving

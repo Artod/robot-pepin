@@ -41,6 +41,7 @@ class LiveConfig:
     compression_trigger_tokens: int = 16000
     compression_target_tokens: int = 8000
     barge_in: bool = False
+    affective_dialog: bool = False
     playback_lead_s: float = 0.5
     report_drive_start: bool = True
     mic_while_driving: str = "gated"
@@ -86,6 +87,7 @@ class LiveConfig:
                 session.get("compression_target_tokens", d.compression_target_tokens)
             ),
             barge_in=bool(session.get("barge_in", d.barge_in)),
+            affective_dialog=bool(session.get("affective_dialog", d.affective_dialog)),
             playback_lead_s=float(session.get("playback_lead_s", d.playback_lead_s)),
             report_drive_start=bool(session.get("report_drive_start", d.report_drive_start)),
             mic_while_driving=str(session.get("mic_while_driving", d.mic_while_driving)),

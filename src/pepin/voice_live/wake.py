@@ -180,6 +180,8 @@ class Segmenter:
         self._quiet = 0
         self._start = 0.0
         self.talking = False
+        # a second opinion asked before a loud run opens a segment (None: loudness alone)
+        self.speech: Callable[[], bool] | None = None
         self.last_voice_s = 0.0  # when the last loud frame arrived
         self.last_quiet_s = 0.0  # when the last quiet frame arrived (floor recovery)
 
@@ -188,8 +190,17 @@ class Segmenter:
         db = rms_db(pcm)
         real = db >= DIGITAL_SILENCE_DB  # zeros from a closed link are quiet, but not the room
         loud = db > self.floor + self.start_db
+        # a loud frame opens a segment only when the second opinion (a voice-activity model,
+        # when one is set) hears speech: a chair, a door or the lidar is loud but not a voice
+        opens = loud and (self.talking or self.speech is None or self.speech())
         if loud:
             self.last_voice_s = now
+        stuck = loud and real and now - self.last_quiet_s > STUCK_OPEN_S
+        if stuck and (self.talking or not opens):
+            # no quiet frame for seconds: the floor sits below the room (it sank while the
+            # link was down); climb until the room counts as quiet again, also while the
+            # second opinion keeps the gate shut on a loud room that is not a voice
+            self.floor += FLOOR_CLIMB_DB
         if not self.talking:
             if not loud:
                 if real:
@@ -197,7 +208,7 @@ class Segmenter:
                 self.last_quiet_s = now
             self._pre.append(pcm)
             del self._pre[: -self._pre_frames]
-            self._loud_run = self._loud_run + 1 if loud else 0
+            self._loud_run = self._loud_run + 1 if opens else 0
             if self._loud_run >= 3:
                 self.talking, self._start, self._quiet = True, now, 0
                 self._voiced = list(self._pre)
@@ -205,10 +216,6 @@ class Segmenter:
         self._voiced.append(pcm)
         self._quiet = 0 if loud else self._quiet + 1
         quiet_s = self._quiet * FRAME_SAMPLES / RATE
-        if loud and real and now - self.last_quiet_s > STUCK_OPEN_S:
-            # no quiet frame for seconds: the floor sits below the room (it sank while the
-            # link was down); climb until the room counts as quiet again
-            self.floor += FLOOR_CLIMB_DB
         if not loud:
             self.last_quiet_s = now
         if quiet_s < self.silence_s and now - self._start < self.max_s:

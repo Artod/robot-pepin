@@ -31,6 +31,7 @@ from typing import Any
 
 from pepin.voice_cascade.config import ModelPrice
 from pepin.voice_cascade.stages import Voice, VoiceBill
+from pepin.voice_cascade.voice import with_gain
 from pepin.voice_live.audio import Resampler
 
 logger = logging.getLogger(__name__)
@@ -92,14 +93,17 @@ class GeminiVoice:
         cache_dir: Path | None = None,
         client: Any | None = None,
         clock: Callable[[], float] = time.monotonic,
+        gain_db: float = 0.0,
     ) -> None:
         """``price``: USD per million text tokens in (``input``) and audio tokens out
         (``output``); ``fallback``: the local voice that speaks when the call fails or is
         slower than ``timeout_s`` (None: the sentence is lost); ``max_calls``: calls this voice
         may make in its life (None: no cap); ``cache_dir``: where short lines are kept (None:
         nowhere); ``client``: a ``genai.Client`` (built from the environment at load when
-        None)."""
+        None); ``gain_db``: applied to the cloud's audio only, so the fallback keeps its own
+        level."""
         self.model, self.voice, self.price = model, voice, price
+        self.gain_db = gain_db
         self.fallback, self.fallback_name = fallback, fallback_name
         self.timeout_s, self.max_calls = timeout_s, max_calls
         self.cache_dir = cache_dir / model / voice if cache_dir is not None else None
@@ -142,7 +146,7 @@ class GeminiVoice:
         cached = self._cached(text, style)
         if cached is not None:
             self._bill = VoiceBill(self.model, first_audio_ms=0)
-            yield cached
+            yield with_gain(cached, self.gain_db)
             return
         reason = self._rest_reason()
         if reason is not None:
@@ -173,8 +177,8 @@ class GeminiVoice:
                     break
                 if first_ms is None:
                     first_ms = round((self.clock() - start) * 1000)
-                audio += item
-                yield item
+                audio += item  # kept on disk as it came: the gain is applied as it is said
+                yield with_gain(item, self.gain_db)
         finally:
             cancel.set()
             self._bill = self._priced(text, style, usage, len(audio), first_ms)

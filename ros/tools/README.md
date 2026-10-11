@@ -164,3 +164,4 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `voice.py` | Voice loop: the array, Gemini on the audio, the robot's tools, speech | `uv run python scripts/voice.py` |
 | `voice_live.py` | Voice over the Gemini Live API with a local wake gate | `uv run python scripts/voice_live.py [--dry-run]` |
 | `voice_cascade.py` | Voice cascade: local Whisper, Claude with the tools, local Qwen3-TTS; per-stage latency, `--bench` p50/p90 | `uv run python scripts/voice_cascade.py [--brain sonnet] [--bench DIR]` |
+| `cascade_stats.py` | Voice-cascade sessions side by side: to-sound p50/p90, Whisper / first token / first sentence / TTS medians, tool turns, barge-ins, cents per reply | `uv run python scripts/cascade_stats.py data/voice/DAY [SESSION_DIR] [-v]` |

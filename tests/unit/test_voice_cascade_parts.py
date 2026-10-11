@@ -6,12 +6,14 @@ and its report, the play-out clock, the ears, the tag line and the speech worker
 import json
 import math
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.voice_cascade.barge_in import Frame
 from pepin.voice_cascade.config import CascadeConfig, ProsodyConfig, apply_overrides
 from pepin.voice_cascade.ears import Ears
 from pepin.voice_cascade.fake import ToneVoice
@@ -21,6 +23,7 @@ from pepin.voice_cascade.stages import Prosody
 from pepin.voice_cascade.tagger import ProsodyTagger, comparatives
 from pepin.voice_cascade.text import SentenceSplitter, speakable, syllables
 from pepin.voice_cascade.timeline import Timeline, histogram, percentile, report
+from pepin.voice_live.wake import rms_db
 
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
 FRAME_S = FRAME_SAMPLES / RATE
@@ -29,24 +32,33 @@ FRAME_S = FRAME_SAMPLES / RATE
 # -- config ---------------------------------------------------------------------------------
 
 
-def test_the_file_reads_with_the_haiku_preset() -> None:
+def test_the_file_reads_with_the_default_presets() -> None:
     config = CascadeConfig.load(CONFIG)
-    assert config.brain.model == "claude-haiku-5-5"
-    assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
+    assert config.brain.model == "claude-opus-5-5"
+    assert (config.brain.thinking, config.brain.effort) == ("adaptive", "low")
     assert config.wake == "name" and config.silence_s == 0.4
     assert config.voice.engine == "qwen3" and config.voice.voice == "serena"
+    assert config.voice.name == "qwen3-1.7b" and config.voice.use_style
+    assert "1.7B" in config.voice.model and config.voice.fallback is None
+    assert config.barge_in and not config.backchannel and config.prosody_tags
+    assert config.vad_open == 0.5 and config.lead_s == 1.0
+    assert config.price.input == pytest.approx(4.00)
+    assert config.brain.preset == "opus"
+
+
+def test_the_haiku_preset_still_reads() -> None:
+    config = CascadeConfig.load(CONFIG, ["brain.preset=haiku", "voice.preset=qwen3-0.6b"])
+    assert config.brain.model == "claude-haiku-5-5"
+    assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
     assert config.voice.name == "qwen3-0.6b" and not config.voice.use_style
-    assert "0.6B" in config.voice.model and config.voice.fallback is None
-    assert not config.barge_in and not config.backchannel and config.prosody_tags
     assert config.price.input == pytest.approx(0.10)
-    assert config.brain.preset == "haiku"
 
 
 def test_a_voice_preset_or_an_engine_s_name_picks_the_voice() -> None:
     lite = CascadeConfig.load(CONFIG, ["voice.preset=gemini"])  # the engine's first preset
     v = lite.voice
     assert (v.name, v.engine, v.model, v.voice) == (
-        "gemini-lite", "gemini", "gemini-3.8-flash-lite-tts", "Kore",
+        "gemini-lite", "gemini", "gemini-3.8-flash-lite-tts", "Zephyr",
     )  # fmt: skip
     assert v.use_style and v.cloud_timeout_s == 2.0
     assert v.fallback is not None and v.fallback.name == "qwen3-0.6b"
@@ -400,3 +412,101 @@ def test_an_opener_said_by_the_brain_plays_from_memory() -> None:
     worker.close()
     assert voice.spoken == ["Да?"]  # made once at load, not again for the reply
     assert player.span(1) is not None
+
+
+class _Deaf:
+    """A barge-in detector whose model hears no speech (p 0): a loud rustle, not a voice."""
+
+    preroll_s = 0.6
+    p = 0.0
+
+    def feed(self, frame: object, speaking: bool) -> str | None:
+        return None
+
+    def reset(self) -> None:
+        pass
+
+
+def test_a_loud_sound_the_vad_calls_no_speech_opens_no_utterance() -> None:
+    deaf = _Deaf()
+    ears = Ears(CascadeConfig().with_changes(silence_s=0.5), lambda: "silent", detector=deaf)
+    assert hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8)) == []
+    deaf.p = 0.9  # now the model hears speech
+    kinds = [k for k, _ in hear(ears, tone(1.0) + quiet(0.8), t0=2.3)]
+    assert kinds[0] == "start" and kinds[-1] == "segment"
+
+
+def test_vad_open_at_zero_is_loudness_alone() -> None:
+    config = CascadeConfig().with_changes(silence_s=0.5, vad_open=0.0)
+    ears = Ears(config, lambda: "silent", detector=_Deaf())
+    kinds = [k for k, _ in hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8))]
+    assert kinds[0] == "start" and kinds[-1] == "segment"
+
+
+class _LateVad(_Deaf):
+    """A voice-activity model that calls a loud run speech only from its ``late``-th frame
+    (Silero says speech ~0.4 s into a word)."""
+
+    def __init__(self, late: int) -> None:
+        self.late, self.run, self.p = late, 0, 0.0
+
+    def feed(self, frame: object, speaking: bool) -> str | None:
+        assert isinstance(frame, Frame)
+        self.run = self.run + 1 if frame.db > -40 else 0
+        self.p = 0.9 if self.run >= self.late else 0.0
+        return None
+
+
+def test_a_late_opening_keeps_the_first_word_only_with_a_long_lead() -> None:
+    def heard(lead_s: float) -> tuple[float, int]:
+        config = CascadeConfig().with_changes(silence_s=0.5, lead_s=lead_s)
+        ears = Ears(config, lambda: "silent", detector=_LateVad(late=20))  # 0.4 s into it
+        events = []
+        for i, frame in enumerate(quiet(0.5) + tone(1.0) + quiet(0.8)):
+            events += ears.feed(frame, i * FRAME_S)
+        start = next(e for e in events if e.kind == "start")
+        segment = next(e.segment for e in events if e.kind == "segment")
+        assert start.lead_s is not None and segment is not None
+        step = FRAME_SAMPLES * 2
+        frames = [segment.pcm[i : i + step] for i in range(0, len(segment.pcm), step)]
+        return start.lead_s, sum(1 for f in frames if rms_db(f) > -40)
+
+    short_lead, short_loud = heard(0.3)
+    long_lead, long_loud = heard(1.0)
+    assert long_loud == 50  # the whole second of the word
+    assert short_loud == 43  # its first 0.14 s lost: opened at frame 22, 15 frames kept
+    assert short_lead == pytest.approx(0.3) and long_lead == pytest.approx(0.94)
+
+
+def test_a_floor_below_a_loud_room_climbs_while_the_vad_keeps_the_gate_shut() -> None:
+    deaf = _Deaf()
+    ears = Ears(CascadeConfig().with_changes(silence_s=0.5), lambda: "silent", detector=deaf)
+    room = tone(3.0, amplitude=1.4e-4)  # -80 dBFS: the floor settles near it
+    hum = tone(4.0, amplitude=4.5e-3)  # -50 dBFS: a fan or the motors, no voice
+    assert hear(ears, room + hum) == []
+    assert ears.gate.floor > -62  # climbed: the hum counts as the room now
+    deaf.p = 0.9
+    events = hear(ears, tone(0.5) + tone(2.0, amplitude=4.5e-3), t0=7.0)
+    assert [k for k, _ in events] == ["start", "segment"]
+    assert events[-1][1] == pytest.approx(7.0 + 0.5 + 0.5, abs=0.06)  # the silence closed it
+
+
+def test_a_gained_voice_scales_the_engine_s_pcm_and_clips() -> None:
+    from pepin.voice_cascade.voice import GainedVoice, with_gain
+
+    class Loud:
+        rate = 24_000
+
+        def load(self) -> None:
+            pass
+
+        def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+            yield np.array([10_000, -10_000], dtype="<i2").tobytes()
+
+    quiet = GainedVoice(Loud(), -6.0)
+    assert quiet.rate == 24_000
+    (pcm,) = list(quiet.stream("x"))
+    assert list(np.frombuffer(pcm, dtype="<i2")) == pytest.approx([5012, -5012], abs=2)
+    hot = np.frombuffer(with_gain(np.array([30_000], dtype="<i2").tobytes(), 20.0), dtype="<i2")
+    assert int(hot[0]) == 32767
+    assert with_gain(b"", -3.0) == b"" and with_gain(b"\x01\x00", 0.0) == b"\x01\x00"
