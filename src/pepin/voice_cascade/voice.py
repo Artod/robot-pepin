@@ -137,3 +137,36 @@ class SayVoice:
     def stream(self, text: str, style: str = "") -> Iterator[bytes]:
         """The whole sentence, once ``say`` has written it (the style ignored)."""
         yield synthesize(text, self.voice, self.rate_wpm)
+
+
+class GainedVoice:
+    """A voice's PCM scaled by ``gain_db`` (clipped at full scale): one loudness for every
+    engine, so the room and the echo guard meet the same level whoever speaks. Everything
+    else (the bill, the fallback's name) is the wrapped voice's."""
+
+    def __init__(self, inner: Any, gain_db: float) -> None:
+        """``inner``: the engine; ``gain_db``: negative quietens."""
+        self.inner, self.gain_db = inner, gain_db
+        self.rate: int = inner.rate
+
+    def load(self) -> None:
+        """See :class:`pepin.voice_cascade.stages.Voice`."""
+        self.inner.load()
+
+    def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+        """The engine's chunks, each scaled."""
+        for pcm in self.inner.stream(text, style):
+            yield with_gain(pcm, self.gain_db)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.inner, name)
+
+
+def with_gain(pcm: bytes, gain_db: float) -> bytes:
+    """s16le ``pcm`` scaled by ``gain_db``, clipped to the sample range."""
+    if not pcm or gain_db == 0.0:
+        return pcm
+    import numpy as np
+
+    samples = np.frombuffer(pcm, dtype="<i2").astype(np.float32) * (10 ** (gain_db / 20))
+    return np.clip(samples, -32768, 32767).astype("<i2").tobytes()

@@ -118,6 +118,7 @@ class Ears:
             start_db=config.start_db,
             silence_s=config.silence_s,
             max_s=config.max_utterance_s,
+            pre_s=config.lead_s,
         )
         self._window: deque[bytes] = deque(maxlen=round(config.turn_window_s / FRAME_S))
         self._requests = 0

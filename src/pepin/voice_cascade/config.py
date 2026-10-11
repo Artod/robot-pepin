@@ -106,6 +106,7 @@ class VoiceConfig:
     cloud_timeout_s: float = 2.0  # Gemini: no audio this long after the call -> the fallback
     cloud_max_calls: int | None = None  # Gemini: calls a run may make (None: no cap)
     fallback: VoiceConfig | None = None  # Gemini: the local voice when the call fails
+    gain_db: float = 0.0  # applied to the engine's PCM; cloud voices come ~10 dB hotter than Qwen
     say_voice: str = "Milena"
     say_rate_wpm: int = 185
 
@@ -136,6 +137,7 @@ class CascadeConfig:
     max_utterance_s: float = 15.0
     start_db: float = 10.0
     vad_open: float = 0.5  # Silero speech probability to open an utterance; 0 = loudness alone
+    lead_s: float = 1.0  # audio kept before the opening: the model says speech ~0.4 s into a word
     floor_min_dbfs: float = -85.0
     continuation_s: float = 0.8
     turn_model: str | None = None
@@ -219,6 +221,7 @@ class CascadeConfig:
             max_utterance_s=float(ears.get("max_utterance_s", d.max_utterance_s)),
             start_db=float(ears.get("start_db", d.start_db)),
             vad_open=float(ears.get("vad_open", d.vad_open)),
+            lead_s=float(ears.get("lead_s", d.lead_s)),
             floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
             continuation_s=float(ears.get("continuation_s", d.continuation_s)),
             turn_model=ears.get("turn_model") or None,
@@ -459,6 +462,7 @@ def voice_config(
             if engine == "gemini" and fallback and not stand_in
             else None
         ),
+        gain_db=float(merged.get("gain_db", d.gain_db)),
         say_voice=str(merged.get("say_voice", d.say_voice)),
         say_rate_wpm=int(merged.get("say_rate_wpm", d.say_rate_wpm)),
     )

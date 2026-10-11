@@ -6,6 +6,7 @@ and its report, the play-out clock, the ears, the tag line and the speech worker
 import json
 import math
 import threading
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -29,24 +30,33 @@ FRAME_S = FRAME_SAMPLES / RATE
 # -- config ---------------------------------------------------------------------------------
 
 
-def test_the_file_reads_with_the_haiku_preset() -> None:
+def test_the_file_reads_with_the_default_presets() -> None:
     config = CascadeConfig.load(CONFIG)
-    assert config.brain.model == "claude-haiku-5-5"
-    assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
+    assert config.brain.model == "claude-opus-5-5"
+    assert (config.brain.thinking, config.brain.effort) == ("adaptive", "low")
     assert config.wake == "name" and config.silence_s == 0.4
     assert config.voice.engine == "qwen3" and config.voice.voice == "serena"
-    assert config.voice.name == "qwen3-0.6b" and not config.voice.use_style
-    assert "0.6B" in config.voice.model and config.voice.fallback is None
+    assert config.voice.name == "qwen3-1.7b" and config.voice.use_style
+    assert "1.7B" in config.voice.model and config.voice.fallback is None
     assert config.barge_in and not config.backchannel and config.prosody_tags
+    assert config.vad_open == 0.5 and config.lead_s == 1.0
+    assert config.price.input == pytest.approx(4.00)
+    assert config.brain.preset == "opus"
+
+
+def test_the_haiku_preset_still_reads() -> None:
+    config = CascadeConfig.load(CONFIG, ["brain.preset=haiku", "voice.preset=qwen3-0.6b"])
+    assert config.brain.model == "claude-haiku-5-5"
+    assert (config.brain.thinking, config.brain.effort) == ("disabled", "low")
+    assert config.voice.name == "qwen3-0.6b" and not config.voice.use_style
     assert config.price.input == pytest.approx(0.10)
-    assert config.brain.preset == "haiku"
 
 
 def test_a_voice_preset_or_an_engine_s_name_picks_the_voice() -> None:
     lite = CascadeConfig.load(CONFIG, ["voice.preset=gemini"])  # the engine's first preset
     v = lite.voice
     assert (v.name, v.engine, v.model, v.voice) == (
-        "gemini-lite", "gemini", "gemini-3.8-flash-lite-tts", "Kore",
+        "gemini-lite", "gemini", "gemini-3.8-flash-lite-tts", "Zephyr",
     )  # fmt: skip
     assert v.use_style and v.cloud_timeout_s == 2.0
     assert v.fallback is not None and v.fallback.name == "qwen3-0.6b"
@@ -429,3 +439,24 @@ def test_vad_open_at_zero_is_loudness_alone() -> None:
     ears = Ears(config, lambda: "silent", detector=_Deaf())
     kinds = [k for k, _ in hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8))]
     assert kinds[0] == "start" and kinds[-1] == "segment"
+
+
+def test_a_gained_voice_scales_the_engine_s_pcm_and_clips() -> None:
+    from pepin.voice_cascade.voice import GainedVoice, with_gain
+
+    class Loud:
+        rate = 24_000
+
+        def load(self) -> None:
+            pass
+
+        def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+            yield np.array([10_000, -10_000], dtype="<i2").tobytes()
+
+    quiet = GainedVoice(Loud(), -6.0)
+    assert quiet.rate == 24_000
+    (pcm,) = list(quiet.stream("x"))
+    assert list(np.frombuffer(pcm, dtype="<i2")) == pytest.approx([5012, -5012], abs=2)
+    hot = np.frombuffer(with_gain(np.array([30_000], dtype="<i2").tobytes(), 20.0), dtype="<i2")
+    assert int(hot[0]) == 32767
+    assert with_gain(b"", -3.0) == b"" and with_gain(b"\x01\x00", 0.0) == b"\x01\x00"

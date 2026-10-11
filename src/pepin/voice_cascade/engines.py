@@ -113,9 +113,16 @@ class VoiceShop:
         self._local: dict[tuple[object, ...], Voice] = {}
 
     def voice(self, v: VoiceConfig) -> Voice:
-        """The voice ``v`` names (a cloud voice with its fallback from the local ones)."""
-        if v.engine != "gemini":
-            return self.local(v)
+        """The voice ``v`` names (a cloud voice with its fallback from the local ones), at
+        ``v.gain_db``."""
+        built = self._cloud(v) if v.engine == "gemini" else self.local(v)
+        if not v.gain_db:
+            return built
+        from pepin.voice_cascade.voice import GainedVoice
+
+        return GainedVoice(built, v.gain_db)
+
+    def _cloud(self, v: VoiceConfig) -> Voice:
         from pepin.voice_cascade.gemini_voice import GeminiVoice
 
         if not os.environ.get(API_KEYS["gemini"]):

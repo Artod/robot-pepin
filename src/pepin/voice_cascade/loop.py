@@ -387,6 +387,8 @@ class CascadeLoop:
             if event.kind == "start":
                 if self.conversation is not None:
                     self.conversation.last_heard_s = event.t
+                    lead_s = len(self.ears.gate.audio()) / 2 / 16_000  # the lead-in kept
+                    self.conversation.log.event("start", event.t, lead_s=round(lead_s, 2))
                 cfg = self.config
                 if cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s:
                     await self._continuation()
