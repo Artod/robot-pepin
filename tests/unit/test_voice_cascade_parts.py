@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.voice_cascade.barge_in import Frame
 from pepin.voice_cascade.config import CascadeConfig, ProsodyConfig, apply_overrides
 from pepin.voice_cascade.ears import Ears
 from pepin.voice_cascade.fake import ToneVoice
@@ -22,6 +23,7 @@ from pepin.voice_cascade.stages import Prosody
 from pepin.voice_cascade.tagger import ProsodyTagger, comparatives
 from pepin.voice_cascade.text import SentenceSplitter, speakable, syllables
 from pepin.voice_cascade.timeline import Timeline, histogram, percentile, report
+from pepin.voice_live.wake import rms_db
 
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
 FRAME_S = FRAME_SAMPLES / RATE
@@ -439,6 +441,54 @@ def test_vad_open_at_zero_is_loudness_alone() -> None:
     ears = Ears(config, lambda: "silent", detector=_Deaf())
     kinds = [k for k, _ in hear(ears, quiet(0.5) + tone(1.0) + quiet(0.8))]
     assert kinds[0] == "start" and kinds[-1] == "segment"
+
+
+class _LateVad(_Deaf):
+    """A voice-activity model that calls a loud run speech only from its ``late``-th frame
+    (Silero says speech ~0.4 s into a word)."""
+
+    def __init__(self, late: int) -> None:
+        self.late, self.run, self.p = late, 0, 0.0
+
+    def feed(self, frame: object, speaking: bool) -> str | None:
+        assert isinstance(frame, Frame)
+        self.run = self.run + 1 if frame.db > -40 else 0
+        self.p = 0.9 if self.run >= self.late else 0.0
+        return None
+
+
+def test_a_late_opening_keeps_the_first_word_only_with_a_long_lead() -> None:
+    def heard(lead_s: float) -> tuple[float, int]:
+        config = CascadeConfig().with_changes(silence_s=0.5, lead_s=lead_s)
+        ears = Ears(config, lambda: "silent", detector=_LateVad(late=20))  # 0.4 s into it
+        events = []
+        for i, frame in enumerate(quiet(0.5) + tone(1.0) + quiet(0.8)):
+            events += ears.feed(frame, i * FRAME_S)
+        start = next(e for e in events if e.kind == "start")
+        segment = next(e.segment for e in events if e.kind == "segment")
+        assert start.lead_s is not None and segment is not None
+        step = FRAME_SAMPLES * 2
+        frames = [segment.pcm[i : i + step] for i in range(0, len(segment.pcm), step)]
+        return start.lead_s, sum(1 for f in frames if rms_db(f) > -40)
+
+    short_lead, short_loud = heard(0.3)
+    long_lead, long_loud = heard(1.0)
+    assert long_loud == 50  # the whole second of the word
+    assert short_loud == 43  # its first 0.14 s lost: opened at frame 22, 15 frames kept
+    assert short_lead == pytest.approx(0.3) and long_lead == pytest.approx(0.94)
+
+
+def test_a_floor_below_a_loud_room_climbs_while_the_vad_keeps_the_gate_shut() -> None:
+    deaf = _Deaf()
+    ears = Ears(CascadeConfig().with_changes(silence_s=0.5), lambda: "silent", detector=deaf)
+    room = tone(3.0, amplitude=1.4e-4)  # -80 dBFS: the floor settles near it
+    hum = tone(4.0, amplitude=4.5e-3)  # -50 dBFS: a fan or the motors, no voice
+    assert hear(ears, room + hum) == []
+    assert ears.gate.floor > -62  # climbed: the hum counts as the room now
+    deaf.p = 0.9
+    events = hear(ears, tone(0.5) + tone(2.0, amplitude=4.5e-3), t0=7.0)
+    assert [k for k, _ in events] == ["start", "segment"]
+    assert events[-1][1] == pytest.approx(7.0 + 0.5 + 0.5, abs=0.06)  # the silence closed it
 
 
 def test_a_gained_voice_scales_the_engine_s_pcm_and_clips() -> None:

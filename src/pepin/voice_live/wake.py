@@ -195,6 +195,12 @@ class Segmenter:
         opens = loud and (self.talking or self.speech is None or self.speech())
         if loud:
             self.last_voice_s = now
+        stuck = loud and real and now - self.last_quiet_s > STUCK_OPEN_S
+        if stuck and (self.talking or not opens):
+            # no quiet frame for seconds: the floor sits below the room (it sank while the
+            # link was down); climb until the room counts as quiet again, also while the
+            # second opinion keeps the gate shut on a loud room that is not a voice
+            self.floor += FLOOR_CLIMB_DB
         if not self.talking:
             if not loud:
                 if real:
@@ -210,10 +216,6 @@ class Segmenter:
         self._voiced.append(pcm)
         self._quiet = 0 if loud else self._quiet + 1
         quiet_s = self._quiet * FRAME_SAMPLES / RATE
-        if loud and real and now - self.last_quiet_s > STUCK_OPEN_S:
-            # no quiet frame for seconds: the floor sits below the room (it sank while the
-            # link was down); climb until the room counts as quiet again
-            self.floor += FLOOR_CLIMB_DB
         if not loud:
             self.last_quiet_s = now
         if quiet_s < self.silence_s and now - self._start < self.max_s:

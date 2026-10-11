@@ -44,10 +44,10 @@ SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
 @dataclass(frozen=True)
 class EarEvent:
     """One moment: what, when (laptop monotonic seconds), the segment (``segment`` only), the
-    frame's level and the detector's reason (``barge_in``: the voice that cut in), and for a
-    segment with an end-of-turn model: what closed it (``model`` or ``silence``), the model's p
-    for its last pause, the model's milliseconds and the time saved against the fixed
-    silence."""
+    frame's level and the detector's reason (``barge_in``: the voice that cut in), the lead-in
+    kept in front of the opening (``start``: seconds), and for a segment with an end-of-turn
+    model: what closed it (``model`` or ``silence``), the model's p for its last pause, the
+    model's milliseconds and the time saved against the fixed silence."""
 
     kind: EarKind
     t: float
@@ -59,6 +59,7 @@ class EarEvent:
     model_ms: float | None = None
     saved_ms: float | None = None
     early: concurrent.futures.Future[str] | None = None  # Whisper on it, started in its pause
+    lead_s: float | None = None  # start: the audio kept from before the opening
 
 
 class TurnSegmenter(Segmenter):
@@ -221,7 +222,9 @@ class Ears:
             self._drop_early()
             self._window.clear()
             self.voice_peak_db = db
-            events.append(EarEvent("start", t))
+            # measured here, on the mic's thread: the loop reads the event frames later
+            lead_s = len(self.gate.audio()) / 2 / RATE
+            events.append(EarEvent("start", t, lead_s=lead_s))
         if self.gate.talking:
             self.voice_peak_db = max(self.voice_peak_db, db)
             self._window.append(pcm)
