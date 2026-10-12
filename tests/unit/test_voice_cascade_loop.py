@@ -1,7 +1,7 @@
 """The whole cascade over fakes: the name gate, a turn's timeline and logs, the person going on
 before the robot answered, a barge-in cut to what was heard, a drive acknowledged when it
-starts and reported when it ends, and the brain asked at the early read (kept by the close,
-dropped when the person goes on, billed either way)."""
+starts and reported when it ends, a slow tool's fillers, and the brain asked at the early read
+(kept by the close, dropped when the person goes on, billed either way)."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -22,7 +22,7 @@ from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.expression.markers import EMPTY, Vocabulary
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
-from pepin.voice_cascade.config import BrainConfig, CascadeConfig, VoiceConfig
+from pepin.voice_cascade.config import BrainConfig, CascadeConfig, FillerLines, VoiceConfig
 from pepin.voice_cascade.control import ControlFile, Switchboard, answers_to, write_request
 from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
@@ -94,6 +94,7 @@ class Rig:
         flags: Sequence[Any] = (),
         vocabulary: Vocabulary = EMPTY,
         people: Any = None,
+        clock: Callable[[], float] = time.monotonic,
         **config: Any,
     ) -> None:
         self.config = CascadeConfig().with_changes(
@@ -128,6 +129,7 @@ class Rig:
             flags=flags,
             vocabulary=vocabulary,
             people=people,
+            clock=clock,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -482,7 +484,8 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
     observer, flag = RecordingObserver(), FakeFlag(GESTURES)
     script: list[list[Step]] = [[("look", {"pan_deg": 10.0}), "{тихо} Вижу стол.", "Всё."]]
     rig = Rig(tmp_path, ["Пепин, что там?"], script, switchboard=board,
-              observers=[BrokenObserver(), observer], flags=[flag])  # fmt: skip
+              observers=[BrokenObserver(), observer], flags=[flag],
+              fillers=FillerLines(("Секунду.",), (), {}))  # fmt: skip
 
     asked: list[str] = []
 
@@ -514,6 +517,88 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
     ]  # fmt: skip
     assert observer.calls[-1] == ("closed", ("stopped",))
+
+
+class SkewClock:
+    """The loop's clock: monotonic time moved on by ``skew`` seconds when the test says so."""
+
+    def __init__(self) -> None:
+        self.skew = 0.0
+
+    def __call__(self) -> float:
+        return time.monotonic() + self.skew
+
+
+def slow_tool(release: threading.Event) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """Tools that answer at once, but for ``look``, which waits for ``release``."""
+
+    def run(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "look":
+            assert release.wait(5.0)
+        return {"ok": True, "places": [{"name": "home"}]}
+
+    return run
+
+
+def test_a_slow_tool_gets_its_own_filler_and_a_second_one_when_the_wait_goes_on(
+    tmp_path: Path,
+) -> None:
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("remember_person", {"name": "Саша"}), ("look", {}), "Готово."]]
+    rig = Rig(tmp_path, ["Пепин, запомни Сашу"], script, tool=slow_tool(release), clock=clock)
+    rig.loop.allowed |= {"remember_person", "look"}
+    said: list[list[str]] = []
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and bool(rig.loop.current.fillers))
+        reply = rig.loop.current
+        assert reply is not None
+        clock.skew = 3.0  # under filler_again_s (4 s) since the first filler: nothing more
+        await asyncio.sleep(0.2)
+        said.append(list(reply.fillers))
+        clock.skew = 4.5  # past it, the tool still running and nothing said
+        await until(lambda: len(reply.fillers) == 2)
+        clock.skew = 20.0  # a second filler at most
+        await asyncio.sleep(0.2)
+        said.append(list(reply.fillers))
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    fillers = CascadeConfig().fillers
+    (first,) = said[0]
+    assert first in fillers.for_tool("remember_person")  # its own, not the look's
+    again = said[1][1]
+    assert said[1] == [first, again] and again in fillers.again
+    assert rig.voice.spoken == [first, again, "Готово."]
+    (turn,) = rig.loop.turns
+    assert turn["fillers"] == [first, again]
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    logged = [(r["tool"], r["text"]) for r in rows if r["event"] == "filler"]
+    assert logged == [("remember_person", first), (None, again)]
+
+
+def test_no_filler_speaks_once_the_reply_s_first_sentence_has_started(tmp_path: Path) -> None:
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("see", {}), "Вижу стол.", ("look", {}), "Всё."]]
+    rig = Rig(tmp_path, ["Пепин, что там?"], script, tool=slow_tool(release), clock=clock)
+    rig.loop.allowed |= {"see", "look"}
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and bool(rig.loop.current.sentences))
+        clock.skew = 30.0  # the look runs on long after the sentence: no filler for it
+        await asyncio.sleep(0.3)
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    (first, *rest) = rig.voice.spoken
+    assert first in CascadeConfig().fillers.for_tool("see")
+    assert rest == ["Вижу стол.", "Всё."]
+    assert rig.loop.turns[0]["fillers"] == [first]
 
 
 class FakeSpeakers:
