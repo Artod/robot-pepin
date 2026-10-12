@@ -8,7 +8,7 @@ import asyncio
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +16,8 @@ import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.expression.conversation import GESTURES, SLOW_TOOL, Heard
+from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
@@ -85,6 +87,8 @@ class Rig:
         whisper_delay_s: float = 0.0,
         seconds_per_char: float = 0.01,
         switchboard: Switchboard | None = None,
+        observers: Sequence[Any] = (),
+        flags: Sequence[Any] = (),
         **config: Any,
     ) -> None:
         self.config = CascadeConfig().with_changes(
@@ -115,6 +119,8 @@ class Rig:
             ledger=None,
             tick_s=0.01,
             switchboard=switchboard,
+            observers=observers,
+            flags=flags,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -446,6 +452,61 @@ def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: 
     assert second["brain"] == "second" and second["voice"] == "second-voice"
     assert late_voice.spoken[-1] == "Теперь я другой." and rig.loop.allowed == {"where_am_i"}
     assert rig.brain.heard == ["Пепин, грустно"]  # the first brain never heard the second
+
+
+class BrokenObserver(RecordingObserver):
+    """An observer that breaks on every part: the voice must not notice."""
+
+    def part_queued(self, turn: int, index: int, part: Any) -> None:
+        raise RuntimeError("broken body")
+
+
+def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) -> None:
+    board = Switchboard(
+        ControlFile(tmp_path),
+        configure=lambda brain, voice: CascadeConfig(),
+        build_brain=lambda config, name: BrainSetup(
+            ScriptedBrain(), config, name, set(), set(), paid=False
+        ),
+        build_voice=lambda v: ToneVoice(rate=RATE),
+        brain="first",
+        voice="first-voice",
+    )
+    observer, flag = RecordingObserver(), FakeFlag(GESTURES)
+    script: list[list[Step]] = [[("look", {"pan_deg": 10.0}), "{тихо} Вижу стол.", "Всё."]]
+    rig = Rig(tmp_path, ["Пепин, что там?"], script, switchboard=board,
+              observers=[BrokenObserver(), observer], flags=[flag])  # fmt: skip
+
+    asked: list[str] = []
+
+    async def scenario(rig: Rig) -> None:
+        request = write_request(tmp_path, None, None, flags={GESTURES: True, "nope": True})
+        asked.append(request.id)
+        await until(lambda: len(answers_to(tmp_path, request.id)) == 2)
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert flag.on and rig.voice.spoken == ["Секунду.", "Вижу стол.", "Всё."]  # filler first
+    answers = {r["name"]: r for r in answers_to(tmp_path, asked[0])}
+    assert answers[GESTURES]["state"] == "applied" and answers[GESTURES]["what"] == "flag"
+    assert answers["nope"]["state"] == "failed" and "gestures" in answers["nope"]["error"]
+    moments = [name for name, _ in observer.calls]
+    assert moments[:3] == ["opened", "speech_ended", "moment"] and moments[-1] == "closed"
+    assert moments.count("part_queued") == 2 and moments.count("part_spoken") == 2
+    for index in (0, 1):  # a part is spoken after it was queued, and the reply ends after both
+        queued = next(k for k, (name, args) in enumerate(observer.calls)
+                      if name == "part_queued" and args[1] == index)  # fmt: skip
+        assert observer.calls.index(("part_spoken", (1, index))) > queued
+    assert moments.index("reply_done") > max(i for i, m in enumerate(moments) if m == "part_spoken")
+    (wake,) = [args[0] for name, args in observer.calls if name == "opened"]
+    assert isinstance(wake, Heard) and wake.text == "Пепин, что там?" and wake.duration_s > 0
+    assert ("moment", (SLOW_TOOL,)) in observer.calls
+    parts = [args for name, args in observer.calls if name == "part_queued"]
+    assert [(turn, index, part.text, part.style) for turn, index, part in parts] == [
+        (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
+    ]  # fmt: skip
+    assert observer.calls[-1] == ("closed", ("stopped",))
 
 
 class BrokenVoice(ToneVoice):

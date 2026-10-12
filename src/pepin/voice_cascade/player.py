@@ -169,6 +169,18 @@ class Player:
         """Audio is queued or playing (with the room's tail)."""
         return self.pacer.speaking()
 
+    def played(self) -> float:
+        """Stream seconds played by now (the clock a part's :meth:`mark` is on)."""
+        return self.playout.played()
+
+    def mark(self, turn: int, index: int) -> tuple[float, float] | None:
+        """Where part ``index`` of reply ``turn`` sits in the stream so far: its first and last
+        second fed (the last grows while its audio is still being made); None before its
+        first chunk, or once the turn is forgotten. Read from any thread (the body's cues)."""
+        with self._lock:
+            mark = self._marks.get((turn, index))
+            return None if mark is None else (mark[0], mark[1])
+
     def span(self, turn: int) -> tuple[float, float] | None:
         """Where reply ``turn``'s audio sits in the stream: its first and last second."""
         with self._lock:

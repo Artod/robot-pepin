@@ -24,6 +24,7 @@ about a second, a voice once its model has loaded, a transcriber between utteran
 
     uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
     uv run python scripts/voice_cascade.py switch --transcriber whispercpp
+    uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -61,9 +62,11 @@ from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import CONFIG_FILE, CascadeConfig, voice_preset
 from pepin.voice_cascade.control import (
     DONE_STATES,
+    FLAG,
     ControlFile,
     Switchboard,
     answers_to,
+    flag_value,
     write_request,
 )
 from pepin.voice_cascade.engines import (
@@ -127,22 +130,52 @@ def ledger_for(config: CascadeConfig, path: Path) -> Ledger:
     return Ledger(path, caps)
 
 
+def parse_flags(items: list[str], known: set[str]) -> dict[str, bool]:
+    """``["gestures=on", "speaker_gaze=off"]`` as ``{name: on}``; ``ValueError`` naming an item
+    that is not ``NAME=on|off`` or a name config/expression.json's flags do not carry."""
+    flags: dict[str, bool] = {}
+    for item in items:
+        name, _, value = item.partition("=")
+        wanted = flag_value(value)
+        if not name or wanted is None:
+            raise ValueError(f"--flag {item!r}: NAME=on or NAME=off")
+        if name not in known:
+            raise ValueError(f"--flag {name!r}: one of {', '.join(sorted(known))}")
+        flags[name] = wanted
+    return flags
+
+
+def expression_flags() -> set[str]:
+    """The live flags config/expression.json declares (its ``flags`` but the note)."""
+    data = json.loads(config_file("expression.json").read_text())
+    return {name for name in data.get("flags", {}) if name != "note"}
+
+
 def switch(argv: list[str]) -> int:
-    """``switch --brain X --voice Y --transcriber Z``: ask the running loop for a switch and
-    print its answers until each part is applied or has failed."""
+    """``switch --brain X --voice Y --transcriber Z --flag NAME=on``: ask the running loop for
+    a switch and print its answers until each part is applied or has failed."""
     ap = argparse.ArgumentParser(
         prog="voice_cascade.py switch",
-        description="switch the running loop's brain, voice or speech-to-text engine",
+        description="switch the running loop's brain, voice, speech-to-text engine or features",
     )
     ap.add_argument("--brain", help="a brain preset, or echo")
     ap.add_argument("--voice", help="a voice preset (or an engine's name: qwen3, gemini, say)")
     ap.add_argument("--transcriber", help="mlx, whispercpp or engine:model (whispercpp:large-v3)")
+    ap.add_argument(
+        "--flag", action="append", default=[], metavar="NAME=on|off",
+        help="a feature of config/expression.json's flags (gestures, speaker_gaze), live",
+    )  # fmt: skip
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
     ap.add_argument("--wait-s", type=float, default=SWITCH_WAIT_S)
     args = ap.parse_args(argv)
-    if not (args.brain or args.voice or args.transcriber):
-        ap.error("--brain, --voice, --transcriber, or several")
+    if not (args.brain or args.voice or args.transcriber or args.flag):
+        ap.error("--brain, --voice, --transcriber, --flag, or several")
+    try:
+        flags = parse_flags(args.flag, expression_flags())
+    except ValueError as error:
+        print(error)
+        return 2
     data = json.loads((args.config or config_file(CONFIG_FILE)).read_text())
     brains = [*data.get("brain", {}).get("presets", {}), ECHO]
     if args.brain and args.brain not in brains:
@@ -157,14 +190,14 @@ def switch(argv: list[str]) -> int:
     if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
         print(f"transcriber {args.transcriber!r}: mlx, whispercpp or engine:model")
         return 2
-    request = write_request(args.logs, args.brain, args.voice, args.transcriber)
+    request = write_request(args.logs, args.brain, args.voice, args.transcriber, flags)
     print(
         f"asked ({request.id}): brain {args.brain}, voice {args.voice},"
-        f" transcriber {args.transcriber}",
+        f" transcriber {args.transcriber}, flags {flags or None}",
         flush=True,
     )
     asked = (("brain", args.brain), ("voice", args.voice), ("transcriber", args.transcriber))
-    parts = {what for what, name in asked if name}
+    parts = {what for what, name in asked if name} | {f"{FLAG} {name}" for name in flags}
     deadline = time.monotonic() + args.wait_s
     shown = 0
     failed = False
@@ -174,7 +207,11 @@ def switch(argv: list[str]) -> int:
             extra = {k: v for k, v in row.items() if k not in ("id", "t", "what", "name", "state")}
             print(f"  {row['what']} {row['name']}: {row['state']} {json.dumps(extra)}", flush=True)
         shown = len(rows)
-        done = {row["what"] for row in rows if row["state"] in DONE_STATES}
+        done = {
+            f"{FLAG} {row['name']}" if row["what"] == FLAG else row["what"]
+            for row in rows
+            if row["state"] in DONE_STATES
+        }
         failed = any(row["state"] == "failed" for row in rows)
         if parts <= done:
             return 1 if failed else 0
