@@ -9,6 +9,9 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
     uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
+    uv run python scripts/gesture.py turn 10 --speed 0.2      # the wheels: 10 deg left in place
+    uv run python scripts/gesture.py rock 2 --times 1         # 2 cm forward and back
+    uv run python scripts/gesture.py turn -10 --dry-run       # every check, nothing moves
 
 ``play`` renders the intent from config/animation.json (seed and variant printed, so a run is
 replayed with them), stretches its arm clip by 1/speed, checks it against config/arm.json's
@@ -18,6 +21,11 @@ clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds
 (``--no-head`` leaves it out). Ctrl-C during a play sends a halt and releases the overlay.
 ``--dry-run`` prints the plan and sends nothing. ``teach`` reads the arm while its torque is off
 (move it by hand first) and writes the six angles as ``poses.NAME`` of config/animation.json.
+``turn`` and ``rock`` are the wheels' expressive motions exactly as the voice cascade makes them
+(pepin.expression.wheels: twists to the base server judged by its odometry, the goal server on
+this Mac saying nothing navigates and the lidar's arc is clear), at ``--speed`` (a share of
+config/expression.json's wheels caps); Ctrl-C halts. ``ros/stop.sh`` stays the red button: the
+motion ends on the first state line of a stop it did not send.
 The board is ``PEPIN_HOST`` (or --host).
 """
 
@@ -142,8 +150,8 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
             plan = "left out (--no-head)" if args.no_head else _overlay(overlay)
             print(f"  head at +{at:.2f} s: {plan}")
         else:
-            print(f"  {clip.part} at +{at:.2f} s for {clip.duration_s:.1f} s: not played (no"
-                  f" {clip.part} executor yet)")  # fmt: skip
+            print(f"  {clip.part} at +{at:.2f} s for {clip.duration_s:.1f} s: not played here"
+                  " (the wheels: scripts/gesture.py turn | rock)")  # fmt: skip
     if args.dry_run:
         return 0
     face = None
@@ -270,6 +278,62 @@ def nudge(args: argparse.Namespace, motion: ArmMotion) -> int:
     return 0
 
 
+def wheels(args: argparse.Namespace) -> int:
+    """``turn DEG`` or ``rock CM``: the checks, then the motion (none with ``--dry-run``)."""
+    import threading
+    from dataclasses import replace
+
+    from pepin.expression.executors import WheelMove, WheelReport
+    from pepin.expression.wheels import WheelsSettings, robot_wheels
+
+    if not 0.0 < args.speed <= 1.0:
+        print("--speed: above 0, at most 1")
+        return 2
+    settings = replace(WheelsSettings.load(), speed_scale=args.speed)
+    if args.command == "turn":
+        request = WheelMove(turn_deg=args.deg)
+        rate, acc = settings.yaw_caps()
+        print(f"turn {args.deg:+.1f} deg in place at speed {args.speed:g}: up to"
+              f" {math.degrees(rate):.1f} deg/s, ramp {math.degrees(acc):.1f} deg/s^2")  # fmt: skip
+    else:
+        request = WheelMove(rock_m=args.cm / 100.0, rocks=args.times)
+        speed, acc = settings.drive_caps()
+        print(f"rock {args.cm:+.1f} cm and back x{args.times} at speed {args.speed:g}: up to"
+              f" {speed * 100:.1f} cm/s, ramp {acc * 100:.1f} cm/s^2")  # fmt: skip
+    executor = robot_wheels(args.host, load=lambda: replace(WheelsSettings.load(),
+                                                            speed_scale=args.speed))  # fmt: skip
+    try:
+        refusal = executor.preview(request)
+        retries = bool(request.turn_deg) and str(refusal).startswith("the arc")
+        then = " (the turn would back off and try again)" if retries else ""
+        print(f"checks: {'ok' if refusal is None else refusal}{then}")
+        if args.dry_run or (refusal is not None and not retries):
+            return 0 if refusal is None else 3
+        ended = threading.Event()
+        reports: list[WheelReport] = []
+
+        def done(report: WheelReport) -> None:
+            reports.append(report)
+            ended.set()
+
+        if args.command == "turn":
+            executor.turn(args.deg, done, lambda deg: print(f"  turned {deg:+.1f} deg"))
+        else:
+            executor.rock(args.cm / 100.0, args.times, done)
+        try:
+            while not ended.wait(0.1):
+                pass
+        except KeyboardInterrupt:
+            executor.halt("Ctrl-C")
+            ended.wait(2.0)
+            print("\nhalted: the stop went to the base server")
+            return 130
+        report = reports[0]
+        return 0 if report.done else 3
+    finally:
+        executor.close()
+
+
 def teach(args: argparse.Namespace, motion: ArmMotion) -> int:
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", args.name) or args.name == "rest":
         print("a pose's name: lower_snake_case, not rest (config/arm.json's)")
@@ -339,7 +403,17 @@ def main() -> int:
     n.add_argument("--dry-run", action="store_true", help="print the plan, send nothing")
     t = sub.add_parser("teach", help="write the arm's present angles as a pose of the book")
     t.add_argument("name")
+    w = sub.add_parser("turn", help="the wheels: turn in place (+ left), as the gaze does")
+    w.add_argument("deg", type=float)
+    r = sub.add_parser("rock", help="the wheels: forward and back (backward first when negative)")
+    r.add_argument("cm", type=float, nargs="?", default=2.0)
+    r.add_argument("--times", type=int, choices=range(1, 6), default=1, metavar="1..5")
+    for wheel in (w, r):
+        wheel.add_argument("--speed", type=float, default=0.2, help="share of the wheels' caps")
+        wheel.add_argument("--dry-run", action="store_true", help="every check, nothing moves")
     args = ap.parse_args()
+    if args.command in ("turn", "rock"):
+        return wheels(args)
     motion = load_arm_motion(ARM)
     if args.command == "list":
         return show_list(motion)
