@@ -336,6 +336,16 @@ def test_a_refused_service_is_left_alone_for_the_back_off_and_a_slow_one_costs_a
     assert "0 dropped, 1 refused, 2 failed" in line and "HTTP 500" in line
 
 
+def test_a_name_that_does_not_resolve_backs_off_like_a_refusal() -> None:
+    import socket
+
+    clock = Clock()
+    sender = feed(Post(socket.gaierror(8, "nodename nor servname provided")), clock)
+    sender.offer(np.zeros((2, 2, 3), np.uint8), 1.0, "o")
+    sender.send_one()
+    assert sender.counts["refused"] == 1 and "gaierror" in sender.report()
+
+
 # ---- the service's receiver and health ---------------------------------------------------------
 def perceiver(identity: Identity | None = None, clock: Clock | None = None) -> Perceiver:
     clock = clock or Clock()

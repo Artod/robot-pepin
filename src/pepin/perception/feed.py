@@ -21,6 +21,7 @@ No ROS and no detector here: the container imports this file alone.
 from __future__ import annotations
 
 import http.client
+import socket
 import threading
 import time
 from collections.abc import Callable
@@ -37,8 +38,9 @@ PACE_SLACK = 0.75  # a frame this share of a period after the last one taken sti
 # What a kept-alive connection the service closed raises on its next use (and what "nobody
 # listens" raises through Docker Desktop's port forwarding, which accepts and then resets).
 STALE = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, http.client.BadStatusLine)
-# What means the service is not there: the feed backs off instead of paying a connect per frame.
-AWAY = (ConnectionRefusedError, *STALE)
+# What means the service is not there: the feed backs off instead of paying a connect per frame
+# (a name that does not resolve, host.docker.internal outside Docker, is one of them).
+AWAY = (ConnectionRefusedError, socket.gaierror, *STALE)
 
 
 @dataclass(frozen=True)
