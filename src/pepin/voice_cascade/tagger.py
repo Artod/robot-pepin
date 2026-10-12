@@ -4,7 +4,8 @@ Praat (parselmouth) measures each utterance over its voiced span, the way
 scratch/prosody_1008 did on Artem's speech: intensity, the pitch's median and its 5-95 % range
 in semitones, the share of pauses of 150 ms or more; the speaking rate is syllables (vowel
 letters of Whisper's words) per second of that span. A running baseline of the last ``window``
-utterances turns each number into a z-score, and a z beyond ``z`` becomes a plain Russian word:
+utterances (one per recognised person, :mod:`pepin.people`; one for all while nobody is)
+turns each number into a z-score, and a z beyond ``z`` becomes a plain Russian word:
 ``[Артём: тише и медленнее обычного, интонация ровнее]``. The line describes and never
 interprets (prosody.md section 7): no feeling is named, and nothing is said until the baseline
 holds ``min_baseline`` utterances. A neural reading is added only when ``emotion_model`` is set:
@@ -39,6 +40,7 @@ WORDS = {
 }
 RANGE_WORDS = ("живее", "ровнее")
 PAUSED = 0.25  # pause ratio above which the line says so (absolute: the baseline is ~0)
+DEFAULT_KEY = ""  # the one baseline while nobody is recognised (prosody.speaker's)
 
 
 class EmotionModel(Protocol):
@@ -119,10 +121,18 @@ class ProsodyTagger:
         self.config = config
         self.emotion = emotion
         self.measurer = measurer
-        self.baseline: dict[str, deque[float]] = {
-            name: deque(maxlen=config.window) for name in (*WORDS, "range")
-        }
+        self.baselines: dict[str, dict[str, deque[float]]] = {}
         self.count = 0
+
+    def baseline(self, key: str = DEFAULT_KEY) -> dict[str, deque[float]]:
+        """One person's running baseline (``key``: whose; one for everyone when nobody is
+        recognised)."""
+        found = self.baselines.get(key)
+        if found is None:
+            window = self.config.window
+            found = {name: deque(maxlen=window) for name in (*WORDS, "range")}
+            self.baselines[key] = found
+        return found
 
     def measure(self, pcm: bytes) -> Prosody:
         """Praat's numbers, and the neural reading when there is a model."""
@@ -153,9 +163,9 @@ class ProsodyTagger:
             out["arousal"] = prosody.arousal
         return out
 
-    def z(self, name: str, value: float) -> float | None:
+    def z(self, name: str, value: float, key: str = DEFAULT_KEY) -> float | None:
         """``value`` in this person's spreads from their mean (None: no baseline yet)."""
-        seen = self.baseline[name]
+        seen = self.baseline(key)[name]
         if len(seen) < self.config.min_baseline:
             return None
         sd = max(statistics.pstdev(seen), MIN_SD[name])
@@ -163,13 +173,21 @@ class ProsodyTagger:
 
     def line(self, prosody: Prosody, text: str) -> str:
         """The tag line, then the utterance joins the baseline."""
+        body = self.describe(prosody, text)
+        who = self.config.speaker or "голос"
+        return f"[{who}: {body}]" if body else ""
+
+    def describe(self, prosody: Prosody, text: str, key: str = DEFAULT_KEY) -> str:
+        """How the utterance was said against ``key``'s own baseline, in words ("" while the
+        baseline is too short or nothing was measured); then it joins that baseline."""
         if prosody.loudness_db <= -100 or not text.strip():
             return ""
         values = self.features(prosody, text)
-        scores = {name: self.z(name, value) for name, value in values.items()}
+        scores = {name: self.z(name, value, key) for name, value in values.items()}
+        baseline = self.baseline(key)
         for name, value in values.items():
             if math.isfinite(value):
-                self.baseline[name].append(value)
+                baseline[name].append(value)
         self.count += 1
         if all(score is None for score in scores.values()):
             return ""
@@ -187,9 +205,7 @@ class ProsodyTagger:
             parts.append("с паузами")  # noqa: RUF001
         if prosody.label:
             parts.append(f"модель эмоций: {prosody.label}")
-        body = ", ".join(parts) if parts else "голос как обычно"
-        who = self.config.speaker or "голос"
-        return f"[{who}: {body}]"
+        return ", ".join(parts) if parts else "голос как обычно"
 
 
 class AudeeringArousal:

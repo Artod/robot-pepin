@@ -28,6 +28,7 @@ from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneV
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
+from pepin.voice_cascade.stages import Speaker
 from pepin.voice_live.events import Events
 from pepin.voice_live.sources import FrameSink
 
@@ -91,6 +92,7 @@ class Rig:
         observers: Sequence[Any] = (),
         flags: Sequence[Any] = (),
         vocabulary: Vocabulary = EMPTY,
+        people: Any = None,
         **config: Any,
     ) -> None:
         self.config = CascadeConfig().with_changes(
@@ -124,6 +126,7 @@ class Rig:
             observers=observers,
             flags=flags,
             vocabulary=vocabulary,
+            people=people,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -510,6 +513,58 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
     ]  # fmt: skip
     assert observer.calls[-1] == ("closed", ("stopped",))
+
+
+class FakeSpeakers:
+    """Person recognition that names everyone Sasha; counts what it was asked."""
+
+    def __init__(self, on: bool) -> None:
+        self.on = on
+        self.measured = 0
+        self.named: list[str] = []
+
+    def measure(self, pcm: bytes, end_s: float) -> Callable[[str], Speaker]:
+        self.measured += 1
+
+        def name(text: str) -> Speaker:
+            self.named.append(text)
+            return Speaker("говорит: Саша", "sasha", {"who": "Саша", "confidence": "sure"})
+
+        return name
+
+
+def test_the_speaker_is_named_in_front_of_the_words_only_while_the_switch_is_on(
+    tmp_path: Path,
+) -> None:
+    people = FakeSpeakers(on=True)
+    rig = Rig(tmp_path, ["просто разговор", "Пепин, привет", "Продолжение следует...", "как дела"],
+              people=people)  # fmt: skip
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())  # idle and no name: nobody is measured
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+        await rig.say(utterance())  # Whisper's noise line: measured, never named
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["[говорит: Саша] Пепин, привет", "[говорит: Саша] как дела"]
+    assert people.measured == 3 and people.named == ["Пепин, привет", "как дела"]
+    (conversation,) = next(tmp_path.iterdir()).glob("cascade_*/")
+    rows = [json.loads(line) for line in (conversation / "events.jsonl").open()]
+    speakers = [r for r in rows if r["event"] == "speaker"]
+    assert [(r["head"], r["who"]) for r in speakers] == [("говорит: Саша", "Саша")] * 2
+
+    off = FakeSpeakers(on=False)
+    rig = Rig(tmp_path / "off", ["Пепин, привет"], people=off)
+
+    async def once(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+
+    asyncio.run(rig.run(once))
+    assert rig.brain.heard == ["Пепин, привет"] and off.measured == 0
 
 
 def test_markers_ride_their_parts_to_the_body_and_never_reach_the_voice(tmp_path: Path) -> None:
