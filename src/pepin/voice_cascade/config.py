@@ -83,10 +83,11 @@ class SttConfig:
     quantization: str | None = None  # cpu: onnx-asr's int8 files (None: the full model)
     dtype: str | None = None  # gpu: the weights cast to this MLX dtype once loaded (None: kept)
     delay_ms: int | None = None  # voxtral: its transcription delay (None: the model's 480 ms)
+    timings: bool = False  # gigaam: words with their times and vowels (the stretch tag needs it)
 
 
 DEFAULT_STT = {
-    "gigaam": SttConfig("gigaam-v3-e2e-rnnt", "cpu"),
+    "gigaam": SttConfig("gigaam-v3-e2e-rnnt", "cpu", timings=True),
     "parakeet": SttConfig("mlx-community/parakeet-tdt-0.6b-v3", "gpu", dtype="bfloat16"),
     "canary": SttConfig("nemo-canary-1b-v2", "cpu", quantization="int8"),
     "voxtral": SttConfig("mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit", "gpu"),
@@ -152,13 +153,16 @@ class VoiceConfig:
 
 @dataclass(frozen=True)
 class ProsodyConfig:
-    """The tag line: who is assumed to speak, the baseline, the z-score that is worth a word."""
+    """The tag line: who is assumed to speak, the baseline, the z-score that is worth a word,
+    and how much longer than usual a vowel must be to be called drawn out (None: never)."""
 
     speaker: str = "Артём"
     min_baseline: int = 5
     window: int = 200
     z: float = 2.0
     emotion_model: str | None = None
+    stretch_ratio: float | None = 2.0
+    stretch_min_s: float = 0.25
 
 
 @dataclass(frozen=True)
@@ -318,6 +322,12 @@ class CascadeConfig:
                 window=int(pros.get("window", d.prosody.window)),
                 z=float(pros.get("z", d.prosody.z)),
                 emotion_model=pros.get("emotion_model") or None,
+                stretch_ratio=(
+                    None
+                    if (ratio := pros.get("stretch_ratio", d.prosody.stretch_ratio)) is None
+                    else float(ratio)
+                ),
+                stretch_min_s=float(pros.get("stretch_min_s", d.prosody.stretch_min_s)),
             ),
             idle_close_s=float(conv.get("idle_close_s", d.idle_close_s)),
             max_session_s=float(conv.get("max_session_s", d.max_session_s)),
@@ -365,6 +375,9 @@ class CascadeConfig:
         self.check_voice(self.voice)
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
+        ratio = self.prosody.stretch_ratio
+        if (ratio is not None and ratio <= 1.0) or self.prosody.stretch_min_s < 0:
+            raise ValueError("prosody.stretch_ratio above 1 or null; prosody.stretch_min_s >= 0")
         if self.turn_model is not None and self.turn_model not in TURN_METHODS:
             raise ValueError(f"ears.turn_model: one of {', '.join(TURN_METHODS)} or null")
         if not 0 < self.turn_min_silence_s < self.silence_s:
@@ -482,6 +495,7 @@ def stt_config(section: Mapping[str, Any], base: SttConfig) -> SttConfig:
         quantization=None if quantization is None else str(quantization),
         dtype=None if dtype is None else str(dtype),
         delay_ms=None if delay is None else int(delay),
+        timings=bool(section.get("timings", base.timings)),
     )
 
 

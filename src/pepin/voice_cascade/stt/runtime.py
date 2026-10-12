@@ -27,6 +27,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pepin.audio_link import RATE
+from pepin.voice_cascade.stages import Transcript
 from pepin.voice_live.wake import clean_transcript
 
 WARM_S = 0.5  # the silence an engine reads once at load: its first call allocates and compiles
@@ -69,7 +70,9 @@ class OnnxAsr:
     """A model of onnx-asr on onnxruntime's CPU, loaded and warmed at construction: ``model``
     an onnx-asr name (its files come from the Hugging Face cache, fetched at the first load),
     ``threads`` onnxruntime's intra-op threads, ``options`` passed to every recognition (a
-    language for the models that take one)."""
+    language for the models that take one). With ``timings`` (a CTC or transducer model) a
+    timed read also gives each word's time, its tokens' (``letters``: a character model's
+    letters) and its vowels (:mod:`pepin.voice_cascade.timing`)."""
 
     def __init__(
         self,
@@ -79,6 +82,8 @@ class OnnxAsr:
         threads: int,
         quantization: str | None = None,
         options: Mapping[str, str] | None = None,
+        timings: bool = False,
+        letters: bool = False,
     ) -> None:
         """``name``: ``engine:model``, as the switch reports it."""
         load_model, onnxruntime = onnx_runtime()
@@ -86,10 +91,15 @@ class OnnxAsr:
         session.intra_op_num_threads = threads
         self.name = name
         self._options = dict(options or {})
+        self._letters = letters
         self._model: Any = load_model(
             model, quantization=quantization, sess_options=session, providers=[CPU]
         )
-        self.transcribe(silence())
+        self._timed: Any = self._model.with_timestamps() if timings else None
+        if self._timed is None:
+            self.transcribe(silence())
+        else:
+            self.transcribe_timed(silence())
 
     def transcribe(self, pcm: bytes) -> str:
         """The words in ``pcm``."""
@@ -99,9 +109,27 @@ class OnnxAsr:
             text = self._model.recognize(samples(pcm), sample_rate=RATE, **self._options)
         return clean_transcript(str(text))
 
+    def transcribe_timed(self, pcm: bytes) -> Transcript:
+        """The words in ``pcm`` (as :meth:`transcribe` gives them) with their timings; none
+        when timings are off. The same model call, onnx-asr keeping the frame each token was
+        emitted at and its log-prob; with the loudness and Praat's voicing for the vowels,
+        +0-4 ms on 2-4 s of speech, +10 ms on 6.8 s (2026-10-12)."""
+        if self._timed is None:
+            return Transcript(self.transcribe(pcm))
+        if self._model is None:
+            raise RuntimeError(f"{self.name} is closed")
+        from pepin.voice_cascade import timing
+
+        with fp_flags_ignored():
+            result = self._timed.recognize(samples(pcm), sample_rate=RATE, **self._options)
+        logprobs = result.logprobs or [None] * len(result.tokens)
+        emissions = list(zip(result.tokens, result.timestamps, logprobs, strict=True))
+        words = timing.words_of(emissions, pcm, letters=self._letters, voiced=timing.voicing(pcm))
+        return Transcript(clean_transcript(str(result.text)), words)
+
     def close(self) -> None:
         """Drop the model's sessions; onnxruntime frees their memory with them."""
-        self._model = None
+        self._model = self._timed = None
         gc.collect()
 
 

@@ -28,7 +28,7 @@ from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneV
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import Speaker
+from pepin.voice_cascade.stages import Prosody, Speaker, TimedWord, Transcript, Unit, Vowel
 from pepin.voice_live.events import Events
 from pepin.voice_live.sources import FrameSink
 
@@ -531,6 +531,57 @@ class FakeSpeakers:
             return Speaker("говорит: Саша", "sasha", {"who": "Саша", "confidence": "sure"})
 
         return name
+
+
+class TimedList(ListTranscriber):
+    """A transcriber that times its words: each text read as one word with a 0.3 s vowel."""
+
+    def transcribe_timed(self, pcm: bytes) -> Transcript:
+        text = self.transcribe(pcm)
+        units = (Unit("д", 0.0, 0.05), Unit("а", 0.05, 0.35))
+        return Transcript(
+            text, (TimedWord("да", 0.0, 0.35, units, True, -0.2, (Vowel(0.05, 0.35, 1),)),)
+        )
+
+
+class WordsTagger:
+    """A tagger that keeps the words each line was given and tags with their count."""
+
+    def __init__(self) -> None:
+        self.words: list[tuple[TimedWord, ...]] = []
+
+    def measure(self, pcm: bytes) -> Prosody:
+        return Prosody(1.0, 60.0)
+
+    def line(self, prosody: Prosody, text: str) -> str:
+        self.words.append(prosody.words)
+        return f"[{len(prosody.words)} timed]"
+
+    def describe(self, prosody: Prosody, text: str, key: str) -> str:
+        return ""
+
+
+def test_a_timed_read_s_words_reach_the_tag_line_and_the_log(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["Пепин, привет", "да"])
+    tagger = WordsTagger()
+    rig.loop.transcriber = TimedList(["Пепин, привет", "да"])
+    rig.loop.tagger = tagger
+    rig.loop.config = rig.config.with_changes(prosody_tags=True)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["[1 timed] Пепин, привет", "[1 timed] да"]
+    assert [w.text for words in tagger.words for w in words] == ["да", "да"]
+    (conversation,) = next(tmp_path.iterdir()).glob("cascade_*/")
+    rows = [json.loads(line) for line in (conversation / "events.jsonl").open()]
+    heard = [r for r in rows if r["event"] == "heard"]
+    assert heard and all(r["words"] == [{"w": "да", "t": [0.0, 0.35], "lp": -0.2, "v": [0.3]}]
+                         for r in heard)  # fmt: skip
 
 
 def test_the_speaker_is_named_in_front_of_the_words_only_while_the_switch_is_on(

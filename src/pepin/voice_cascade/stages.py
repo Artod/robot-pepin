@@ -26,9 +26,74 @@ class Transcriber(Protocol):
 
 
 @dataclass(frozen=True)
+class Unit:
+    """What a speech-to-text model emitted inside a word, a letter (a character model) or a
+    token (a BPE model), with its span in seconds from the start of the PCM."""
+
+    text: str
+    start: float
+    end: float
+
+    @property
+    def seconds(self) -> float:
+        """How long it lasted."""
+        return self.end - self.start
+
+
+@dataclass(frozen=True)
+class Vowel:
+    """A vowel heard inside a word: the span of its voiced, loud sound in seconds, and which of
+    the word's units is its letter (None: not known)."""
+
+    start: float
+    end: float
+    unit: int | None = None
+
+    @property
+    def seconds(self) -> float:
+        """How long it lasted."""
+        return self.end - self.start
+
+
+@dataclass(frozen=True)
+class TimedWord:
+    """One word as a model heard it: its letters only (no punctuation), its span, its units
+    (``letters``: one per letter), its log-probability (None: the model gives none), and its
+    vowels as the sound has them (:mod:`pepin.voice_cascade.timing`)."""
+
+    text: str
+    start: float
+    end: float
+    units: tuple[Unit, ...]
+    letters: bool
+    logprob: float | None = None
+    vowels: tuple[Vowel, ...] = ()
+
+
+@dataclass(frozen=True)
+class Transcript:
+    """An utterance's words: ``text`` as the transcriber writes it, ``words`` with their timings
+    (empty when the engine gives none or timings are off; they may be another model's reading,
+    :class:`pepin.voice_cascade.stt.gigaam.GigaAM`)."""
+
+    text: str
+    words: tuple[TimedWord, ...] = ()
+
+
+@runtime_checkable
+class TimedTranscriber(Protocol):
+    """A transcriber that can also say when each word, and each letter or token, was said."""
+
+    def transcribe_timed(self, pcm: bytes) -> Transcript:
+        """The words in ``pcm`` (the text :meth:`Transcriber.transcribe` gives) with timings."""
+        ...
+
+
+@dataclass(frozen=True)
 class Prosody:
     """How one utterance sounded: plain acoustic numbers over its voiced span (None where the
-    pitch tracker found nothing), and a neural model's reading when one is configured."""
+    pitch tracker found nothing), a neural model's reading when one is configured, and the
+    words' timings when the transcriber gives them (joined after both are read)."""
 
     active_s: float
     loudness_db: float
@@ -37,6 +102,7 @@ class Prosody:
     pause_ratio: float = 0.0
     arousal: float | None = None  # a dimensional model's 0..1
     label: str | None = None  # a categorical model's top class, with its score
+    words: tuple[TimedWord, ...] = ()
 
 
 class Tagger(Protocol):
