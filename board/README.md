@@ -65,7 +65,7 @@ and `systemctl start pepin-base` after.
 | `board/wifi_primary.sh` | run by hand, as root: `dongle\|onboard\|status\|confirm` picks which radio carries the board's DHCP identity, with a timed rollback (see its header) |
 | `board/xvf_host_install.sh` | run once: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
-| `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure and frame rate (the active rig's `rate.fps`, the one number the laptop's stamps, OpenVINS and the frame gates follow), read by pepin-camera at its start: a rate change is this file copied and `systemctl restart pepin-camera`; `ros/sync.sh` does not reach `/opt/pepin`) |
+| `config/base.json`, `config/neck.json`, `config/arm.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `arm.json`: its `motion` block, the arm's ids, rest pose, limits, caps and torque limit (pepin.arm_driver); absent, the arm is never read or written and the `arm_*` commands answer an error; `camera.json`: the camera's exposure and frame rate (the active rig's `rate.fps`, the one number the laptop's stamps, OpenVINS and the frame gates follow), read by pepin-camera at its start: a rate change is this file copied and `systemctl restart pepin-camera`; `ros/sync.sh` does not reach `/opt/pepin`) |
 | `config/head.json`, `config/face.json` | `/opt/pepin/config/` (`head.json`: the head's port, its IMU's rate and ranges, the clock map; `face.json`: the mouth's expressions and the robot events, read by pepin-head and by pepin-audio's lip sync) |
 | `ros/` | `/root/pepin-ros/` (`ros/sync.sh`) |
 
@@ -73,7 +73,7 @@ Deploy the host package and its configuration from the laptop:
 
 ```bash
 rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin/pepin/
-scp config/base.json config/neck.json config/camera.json root@pepin.local:/opt/pepin/config/
+scp config/base.json config/neck.json config/arm.json config/camera.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof pepin-audio'
 ```
 
@@ -183,6 +183,20 @@ limits instead (it is walking, not aiming), and it never winds the servo up: a g
 ~10 deg ahead of the encoder waits for the head. A move's answer is broadcast to every client of
 the port, because it may come seconds after the request. WiFi lost: a jog stops within 0.5 s and
 lets go, a lease goes home within its 2 s.
+
+The SO-101 arm (ids 1-6, the roster's `servo1`..`servo6`) rides the same read as a second group
+(`pepin.base_server.Riders`): every tick while energised, `motion.idle_read_hz` (5) times a second
+at rest, its angles in the state lines as `"arm": {"deg", "torque", "phase", "id", "progress_s",
+"error"}`. When it first answers, its Operating_Mode (position mode, or every motion is refused)
+and its EEPROM range (Min/Max_Position_Limit, which is lerobot's calibration) are read once; the
+angles are lerobot's degrees counted from that range. `pepin.arm_driver` plays a whole
+trajectory by itself on the tick and needs the laptop for nothing after it.
+
+| Line | What happens |
+| --- | --- |
+| `{"cmd":"arm_trajectory","id","source","name","knots":[[t,d1..d6],..],"then":"rest","hold_s":0,"speed":0.2}` | refused (never clamped) outside `config/arm.json`'s `motion.limits_deg` within the EEPROM range, faster than `max_speed_deg_s`/`max_acc_deg_s2` times `speed` (accelerations times its square), longer than `max_duration_s`, or while the wheels are commanded to move: `{"type":"arm","id","status":"refused","reason"}`. Accepted: the six servos energised where they stand (one block: torque, ramp and speed at the caps, goal = present, Torque_Limit `torque_limit`), the first knot joined by a minimum-jerk move, one Goal_Position write a tick; then `done`, a hold (`then: hold`, at most `hold_max_s`), rest by a minimum-jerk move, torque off `release_after_s` later. A newer trajectory answers the older one `preempted`; a twist during one sends the arm to rest (`halted`) |
+| `{"cmd":"arm_rest"}`, `{"cmd":"arm_halt"}` | to rest now; stop where the goal is and hold it `hold_max_s`, then rest. Answered `{"type":"arm_rest","phase":..}` |
+| `{"cmd":"arm_read"}` | `{"type":"arm_read","deg":[..],"ticks":[..],"age_s":..,"torque":..,"phase":..,"range_deg":[[lo,hi],..]}` from the newest read, no bus traffic of its own |
 
 ## The I2C bus
 

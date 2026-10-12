@@ -562,6 +562,32 @@ base server that moves the neck only at rest has them refused during a drive. At
 every request but the operator's is let go, and a head found more than `drive_home_tol_deg` off
 home (a jog, a hand) is sent home.
 
+## Gestures: the body as one animated character
+
+The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
+`{laugh}`, `{face:smile}`; `{whispering}` and `{}` stay the voice's style) and the gesture engine
+(`pepin.expression`) decides how: it renders the intent from `config/animation.json` (atoms,
+twelve compositions, taught poses; a seed logged with every performance), places each part's
+clip on the word by the player's clock, and plays it through each part's one owner. The arm:
+the laptop sends a whole trajectory (`arm_trajectory`) and the base server plays it on its tick,
+then rests and lets go of the torque by itself (`pepin.arm_driver`, `config/arm.json` `motion`:
+caps, limits, rest pose, torque limit). The face: the head server, source `expression`. The head:
+waits for the gaze arbiter's `clip` overlay (left out of every gesture until it lands). The
+wheels: none yet. The person starting to speak fades the gestures; a drive or the end of the
+conversation sends every part to rest; markers are capped (`config/expression.json` `caps`).
+
+```bash
+uv run python scripts/voice_cascade.py switch --flag gestures=on    # off as shipped; live
+uv run python scripts/gesture.py read                               # the arm's angles, no motion
+uv run python scripts/gesture.py play greeting --speed 0.2 --dry-run
+uv run python scripts/gesture.py teach raised                       # torque off, place, Enter
+tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performances and cues
+```
+
+A board without `config/arm.json` in `/opt/pepin/config` never reads or writes the arm. Every
+cue line says the stream second it was planned for, the one it went at and how late; the
+board's `accepted`/`done` come back as `arm` lines with the laptop's time.
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
