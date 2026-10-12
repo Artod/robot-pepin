@@ -1,0 +1,67 @@
+{
+  "_note": "Body expression (pepin.expression): the gesture engine and the speaker gaze, run inside the voice cascade on the laptop. The atoms, compositions, taught poses and idle layers are config/animation.json; the arm's caps, limits and rest pose, which the board enforces, are config/arm.json's motion block; the face finder's detector is config/face_sensor.json's. Every number here is a design default until a line says MEASURED.",
+  "flags": {
+    "gestures": false,
+    "speaker_gaze": false,
+    "note": "The two features' switches at the cascade's start; while it runs: scripts/voice_cascade.py switch --flag gestures=on (data/voice/control.json's flags, answered in control.jsonl). Switching a feature on re-reads this file and config/animation.json. gestures: every gesture and idle layer of every part (arm, head overlays, face cues, wheels); off, markers are still taken out of the speech and nothing moves. speaker_gaze: the head's base layer on the person and its turn of the wheels."
+  },
+  "timing": {
+    "audio_lag_s": 0.15,
+    "char_s": 0.07,
+    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. char_s: seconds per spoken character while a part's audio is still being made (Player.heard's estimate)."
+  },
+  "layers": {
+    "fade_s": 0.4,
+    "idle_resume_s": 2.0,
+    "seed": null,
+    "note": "fade_s: every change between layers on a part (a gesture taken over, the gesture layer faded when the person starts speaking). idle_resume_s: quiet on a part after a gesture before its idle layer plays again. seed: null draws a fresh seed for each performance (logged with it); a number makes every performance repeat (the bench)."
+  },
+  "parts": {
+    "arm": {
+      "latency_s": 0.06,
+      "speed_scale": 0.2,
+      "knot_hz": 25.0,
+      "note": "latency_s: the WiFi hop and the board's next tick. speed_scale: every arm clip's time stretched by 1/speed_scale and the servos' profile capped by it; 0.2 for the first live test, raised by Artem's word. knot_hz: the knots a clip is sampled into (the board interpolates between them on its 50 Hz tick)."
+    },
+    "head": {
+      "latency_s": 0.1,
+      "note": "latency_s: the door's HTTP, the arbiter's step and the neck_target hop."
+    },
+    "face": {
+      "latency_s": 0.05,
+      "note": "latency_s: the head server's hop; its 280 ms tween (config/face.json timing) starts after it."
+    },
+    "body": {
+      "max_turn_deg": 30.0,
+      "step_deg": 10.0,
+      "max_rock_m": 0.02,
+      "attempts": 3,
+      "backoff_m": 0.03,
+      "max_backoff_m": 0.06,
+      "note": "The wheels' expressive motions on the board's measured-motion path, never Nav2, only while the goal server says navigating false: a turn in place of at most max_turn_deg per request in steps of step_deg, a rock of at most max_rock_m. A stalled wheel or a blocked arc (lidar, ToF) backs the cart off backoff_m and the turn is tried again, at most attempts times and max_backoff_m of backing in all; then it gives up and the head looks as far as it reaches."
+    }
+  },
+  "speaker": {
+    "doa": {
+      "front_deg": null,
+      "sign": null,
+      "window_s": 1.0,
+      "note": "The XVF3800 sits on the cart's front, not on the head. front_deg: the array's angle (0..359, 0 toward its USB-C side) of a voice straight ahead of the cart; sign: +1 when that angle grows toward the cart's left, -1 toward its right. Both null until measured (scratch/audio/doa_turn.py at the front, left, back and right); null orients by faces alone. window_s: the speech-flagged readings of the utterance's last window_s are averaged (circular mean) into its bearing."
+    },
+    "comfort_pan_deg": 60.0,
+    "in_frame_deg": 25.0,
+    "seek_tilt_deg": -5.0,
+    "seek_frames": 3,
+    "seek_every_s": 0.4,
+    "track_every_s": 1.0,
+    "match_deg": 20.0,
+    "deadband_deg": 6.0,
+    "saccade_over_deg": 15.0,
+    "doa_jump_deg": 30.0,
+    "ttl_s": 6.0,
+    "renew_s": 2.0,
+    "smile": "smile",
+    "smile_hold_s": 2.0,
+    "note": "comfort_pan_deg: the head alone turns this far; past it the wheels turn the rest (parts.body), and the head goes to its reach when they may not. in_frame_deg: a voice this close to where the head points is in the picture already: no turn, only a frame. seek_tilt_deg: the tilt the head turns to before a face is found (+ down; level-ish for a face at 1-2 m). seek_frames, seek_every_s: frames taken at that interval after the turn before giving up on a face (the head then stays on the voice). track_every_s: one frame this often while the conversation lasts and the head stands still. match_deg: a face within this of the voice's bearing is the speaker's. deadband_deg: a face this close to the frame's centre moves nothing. saccade_over_deg: a correction larger than this is a saccade, a smaller one the arbiter's slow speed. doa_jump_deg: the voice this far from the aim for a whole utterance turns the head to it again. ttl_s, renew_s: the speaker's look lives ttl_s and is renewed every renew_s, so the head goes home within ttl_s of the cascade's end. smile, smile_hold_s: the face's expression when a face is first found, and for how long."
+  }
+}
