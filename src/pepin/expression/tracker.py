@@ -61,11 +61,13 @@ if TYPE_CHECKING:
     from pepin.expression.finder import SnapshotFinder
     from pepin.expression.plan import BoundedTurn
     from pepin.expression.speaker import TargetPolicy
+    from pepin.voice_live.sources import BoardLink
 
 logger = logging.getLogger(__name__)
 
 Phase = Literal["idle", "seek", "voice", "track", "paused"]
 CONFIG_FILE = "expression.json"
+FACE_SOURCE = "expression"  # the face's expressions of the body layer, at the head server
 BLIND_RETRY_S = 0.1  # a frame refused for a blind head is tried again this soon
 SPOKE_KEPT = 8  # the robot's latest speaking spans kept to judge an utterance by
 Report = Callable[[str], None]
@@ -272,10 +274,16 @@ class SpeakerGaze:
             self.phase, self.reorient = "paused", True
 
     def warm(self) -> None:
-        """Load what the first wake would wait for (the face finder's model)."""
+        """Load what the first wake would wait for (the face finder's model); a finder that
+        cannot load (no weights) is dropped: the head then stays on the voice."""
         warm = getattr(self.finder, "warm", None)
-        if callable(warm):
+        if not callable(warm):
+            return
+        try:
             warm()
+        except (OSError, ImportError, RuntimeError, ValueError) as exc:
+            self.finder = None
+            self.report(f"no face finder ({exc}): the head turns to the voice only")
 
     # ---- the clock ---------------------------------------------------------------------------
     def tick(self, now: float) -> float | None:
@@ -633,6 +641,38 @@ class SpeakerGazeWorker:
             return None
 
 
+def robot_gaze(host: str, doa: DoaSource, *, on: bool | None = None) -> SpeakerGazeWorker:
+    """The speaker gaze on the robot: the arbiter's door on this Mac, the board's camera and
+    head server at ``host``, the array's directions from ``doa`` (the cascade's audio link), the
+    wheels' stub; built, and the finder's model loaded, the first time its switch is on (config/
+    expression.json's ``flags.speaker_gaze`` at the start when ``on`` is None)."""
+
+    def build(settings: SpeakerSettings) -> SpeakerGaze:
+        from pepin.deployment import config_file
+        from pepin.expression.door import SpeakerDoor
+        from pepin.expression.executors import NoWheels
+        from pepin.expression.finder import board_finder
+        from pepin.head_link import HeadClient
+        from pepin.neck import NeckConfig
+
+        finder: SnapshotFinder | None = None
+        try:
+            finder = board_finder(host)  # config reads only: the model loads on warm()
+        except (OSError, ValueError, KeyError) as exc:
+            say(f"no face finder ({exc}): the head turns to the voice only")
+        return SpeakerGaze(
+            settings,
+            door=SpeakerDoor(aim_wait_s=settings.aim_wait_s),
+            doa=doa,
+            finder=finder,
+            wheels=NoWheels(),
+            face=HeadClient(host, source=FACE_SOURCE).start(),
+            reach=Reach.of(NeckConfig.from_json(config_file("neck.json"))),
+        )
+
+    return SpeakerGazeWorker(build, on=flag_default() if on is None else on)
+
+
 if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
 
     def _conforms(
@@ -641,6 +681,7 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         finder: SnapshotFinder,
         turn: BoundedTurn,
         policy: SpeakerPolicy,
+        link: BoardLink,
     ) -> None:
         observer: ConversationObserver = worker
         flag: LiveFlag = worker
@@ -648,4 +689,5 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         faces: FaceFinder = finder
         wheels: Wheels = turn
         target: TargetPolicy = policy
-        del observer, flag, gaze_door, faces, wheels, target
+        doa: DoaSource = link
+        del observer, flag, gaze_door, faces, wheels, target, doa
