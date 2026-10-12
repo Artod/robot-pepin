@@ -132,9 +132,9 @@ def now(work: Any) -> None:
     work()
 
 
-def test_the_file_names_every_engine_with_its_device_and_keeps_mlx() -> None:
+def test_the_file_names_every_engine_with_its_device_and_picks_gigaam() -> None:
     config = CascadeConfig.load(CONFIG)
-    assert configured(config).engine == "mlx"
+    assert configured(config).engine == "gigaam"
     assert set(config.stt) == set(DEFAULT_STT) and set(TRANSCRIBER_ENGINES) > set(config.stt)
     assert config.stt == DEFAULT_STT  # the file's blocks say what the defaults say
     gigaam = CascadeConfig.load(CONFIG, ["transcriber.engine=gigaam"])

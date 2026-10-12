@@ -45,10 +45,10 @@ def now(work: Callable[[], None]) -> None:
     work()
 
 
-def test_the_file_picks_mlx_and_switches_to_the_neural_engine_for_one_run() -> None:
+def test_the_file_picks_gigaam_and_switches_to_the_neural_engine_for_one_run() -> None:
     config = CascadeConfig.load(CONFIG)
-    assert configured(config) == Choice("mlx", "mlx-community/whisper-large-v3-turbo")
-    assert configured(config).label == "mlx:whisper-large-v3-turbo"
+    assert configured(config) == Choice("gigaam", "gigaam-v3-e2e-rnnt")
+    assert configured(config).label == "gigaam:gigaam-v3-e2e-rnnt"
     ane = CascadeConfig.load(CONFIG, ["transcriber.engine=whispercpp"])
     assert configured(ane) == Choice("whispercpp", "large-v3-turbo")
     assert (ane.whispercpp_units, ane.whispercpp_gpu) == ("ane", False)

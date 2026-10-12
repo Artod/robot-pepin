@@ -19,7 +19,7 @@
     "note": "with ears.turn_model smart-turn-v3.2 (pipecat-ai/smart-turn-v3, smart-turn-v3.2-cpu.onnx: 8 MB int8 ONNX on the CPU, BSD-2-Clause, 23 languages with Russian at 93.5 % on its own benchmark; ~9 ms a call here): at min_silence_s of quiet inside an utterance the model reads its last window_s seconds (zeros in front, as it was trained) on a worker thread, and the utterance closes when it says p >= threshold (0.85: at 0.5 it cut 'сегодня день.' live at p 0.97, and at either it fires in most 0.25 s mid-sentence pauses, which the continuation merge joins back); otherwise ears.silence_s closes it as before. Every turn logs p, the model's own ms and the time saved against the fixed silence"
   },
   "transcriber": {
-    "engine": "mlx",
+    "engine": "gigaam",
     "mlx": {
       "model": "mlx-community/whisper-large-v3-turbo"
     },
