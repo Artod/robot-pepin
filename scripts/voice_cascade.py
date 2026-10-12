@@ -485,13 +485,8 @@ def main() -> int:
     except RuntimeError as error:  # a cloud voice without its key
         print(error)
         return 2
-    clips = (
-        *(config.backchannel_lines if config.backchannel else ()),
-        config.tool_filler,
-        *config.openers,
-    )
-    clips = tuple(line for line in clips if line)
-    speech = SpeechWorker(voice, player, clips=clips)
+    asides = (*(config.backchannel_lines if config.backchannel else ()), *config.fillers.lines())
+    speech = SpeechWorker(voice, player, clips=config.openers, asides=asides)
     choice = configured(config)
     print(f"loading the voice ({config.voice.name}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile

@@ -150,7 +150,7 @@
     "delay_s": 0.3,
     "min_speech_s": 0.8,
     "lines": ["угу", "мм"],
-    "note": "a clip (synthesised once at load) when the person has been quiet delay_s inside an utterance of at least min_speech_s, before the end of the turn"
+    "note": "a clip (made once the voice is ready, by a paid voice's local fallback) when the person has been quiet delay_s inside an utterance of at least min_speech_s, before the end of the turn"
   },
   "prosody": {
     "speaker": "Артём",
@@ -168,8 +168,21 @@
     "max_session_s": 900.0,
     "report_drive_start": true,
     "error_line": "Извини, у меня сбой связи.",
-    "tool_filler": "Секунду.",
-    "note": "tool_filler: said locally (a clip made at load) when the brain calls a slow tool (see, look, find...) before saying a word in its reply; empty: off. a conversation closes after idle_close_s without the person's voice or a reply (never while a drive runs), on a goodbye, on end_conversation, or at max_session_s. report_drive_start: a drive answers its call when the goal server takes it (the brain says its acknowledgement) and its end comes as a [robot] turn. error_line: said locally when the brain fails before saying anything"
+    "fillers": {
+      "any": ["Минуточку.", "Секунду.", "Так…", "Сейчас.", "Почти готово."],
+      "again": ["Ещё секундочку.", "Уже почти."],
+      "by_tool": {
+        "see": ["Сейчас гляну.", "Так, смотрю."],
+        "look": ["Сейчас гляну.", "Так, смотрю."],
+        "look_around": ["Сейчас осмотрюсь.", "Так, оглядываюсь."],
+        "find": ["Сейчас поищу.", "Так, ищу."],
+        "recall": ["Дай вспомнить.", "Сейчас вспомню."],
+        "remember_person": ["Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."],
+        "forget_person": ["Хорошо, забываю."]
+      }
+    },
+    "filler_again_s": 4.0,
+    "note": "fillers: said locally when the brain calls a slow tool (pepin.voice_cascade.loop.SLOW_TOOLS) before a word of its reply: one of the tool's by_tool lines, else of any, at random, never the line said just before; one of again when the reply has still said nothing filler_again_s later (0: never); each said line is logged (events.jsonl filler, the turn's fillers). Their clips are made by the voice once it is ready, while no job waits; a paid voice's are made and said by its local fallback (never a cloud call), and without a fallback no filler is said. {} or \"\": no fillers; the old \"tool_filler\": \"Секунду.\" still reads as any alone. a conversation closes after idle_close_s without the person's voice or a reply (never while a drive runs), on a goodbye, on end_conversation, or at max_session_s. report_drive_start: a drive answers its call when the goal server takes it (the brain says its acknowledgement) and its end comes as a [robot] turn. error_line: said locally when the brain fails before saying anything"
   },
   "money": {
     "daily_budget_cad": 2.0,

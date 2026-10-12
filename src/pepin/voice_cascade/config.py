@@ -169,6 +169,39 @@ class ProsodyConfig:
     stretch_min_s: float = 0.25
 
 
+DEFAULT_FILLERS_BY_TOOL: Mapping[str, tuple[str, ...]] = {
+    "see": ("Сейчас гляну.", "Так, смотрю."),
+    "look": ("Сейчас гляну.", "Так, смотрю."),
+    "look_around": ("Сейчас осмотрюсь.", "Так, оглядываюсь."),
+    "find": ("Сейчас поищу.", "Так, ищу."),
+    "recall": ("Дай вспомнить.", "Сейчас вспомню."),
+    "remember_person": ("Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."),
+    "forget_person": ("Хорошо, забываю.",),
+}
+
+
+@dataclass(frozen=True)
+class FillerLines:
+    """What the robot says by itself while a slow tool runs before its reply's first word: the
+    tool's own lines (``by_tool``), else the common ones (the file's ``any``), and one of
+    ``again`` when the wait goes on."""
+
+    common: tuple[str, ...] = ("Минуточку.", "Секунду.", "Так…", "Сейчас.", "Почти готово.")
+    again: tuple[str, ...] = ("Ещё секундочку.", "Уже почти.")
+    by_tool: Mapping[str, tuple[str, ...]] = field(
+        default_factory=lambda: dict(DEFAULT_FILLERS_BY_TOOL)
+    )
+
+    def for_tool(self, tool: str) -> tuple[str, ...]:
+        """The lines a filler for ``tool`` is chosen from."""
+        return self.by_tool.get(tool) or self.common
+
+    def lines(self) -> tuple[str, ...]:
+        """Every line once, in the file's order (the clips to make)."""
+        every = [*self.common, *self.again, *(x for own in self.by_tool.values() for x in own)]
+        return tuple(dict.fromkeys(every))
+
+
 @dataclass(frozen=True)
 class CascadeConfig:
     """Everything the cascade reads at start; see the file's notes for the reasons."""
@@ -240,7 +273,8 @@ class CascadeConfig:
     max_session_s: float = 900.0
     report_drive_start: bool = True
     error_line: str = "Извини, у меня сбой связи."  # noqa: RUF001
-    tool_filler: str = "Секунду."
+    fillers: FillerLines = field(default_factory=FillerLines)
+    filler_again_s: float = 4.0  # the second filler after this long without a word (0: none)
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -337,7 +371,8 @@ class CascadeConfig:
             max_session_s=float(conv.get("max_session_s", d.max_session_s)),
             report_drive_start=bool(conv.get("report_drive_start", d.report_drive_start)),
             error_line=str(conv.get("error_line", d.error_line)),
-            tool_filler=str(conv.get("tool_filler", d.tool_filler)),
+            fillers=filler_lines(conv, d.fillers),
+            filler_again_s=float(conv.get("filler_again_s", d.filler_again_s)),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -426,8 +461,11 @@ class CascadeConfig:
                     f"transcriber.{name}: quantization int8 or null, dtype"
                     f" {', '.join(map(str, STT_DTYPES[1:]))} or null, delay_ms > 0"
                 )
-        if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:
-            raise ValueError("conversation.idle_close_s > 0 and money.daily_budget_cad > 0")
+        if self.idle_close_s <= 0 or self.daily_budget_cad <= 0 or self.filler_again_s < 0:
+            raise ValueError(
+                "conversation.idle_close_s > 0, conversation.filler_again_s >= 0 and"
+                " money.daily_budget_cad > 0"
+            )
         if b.model not in self.prices:
             raise ValueError(f"no price for {b.model}: add it to money.prices_usd_per_mtok")
 
@@ -502,6 +540,26 @@ def stt_config(section: Mapping[str, Any], base: SttConfig) -> SttConfig:
         dtype=None if dtype is None else str(dtype),
         delay_ms=None if delay is None else int(delay),
         timings=bool(section.get("timings", base.timings)),
+    )
+
+
+def filler_lines(conversation: Mapping[str, Any], default: FillerLines) -> FillerLines:
+    """The ``fillers`` block of the conversation section; the old ``tool_filler`` string (read
+    when ``fillers`` is absent or null; also a string or a list given as ``fillers``) is the
+    common lines alone; "" or {}: no fillers."""
+    block = conversation.get("fillers")
+    if block is None:
+        block = conversation.get("tool_filler")
+    if block is None:
+        return default
+    if isinstance(block, str | list):
+        lines = [block] if isinstance(block, str) else block
+        return FillerLines(tuple(str(x) for x in lines if x), (), {})
+    by_tool = block.get("by_tool", {})
+    return FillerLines(
+        tuple(str(x) for x in block.get("any", ()) if x),
+        tuple(str(x) for x in block.get("again", ()) if x),
+        {str(tool): tuple(str(x) for x in own if x) for tool, own in by_tool.items()},
     )
 
 

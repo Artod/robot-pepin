@@ -5,6 +5,10 @@ one before plays. A barge-in cancels every job of the turns up to the one cut (:
 under the same lock as each chunk's hand-over to the player, so no chunk of a cut turn reaches
 the speaker after the flush. Another voice can be swapped in while this one speaks
 (:meth:`SpeechWorker.swap`): it loads on a thread of its own and takes over at the next job.
+
+Asides (a slow tool's fillers, backchannels) are said by the voice itself, or by the local
+fallback of a voice that pays per sentence, never by a cloud call; a paid voice without a
+fallback says none. Their clips are made once the voice is ready, while no job waits.
 """
 
 from __future__ import annotations
@@ -56,7 +60,25 @@ def make_clips(voice: Voice, lines: Sequence[str]) -> dict[str, bytes]:
     sentence (each clip would be a call)."""
     if isinstance(voice, Billed):
         return {}
-    return {clip_key(line): b"".join(voice.stream(speakable(line))) for line in lines}
+    return {clip_key(line): b"".join(voice.stream(speakable(line))) for line in unique(lines)}
+
+
+def aside_voice(voice: Voice) -> Voice | None:
+    """Who says the asides (fillers, backchannels) of ``voice``: the voice itself, or for a
+    voice that pays per sentence its local fallback (None: it has none, no aside is said)."""
+    if not isinstance(voice, Billed):
+        return voice
+    fallback: Voice | None = getattr(voice, "fallback", None)
+    return fallback
+
+
+def unique(lines: Sequence[str]) -> list[str]:
+    """``lines`` with each clip key once (the first line kept), in order; no empty one."""
+    first: dict[str, str] = {}
+    for line in lines:
+        if key := clip_key(line):
+            first.setdefault(key, line)
+    return list(first.values())
 
 
 class SpeechWorker:
@@ -71,15 +93,19 @@ class SpeechWorker:
         on_done: DoneSink | None = None,
         on_bill: BillSink | None = None,
         clips: Sequence[str] = (),
+        asides: Sequence[str] = (),
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """``on_audio`` hears every chunk handed to the player; ``on_done`` every job finished
         (cut or not); ``on_bill`` the bill of every sentence a paid voice said; all on this
-        worker's thread. ``clips``: short lines (backchannels, fillers, the commonest openers)
-        synthesised once at load and played from memory when a job says one of them without
-        a style (:func:`pepin.voice_cascade.text.clip_key`)."""
+        worker's thread. ``clips``: short lines (the commonest openers) synthesised once at
+        load and played from memory when a job says one of them without a style
+        (:func:`pepin.voice_cascade.text.clip_key`); none with a paid voice. ``asides``: the
+        lines of backchannel jobs (fillers, "мм"), made by :func:`aside_voice` once the voice
+        is ready, while no job waits."""
         self.player = player
-        self.clip_lines = tuple(clips)
+        self.clip_lines = tuple(unique(clips))
+        self.aside_lines = tuple(unique(asides))
         self.on_audio, self.on_done, self.on_bill = on_audio, on_done, on_bill
         self.clock = clock
         self.ready = threading.Event()
@@ -88,7 +114,8 @@ class SpeechWorker:
         self.cut_through = -1  # jobs of turns up to this one are dropped
         self._slot: tuple[Voice, dict[str, bytes]] = (voice, {})
         self._swaps = 0  # the latest swap asked for; an older one finishing is dropped
-        self._unmade: list[str] = []  # clip lines a swapped-in voice has still to make
+        self._unmade: list[str] = []  # clip lines the voice has still to make
+        self._told_unsaid = False
         self.job_rate = voice.rate  # Hz of the chunks on_audio hears now (its thread reads it)
         self._jobs: queue.Queue[SpeechJob | _Wake | None] = queue.Queue()
         self._thread = threading.Thread(target=self._run, name="speech", daemon=True)
@@ -102,6 +129,11 @@ class SpeechWorker:
     def clips(self) -> dict[str, bytes]:
         """The current voice's clips by key."""
         return self._slot[1]
+
+    @property
+    def says_asides(self) -> bool:
+        """The current voice says asides (a paid voice without a local fallback does not)."""
+        return aside_voice(self._slot[0]) is not None
 
     def start(self) -> None:
         """Load the voice on the worker's thread, then serve jobs; :attr:`ready` is set when
@@ -142,7 +174,7 @@ class SpeechWorker:
                     outcome: BaseException | None = RuntimeError("superseded by a later swap")
                 else:
                     self._slot, outcome = (voice, {}), None
-                    self._unmade = [] if isinstance(voice, Billed) else list(self.clip_lines)
+                    self._unmade = self._to_make(voice, {})
                     self._jobs.put(_Wake())  # the worker may be waiting with no timeout
             if on_ready is not None:
                 on_ready(outcome)
@@ -167,14 +199,25 @@ class SpeechWorker:
             if not isinstance(item, _Wake):
                 return item
 
+    def _to_make(self, voice: Voice, made: dict[str, bytes]) -> list[str]:
+        """The lines still to be made for ``voice``: its clips (a voice that pays: none), then
+        the asides (by its aside voice; none without one), less those in ``made``."""
+        lines = [] if isinstance(voice, Billed) else list(self.clip_lines)
+        if aside_voice(voice) is not None:
+            lines += self.aside_lines
+        return [line for line in unique(lines) if clip_key(line) not in made]
+
     def _make_clip(self) -> None:
         with self.lock:
             if not self._unmade:
                 return
             line = self._unmade.pop(0)
             voice = self._slot[0]
+        maker = aside_voice(voice)  # the voice itself, or a paid voice's fallback
+        if maker is None:
+            return
         try:
-            pcm = b"".join(voice.stream(speakable(line)))
+            pcm = b"".join(maker.stream(speakable(line)))
         except Exception:
             logger.exception("speech: the clip %r was not made", line)
             return
@@ -190,6 +233,7 @@ class SpeechWorker:
             with self.lock:
                 if self._slot[0] is voice:
                     self._slot = (voice, clips)
+                    self._unmade = self._to_make(voice, clips)  # the asides, made while idle
         except BaseException as error:  # the run cannot speak: the caller reports it
             self.error = error
             self.ready.set()
@@ -203,6 +247,12 @@ class SpeechWorker:
             if self.on_done is not None:
                 self.on_done(job, self.clock())
 
+    def _unsaid(self, job: SpeechJob) -> None:
+        """A backchannel job a paid voice without a local fallback leaves unsaid (told once)."""
+        if not self._told_unsaid:
+            self._told_unsaid = True
+            logger.warning("speech: a paid voice without a local fallback says no %r", job.text)
+
     def _speak(self, job: SpeechJob) -> None:
         if job.turn <= self.cut_through and job.kind != "backchannel":
             return
@@ -210,15 +260,20 @@ class SpeechWorker:
             self.player.end()
             return
         voice, clips = self._slot
-        self.job_rate = voice.rate
-        resampler = Resampler(voice.rate, self.player.rate)
+        clipper = aside_voice(voice)  # who made the clips
+        speaker = clipper if job.kind == "backchannel" else voice
+        if speaker is None:
+            self._unsaid(job)
+            return
+        self.job_rate = speaker.rate
+        resampler = Resampler(speaker.rate, self.player.rate)
         text = speakable(job.text)
         if not text and job.pcm is None:
             return  # nothing to say aloud (an aside)
         ready = job.pcm if job.pcm is not None else None
-        if ready is None and not job.style:
+        if ready is None and not job.style and speaker is clipper:
             ready = clips.get(clip_key(text))
-        chunks = iter([ready]) if ready is not None else voice.stream(text, job.style)
+        chunks = iter([ready]) if ready is not None else speaker.stream(text, job.style)
         player_kind: Literal["reply", "backchannel"] = (
             "backchannel" if job.kind == "backchannel" else "reply"
         )
@@ -234,7 +289,7 @@ class SpeechWorker:
             close = getattr(chunks, "close", None)
             if close is not None:
                 close()
-            if ready is None and isinstance(voice, Billed):
+            if ready is None and speaker is voice and isinstance(voice, Billed):
                 bill = voice.bill()
                 if bill is not None and self.on_bill is not None:
                     self.on_bill(job, bill)
