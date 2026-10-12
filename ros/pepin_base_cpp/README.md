@@ -52,9 +52,11 @@ Python process at 10 % and 66 MB.
 
 ## Arm
 
-The base server reads the SO-101's six servos in the same sync_read (`pepin.arm_driver`: every tick
-while the arm is energised, `idle_read_hz` 5 while it rests with its torque off, never on a board
-without `/opt/pepin/config/arm.json`) and a line whose read heard them carries
+The base server reads the SO-101's six servos in the same sync_read, in two parts on consecutive
+ticks (`pepin.arm_driver`: wrist_roll and gripper, then joints 1-4, so no read outgrows the bus
+adapter's 64-byte USB packet; back to back while the arm is energised, 25 Hz, `idle_read_hz` 5
+while it rests with its torque off, never on a board without `/opt/pepin/config/arm.json`) and the
+line whose read completed them carries
 `"arm": {"deg": [six angles], "torque", "phase", "id", "progress_s", "error"}`: degrees in
 `pepin.expression.trajectory.JOINTS` order, lerobot's calibration = the URDF's convention. Each such
 line becomes `/arm/joint_states` (`sensor_msgs/JointState`: `shoulder_pan`, `shoulder_lift`,

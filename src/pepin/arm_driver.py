@@ -23,17 +23,20 @@ A motion, tick by tick:
    off. ``arm_halt`` stops the arm where its goal is and holds it ``hold_max_s``, then rests;
    ``arm_rest`` goes to rest at once.
 
-The encoders ride in the wheels' read (:class:`pepin.base_server.Riders`): every tick while the
-arm is energised, ``idle_read_hz`` while it rests with its torque off. When the group first
+The encoders ride in the wheels' read (:class:`pepin.base_server.Riders`): back to back while
+the arm is energised, ``idle_read_hz`` while it rests with its torque off. Beside the neck a
+read has room for four of them (one 64-byte USB packet), so a ride is two ticks: wrist_roll and
+gripper, then joints 1-4, whose read stamps the state line (25 Hz energised). When the group first
 answers (or answers again) its Operating_Mode is read (anything but position mode refuses every
 motion: velocity mode would turn a joint forever) and its EEPROM range (Min/Max_Position_Limit,
 which IS lerobot's calibration on these servos), from which the angles are counted
 (:class:`pepin.arm_motion.ServoRange`). Servos that fall silent end the motion (answered
 ``halted``) and are never written.
 
-Cost on the board, an ESTIMATE until board_cpu.sh and bus_p95_ms measure it: six more servos in
-the tick's sync_read, ~8 bytes a reply at 1 Mbaud plus the servos' return delay, about
-+0.5-1 ms of bus a tick while the arm rides (every tick when energised, 5 a second at rest);
+Cost on the board, an ESTIMATE until board_cpu.sh and bus_p95_ms measure it: two or four more
+servos in the tick's sync_read, 8 bytes a reply at 1 Mbaud, within the adapter's one USB packet
+(a 64-byte read arrived in 1.5-2.6 ms on 2026-10-12, 32 bytes in 3.9-4.3) while the arm rides
+(every tick when energised, ten ticks of fifty at rest);
 the interpolation, the conversion and one packet a tick, ~0.2-0.4 ms of Python on an A53, so
 +1-3 % of one core while the arm moves and well under 1 % at rest; a few hundred bytes of RAM.
 Accepting a trajectory checks every knot once on the tick thread: ~20 us a knot, so ~2-3 ms
@@ -221,8 +224,9 @@ class ArmDriver:
         )
 
     def state_fields(self, now: float) -> ArmStateFields | None:
-        """The state line's ``arm``: this tick's angles and the motion; None when this tick did
-        not read the arm (or its range is still unread)."""
+        """The state line's ``arm``: the angles of the ride this tick completed (joints 1-4 read
+        now, wrist_roll and gripper a tick ago) and the motion; None when this tick completed
+        no ride (or the range is still unread)."""
         deg = self._angles(self.encoders.ticks)
         if deg is None:
             return None

@@ -625,7 +625,8 @@ tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performanc
 ```
 
 The base bridge publishes the arm's angles as `/arm/joint_states` (the URDF's joint names, radians,
-at each read's stamp: every tick while the arm is energised, 5 Hz at rest), which depth_fusion's
+at the stamp of the read of joints 1-4, wrist_roll and gripper a tick older: 25 Hz while the arm
+is energised, 5 Hz at rest), which depth_fusion's
 `arm_filter` reads under `config/arm.json` `joints.source: topic`. A board without `config/arm.json`
 in `/opt/pepin/config` never reads or writes the arm, and publishes nothing there. Every
 cue line says the stream second it was planned for, the one it went at and how late; the

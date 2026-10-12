@@ -63,11 +63,12 @@
 // a stale edge is never republished. This replaced pepin_bringup.neck_state (a Python process
 // polling the base server at 2-20 Hz, git history before 2026-10-02).
 //
-// THE ARM rides it too: a line whose read heard the SO-101 (every tick while it is energised,
-// `idle_read_hz` while it rests, never on a board without config/arm.json) carries its six
-// angles in degrees, and each such line becomes /arm/joint_states (sensor_msgs/JointState: the
-// URDF's joint names, radians; arm.hpp), stamped with that read like the neck. A line without
-// them publishes nothing.
+// THE ARM rides it too: a line whose read completed the SO-101 (every other tick while it is
+// energised, `idle_read_hz` while it rests, never on a board without config/arm.json) carries
+// its six angles in degrees, and each such line becomes /arm/joint_states
+// (sensor_msgs/JointState: the URDF's joint names, radians; arm.hpp), stamped with that read
+// like the neck (joints 1-4; wrist_roll and gripper are a tick older). A line without them
+// publishes nothing.
 //
 // THE HEAD IMU (head_imu_enable, off until the head exists): a second JsonLineLink to head_server
 // (TCP 3340, pepin.head_server owns the head ESP32's serial port) subscribes to its IMU lines and

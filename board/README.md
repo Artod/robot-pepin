@@ -185,12 +185,15 @@ the port, because it may come seconds after the request. WiFi lost: a jog stops 
 lets go, a lease goes home within its 2 s.
 
 The SO-101 arm (ids 1-6, the roster's `servo1`..`servo6`) rides the same read as a second group
-(`pepin.base_server.Riders`): every tick while energised, `motion.idle_read_hz` (5) times a second
-at rest, its angles in the state lines as `"arm": {"deg", "torque", "phase", "id", "progress_s",
-"error"}`. When it first answers, its Operating_Mode (position mode, or every motion is refused)
-and its EEPROM range (Min/Max_Position_Limit, which is lerobot's calibration) are read once; the
-angles are lerobot's degrees counted from that range. `pepin.arm_driver` plays a whole
-trajectory by itself on the tick and needs the laptop for nothing after it.
+(`pepin.base_server.Riders`) in two parts on consecutive ticks, wrist_roll and gripper, then
+joints 1-4 (wheels, neck and all six in one read are 80 bytes of replies, and the CH343 adapter
+holds the 16 past its 64-byte USB packet back until the next request: 2026-10-12): back to back
+while energised (25 Hz), `motion.idle_read_hz` (5) times a second at rest, its angles in the
+state line of the tick that read joints 1-4 as `"arm": {"deg", "torque", "phase", "id",
+"progress_s", "error"}`. When it first answers, its Operating_Mode (position mode, or every
+motion is refused) and its EEPROM range (Min/Max_Position_Limit, which is lerobot's calibration)
+are read once; the angles are lerobot's degrees counted from that range. `pepin.arm_driver`
+plays a whole trajectory by itself on the tick and needs the laptop for nothing after it.
 
 | Line | What happens |
 | --- | --- |

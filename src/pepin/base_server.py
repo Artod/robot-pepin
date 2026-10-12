@@ -34,7 +34,9 @@ moves answered on arrival; ``neck_jog`` walks the head at a rate for the game-mo
 config/neck.json's ``motion`` block, live through ``neck_motion``.
 
 The SO-101 arm (ids 1-6) rides the same read as another group of the same kind
-(:class:`Riders`: every tick while energised, a few times a second at rest) and is played by
+(:class:`Riders`: back to back while energised, a few times a second at rest), in two parts on
+consecutive ticks beside the neck: no read's replies may outgrow one 64-byte USB packet of the
+bus adapter (``READ_BUDGET_BYTES``). It is played by
 :class:`pepin.arm_driver.ArmDriver` after the neck's step: ``arm_trajectory`` (a whole gesture,
 refused while the wheels are commanded to move; a twist during one sends the arm to rest),
 ``arm_rest``, ``arm_halt``, ``arm_read``. Its caps, limits and rest pose are config/arm.json's
@@ -113,6 +115,11 @@ NECK_BLOCK = ("Torque_Enable", "Acceleration", "Goal_Position", "Goal_Time", "Go
 # dropped (pepin.streams' default of 24 was "about a second" at 20 Hz).
 STATE_OUTBOX_LINES = 64
 P95_EVERY_S = 1.0  # bus_p95_ms is re-sorted out of its 512-sample window at most this often
+# The bus's USB adapter (CH343) hands replies over in 64-byte USB packets: a read whose replies
+# fill more gets the rest 3-4 ms later, or not before the next request (2026-10-12).
+READ_BUDGET_BYTES = 64
+POSITION_REPLY_BYTES = 8  # FF FF id length error, two bytes of Present_Position, checksum
+TICK_READ_SERVOS = READ_BUDGET_BYTES // POSITION_REPLY_BYTES  # the wheels and every rider: 8
 
 
 def jog_ticks_s(deg_s: float) -> float:
@@ -126,12 +133,15 @@ class Riders:
 
     They are asked in the same sync_read as the wheels, after them, and waited for only
     ``window_s`` past the wheels' replies (pepin.feetech's optional ids): a dead group costs the
-    odometry that window and never a retry. ``silent_ticks`` reads in a row without every answer
-    take the group out of the read; it rides along again every ``retry_s`` until it answers.
-    With ``every_s`` above zero the group rides at most that often while it is not ``eager``
-    (an arm resting with its torque off). :meth:`riders` says whom to add to this tick's read,
-    :meth:`heard` takes the answer, and :attr:`ticks` is this tick's reading, in ``names``'
-    order, under the stamp of the same read as the odometry.
+    odometry that window and never a retry. A group too big for one tick's read
+    (:meth:`fit`) rides in ``parts`` on consecutive ticks, its first names last: a RIDE is
+    one read of every part, and its reading is the tick that completes it. ``silent_ticks``
+    rides in a row without every answer take the group out of the read; it rides along again
+    every ``retry_s`` until it answers. With ``every_s`` above zero a ride starts at most that
+    often while the group is not ``eager`` (an arm resting with its torque off).
+    :meth:`riders` says whom to add to this tick's read, :meth:`heard` takes the answer, and
+    :attr:`ticks` is the reading of the ride this tick completed, in ``names``' order, under the
+    stamp of this tick's read (the odometry's); the earlier parts are one tick older each.
     """
 
     def __init__(
@@ -146,6 +156,7 @@ class Riders:
     ) -> None:
         """``names`` are the motor names on the bus; ``what`` names the group in the log."""
         self.names = names
+        self.parts: tuple[tuple[str, ...], ...] = (names,)
         self.what = what
         self.window_s = window_s
         self._silent_ticks = silent_ticks
@@ -157,7 +168,12 @@ class Riders:
         self._missed = 0
         self._dropped_at = float("-inf")
         self._appeared = False
-        self.ticks: tuple[int, ...] | None = None  # this tick's reading, None: not heard
+        self._part = 0  # the part the next tick asks: past 0, a ride is under way
+        self._asking: int | None = None  # the part this tick's read carries
+        self._ride: dict[str, int] = {}  # what the ride under way has heard
+        self._ride_at = 0.0  # when it started: its oldest part
+        self._aside = 0  # the part the next read outside the tick takes (:meth:`aside`)
+        self.ticks: tuple[int, ...] | None = None  # the ride this tick completed, None: none
         self._last: tuple[int, ...] | None = None
         self._last_at = 0.0
         self._read_ms = 0.0
@@ -168,36 +184,57 @@ class Riders:
         """The group has answered and is in the read: a write reaches servos that listen."""
         return self._asked and self._last is not None
 
+    def fit(self, room: int) -> None:
+        """Ride in parts of at most ``room`` servos, the first names in the LAST part: the
+        tick that completes a ride reads them under its own stamp (the arm: joints 1-4)."""
+        if room < 1:
+            raise ValueError(f"{self.what}: no room in the tick's read")
+        chunks = [self.names[i : i + room] for i in range(0, len(self.names), room)]
+        self.parts = tuple(reversed(chunks))
+
     def riders(self, now: float) -> list[str]:
-        """The names to add to this tick's read: while the group answers (every ``every_s``
-        when it is not eager), once a ``retry_s`` after it fell silent, otherwise none."""
-        if self._asked:
-            if not self.eager and self.every_s > 0 and now - self._rode_at < self.every_s:
+        """The names to add to this tick's read: the next part of a ride under way, else the
+        first part while the group answers (every ``every_s`` when it is not eager), once a
+        ``retry_s`` after it fell silent, otherwise none."""
+        self._asking = None
+        if self._part == 0:
+            if self._asked:
+                if not self.eager and self.every_s > 0 and now - self._rode_at < self.every_s:
+                    return []
+                self._rode_at = now
+            elif now - self._dropped_at < self._retry_s:
                 return []
-            self._rode_at = now
-            return list(self.names)
-        if now - self._dropped_at >= self._retry_s:
-            return list(self.names)
-        return []
+            self._ride, self._ride_at = {}, now
+        self._asking = self._part
+        return list(self.parts[self._part])
 
     def heard(self, now: float, raw: Mapping[str, int] | None, asked: bool, read_ms: float) -> None:
         """This tick's read: ``raw`` its answer, None when the wheels' read itself failed (then
-        nothing is learned about the group); ``asked`` whether the group rode in it."""
+        nothing is learned about the group and a ride under way starts over); ``asked`` whether
+        the group rode in it."""
         self.ticks = None
-        if raw is None or not asked:
+        part, self._asking = self._asking, None
+        if part is None or not asked:
+            return
+        if raw is None:
+            self._part = 0
             return
         self._read_ms = read_ms
-        values = [raw.get(name) for name in self.names]
+        self._ride.update({name: raw[name] for name in self.parts[part] if name in raw})
+        self._part = (part + 1) % len(self.parts)
+        if self._part:
+            return  # the ride's next part comes with the next tick
+        values = [self._ride.get(name) for name in self.names]
         if all(v is not None for v in values):
             if not self.live:
                 self._appeared = True
                 if self._last is not None:
                     logger.info("%s answer again: back in the tick's read", self.what)
             self.ticks = tuple(int(v) for v in values if v is not None)
-            self._last, self._last_at = self.ticks, now
+            self._last, self._last_at = self.ticks, self._ride_at
             self._asked, self._missed, self.error = True, 0, None
             return
-        silent = [name for name in self.names if raw.get(name) is None]
+        silent = [name for name in self.names if self._ride.get(name) is None]
         self._missed += 1
         if not self._asked:
             self._dropped_at = now  # a retry that found them silent still: wait again
@@ -212,6 +249,15 @@ class Riders:
                 self._retry_s,
             )
 
+    def aside(self) -> tuple[str, ...]:
+        """The names to add to a read outside the tick (the temperature) while the group is
+        live: one part, the next one each call, so that read fits the tick's budget too."""
+        if not self.live:
+            return ()
+        part = self.parts[self._aside % len(self.parts)]
+        self._aside += 1
+        return part
+
     def take_appeared(self) -> bool:
         """Whether the group answered for the first time, or again after falling silent, since
         the last call: their operating mode must be checked, their registers are unknown."""
@@ -219,11 +265,11 @@ class Riders:
         return appeared
 
     def reading(self) -> tuple[int, ...] | None:
-        """The newest reading while the group is live: at most ``silent_ticks`` reads old."""
+        """The newest reading while the group is live: at most ``silent_ticks`` rides old."""
         return self._last if self.live else None
 
     def age_s(self, now: float) -> float:
-        """Seconds since the newest reading (infinite before any)."""
+        """Seconds since the newest reading's oldest part (infinite before any)."""
         return now - self._last_at if self._last is not None else float("inf")
 
 
@@ -889,6 +935,10 @@ class BaseServerCore:
         self._mover = mover
         self._arm_driver = arm
         self._groups: list[Riders] = [g for g in (neck, arm.encoders if arm else None) if g]
+        room = TICK_READ_SERVOS - 2  # what the wheels leave of one tick's read
+        for group in self._groups:  # the neck whole, the arm in parts (1-4 with 5-6 before)
+            group.fit(room)
+            room -= max(len(part) for part in group.parts)
         self._watchdog = BusWatchdog()
         self.twist = STOP
         self.armed = False
@@ -979,9 +1029,9 @@ class BaseServerCore:
         return None
 
     def tick(self, now: float) -> None:
-        """One control period: the encoders (wheels, neck and arm in one read) -> odometry, the
-        deadman and the idle disarm, and then the neck's and the arm's steps and their one write
-        each, if any — the wheels first, always.
+        """One control period: the encoders (wheels, neck and a part of the arm in one read) ->
+        odometry, the deadman and the idle disarm, and then the neck's and the arm's steps and
+        their one write each, if any — the wheels first, always.
 
         Raises ``RuntimeError`` when the servos have been silent for the
         watchdog's give-up time: the service exits and systemd restarts it.
@@ -1107,12 +1157,11 @@ class BaseServerCore:
         # The servos' temperature, read at most every 5 s and only while the bus answers: the
         # speed cap was raised to what the servos can do (2026-09-30), the neck holds its torque
         # for as long as a lease lasts, and the servo's own cut-out is 70 C. None until the first
-        # read; the neck and an answering arm ride along as optional ids, as in the tick's read.
+        # read; the answering groups ride along as optional ids, as in the tick's read: one part
+        # each (the arm's two in turn), the other part's degrees kept from the read before.
         if self.bus_ok and now - self._temperature_at >= 5.0:
             self._temperature_at = now
-            riders = self._neck.riders(now) if self._neck is not None else []
-            if self._arm_driver is not None and self._arm_driver.encoders.live:
-                riders += list(self._arm_driver.encoders.names)
+            riders = [name for group in self._groups for name in group.aside()]
             try:
                 if riders:
                     raw = self._bus.sync_read(
@@ -1124,7 +1173,14 @@ class BaseServerCore:
                     )
                 else:
                     raw = self._bus.sync_read("Present_Temperature", [LEFT, RIGHT], normalize=False)
-                self._temperature = {name: int(v) for name, v in raw.items()}
+                kept = {
+                    name: degrees
+                    for group in self._groups
+                    if group.live and len(group.parts) > 1
+                    for name, degrees in (self._temperature or {}).items()
+                    if name in group.names and name not in riders
+                }
+                self._temperature = {**kept, **{name: int(v) for name, v in raw.items()}}
             except Exception as exc:  # a missed read never touches the wheels
                 logger.debug("temperature read failed: %r", exc)
         message["temp_c"] = self._temperature

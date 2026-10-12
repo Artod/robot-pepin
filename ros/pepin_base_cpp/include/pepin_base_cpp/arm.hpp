@@ -1,9 +1,10 @@
 // Copyright 2026 Artem Belousov. Licensed under the Apache License, Version 2.0.
 //
 // The SO-101 arm's joints as the base server's state lines carry them, into the form its readers
-// take. pepin.arm_driver puts `"arm": {"deg": [six angles], ...}` in every line whose read heard
-// the arm (every tick while it is energised, `idle_read_hz` while it rests, never on a board
-// without config/arm.json): DEGREES, in pepin.expression.trajectory.JOINTS order, counted as
+// take. pepin.arm_driver puts `"arm": {"deg": [six angles], ...}` in every line whose read
+// completed a reading of the arm (every other tick while it is energised, `idle_read_hz` while
+// it rests, never on a board without config/arm.json; joints 1-4 are that line's read, wrist_roll
+// and gripper the tick before): DEGREES, in pepin.expression.trajectory.JOINTS order, counted as
 // lerobot's calibration counts them (the middle of each servo's EEPROM range is 0, the gripper's
 // closed end -10), which is the URDF's convention. The bridge publishes them as /arm/joint_states
 // (sensor_msgs/JointState: the URDF's joint names, RADIANS), what pepin.arm reads for

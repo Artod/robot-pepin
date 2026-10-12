@@ -3,7 +3,7 @@ mode and range once, energises where it stands, writes one goal a tick, refuses 
 rests and lets go by itself, yields to the wheels, and halts on silence."""
 
 import itertools
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -14,12 +14,18 @@ from test_base import CFG, FakeBus
 from pepin.arm_driver import ARM_BLOCK, interpolate, trajectory_from, trajectory_line
 from pepin.arm_motion import ServoRange, load_arm_motion
 from pepin.base import LEFT, RIGHT
-from pepin.base_server import BaseServerCore, arm_part, neck_parts
+from pepin.base_server import (
+    READ_BUDGET_BYTES,
+    BaseServerCore,
+    NeckEncoders,
+    arm_part,
+    neck_parts,
+)
 from pepin.expression.animation import Clip, Track
 from pepin.expression.fakes import FakeArmLink
 from pepin.expression.parts import ArmPart
 from pepin.expression.trajectory import JOINTS, Knot, Trajectory
-from pepin.feetech import FeetechTcpClient
+from pepin.feetech import REGISTERS, FeetechTcpClient
 from pepin.neck import NeckConfig, acc_units, speed_ticks
 
 REPO = Path(__file__).resolve().parents[2]
@@ -33,6 +39,8 @@ RANGES = tuple(
 )
 REST_TICKS = tuple(r.ticks(MOTION.rest_deg[j]) for r, j in zip(RANGES, JOINTS, strict=True))
 MOTORS = {LEFT: 7, RIGHT: 8, **{n: i for i, n in enumerate(NAMES, start=1)}}
+NECK = ("neck", "head")
+HEADER_BYTES = 6  # FF FF id length error ... checksum around a reply's register bytes
 TICK = 0.02
 WRIST = JOINTS.index("wrist_flex")
 
@@ -44,9 +52,12 @@ class ArmBus(FakeBus):
     def __init__(self) -> None:
         super().__init__()
         self.positions.update(dict(zip(NAMES, REST_TICKS, strict=True)))
+        self.positions.update(dict.fromkeys(NECK, 2048))
         self.modes = dict.fromkeys(NAMES, 0)
         self.silent: set[str] = set()
         self.reads: list[tuple[str, tuple[str, ...]]] = []
+        self.replies: list[int] = []  # the reply bytes each sync_read asked for
+        self.fail_next = False  # the next position read times out (the wheels' read failed)
         self.follow = True
 
     def ping(self, motor: str, num_retry: int = 0) -> int | None:
@@ -62,12 +73,17 @@ class ArmBus(FakeBus):
         optional_window_s: float = 0.0,
     ) -> dict[str, int]:
         self.reads.append((data_name, tuple(optional)))
+        size = REGISTERS[data_name].size
+        self.replies.append((len(motors) + len(optional)) * (HEADER_BYTES + size))
+        if data_name == "Present_Position" and self.fail_next:
+            self.fail_next = False
+            raise TimeoutError("no reply from ids [7, 8] after 2 attempts")
         here = [m for m in optional if m not in self.silent]
         values: dict[str, dict[str, int]] = {
             "Operating_Mode": self.modes,
             "Min_Position_Limit": {n: CAL[n][0] for n in NAMES},
             "Max_Position_Limit": {n: CAL[n][1] for n in NAMES},
-            "Present_Temperature": dict.fromkeys([*NAMES, LEFT, RIGHT], 30),
+            "Present_Temperature": dict.fromkeys([*NAMES, *NECK, LEFT, RIGHT], 30),
             "Present_Position": self.positions,
         }
         table = values[data_name]
@@ -96,6 +112,26 @@ def make_core(bus: ArmBus | None = None) -> tuple[BaseServerCore, ArmBus]:
     bus.writes.clear()
     bus.reads.clear()
     return core, bus
+
+
+def make_board_core(bus: ArmBus | None = None) -> tuple[BaseServerCore, ArmBus]:
+    """The board's read: the wheels, the neck and the arm (in two parts), after the first ride
+    (two ticks), the bus's log cleared."""
+    bus = bus if bus is not None else ArmBus()
+    driver = arm_part(bus, MOTION, MOTORS)
+    assert driver is not None
+    core = BaseServerCore(bus, CFG, servo_names=list(MOTORS), neck=NeckEncoders(), arm=driver)
+    core.tick(0.0)
+    core.tick(TICK)
+    bus.writes.clear()
+    bus.reads.clear()
+    bus.replies.clear()
+    return core, bus
+
+
+def position_reads(bus: ArmBus) -> list[set[str]]:
+    """The arm's servos in each tick's position read, in order."""
+    return [set(o) & set(NAMES) for name, o in bus.reads if name == "Present_Position"]
 
 
 def arm_writes(bus: ArmBus) -> list[tuple[str, dict[str, Any]]]:
@@ -143,6 +179,84 @@ def test_at_rest_the_arm_rides_the_wheels_read_a_few_times_a_second() -> None:
     assert with_arm[0]["deg"] == pytest.approx([MOTION.rest_deg[j] for j in JOINTS], abs=0.1)
     assert with_arm[0]["phase"] == "off" and with_arm[0]["torque"] is False
     assert not arm_writes(bus)
+
+
+def test_beside_the_neck_no_read_outgrows_the_adapter_s_usb_packet() -> None:
+    """Wheels, neck and arm in one read are 80 bytes of replies, and the adapter's 64-byte USB
+    packet held the last 16 (servos 5 and 6) back until the next request (2026-10-12): the arm
+    rides in two parts, at rest and energised, and the temperature read takes one part a time,
+    the other's degrees kept."""
+    core, bus = make_board_core()
+    t = run(core, TICK, 0.0)
+    lines = []
+    for _ in range(300):  # six seconds at rest: rides and two temperature reads
+        t += TICK
+        core.tick(t)
+        lines.append(core.snapshot(t))
+    assert send(core, wave(), t)["status"] == "accepted"
+    for _ in range(100):  # two seconds energised: rides back to back
+        t += TICK
+        core.tick(t)
+        lines.append(core.snapshot(t))
+    assert max(bus.replies) <= READ_BUDGET_BYTES
+    rides = [r for r in position_reads(bus) if r]
+    assert {"servo5", "servo6"} in rides and {"servo1", "servo2", "servo3", "servo4"} in rides
+    assert not any("servo1" in r and "servo5" in r for r in rides)
+    assert set(lines[-1]["temp_c"]) == {LEFT, RIGHT, *NECK, *NAMES}
+
+
+def test_the_line_carries_the_arm_only_when_both_parts_of_one_ride_answered() -> None:
+    """Joints 5-6 are read a tick before 1-4: a line carries the six on the tick that read 1-4
+    (its stamp is that read; 5-6 are one tick older, and the reading's age counts from them),
+    at 5 Hz at rest and every other tick energised. A part that missed or a failed read
+    between the two costs that ride's line, never a reading mixed across rides."""
+    core, bus = make_board_core()
+    t, lines = TICK, []
+    for _ in range(50):  # one second at rest
+        t += TICK
+        core.tick(t)
+        lines.append("arm" in core.snapshot(t))
+    reads = position_reads(bus)
+    closing = [i for i, r in enumerate(reads) if "servo1" in r]
+    assert 4 <= len(closing) <= 5 and lines.count(True) == len(closing)
+    assert all(lines[i] and reads[i - 1] == {"servo5", "servo6"} for i in closing)
+    assert core.command({"cmd": "arm_read"}, t)["age_s"] <= 0.2
+
+    def ride(between: Callable[[], object]) -> dict[str, Any]:
+        """Ticks until a ride's first part is read, ``between``, its second part: the line."""
+        nonlocal t
+        while True:
+            t += TICK
+            before = len(bus.reads)
+            core.tick(t)
+            if any("servo5" in o for _, o in bus.reads[before:]):
+                break
+        between()
+        t += TICK
+        core.tick(t)
+        return core.snapshot(t)
+
+    def by_hand() -> None:  # the gripper and the pan moved between the two parts
+        bus.positions["servo6"] += 40
+        bus.positions["servo1"] += 40
+
+    deg = ride(by_hand)["arm"]["deg"]
+    gripper = RANGES[5].degrees(bus.positions["servo6"] - 40)
+    assert deg[5] == pytest.approx(gripper, abs=0.01), "5-6 as read on the tick before"
+    assert deg[0] == pytest.approx(RANGES[0].degrees(bus.positions["servo1"]), abs=0.01)
+    assert core.command({"cmd": "arm_read"}, t)["age_s"] == pytest.approx(TICK)
+    bus.silent = {"servo6"}
+    assert "arm" not in ride(bus.silent.clear)  # the first part missed servo6
+    assert "arm" not in ride(lambda: setattr(bus, "fail_next", True))  # the second's read failed
+    assert "arm" in ride(lambda: None)
+    assert send(core, wave(seconds=4.0), t)["status"] == "accepted"
+    carried = []
+    for _ in range(40):
+        t += TICK
+        core.tick(t)
+        carried.append("arm" in core.snapshot(t))
+    assert carried.count(True) >= 19  # every other tick: 25 Hz
+    assert not any(a and b for a, b in itertools.pairwise(carried))
 
 
 def test_its_mode_and_range_are_read_once_and_arm_read_answers_without_the_bus() -> None:
@@ -371,6 +485,7 @@ def test_on_the_wire_the_arm_rides_the_one_read_and_its_block_lands_in_the_servo
         driver = arm_part(bus, MOTION, motors)
         core = BaseServerCore(bus, CFG, neck=encoders, mover=mover, arm=driver)
         core.tick(0.0)
+        core.tick(TICK)  # the arm's second part: the first ride is whole
         assert send(core, wave(), 0.1)["status"] == "accepted"
         reads = wire.counts.sync_reads
         for i in range(10):
@@ -378,6 +493,12 @@ def test_on_the_wire_the_arm_rides_the_one_read_and_its_block_lands_in_the_servo
         assert wire.counts.sync_reads - reads == 10  # the wheels, the neck and the arm: one read
         assert wire.byte(4, 40) == 1 and wire.word(4, 48) == 500
         assert wire.word(4, 46) == speed_ticks(90.0)
+        replies = [
+            len(params[2:]) * (HEADER_BYTES + params[1])
+            for instruction, params in wire.counts.log
+            if instruction == 0x82
+        ]
+        assert max(replies) <= READ_BUDGET_BYTES  # every read's replies in one USB packet
     finally:
         bus.close()
         wire.stop()
