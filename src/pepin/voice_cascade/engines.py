@@ -20,6 +20,21 @@ from pepin.voice_cascade.stages import Brain, Voice
 NOT_FOR_THE_BRAIN = frozenset({"say", "find"})
 ECHO = "echo"  # the brain that repeats what it heard (no API call)
 API_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+FIRST_SENTENCE = (
+    "Your first sentence has at most {n} {words} and ends with a full stop, a question mark or"
+    " an exclamation mark, so the voice can start on it at once; say the rest after it. This"
+    " limit replaces any other on the first sentence."
+)
+
+
+def persona_text(persona: str, first_sentence_words: int) -> str:
+    """The persona as the brain gets it: the file's text, then the first-sentence line when
+    ``brain.first_sentence_words`` is set (fixed per config, so the cached prefix is too)."""
+    if first_sentence_words <= 0:
+        return persona
+    words = "word" if first_sentence_words == 1 else "words"
+    line = FIRST_SENTENCE.format(n=first_sentence_words, words=words)
+    return f"{persona.rstrip()}\n\n{line}\n"
 
 
 @dataclass
@@ -73,7 +88,7 @@ def build_brain(
     from pepin.tools.schemas import gemini_function_declarations, openai_tools
 
     b = config.brain
-    persona = config_file(b.persona_file).read_text()
+    persona = persona_text(config_file(b.persona_file).read_text(), b.first_sentence_words)
     brain: Brain
     if b.provider == "openai":
         from pepin.voice_cascade.chat_brain import ChatBrain

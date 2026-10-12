@@ -1,6 +1,6 @@
 """The Claude brain over a fake Messages API: the request laid out for the cache, sentences out
-as they end, tools between rounds, the price of each call (one cut mid-stream too), and a turn
-cut to what was heard."""
+as they end, tools between rounds, the price of each call (one cut mid-stream too), a turn cut
+to what was heard, and the persona's first-sentence line."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -21,6 +21,7 @@ from pepin.voice_cascade.brain import (
     usage_of,
 )
 from pepin.voice_cascade.config import DEFAULT_PRICES, BrainConfig
+from pepin.voice_cascade.engines import persona_text
 from pepin.voice_cascade.stages import (
     CUT,
     BrainEvent,
@@ -364,6 +365,20 @@ def test_a_call_cut_before_its_start_is_billed_as_the_last_prompt_read() -> None
     (cut,) = [e for e in events if isinstance(e, Usage)]
     assert cut.stop == CUT and (cut.cache_read, cut.output) == (4005, 0)
     assert cut.usd == pytest.approx(4005 * HAIKU.cache_read / 1e6)
+
+
+def test_the_first_sentence_line_is_one_fixed_line_of_the_cached_persona() -> None:
+    persona = "You are Pepin.\n"
+    assert persona_text(persona, 0) is persona  # off: today's cached prefix, byte for byte
+    six = persona_text(persona, 6)
+    assert six.startswith("You are Pepin.\n\n") and "at most 6 words" in six
+    assert six == persona_text(persona, 6) != persona_text(persona, 5)  # one prefix per config
+    assert "at most 1 word " in persona_text(persona, 1)
+    tools = [{"name": "see", "description": "look", "input_schema": {"type": "object"}}]
+    client = SimpleNamespace(messages=FakeMessages([]))
+    brain = ClaudeBrain(BrainConfig(), persona=six, tools=tools, price=HAIKU, client=client)
+    block = brain.system()[0]
+    assert block["text"] == six and block["cache_control"] == {"type": "ephemeral"}
 
 
 def test_the_tools_keep_the_registry_order_and_end_the_conversation() -> None:
