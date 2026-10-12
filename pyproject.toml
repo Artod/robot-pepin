@@ -55,6 +55,15 @@ voice = [
     "onnxruntime>=1.20",
     "praat-parselmouth>=0.4.7",
 ]
+# The cascade's other speech-to-text engines (pepin.voice_cascade.stt; transcriber.engine, or
+# `scripts/voice_cascade.py switch --transcriber NAME` while it runs): not installed by default,
+# one `uv sync --group stt-<engine>` each. GigaAM and Canary run on onnxruntime's CPU through
+# onnx-asr; Parakeet and Voxtral on the GPU through mlx-audio, whose `stt` extra is all they add
+# to the voice group. Weights land in the Hugging Face cache at the first load.
+stt-gigaam = ["onnx-asr[cpu,hub]==0.12.0"]
+stt-canary = ["onnx-asr[cpu,hub]==0.12.0"]
+stt-parakeet = ["mlx-audio[stt]==0.5.8 ; platform_machine == 'arm64' and sys_platform == 'darwin'"]
+stt-voxtral = ["mlx-audio[stt]==0.5.8 ; platform_machine == 'arm64' and sys_platform == 'darwin'"]
 # The face sensor on the laptop (pepin.face_sensor, scripts/face_sensor.py): SCRFD + ArcFace through
 # onnxruntime (its macOS wheel carries the CoreML provider) and MediaPipe's Face Landmarker; the
 # EmotiEffLib expression net is its ONNX file run by onnxruntime (the emotiefflib package reads
@@ -107,6 +116,7 @@ testpaths = ["tests"]
 addopts = "-q"
 markers = [
     "hardware: needs the live robot (run with --hardware)",
+    "weights: loads real model weights, gigabytes on the GPU (run with --weights)",
     "slow: over 0.3 s — simulated drives, sockets, timeouts, subprocesses (uv run pytest -m \"not slow\" skips them)",
     "serial: asserts on wall-clock time, flaky under parallel load; the pre-push hook runs these alone, after the parallel run",
 ]
