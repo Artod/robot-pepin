@@ -12,7 +12,7 @@
   speaker gaze's look on the person, or home), posted through the arbiter's door
   (:class:`pepin.expression.door.OverlayDoor`) on a thread of its own; fading a layer is that
   layer's source released over the fade.
-* :class:`Absent`: a part that cannot play, with the reason (the wheels).
+* :class:`Absent`: a part that cannot play, with the reason.
 """
 
 from __future__ import annotations
@@ -427,7 +427,7 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
 
 
 class Absent:
-    """A part that cannot play now, and why (the wheels): never ready, every clip refused, so a
+    """A part that cannot play now, and why: never ready, every clip refused, so a
     gesture plays without it."""
 
     def __init__(self, part: PartName, why: str) -> None:

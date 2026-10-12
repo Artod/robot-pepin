@@ -122,7 +122,10 @@ stays up. Otherwise what commands the wheels is killed first (Nav2's composed co
 its launch respawns idle, and a measured motion on the board), because the base's stop is not
 latched; then the base's stop and its confirmation once more, then `pepin-macnav` stopped. It
 exits 0 only when the wheels read still, and never restarts the board, whose odometry the map is
-tied to; `ros/laptop.sh nav` brings Nav2 back.
+tied to; `ros/laptop.sh nav` brings Nav2 back. The voice's expressive wheels ("Gestures" below)
+never fight it: their motion ends on the first state line that shows a stop they did not send,
+or on the cancel's word from the goal server when their own next twist overwrote the stop before
+any line showed it, and no expressive motion starts for `wheels.stop_hold_s` (30 s) after either.
 
 **Game teleop**, `uv run python -m pepin.teleop --game [--host 10.0.0.187]`: a small window where
 keys act only while held. Arrows drive the wheels, W/S tilt and A/D pan the head (the base
@@ -603,6 +606,16 @@ interpolated between them (the array sits off the cart's centre). Then `scripts/
 switch --flag speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without
 the calibration the head looks up where it points and finds the face by the camera alone.
 
+**Past the head's comfort** (`speaker.comfort_pan_deg`, 60°: a call from the side or behind) the
+head turns at once as far as it reaches and the robot answers at once; the wheels then turn the
+rest in place, at most `wheels.max_turn_deg` (30°) per call, on their own thread while it speaks
+("Gestures" below for how they move and what stops them). Every `wheels.step_deg` (10°) they have
+turned, the head re-centres on the person by as much, slowly, and once more at their end; no
+frame is taken while the body turns. Wheels that turn less (refused, a blocked arc after three
+tries, halted because the person spoke or a drive began) leave the head as far as it reaches,
+and a turn cut by the person's voice is finished at the next utterance. Nothing on the voice's
+path waits for any of it: the wake's turn is a request answered by a callback.
+
 ## Gestures: the body as one animated character
 
 The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
@@ -619,9 +632,37 @@ way to any gesture): each keyframe of the clip is written one move early with th
 that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/s², pan 2232),
 and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
 so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
-the gesture plays without its head. The wheels: none yet. The person starting to speak fades
+the gesture plays without its head. The wheels: below. The person starting to speak fades
 the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
 conversation sends every part to rest; markers are capped (`config/expression.json` `caps`).
+
+**The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
+`body_rock`, `body_wiggle`, `body_turn`; each behind its own flag, no third). Never Nav2: twist
+lines from this Mac straight to the base server on :3336 (the measured motions' method, without
+their 8-15 s ROS start), judged by the base server's own wheel odometry in its 50 Hz state lines
+(the least latency: the same connection; the EKF is ROS's), at most 30° of turn or 2 cm of rock
+per request, a trapezoid at `wheels.yaw_rate_deg_s`/`yaw_acc_deg_s2` (straight:
+`speed_m_s`/`acc_m_s2`) times `speed_scale` (0.2 as shipped; the gesture engine stretches the
+body's clips by its inverse, as the arm's; a clip faster than the caps is refused). Before a
+motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
+the wheels still), the bus answering, the arm not mid-gesture (a twist sends it to rest), no
+stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
+times a second only while a motion runs): nothing navigates, its newest lidar scan under 0.5 s
+old, and the footprint swept from here to the target keeps `clearance_m` (0.10 m) from every
+return it moves toward. Returns below the lidar's plane (0.38 m) are not seen. A stall (a third
+of the commanded motion in `stall_s`) or a blocked arc backs the cart off 3 cm (its rear checked)
+and turns the rest again: three tries and 6 cm at most, then the head alone. The person speaking,
+a drive or the conversation's close halts it at once (a flag and one stop line from the voice's
+own loop). Nothing new runs on the board; the goal server decodes one scan per request on this
+Mac (it already receives every scan for `where`). An older goal server answers `clearance` with
+an error and every motion is refused: `ros/laptop.sh kick goal_server`.
+
+```bash
+uv run python scripts/gesture.py turn 10 --dry-run          # every check, nothing moves
+uv run python scripts/gesture.py turn 10 --speed 0.2        # 10 deg left in place; Ctrl-C halts
+uv run python scripts/gesture.py rock 2 --times 1           # 2 cm forward and back
+uv run python scripts/voice_cascade.py switch --flag speaker_gaze=on   # the turn toward a call
+```
 
 ```bash
 uv run python scripts/voice_cascade.py switch --flag gestures=on    # off as shipped; live

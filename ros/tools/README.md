@@ -22,6 +22,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | Feature flags and config knobs | `ros/flags.sh` | `ros/flags.sh list [NODE]` |
 | Planner and controller trials without the robot | `ros/sim.sh` | `ros/sim.sh up`, `ros/sim.sh scenario FILE` |
 | The arm and the gestures: read, rest, halt, play an intent, teach a pose | `scripts/gesture.py` | `uv run python scripts/gesture.py read \| rest \| halt \| play NAME [--speed 0.2] [--seed N] [--dry-run] \| teach POSE` |
+| The wheels' expressive motions (the gaze's turn, the rock), checks first | `scripts/gesture.py` | `uv run python scripts/gesture.py turn DEG \| rock [CM] [--times N] [--speed 0.2] [--dry-run]` |
 | Where the array's front is (the speaker gaze's voice bearing) | `ros/tools/doa_calibrate.py` | `uv run python ros/tools/doa_calibrate.py --write` |
 
 ## ros/tools
@@ -159,7 +160,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `calibrate_neck.py` | Neck and head servo calibration | `uv run python scripts/calibrate_neck.py --port PORT` |
 | `dashboard.py` | Live rerun dashboard: scan, camera, ToF, board vitals, log | `uv run python scripts/dashboard.py [--map data/maps/M.npz]` |
 | `extrinsics.py` | Library: the camera's yaw against the lidar from the two range fans | imported by `tests/unit/test_extrinsics.py` |
-| `gesture.py` | The SO-101 through the base server: its angles, rest, halt, a gesture of `config/animation.json` played at a speed and seed (Ctrl-C halts), a pose taught by hand | `uv run python scripts/gesture.py list \| read \| rest \| halt \| play NAME [--speed S] [--seed N] [--variant V] [--dry-run] \| nudge JOINT DEG \| teach POSE` |
+| `gesture.py` | The SO-101 through the base server: its angles, rest, halt, a gesture of `config/animation.json` played at a speed and seed (Ctrl-C halts), a pose taught by hand; the wheels' turn in place and rock as the voice makes them (every check first, Ctrl-C halts) | `uv run python scripts/gesture.py list \| read \| rest \| halt \| play NAME [--speed S] [--seed N] [--variant V] [--dry-run] \| nudge JOINT DEG \| teach POSE \| turn DEG \| rock [CM] [--times N]` |
 | `face_sensor.py` | Who is in front of the head camera, where, looking and talking, expression: a JSON line a second in `data/face/latest.json`; enrolment and a bench | `uv run --group face python scripts/face_sensor.py run \| bench FILE... \| enrol NAME FILE... \| list \| forget NAME` |
 | `health_check.py` | Launch-readiness check of every subsystem: GO or NO GO | `uv run python scripts/health_check.py [--quick]` |
 | `jog.py` | Gentle single-motor jog for bring-up | `uv run python scripts/jog.py wheel \| neck --port PORT --id N` |

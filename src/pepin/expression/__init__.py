@@ -14,7 +14,8 @@ Every body part keeps its one owner, and expression goes THROUGH that owner:
   holds the head as its base layer (:mod:`pepin.expression.speaker`), a head gesture is a
   relative ``clip`` played on top of whatever holds it (:mod:`pepin.expression.head`);
 * the face: the board's head server (:mod:`pepin.head_link`), the newest request wins;
-* the wheels: small turns in place and rocks while standing, behind the goal server's guards.
+* the wheels: small turns in place and rocks while standing, from this Mac to the base server
+  behind the goal server's word (:mod:`pepin.expression.wheels`), never waited for.
 
 Each part has three layers, as in game animation: a BASE layer (the arm at rest, the head on
 the person, the wheels still), an additive GESTURE layer (one performance per part at a time,

@@ -16,7 +16,8 @@ a step plays one atom with probability ``p``, its parameters drawn from ranges, 
 ``at_s`` from the composition's sync point (the marker's word). Rendering draws the variant, the
 steps and every parameter from one seeded generator, so the same intent moves a little
 differently every time and a logged seed replays it exactly. A step whose part cannot play now
-(the head held by a better band, the wheels unbuilt) is left out and the rest still plays.
+(the head held by a better band, the wheels turning toward the speaker) is left out and the rest
+still plays.
 
 The degrees of freedom, per part: the arm's joints (:data:`pepin.expression.trajectory.JOINTS`,
 degrees, config/arm.json's convention), the head's ``pan_deg`` (+ left) and ``tilt_deg`` (+ down),
