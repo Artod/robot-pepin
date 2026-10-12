@@ -4,9 +4,10 @@ stream in asyncio, the voice on its own thread feeding the pacer as sentences ar
 An utterance closed by the ears is read by Whisper while Praat measures it; outside a
 conversation only the robot's name (``wake: name``) or anything (``wake: always``) opens one.
 The words, behind the tag line, go to the brain; each sentence it finishes goes to the voice at
-once, so "Сейчас гляну." plays while the tool it announces runs; a slow tool called before
-the reply's first word gets a filler said locally, and a second one when the wait goes on
-(:mod:`pepin.voice_cascade.fillers`). A reply's turn stays open in
+once, so "Сейчас гляну." plays while the tool it announces runs. Dead air gets a filler said
+locally from a ready clip (:mod:`pepin.voice_cascade.fillers`): a slow tool called before the
+reply's first word, a brain whose first token is late ("Хм…"), a wait that goes on, the person's
+pause mid-utterance (the backchannel). A reply's turn stays open in
 the brain until its audio has played: a barge-in until then keeps only what was heard. A drive
 answers its tool call when the goal server takes it (the brain says its acknowledgement) and
 reports its end as the robot's own turn (``[robot] ...``). "Стоп" heard during a drive halts the
@@ -83,7 +84,7 @@ from pepin.voice_cascade.brain import END_CONVERSATION
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
 from pepin.voice_cascade.control import FLAG, Request, Switchboard
 from pepin.voice_cascade.ears import EarEvent, Ears
-from pepin.voice_cascade.fillers import FillerPicker, again_due
+from pepin.voice_cascade.fillers import Context, FillerEngine, again_due, thinking_due
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
@@ -133,10 +134,12 @@ UNASKED_DRIVE = (
 END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
 # tools that take a while: the robot says its filler when the brain calls one before a word
+# (and the body hears the moment)
 SLOW_TOOLS = frozenset(
     ("see", "look", "look_around", "find", "recall", "map_tree", "remember_person", "forget_person")
 )
-BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
+# tools announced by a filler: the slow ones, and a gesture asked for ("смотри!" as it starts)
+FILLER_TOOLS = SLOW_TOOLS | {"gesture"}
 # a held utterance (or a reply kept silent) waits this long after the person stopped without
 # an utterance to read
 HOLD_RELEASE_S = 0.3
@@ -213,7 +216,7 @@ class Reply:
     audio: bool = False  # some of its audio reached the player
     acted: bool = False  # it ran a tool
     filled: bool = False  # a slow tool was called before a word: the wait is announced
-    filler_s: float | None = None  # when its first filler went to the voice
+    filler_s: float | None = None  # when its latest filler went to the voice
     fillers: list[str] = field(default_factory=list)  # the fillers said, in order
     generated: bool = False  # the brain's stream ended
     spoken: asyncio.Event = field(default_factory=asyncio.Event)  # the voice did its last job
@@ -277,7 +280,7 @@ class CascadeLoop:
         clock: Callable[[], float] = time.monotonic,
         wall: Callable[[], float] = time.time,
         tick_s: float = 0.1,
-        seed: int = 0,
+        seed: int | None = None,
         turn: TurnWorker | None = None,
         switchboard: Switchboard | None = None,
         observers: Sequence[ConversationObserver] = (),
@@ -293,7 +296,8 @@ class CascadeLoop:
         ``vocabulary``: the intents and faces a marker may name (any other bare name is a
         voice style, a spelled-out unknown one is dropped); ``people``: who said each
         utterance, named in the tag line while its switch is on; ``judge``: two-gates' reader
-        of the early words (:mod:`pepin.voice_cascade.turn_text`)."""
+        of the early words (:mod:`pepin.voice_cascade.turn_text`); ``seed``: the fillers'
+        choices (None: each run differs)."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         self.brain, self.speech = brain, speech
@@ -311,8 +315,8 @@ class CascadeLoop:
                 played=player.playout.level_between,
             )
         self.ears = Ears(config, player.playback, turn, early, detector, judge, self._on_words)
-        self.rng = random.Random(seed)
-        self.filler = FillerPicker()
+        rng = None if seed is None else random.Random(seed)
+        self.fillers = FillerEngine(rng, language=config.conversation_language)
         self.conversation: Conversation | None = None
         self.last_log: CascadeLog | None = None  # the conversation that closed last
         self.replies: dict[int, Reply] = {}
@@ -327,7 +331,6 @@ class CascadeLoop:
         self.hearing = 0  # utterances being read
         self.last_call_s = 0.0
         self.last_reply_end_s = 0.0
-        self.last_backchannel_s = -BACKCHANNEL_GAP_S
         self.last_closed_s = -1e9  # when the ears last closed an utterance
         self.held: Input | None = None  # an utterance waiting for the rest of the sentence
         self.held_s = 0.0
@@ -637,46 +640,84 @@ class CascadeLoop:
             self.held = None
 
     def _backchannel(self) -> None:
-        cfg = self.config
-        if not (cfg.backchannel and cfg.backchannel_lines and self.conversation is not None):
+        """The person paused mid-utterance: a backchannel by the fillers' rules (its flag on,
+        the speaker silent)."""
+        if not (self.config.backchannel and self.conversation is not None):
             return
-        now = self.clock()
-        if self.player.speaking() or now - self.last_backchannel_s < BACKCHANNEL_GAP_S:
+        if self.player.speaking():
             return
-        self.last_backchannel_s = now
-        line = self.rng.choice(cfg.backchannel_lines)
-        self.speech.say(SpeechJob(self.last_turn, -1, line, "backchannel"))
-        self._event("backchannel", text=line)
+        line = self._filler_line("backchannel", None)
+        if line is not None:
+            self.speech.say(SpeechJob(self.last_turn, -1, line, "backchannel"))
+            self._event("backchannel", text=line, language=self.fillers.language)
 
-    def _say_filler(self, reply: Reply, line: str, tool: str | None) -> None:
-        """A filler of ``reply`` to the voice (``tool``: the slow tool it waits for; None: the
-        second one), logged and printed; none from a paid voice without a local fallback."""
+    def _filler_line(
+        self, context: Context, turn: int | None, tool: str | None = None
+    ) -> str | None:
+        """A line for a filler's moment of reply ``turn`` (None: of no reply), by the engine's
+        rules with this config's knobs, among the lines the voice has a clip of."""
+        cfg = self.config
+        return self.fillers.choose(
+            cfg.fillers, context, self.clock(), turn=turn, tool=tool,
+            silent_p=cfg.filler_silent_p.get(context, 0.0),
+            cooldown_s=cfg.filler_cooldown_s.get(context, 0.0),
+            ready=self.speech.has_clip,
+        )  # fmt: skip
+
+    def _say_filler(
+        self, reply: Reply, line: str, context: Context, tool: str | None = None
+    ) -> None:
+        """A filler of ``reply`` to the voice (``tool``: the slow tool it waits for), logged
+        and printed; none from a paid voice without a local fallback."""
         if not self.speech.says_asides:
             return
         self.speech.say(SpeechJob(reply.id, -1, line, "backchannel"))
-        if reply.filler_s is None:
-            reply.filler_s = self.clock()
+        reply.filler_s = self.clock()
         reply.fillers.append(line)
-        self._event("filler", turn=reply.id, tool=tool, text=line)
-        print(f"  (filler{'' if tool else ' again'}: {line})", flush=True)
+        self._event("filler", turn=reply.id, context=context, tool=tool, text=line,
+                    language=self.fillers.language)  # fmt: skip
+        print(f"  (filler{'' if context == 'tool' else ' ' + context}: {line})", flush=True)
 
-    def _filler_again(self, now: float) -> None:
-        """The second filler, once the reply in flight has waited ``filler_again_s`` since its
-        first one without a word of its own (its brain still at work, the reply not cut)."""
-        reply = self.current
-        if (
+    def _waiting(self, reply: Reply | None) -> bool:
+        """``reply`` is in flight with nothing of its own said: its brain still at work, the
+        reply neither cut nor kept silent, the person not speaking over it."""
+        return not (
             reply is None
-            or len(reply.fillers) != 1
             or reply.sentences
+            or reply.audio
             or reply.muted
             or reply.generated
             or reply.outcome
-            or not again_due(reply.filler_s, now, self.config.filler_again_s)
-        ):
+            or self._unsettled(reply)
+            or self.ears.gate.talking
+        )
+
+    def _filler_thinking(self, now: float) -> None:
+        """The thinking filler: the reply in flight has said nothing and its brain's first
+        token is not in ``filler_thinking_s`` after the turn closed (never when its first token
+        came early, a turn asked before its close)."""
+        reply = self.current
+        if reply is None or reply.fillers or not self._waiting(reply) or self.player.speaking():
             return
-        line = self.filler.pick(self.config.fillers.again)
+        timeline = reply.input.timeline
+        first_token = timeline.has("first_token")
+        if not thinking_due(timeline.at("closed"), first_token, now, self.config.filler_thinking_s):
+            return
+        line = self._filler_line("thinking", reply.id)
         if line is not None:
-            self._say_filler(reply, line, None)
+            self._say_filler(reply, line, "thinking")
+
+    def _filler_again(self, now: float) -> None:
+        """The second filler, once the reply in flight has waited ``filler_again_s`` since its
+        last one without a word of its own (once a reply)."""
+        reply = self.current
+        if reply is None or not reply.fillers or not self._waiting(reply):
+            return
+        if not again_due(reply.filler_s, now, self.config.filler_again_s):
+            return
+        line = self._filler_line("again", reply.id)
+        if line is not None:
+            self._say_filler(reply, line, "again")
 
     def _read_early(self, pcm: bytes) -> concurrent.futures.Future[str]:
         """Whisper on an utterance not yet closed (the ears call this from the mic's thread);
@@ -883,6 +924,8 @@ class CascadeLoop:
             self._resume("only noise followed")  # never cancelled, never asked again
             return
         conversation.last_heard_s = read_s
+        if self.config.filler_language_from == "utterance":
+            self.fillers.hear(text)  # the fillers speak the language of the words heard last
         if who is None:
             tag = tagger.line(prosody, text) if tagger is not None and prosody is not None else ""
         else:
@@ -1047,13 +1090,15 @@ class CascadeLoop:
                           style=reply.style, parts=list(range(first, len(reply.parts))),
                           markers=markers, dropped=list(parsed.dropped))  # fmt: skip
         elif isinstance(event, ToolUse):
-            if event.name in SLOW_TOOLS and not reply.sentences and not reply.filled:
+            if event.name in FILLER_TOOLS and not reply.sentences and not reply.filled:
                 reply.filled = True  # nothing said yet: the wait is announced locally
-                self._when_free(reply, lambda: self._tell("moment", SLOW_TOOL))
-                fillers = self.config.fillers
-                line = self.filler.pick(fillers.for_tool(event.name), fillers.common)
+                if event.name in SLOW_TOOLS:
+                    self._when_free(reply, lambda: self._tell("moment", SLOW_TOOL))
+                line = self._filler_line("tool", reply.id, event.name)
                 if line is not None:
-                    self._when_free(reply, lambda: self._say_filler(reply, line, event.name))
+                    self._when_free(
+                        reply, lambda: self._say_filler(reply, line, "tool", event.name)
+                    )
             reply.acted = True
             print(f"  -> {event.name}({json.dumps(event.args, ensure_ascii=False)})", flush=True)
             if log is not None:
@@ -1291,6 +1336,7 @@ class CascadeLoop:
         self.brain.begin(self.places)
         self.conversation = Conversation(sid, wall, now, log, now)
         cfg = self.config
+        self.fillers.open(cfg.conversation_language)
         log.event("open", now, model=cfg.brain.model, thinking=cfg.brain.thinking,
                   effort=cfg.brain.effort, wake=cfg.wake, places=self.places,
                   brain=self.brain_name, voice=self.voice_name,
@@ -1391,6 +1437,7 @@ class CascadeLoop:
                 self._resume("no words followed")
             if conversation is None:
                 continue
+            self._filler_thinking(now)
             self._filler_again(now)
             speaking = self.player.playback() == "reply"
             current = self.current

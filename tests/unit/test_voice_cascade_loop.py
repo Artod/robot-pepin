@@ -1,7 +1,8 @@
 """The whole cascade over fakes: the name gate, a turn's timeline and logs, the person going on
 before the robot answered, a barge-in cut to what was heard, a drive acknowledged when it
-starts and reported when it ends, a slow tool's fillers, and the brain asked at the early read
-(kept by the close, dropped when the person goes on, billed either way)."""
+starts and reported when it ends, the fillers (a slow tool's, a late first token's, a pause's
+backchannel), and the brain asked at the early read (kept by the close, dropped when the person
+goes on, billed either way)."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -22,10 +23,11 @@ from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.expression.markers import EMPTY, Vocabulary
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
-from pepin.voice_cascade.config import BrainConfig, CascadeConfig, FillerLines, VoiceConfig
+from pepin.voice_cascade.config import BrainConfig, CascadeConfig, FillerBook, VoiceConfig
 from pepin.voice_cascade.control import ControlFile, Switchboard, answers_to, write_request
 from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
+from pepin.voice_cascade.fillers import clip_lines
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
@@ -95,8 +97,13 @@ class Rig:
         vocabulary: Vocabulary = EMPTY,
         people: Any = None,
         clock: Callable[[], float] = time.monotonic,
+        clips: bool = False,
         **config: Any,
     ) -> None:
+        """``clips``: the voice makes the fillers' clips before the scenario (the only way a
+        filler is said; what it made is then cleared from its log); without them, no filler.
+        The thinking filler is off and no filler's moment passes in silence unless asked."""
+        config = {"filler_thinking_s": 0.0, "filler_silent_p": {}, **config}
         self.config = CascadeConfig().with_changes(
             prosody_tags=False, playback_lead_s=0.1, idle_close_s=30.0, **config
         )
@@ -104,7 +111,8 @@ class Rig:
         self.brain = ScriptedBrain(script=script or [], delay_s=brain_delay_s)
         self.voice = ToneVoice(rate=RATE, seconds_per_char=seconds_per_char, chunk_s=0.1)
         self.player = Player(NullSpeaker(), rate=RATE, lead_s=0.1)
-        self.speech = SpeechWorker(self.voice, self.player)
+        self.asides = clip_lines(self.config) if clips else ()
+        self.speech = SpeechWorker(self.voice, self.player, asides=self.asides, clip_idle_s=0.0)
         self.transcriber = ListTranscriber(texts, whisper_delay_s)
         self.states: list[str] = []
         events = Events(lambda e: self.states.append(e.state) if e.state != "speaking" else None)
@@ -138,6 +146,8 @@ class Rig:
         task = asyncio.create_task(self.loop.run(until=self.stop))
         try:
             await until(lambda: self.mic.sink is not None)
+            await until(lambda: all(map(self.speech.has_clip, self.asides)))
+            self.voice.spoken.clear()  # the clips: from here on, what was said live
             await scenario(self)
         finally:
             self.stop.set()
@@ -353,7 +363,7 @@ def test_a_barge_in_cuts_the_reply_to_what_was_heard_and_answers_the_new_words(
 def test_a_pause_in_a_long_utterance_gets_a_backchannel_before_the_answer(
     tmp_path: Path,
 ) -> None:
-    rig = Rig(tmp_path, ["Пепин", "послушай меня"], backchannel=True)
+    rig = Rig(tmp_path, ["Пепин", "послушай меня"], backchannel=True, clips=True)
 
     async def scenario(rig: Rig) -> None:
         await rig.say(utterance())  # the name opens the conversation (no backchannel before)
@@ -362,9 +372,13 @@ def test_a_pause_in_a_long_utterance_gets_a_backchannel_before_the_answer(
         await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
 
     asyncio.run(rig.run(scenario))
-    assert rig.voice.spoken[0] == "Ты сказал: Пепин"
-    assert rig.voice.spoken[1] in ("угу", "мм")
-    assert rig.voice.spoken[2] == "Ты сказал: послушай меня"
+    assert rig.voice.spoken == ["Ты сказал: Пепин", "Ты сказал: послушай меня"]
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    kinds = [r["event"] for r in rows if r["event"] in ("backchannel", "turn")]
+    assert kinds == ["turn", "backchannel", "turn"]  # through the fillers, from its clip
+    (back,) = [r for r in rows if r["event"] == "backchannel"]
+    assert back["text"] in CascadeConfig().fillers.backchannel["ru"] and back["language"] == "ru"
 
 
 def test_a_brain_that_fails_before_a_word_is_covered_by_the_local_error_line(
@@ -484,8 +498,8 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
     observer, flag = RecordingObserver(), FakeFlag(GESTURES)
     script: list[list[Step]] = [[("look", {"pan_deg": 10.0}), "{тихо} Вижу стол.", "Всё."]]
     rig = Rig(tmp_path, ["Пепин, что там?"], script, switchboard=board,
-              observers=[BrokenObserver(), observer], flags=[flag],
-              fillers=FillerLines(("Секунду.",), (), {}))  # fmt: skip
+              observers=[BrokenObserver(), observer], flags=[flag], clips=True,
+              fillers=FillerBook({"ru": ("Секунду.",)}, {}, {}, {}, {}, ()))  # fmt: skip
 
     asked: list[str] = []
 
@@ -497,7 +511,8 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
 
     asyncio.run(rig.run(scenario))
-    assert flag.on and rig.voice.spoken == ["Секунду.", "Вижу стол.", "Всё."]  # filler first
+    assert flag.on and rig.voice.spoken == ["Вижу стол.", "Всё."]  # the filler from its clip
+    assert rig.loop.turns[0]["fillers"] == ["Секунду."]
     answers = {r["name"]: r for r in answers_to(tmp_path, asked[0])}
     assert answers[GESTURES]["state"] == "applied" and answers[GESTURES]["what"] == "flag"
     assert answers["nope"]["state"] == "failed" and "gestures" in answers["nope"]["error"]
@@ -545,7 +560,8 @@ def test_a_slow_tool_gets_its_own_filler_and_a_second_one_when_the_wait_goes_on(
 ) -> None:
     release, clock = threading.Event(), SkewClock()
     script: list[list[Step]] = [[("remember_person", {"name": "Саша"}), ("look", {}), "Готово."]]
-    rig = Rig(tmp_path, ["Пепин, запомни Сашу"], script, tool=slow_tool(release), clock=clock)
+    rig = Rig(tmp_path, ["Пепин, запомни Сашу"], script, tool=slow_tool(release), clock=clock,
+              clips=True)  # fmt: skip
     rig.loop.allowed |= {"remember_person", "look"}
     said: list[list[str]] = []
 
@@ -568,22 +584,23 @@ def test_a_slow_tool_gets_its_own_filler_and_a_second_one_when_the_wait_goes_on(
     asyncio.run(rig.run(scenario))
     fillers = CascadeConfig().fillers
     (first,) = said[0]
-    assert first in fillers.for_tool("remember_person")  # its own, not the look's
+    assert first in fillers.for_tool("remember_person", "ru")  # its own, not the look's
     again = said[1][1]
-    assert said[1] == [first, again] and again in fillers.again
-    assert rig.voice.spoken == [first, again, "Готово."]
+    assert said[1] == [first, again] and again in fillers.again["ru"]
+    assert rig.voice.spoken == ["Готово."]  # the fillers from their clips
     (turn,) = rig.loop.turns
     assert turn["fillers"] == [first, again]
     (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
     rows = [json.loads(line) for line in events.read_text().splitlines()]
-    logged = [(r["tool"], r["text"]) for r in rows if r["event"] == "filler"]
-    assert logged == [("remember_person", first), (None, again)]
+    logged = [(r["context"], r["tool"], r["text"]) for r in rows if r["event"] == "filler"]
+    assert logged == [("tool", "remember_person", first), ("again", None, again)]
 
 
 def test_no_filler_speaks_once_the_reply_s_first_sentence_has_started(tmp_path: Path) -> None:
     release, clock = threading.Event(), SkewClock()
     script: list[list[Step]] = [[("see", {}), "Вижу стол.", ("look", {}), "Всё."]]
-    rig = Rig(tmp_path, ["Пепин, что там?"], script, tool=slow_tool(release), clock=clock)
+    rig = Rig(tmp_path, ["Пепин, что там?"], script, tool=slow_tool(release), clock=clock,
+              clips=True, filler_thinking_s=1.2)  # fmt: skip
     rig.loop.allowed |= {"see", "look"}
 
     async def scenario(rig: Rig) -> None:
@@ -595,10 +612,98 @@ def test_no_filler_speaks_once_the_reply_s_first_sentence_has_started(tmp_path: 
         await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
 
     asyncio.run(rig.run(scenario))
-    (first, *rest) = rig.voice.spoken
-    assert first in CascadeConfig().fillers.for_tool("see")
-    assert rest == ["Вижу стол.", "Всё."]
-    assert rig.loop.turns[0]["fillers"] == [first]
+    assert rig.voice.spoken == ["Вижу стол.", "Всё."]
+    (first,) = rig.loop.turns[0]["fillers"]
+    assert first in CascadeConfig().fillers.for_tool("see", "ru")
+
+
+def blocked_tool(release: threading.Event) -> Callable[[str, dict[str, Any]], dict[str, Any]]:
+    """Tools that answer at once, but for ``where_am_i`` (no filler of its own), which waits
+    for ``release``: the brain's first token waits with it."""
+
+    def run(name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if name == "where_am_i":
+            assert release.wait(5.0)
+        return {"ok": True, "places": [{"name": "home"}]}
+
+    return run
+
+
+def thinking_lines(language: str) -> set[str]:
+    book = CascadeConfig().fillers
+    return {*book.thinking.get(language, ()), *book.neutral}
+
+
+def test_a_brain_late_to_its_first_token_gets_one_thinking_filler(tmp_path: Path) -> None:
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("where_am_i", {}), "Я дома."]]
+    rig = Rig(tmp_path, ["Пепин, где ты?"], script, tool=blocked_tool(release), clock=clock,
+              clips=True, filler_thinking_s=1.2, filler_again_s=0.0)  # fmt: skip
+    said: list[list[str]] = []
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and rig.loop.current.acted)
+        reply = rig.loop.current
+        assert reply is not None
+        clock.skew = 0.5  # under filler_thinking_s since the close (the ears' clock): nothing
+        await asyncio.sleep(0.2)
+        said.append(list(reply.fillers))
+        clock.skew = 1.3
+        await until(lambda: len(reply.fillers) == 1)
+        clock.skew = 9.0  # once a reply
+        await asyncio.sleep(0.2)
+        said.append(list(reply.fillers))
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert said[0] == [] and len(said[1]) == 1 and said[1][0] in thinking_lines("ru")
+    assert rig.voice.spoken == ["Я дома."]
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    (filler,) = [r for r in rows if r["event"] == "filler"]
+    assert (filler["context"], filler["language"], filler["text"]) == ("thinking", "ru", said[1][0])
+
+
+def test_no_thinking_filler_once_the_first_token_came_in_time(tmp_path: Path) -> None:
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("where_am_i", {}), "Я дома."]]
+    rig = Rig(tmp_path, ["Пепин, где ты?"], script, tool=blocked_tool(release), clock=clock,
+              clips=True, filler_thinking_s=1.2)  # fmt: skip
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and rig.loop.current.acted)
+        reply = rig.loop.current
+        assert reply is not None
+        clock.skew = 0.9
+        release.set()  # the first token ~1.0 s after the close
+        await until(lambda: reply.input.timeline.has("first_token"))
+        clock.skew = 9.0
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.loop.turns[0].get("fillers") is None and rig.voice.spoken == ["Я дома."]
+
+
+def test_the_thinking_filler_speaks_the_language_of_the_words(tmp_path: Path) -> None:
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("where_am_i", {}), "At home."]]
+    rig = Rig(tmp_path, ["Where are you?"], script, tool=blocked_tool(release), clock=clock,
+              clips=True, wake="always", filler_thinking_s=1.2)  # fmt: skip
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and rig.loop.current.acted)
+        clock.skew = 1.3
+        await until(lambda: rig.loop.current is not None and bool(rig.loop.current.fillers))
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    (filler,) = rig.loop.turns[0]["fillers"]
+    assert filler in thinking_lines("en") and rig.loop.fillers.language == "en"
 
 
 class FakeSpeakers:

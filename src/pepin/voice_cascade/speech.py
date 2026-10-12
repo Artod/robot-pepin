@@ -8,7 +8,9 @@ the speaker after the flush. Another voice can be swapped in while this one spea
 
 Asides (a slow tool's fillers, backchannels) are said by the voice itself, or by the local
 fallback of a voice that pays per sentence, never by a cloud call; a paid voice without a
-fallback says none. Their clips are made once the voice is ready, while no job waits.
+fallback says none. Their clips are made once the voice is ready, while no job waits. A clip
+(an opener's too) is kept only within a length limit for its line (:func:`make_clip`): a model
+sometimes babbles on for seconds after a hum.
 """
 
 from __future__ import annotations
@@ -30,6 +32,13 @@ logger = logging.getLogger(__name__)
 
 JobKind = Literal["reply", "backchannel", "end"]
 CLIP_IDLE_S = 0.05  # a swapped-in voice makes its next clip after this long without a job
+# A clip runs at most max(CLIP_MIN_LIMIT_S, CLIP_S_PER_CHAR per character): a model sometimes
+# babbles on after a short line (2026-10-12, qwen3-1.7b, scratch/fillers/: 6 of 44 takes of
+# hums ran 4.7-45 s, the others 0.4-3.0 s; words run ~0.09 s a character). A take past it is
+# cut there and made again, CLIP_TRIES times at most; then the line has no clip.
+CLIP_MIN_LIMIT_S = 2.5
+CLIP_S_PER_CHAR = 0.25
+CLIP_TRIES = 3
 
 
 @dataclass(frozen=True)
@@ -56,11 +65,44 @@ SwapSink = Callable[[BaseException | None], None]  # None: the new voice speaks 
 
 
 def make_clips(voice: Voice, lines: Sequence[str]) -> dict[str, bytes]:
-    """``lines`` said once by ``voice``, by their clip key; none for a voice that pays per
-    sentence (each clip would be a call)."""
+    """``lines`` said once by ``voice``, by their clip key (:func:`make_clip`: a line every take
+    of which ran too long has none); none for a voice that pays per sentence (each clip would
+    be a call)."""
     if isinstance(voice, Billed):
         return {}
-    return {clip_key(line): b"".join(voice.stream(speakable(line))) for line in unique(lines)}
+    made = {clip_key(line): make_clip(voice, line) for line in unique(lines)}
+    return {key: pcm for key, pcm in made.items() if pcm is not None}
+
+
+def clip_limit_s(text: str) -> float:
+    """The longest a clip of ``text`` may run (the module's notes)."""
+    return max(CLIP_MIN_LIMIT_S, CLIP_S_PER_CHAR * len(text))
+
+
+def make_clip(voice: Voice, line: str) -> bytes | None:
+    """``line`` said by ``voice`` within :func:`clip_limit_s`: a take past it is cut there and
+    made again, :data:`CLIP_TRIES` times at most (None: every take ran past it)."""
+    text = speakable(line)
+    limit = int(clip_limit_s(text) * voice.rate) * 2  # s16le bytes
+    for _ in range(CLIP_TRIES):
+        chunks = voice.stream(text)
+        pcm = b""
+        try:
+            for chunk in chunks:
+                pcm += chunk
+                if len(pcm) > limit:
+                    break
+        finally:
+            close = getattr(chunks, "close", None)
+            if close is not None:
+                close()
+        if len(pcm) <= limit:
+            return pcm
+        logger.warning(
+            "speech: the clip %r ran past %.1f s: made again", line, limit / 2 / voice.rate
+        )
+    logger.warning("speech: no clip of %r: every take ran too long", line)
+    return None
 
 
 def aside_voice(voice: Voice) -> Voice | None:
@@ -95,6 +137,7 @@ class SpeechWorker:
         clips: Sequence[str] = (),
         asides: Sequence[str] = (),
         clock: Callable[[], float] = time.monotonic,
+        clip_idle_s: float = CLIP_IDLE_S,
     ) -> None:
         """``on_audio`` hears every chunk handed to the player; ``on_done`` every job finished
         (cut or not); ``on_bill`` the bill of every sentence a paid voice said; all on this
@@ -102,12 +145,13 @@ class SpeechWorker:
         load and played from memory when a job says one of them without a style
         (:func:`pepin.voice_cascade.text.clip_key`); none with a paid voice. ``asides``: the
         lines of backchannel jobs (fillers, "мм"), made by :func:`aside_voice` once the voice
-        is ready, while no job waits."""
+        is ready, in order, each after ``clip_idle_s`` without a job."""
         self.player = player
         self.clip_lines = tuple(unique(clips))
         self.aside_lines = tuple(unique(asides))
         self.on_audio, self.on_done, self.on_bill = on_audio, on_done, on_bill
         self.clock = clock
+        self.clip_idle_s = clip_idle_s
         self.ready = threading.Event()
         self.error: BaseException | None = None
         self.lock = threading.Lock()
@@ -134,6 +178,12 @@ class SpeechWorker:
     def says_asides(self) -> bool:
         """The current voice says asides (a paid voice without a local fallback does not)."""
         return aside_voice(self._slot[0]) is not None
+
+    def has_clip(self, line: str) -> bool:
+        """The current voice says ``line`` as an aside from memory: its clip is made (read
+        from any thread)."""
+        voice, clips = self._slot
+        return aside_voice(voice) is not None and clip_key(speakable(line)) in clips
 
     def start(self) -> None:
         """Load the voice on the worker's thread, then serve jobs; :attr:`ready` is set when
@@ -192,7 +242,7 @@ class SpeechWorker:
         one (on this thread, the one that speaks with it)."""
         while True:
             try:
-                item = self._jobs.get(timeout=CLIP_IDLE_S if self._unmade else None)
+                item = self._jobs.get(timeout=self.clip_idle_s if self._unmade else None)
             except queue.Empty:
                 self._make_clip()
                 continue
@@ -217,9 +267,11 @@ class SpeechWorker:
         if maker is None:
             return
         try:
-            pcm = b"".join(maker.stream(speakable(line)))
+            pcm = make_clip(maker, line)
         except Exception:
             logger.exception("speech: the clip %r was not made", line)
+            return
+        if pcm is None:
             return
         with self.lock:
             if self._slot[0] is voice:  # still the voice speaking

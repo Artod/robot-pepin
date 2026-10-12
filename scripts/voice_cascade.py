@@ -94,6 +94,7 @@ from pepin.voice_cascade.engines import (
     brain_key,
     build_brain,
 )
+from pepin.voice_cascade.fillers import clip_lines
 from pepin.voice_cascade.loop import UNANSWERED, CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
@@ -485,8 +486,7 @@ def main() -> int:
     except RuntimeError as error:  # a cloud voice without its key
         print(error)
         return 2
-    asides = (*(config.backchannel_lines if config.backchannel else ()), *config.fillers.lines())
-    speech = SpeechWorker(voice, player, clips=config.openers, asides=asides)
+    speech = SpeechWorker(voice, player, clips=config.openers, asides=clip_lines(config))
     choice = configured(config)
     print(f"loading the voice ({config.voice.name}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile
