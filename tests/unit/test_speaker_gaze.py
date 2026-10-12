@@ -1076,7 +1076,7 @@ def test_the_detector_runs_on_the_neural_engine_as_shipped(tmp_path: Path) -> No
 def test_the_shipped_knobs_load_off_and_measured_on_the_four_readings() -> None:
     settings = SpeakerSettings.load(REPO / "config/expression.json")
     assert settings.doa_map == TODAY.doa_map and settings.ttl_s == 6.0 and settings.renew_s == 2.0
-    assert settings.body.max_turn_deg == 30.0 and settings.min_speech == 2
+    assert settings.body.max_turn_deg == 0.0 and settings.min_speech == 2  # 0 until the live test
     assert settings.refine_deg == 2.0 and settings.smile_unseen is False
     assert (settings.track_hz, settings.lead_max_deg, settings.seek_sweep_deg) == (10.0, 10.0, 10.0)
     assert (settings.track_speaking_hz, settings.hold_for_voice) == (1.0, True)
