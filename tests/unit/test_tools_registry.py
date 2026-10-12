@@ -270,6 +270,8 @@ def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
         "recall",
         "map_tree",
         "remember",
+        "remember_person",
+        "forget_person",
         "say",
         "status",
     ]

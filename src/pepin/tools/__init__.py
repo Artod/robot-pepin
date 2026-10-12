@@ -18,6 +18,7 @@ from pepin.tools import (  # noqa: F401 -- they register
     gesture,
     head,
     memory,
+    people,
     speech,
     status,
 )

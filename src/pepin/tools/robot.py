@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 
 from pepin import goal_link
 from pepin.expression.executors import Animator
+from pepin.people.door import PeopleDoor
 from pepin.tools.clients import (
     AUDIO_PORT,
     BASE_PORT,
@@ -79,7 +80,8 @@ class Endpoints:
 class Robot:
     """Everything a tool may touch. ``clock``/``sleep`` are what the tools wait by (a fake
     clock makes a two-second wait instant in a test); ``drive_timeout_s`` bounds a drive;
-    ``animator`` performs gestures (None where no gesture engine runs: the tool says so)."""
+    ``animator`` performs gestures (None where no gesture engine runs: the tool says so);
+    ``people`` names and forgets people (None where recognition does not run)."""
 
     goals: GoalServer
     neck: Neck
@@ -92,6 +94,7 @@ class Robot:
     sleep: Callable[[float], None] = field(default=time.sleep)
     drive_timeout_s: float = DRIVE_TIMEOUT_S
     animator: Animator | None = None  # the gesture engine, where one runs (the voice cascade)
+    people: PeopleDoor | None = None  # person recognition, where it runs (the voice cascade)
 
     @classmethod
     def connect(cls, endpoints: Endpoints | None = None) -> Robot:

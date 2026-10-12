@@ -16,6 +16,7 @@ from typing import Any
 
 from pepin.expression.executors import Outcome
 from pepin.gaze import DRIVE_REFUSAL
+from pepin.people.door import Outcome as Answer
 from pepin.tools.clients import HeadMove, HeadPose, HeadReach, ServiceDownError
 from pepin.tools.registry import Image, ToolError
 from pepin.tools.robot import Robot
@@ -416,10 +417,34 @@ class FakeAnimator:
         """Nothing kept."""
 
 
+@dataclass
+class FakePeople:
+    """Person recognition's door: names kept in a list; ``refusal`` refuses every naming."""
+
+    names: list[str] = field(default_factory=list)
+    refusal: str | None = None
+
+    def remember(self, name: str, family: bool = False) -> Answer:
+        """Kept, unless refused or taken."""
+        if self.refusal is not None:
+            return Answer(False, self.refusal)
+        if name in self.names:
+            return Answer(False, f"someone else is already called {name}", {"collision": True})
+        self.names.append(name)
+        return Answer(True, payload={"remembered": name, "face_samples": 4, "voice_samples": 2})
+
+    def forget(self, name: str) -> Answer:
+        """Dropped when known."""
+        if name not in self.names:
+            return Answer(False, f"nobody called {name} is known")
+        self.names.remove(name)
+        return Answer(True, payload={"forgotten": name})
+
+
 def fake_robot(**replace: Any) -> Robot:
     """A robot made of fakes sharing one :class:`FakeClock`; ``replace`` swaps any part
     (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``,
-    ``animator``) or sets ``drive_timeout_s``."""
+    ``animator``, ``people``) or sets ``drive_timeout_s``."""
     clock = replace.pop("clock", None) or FakeClock()
     neck = replace.pop("neck", None) or FakeNeck(clock)
     parts: dict[str, Any] = {
@@ -431,6 +456,7 @@ def fake_robot(**replace: Any) -> Robot:
         "face": FakeFace(),
         "body": FakeBody(),
         "animator": FakeAnimator(),
+        "people": FakePeople(),
     }
     parts.update(replace)
     return Robot(clock=clock, sleep=clock.sleep, **parts)
