@@ -164,9 +164,12 @@ def parse_flags(items: list[str], known: set[str]) -> dict[str, bool]:
 
 
 def expression_flags() -> set[str]:
-    """The live flags config/expression.json declares (its ``flags`` but the note)."""
+    """The live flags: config/expression.json's ``flags`` (but the note) and the people flag
+    (config/people.json, ``pepin.people.config.FLAG``)."""
+    from pepin.people.config import FLAG as PEOPLE_FLAG
+
     data = json.loads(config_file("expression.json").read_text())
-    return {name for name in data.get("flags", {}) if name != "note"}
+    return {name for name in data.get("flags", {}) if name != "note"} | {PEOPLE_FLAG}
 
 
 class Body:
