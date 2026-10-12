@@ -11,6 +11,11 @@ loads its new engine beside the old one) and swaps it in (the brain at the next 
 at its next sentence, the transcriber between utterances), appending each step to
 ``control.jsonl`` (``{"id", "t", "what", "name", "state", "ms", "error"}``), which the switch
 command reads back. What the file holds at the start is an earlier run's and is never applied.
+
+A feature's live switch (:class:`pepin.expression.conversation.LiveFlag`: ``gestures``,
+``speaker_gaze``) is the ``flags`` key, ``{"flags": {"gestures": true}}`` (``switch --flag
+gestures=on``), answered as ``{"what": "flag", "name": "gestures", "state": "applied", "on":
+true}``; a name no flag of the running loop carries is answered ``failed``.
 """
 
 from __future__ import annotations
@@ -18,7 +23,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -30,42 +35,72 @@ from pepin.voice_cascade.transcriber import Choice, SwitchingTranscriber, choice
 
 CONTROL = "control.json"
 ANSWERS = "control.jsonl"
-KEYS = ("brain", "voice", "voice_preset", "transcriber")
+KEYS = ("brain", "voice", "voice_preset", "transcriber", "flags")
 DONE_STATES = ("applied", "failed")  # the last answer of a switch
+FLAG = "flag"  # the ``what`` of a flag's answer
+ON_WORDS = {"on": True, "true": True, "1": True, "off": False, "false": False, "0": False}
+
+
+def flag_value(value: Any) -> bool | None:
+    """A flag's wanted state as the file or the command line writes it (``true``, ``"on"``,
+    ``"off"``, ``1``); None for anything else."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        return ON_WORDS.get(value.strip().lower())
+    return None
 
 
 @dataclass(frozen=True)
 class Request:
     """A switch asked for: a brain preset, a voice preset (or an engine's name), a transcriber
-    (``"whispercpp"``, ``"whispercpp:large-v3"`` or ``{"engine", "model"}``), or several."""
+    (``"whispercpp"``, ``"whispercpp:large-v3"`` or ``{"engine", "model"}``), features' live
+    flags turned on or off, or several."""
 
     id: str
     brain: str | None = None
     voice: str | None = None
     transcriber: Any = None
+    flags: Mapping[str, bool] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], default_id: str = "") -> Request:
-        """From the control file's object (``default_id`` when it carries none)."""
+        """From the control file's object (``default_id`` when it carries none); a flag whose
+        value says neither on nor off is left out."""
         voice = data.get("voice_preset") or data.get("voice")
+        raw = data.get("flags")
+        flags = {
+            str(name): wanted
+            for name, value in (raw.items() if isinstance(raw, dict) else ())
+            if (wanted := flag_value(value)) is not None
+        }
         return cls(
             str(data.get("id") or default_id),
             data.get("brain") or None,
             voice or None,
             data.get("transcriber") or None,
+            flags,
         )
 
 
 def write_request(
-    root: Path, brain: str | None, voice: str | None, transcriber: str | None = None
+    root: Path,
+    brain: str | None,
+    voice: str | None,
+    transcriber: str | None = None,
+    flags: Mapping[str, bool] | None = None,
 ) -> Request:
     """Ask the running loop for a switch (the file replaced at once, never half written)."""
     stamp = time.strftime("%H%M%S-") + f"{time.time_ns() % 10**9:09d}"
-    request = Request(stamp, brain, voice, transcriber)
+    request = Request(stamp, brain, voice, transcriber, dict(flags or {}))
     root.mkdir(parents=True, exist_ok=True)
     body: dict[str, Any] = {"id": request.id, "t": round(time.time(), 3)}
     body.update({k: v for k, v in (("brain", brain), ("voice", voice),
                                    ("transcriber", transcriber)) if v})  # fmt: skip
+    if request.flags:
+        body["flags"] = dict(request.flags)
     tmp = root / (CONTROL + ".tmp")
     tmp.write_text(json.dumps(body, ensure_ascii=False) + "\n")
     tmp.replace(root / CONTROL)

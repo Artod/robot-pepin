@@ -15,12 +15,20 @@ _WORDS = re.compile(r"\w+")
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
 
 
+def in_braces(text: str, pos: int) -> bool:
+    """Whether ``pos`` lies inside a marker's braces: a ``{`` opened before it and not closed
+    (markers never nest, :mod:`pepin.expression.markers`)."""
+    return text.rfind("{", 0, pos) > text.rfind("}", 0, pos)
+
+
 class SentenceSplitter:
     """Text deltas in, whole sentences out as soon as each one ends.
 
     A sentence ends at ``. ! ? …`` followed by a space (``3.5`` does not end one) or at a line
     break. A first sentence still open after ``soft_chars`` is cut at its last comma or dash, so
-    a long opening clause does not hold the voice back.
+    a long opening clause does not hold the voice back. Neither happens inside a marker's braces
+    (``{happy. excited}``, ``{style: whispering}``): a marker reaches the voice whole, and a
+    sentence waits while one is still open.
     """
 
     def __init__(self, soft_chars: int = 90) -> None:
@@ -34,7 +42,9 @@ class SentenceSplitter:
         self._buffer += text
         out: list[str] = []
         while True:
-            match = _END.search(self._buffer)
+            buffer = self._buffer
+            ends = (m for m in _END.finditer(buffer) if not in_braces(buffer, m.start()))
+            match = next(ends, None)
             if match is None or (match.end() == len(self._buffer) and match.group().strip()):
                 # "... 3." at the end may still become "3.5": wait for what follows the stop
                 break
@@ -48,7 +58,8 @@ class SentenceSplitter:
             and not out
             and len(self._buffer) > self.soft_chars
         ):
-            cuts = list(_SOFT.finditer(self._buffer))
+            buffer = self._buffer
+            cuts = [c for c in _SOFT.finditer(buffer) if not in_braces(buffer, c.start())]
             if cuts and cuts[-1].start() > 20:
                 cut = cuts[-1].start() + 1
                 out.append(self._buffer[:cut].strip())
