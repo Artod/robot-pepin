@@ -640,14 +640,14 @@ class CascadeLoop:
                 who = loop.run_in_executor(
                     self._people, people.measure, segment.pcm, segment.ended_s
                 )
-            self._tell("opened", heard_of(segment, text, noise))
+            self._tell("opened", heard_of(segment, text, noise, voice_db))
         conversation = self.conversation
         assert conversation is not None
         conversation.log.event(
             "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms, early=early is not None,
             seconds=round(segment.duration_s, 2), voice_peak_db=voice_db, engine=engine,
         )  # fmt: skip
-        self._tell("speech_ended", heard_of(segment, text, noise))
+        self._tell("speech_ended", heard_of(segment, text, noise, voice_db))
         if noise:
             self.hold_next = False
             self._release()
@@ -1330,10 +1330,13 @@ def in_sentences(parts: list[tuple[int, str]], sentences: int, played: Played) -
     return Played(cut, partial)
 
 
-def heard_of(segment: Segment, text: str, noise: bool) -> Heard:
+def heard_of(segment: Segment, text: str, noise: bool, peak_db: float | None = None) -> Heard:
     """An utterance as the body hears it: its start (its last voiced frame less its length,
-    the lead-in included) and end on the laptop's clock, and what Whisper read."""
-    return Heard(segment.ended_s - segment.duration_s, segment.ended_s, text, noise)
+    the lead-in included) and end on the laptop's clock, what Whisper read, its loudest frame
+    and whether it calls the robot by name."""
+    start = segment.ended_s - segment.duration_s
+    named = not noise and is_wake(text)
+    return Heard(start, segment.ended_s, text, noise, peak_db, named)
 
 
 def eot_of(event: EarEvent) -> dict[str, Any] | None:

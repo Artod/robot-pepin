@@ -149,6 +149,19 @@ class TargetPolicy(Protocol):
 
 
 @dataclass(frozen=True)
+class Target:
+    """A person the speaker gaze looked at: where their face was (the cart's frame: pan the
+    bearing, + left; tilt + down), its last sighting (the box, when the finder keeps the
+    detection) and when (the laptop's clock). The seam for more than one interlocutor: when
+    a remembered person speaks again the head goes back to their place before a frame
+    confirms them."""
+
+    aim: Aim
+    face: FaceSighting | None
+    seen_s: float
+
+
+@dataclass(frozen=True)
 class GazePlan:
     """How to face an aim: the wheels' turn in place first (radians, + left; 0 when the head
     suffices or the wheels may not move), then the head's aim relative to the turned cart."""
