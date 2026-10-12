@@ -649,3 +649,104 @@ def test_a_refused_goal_is_a_sad_face_and_a_dropped_report_clears_the_focus(
     with contextlib.suppress(BrokenPipeError):
         node._handle({"cmd": "go", "x": 1.0, "y": 0.0, "yaw_deg": 0.0}, Hangs())
     assert sink.said[0] == ("event", "goal_accepted") and sink.said[-1] == ("clear",)
+
+
+# -- plan: would a goal be driven, asked without motion ----------------------------------------
+
+
+def grid(node: Any, cells: dict[tuple[int, int], int]) -> None:
+    """RTAB-Map's latched grid: 20 x 20 cells of 0.1 m from (-1, -1), free unless ``cells``
+    (col, row) says otherwise (-1 unknown, 100 occupied)."""
+    data = [0] * 400
+    for (col, row), value in cells.items():
+        data[row * 20 + col] = value
+    info = ros_stubs.MapMetaData(resolution=0.1, width=20, height=20)
+    info.origin.position.x, info.origin.position.y = -1.0, -1.0
+    node.subs["/map"][1](ros_stubs.OccupancyGrid(info=info, data=data))
+
+
+class PlanHandle:
+    """The planner's goal handle: accepted, its result a path through ``poses`` or a code."""
+
+    def __init__(self, poses: list[tuple[float, float]], code: int = 0) -> None:
+        self.accepted = True
+        path = ros_stubs.Path_(poses=[ros_stubs.PoseStamped() for _ in poses])
+        for stamped, (x, y) in zip(path.poses, poses, strict=True):
+            stamped.pose.position.x, stamped.pose.position.y = x, y
+        answer = types.SimpleNamespace(path=path, error_code=code, error_msg="")
+        self._result = ros_stubs.Future(types.SimpleNamespace(result=answer))
+
+    def get_result_async(self) -> Any:
+        return self._result
+
+
+def ask_plan(node: Any, **request: Any) -> dict[str, Any]:
+    wire = Wire()
+    node._handle({"cmd": "plan", **request}, wire)
+    (event,) = wire.events()
+    return dict(event)
+
+
+def test_a_plan_on_a_free_cell_asks_the_planner_and_never_drives(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    grid(node, {})
+    node._planner.server = True
+    node._planner.handle = PlanHandle([(0.0, 0.0), (0.3, 0.4), (0.3, 1.4)])
+    answer = ask_plan(node, x=0.3, y=0.4, yaw_deg=90.0)
+    assert answer == {
+        "event": "plan",
+        "x": 0.3,
+        "y": 0.4,
+        "yaw_deg": 90.0,
+        "cell": "free",
+        "ok": True,
+        "length_m": 1.5,
+        "poses": 3,
+    }
+    (goal,) = node._planner.goals
+    assert (goal.goal.pose.position.x, goal.goal.pose.position.y) == (0.3, 0.4)
+    assert goal.goal.header.frame_id == "map"
+    assert goal.planner_id == "GridBased" and goal.use_start is False
+    assert not node._client.goals, "a plan is never a drive"
+
+
+def test_an_unknown_occupied_or_outside_cell_is_refused_before_any_plan(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    grid(node, {(13, 14): -1, (5, 5): 100})
+    node._planner.server = True
+    cases = (((0.35, 0.45), "unknown"), ((-0.45, -0.45), "occupied"), ((5.0, 0.0), "outside"))
+    for (x, y), cell in cases:
+        answer = ask_plan(node, x=x, y=y)
+        assert (answer["cell"], answer["ok"], answer["blames"]) == (cell, False, "goal"), cell
+    assert not node._planner.goals
+
+
+def test_without_a_map_no_goal_is_called_free(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    answer = ask_plan(node, x=0.0, y=0.0)
+    assert (answer["cell"], answer["ok"], answer["blames"]) == ("no map", False, "planner")
+
+
+def test_a_planner_refusal_says_whose_it_is(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    grid(node, {})
+    node._planner.server = True
+    node._planner.handle = PlanHandle([], code=206)
+    answer = ask_plan(node, x=0.3, y=0.4)
+    assert (answer["ok"], answer["blames"], answer["reason"]) == (False, "goal", "goal occupied")
+    node._planner.handle = PlanHandle([], code=205)  # start occupied: no other goal fares better
+    answer = ask_plan(node, x=0.3, y=0.4)
+    assert (answer["ok"], answer["blames"]) == (False, "planner")
+
+
+def test_no_plan_while_driving_and_none_without_a_planner(tmp_path: Path) -> None:
+    node = server(tmp_path)
+    grid(node, {})
+    assert ask_plan(node, x=0.3, y=0.4) == {
+        "event": "error",
+        "detail": "the planner server is not up",
+    }
+    executing = ros_stubs.GoalStatusArray(status_list=[ros_stubs.GoalStatus(status=2)])
+    node.subs["/navigate_to_pose/_action/status"][1](executing)
+    assert "a drive is under way" in ask_plan(node, x=0.3, y=0.4)["detail"]
+    assert "numbers x and y" in ask_plan(node, x="here")["detail"]

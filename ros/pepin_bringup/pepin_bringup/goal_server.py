@@ -12,8 +12,10 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
     {"cmd": "places"}                      {"cmd": "planner", "name": "navfn"}
     {"cmd": "clearance", "radius_m": 1.0}  (where's ``navigating``, and depth_fusion's newest
                                            obstacle marks near the cart, for the voice's wheels)
+    {"cmd": "plan", "x": 1.2, "y": 0.4, "yaw_deg": 90}
 
-and answers with one JSON line per event: accepted, feedback, arrival, done. It also owns the
+and answers with one JSON line per event: accepted, feedback, arrival, done. A ``plan`` is
+asked, never driven: would a goal there be driven (:meth:`GoalServer.plan`)? It also owns the
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
 recording can no longer outlive its run.
 
@@ -41,6 +43,7 @@ listener of its own.
 from __future__ import annotations
 
 import contextlib
+import itertools
 import json
 import math
 import socket
@@ -54,7 +57,8 @@ from action_msgs.msg import GoalStatusArray
 from action_msgs.srv import CancelGoal
 from builtin_interfaces.msg import Duration
 from geometry_msgs.msg import PoseStamped
-from nav2_msgs.action import NavigateToPose, Spin
+from nav2_msgs.action import ComputePathToPose, NavigateToPose, Spin
+from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
@@ -63,7 +67,7 @@ from std_msgs.msg import String
 
 from pepin.face_events import DriveFace, FaceSink
 from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
-from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, cancel_outcome
+from pepin.goal_link import CANCEL_CONFIRM_S, NAV_ACTIONS, PLAN_WAIT_S, cancel_outcome
 from pepin.places import PLACES_TOPIC, heading_residual_deg, places_from_json
 from pepin.runlink import (
     RUN_COMMAND_TOPIC,
@@ -95,6 +99,14 @@ RECORDER_PATIENCE_S = (
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
+# RTAB-Map's grid as both costmaps read it (relayed by rtabmap_frame, latched): the one place that
+# still tells an unsurveyed cell from floor, since the global costmap counts unknown as free
+# (track_unknown_space false) and every planner has allow_unknown true.
+MAP_TOPIC = "/map"
+OCCUPIED_AT = 65  # a /map cell at or above this is occupied (the grids' occupied_thresh 0.65)
+# nav2_msgs/ComputePathToPose error codes (Jazzy) that blame the goal, not the planner: another
+# goal may plan (ros/tools/planner_check.py's GOAL_CODES).
+GOAL_CODES = {204: "goal outside the map", 206: "goal occupied", 208: "no valid path"}
 # THE ONE POSE TOPIC. This node already parses /tf for the pose; every other node beside it that
 # wants it reads this instead of starting a second listener (pepin_bringup.run_recorder). 5 Hz is
 # the rate the tape thinned its `loc` rows to anyway and the local costmap's own
@@ -259,6 +271,16 @@ class GoalServer(Node):
         self._record_dir = Path(str(self.declare_parameter("record_dir", "/maps/rec").value))
         self._port = int(self.declare_parameter("port", PORT).value)
         self._client = ActionClient(self, NavigateToPose, "navigate_to_pose")
+        # A plan without a drive (the `plan` command): the planner server's own action, asked
+        # as the navigator asks it, so a goal is checked before anything moves.
+        self._planner = ActionClient(self, ComputePathToPose, "compute_path_to_pose")
+        self._map: OccupancyGrid | None = None
+        self.create_subscription(
+            OccupancyGrid,
+            MAP_TOPIC,
+            self._on_map,
+            QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
         self._spin = ActionClient(self, Spin, "spin")
         # Every goal on either navigator, whoever sent it: the action servers' own cancel
         # services, made once here so a cancel never waits for discovery.
@@ -579,8 +601,88 @@ class GoalServer(Node):
             )
         elif command == "go":
             self._go(request, connection)
+        elif command == "plan":
+            self._send(connection, self.plan(request))
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
+
+    def _on_map(self, msg: OccupancyGrid) -> None:
+        """RTAB-Map's newest grid (latched): what ``plan`` reads a goal's cell from."""
+        self._map = msg
+
+    def map_cell(self, x: float, y: float) -> str:
+        """What RTAB-Map's grid says under map point ``(x, y)``: ``free``, ``occupied``,
+        ``unknown`` (never surveyed), ``outside`` the grid, or ``no map`` before one is heard.
+        The grid's origin is taken unrotated, as RTAB-Map writes it."""
+        grid = self._map
+        if grid is None:
+            return "no map"
+        info = grid.info
+        col = math.floor((x - info.origin.position.x) / info.resolution)
+        row = math.floor((y - info.origin.position.y) / info.resolution)
+        if not (0 <= col < info.width and 0 <= row < info.height):
+            return "outside"
+        value = int(grid.data[row * info.width + col])
+        if value < 0:
+            return "unknown"
+        return "occupied" if value >= OCCUPIED_AT else "free"
+
+    def plan(self, request: dict[str, Any]) -> dict[str, Any]:
+        """Would a goal at ``(x, y, yaw_deg)`` be driven: never motion. RTAB-Map's cell under it
+        first (unknown, occupied or outside the grid is refused before any plan: the costmap
+        cannot tell unknown from floor), then one ComputePathToPose from where the cart stands
+        with the selected planner. ``blames`` says whose the refusal is: ``goal`` (another goal
+        may plan) or ``planner`` (none will); an ``error`` event when it cannot be asked."""
+        try:
+            x, y = float(request["x"]), float(request["y"])
+            yaw_deg = float(request.get("yaw_deg", 0.0))
+        except (KeyError, TypeError, ValueError):
+            return {"event": "error", "detail": "plan needs numbers x and y (and yaw_deg)"}
+        answer: dict[str, Any] = {"event": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
+        if self.navigating():
+            return {"event": "error", "detail": "a drive is under way: a plan now would race it"}
+        cell = self.map_cell(x, y)
+        answer["cell"] = cell
+        if cell == "no map":
+            return answer | {
+                "ok": False,
+                "blames": "planner",
+                "reason": f"no grid heard on {MAP_TOPIC}: free cannot be told from unknown",
+            }
+        if cell != "free":
+            reason = {
+                "occupied": "the goal is on an occupied cell of the map",
+                "unknown": "the goal is on a cell the map never surveyed",
+                "outside": "the goal is outside the map",
+            }[cell]
+            return answer | {"ok": False, "blames": "goal", "reason": reason}
+        if not self._planner.wait_for_server(timeout_sec=2.0):
+            return {"event": "error", "detail": "the planner server is not up"}
+        goal = ComputePathToPose.Goal()
+        goal.goal = self._pose_msg(x, y, yaw_deg)
+        goal.planner_id = PLANNERS[self.planner][0]
+        goal.use_start = False
+        handle = self._wait(self._planner.send_goal_async(goal), 5.0)
+        if handle is None or not handle.accepted:
+            return {"event": "error", "detail": "the planner did not take the request"}
+        outcome = self._wait(handle.get_result_async(), PLAN_WAIT_S)
+        if outcome is None:
+            return {"event": "error", "detail": f"no plan in {PLAN_WAIT_S:.0f} s"}
+        result = outcome.result
+        poses = list(result.path.poses)
+        if len(poses) >= 2:
+            length = sum(
+                math.hypot(
+                    b.pose.position.x - a.pose.position.x, b.pose.position.y - a.pose.position.y
+                )
+                for a, b in itertools.pairwise(poses)
+            )
+            return answer | {"ok": True, "length_m": round(length, 2), "poses": len(poses)}
+        code = int(getattr(result, "error_code", 0))
+        said = str(getattr(result, "error_msg", "") or "")
+        reason = GOAL_CODES.get(code) or said or f"planner error code {code}"
+        blames = "goal" if code in GOAL_CODES else "planner"
+        return answer | {"ok": False, "blames": blames, "reason": reason, "code": code}
 
     def _on_placement(self, msg: String) -> None:
         """rtabmap_frame's word on what RTAB-Map's present start rests on; a message that does

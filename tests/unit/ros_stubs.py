@@ -357,6 +357,18 @@ class NavigateToPose:
     Goal = _msg("NavigateToPose_Goal", pose=PoseStamped)
 
 
+class ComputePathToPose:
+    """nav2_msgs/ComputePathToPose: a plan to a goal (from the cart's pose unless use_start)."""
+
+    Goal = _msg(
+        "ComputePathToPose_Goal",
+        goal=PoseStamped,
+        start=PoseStamped,
+        planner_id="",
+        use_start=False,
+    )
+
+
 class Spin:
     """nav2_msgs/Spin: the turn in place and how long it may take."""
 
@@ -994,7 +1006,12 @@ def install() -> Any:
         ),
         "nav2_msgs": _module("nav2_msgs"),
         "nav2_msgs.msg": _module("nav2_msgs.msg", ParticleCloud=ParticleCloud),
-        "nav2_msgs.action": _module("nav2_msgs.action", NavigateToPose=NavigateToPose, Spin=Spin),
+        "nav2_msgs.action": _module(
+            "nav2_msgs.action",
+            ComputePathToPose=ComputePathToPose,
+            NavigateToPose=NavigateToPose,
+            Spin=Spin,
+        ),
         "nav2_msgs.srv": _module("nav2_msgs.srv", ClearEntireCostmap=ClearEntireCostmap),
         "action_msgs": _module("action_msgs"),
         "action_msgs.msg": _module(
