@@ -10,10 +10,14 @@ holds for at most ``hold_s`` and then goes to its rest pose by itself and lets g
 The wire, JSON lines on the base server's port (:mod:`pepin.base_link`)::
 
     laptop -> board  {"cmd": "arm_trajectory", "id", "source", "name", "knots": [[t, d1..d6], ...],
-                      "then": "rest" | "hold", "hold_s"}           an ArmTrajectoryCommand
+                      "then": "rest" | "hold", "hold_s", "speed"}  an ArmTrajectoryCommand
                      {"cmd": "arm_rest"}   {"cmd": "arm_halt"}     an ArmCommand
+                     {"cmd": "arm_read"}                           the newest reading, answered
     board -> laptop  {"type": "arm", "id", "status", "reason"}    an ArmReply, to every client
                      "arm": {...} in each state line that read the arm   ArmStateFields
+
+``speed`` (0..1, 1 when absent) scales the board's caps for that trajectory and the rest after
+it: speeds by it, accelerations by its square (the first live test runs at 0.2).
 
 Angles are degrees in config/arm.json's convention (lerobot's: the middle of each calibrated
 range is 0; the gripper's -10..100 is linear), knot times seconds from the trajectory's start.
@@ -54,8 +58,8 @@ class Knot:
 @dataclass(frozen=True)
 class Trajectory:
     """A whole arm motion: its id and who asked (for the replies and the logs), the knots, what
-    follows the last one (``rest``; ``hold`` for at most ``hold_s``, then rest) and the gesture's
-    name."""
+    follows the last one (``rest``; ``hold`` for at most ``hold_s``, then rest), the gesture's
+    name and the share of the board's caps it and its rest run at."""
 
     id: str
     source: str
@@ -63,6 +67,7 @@ class Trajectory:
     then: Then = "rest"
     hold_s: float = 0.0
     name: str = ""
+    speed_scale: float = 1.0
 
 
 @dataclass(frozen=True)
@@ -99,13 +104,14 @@ class ArmTrajectoryCommand(TypedDict):
     knots: list[list[float]]
     then: Then
     hold_s: float
+    speed: float
 
 
 class ArmCommand(TypedDict):
-    """``arm_rest`` (to the rest pose, then torque off) or ``arm_halt`` (stop where it is,
-    holding, then rest after the config's hold limit)."""
+    """``arm_rest`` (to the rest pose, then torque off), ``arm_halt`` (stop where it is,
+    holding, then rest after the config's hold limit) or ``arm_read`` (the newest reading)."""
 
-    cmd: Literal["arm_rest", "arm_halt"]
+    cmd: Literal["arm_rest", "arm_halt", "arm_read"]
 
 
 class ArmReply(TypedDict):

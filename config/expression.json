@@ -8,13 +8,30 @@
   "timing": {
     "audio_lag_s": 0.15,
     "char_s": 0.07,
-    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. char_s: seconds per spoken character while a part's audio is still being made (Player.heard's estimate)."
+    "late_s": 0.5,
+    "poll_s": 0.02,
+    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. char_s: seconds per spoken character while a part's audio is still being made (Player.heard's estimate). late_s: a clip whose time has passed by at most this is sent at once, a later one is dropped and logged (a stroke shifted 0.5 s still looks natural on a word; the first part of a reply plays as soon as it is made, so its preparations are late by their length). poll_s: how often the engine looks at the player's clock while a clip waits for its word."
   },
   "layers": {
-    "fade_s": 0.4,
+    "fade_s": {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35},
     "idle_resume_s": 2.0,
+    "idle_after_speech_s": 5.0,
+    "finish_s": 1.0,
+    "finish": ["greeting", "farewell"],
+    "face_hold_s": 2.0,
     "seed": null,
-    "note": "fade_s: every change between layers on a part (a gesture taken over, the gesture layer faded when the person starts speaking). idle_resume_s: quiet on a part after a gesture before its idle layer plays again. seed: null draws a fresh seed for each performance (logged with it); a number makes every performance repeat (the bench)."
+    "note": "fade_s: per part, how long a layer change eases (the face in 0.1 s, the body in 0.35 s: Disney's bipedal character); the arm's is the board's own way to rest at its caps. The person starting to speak fades the gesture layer of every part, even while the robot is silent, but a gesture of finish (a greeting, a farewell) already past its stroke and ending within finish_s plays out. idle_resume_s: quiet on a part after a gesture before its idle layer plays again; idle_after_speech_s: no idle motion this soon after anyone spoke. face_hold_s: how long a {face:NAME} marker's expression holds. seed: null draws a fresh seed for each performance (logged with it); a number makes every performance repeat (the bench)."
+  },
+  "caps": {
+    "per_part": 1,
+    "per_reply": 2,
+    "per_minute": 6,
+    "arm_per_minute": 3,
+    "intent_per_minute": {"laugh": 1},
+    "laughter": "(?:х[аеи][- ]?){2,}|ахах|хих|haha",
+    "laughter_waives": ["laugh"],
+    "laughter_s": 30.0,
+    "note": "What the brain's markers and the robot's moments may play (a tool or scripts/gesture.py, which a person asked for, is never capped); a marker over a cap is dropped and logged. per_part: gestures in one voice part (a sentence, or a clause a style cut); per_reply, per_minute: of all gestures; arm_per_minute: gestures with the arm (over it the rest of the gesture plays without the arm); intent_per_minute: an intent's own; a composition's cooldown_s (config/animation.json) between two of its own. The person's laugh (laughter, a regex on what Whisper read, within laughter_s) waives the caps of laughter_waives. From expressive_motion.md: a person telling a story makes ~4 gestures a minute; no study gives an annoyance threshold: these are starting knobs."
   },
   "parts": {
     "arm": {

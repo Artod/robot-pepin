@@ -1,0 +1,210 @@
+"""An intent rendered into clips: the variant chosen, each step drawn (whether it plays, when
+its stroke lands, its parameters, its names, its mirror image), its atom's cycle unrolled into
+tracks, the steps of one part merged into that part's clip.
+
+Every draw comes from one ``random.Random(seed)`` in a fixed order, whatever ends up playing, so
+a logged seed (and variant) replays a performance exactly: ``scripts/gesture.py play laugh
+--seed 1234``. The chooser never draws the variant it drew last for that intent (a composition
+of one variant repeats it, its parameters still drawn afresh). A step whose part is not ready,
+or whose pose has not been taught, is left out; when every optional step is left out by chance,
+the most likely one that can play still plays.
+"""
+
+from __future__ import annotations
+
+import random
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+
+from pepin.expression.animation import (
+    HOLD,
+    PERIOD,
+    REPEATS,
+    Atom,
+    Book,
+    Clip,
+    Composition,
+    Event,
+    Layer,
+    PartName,
+    Performance,
+    Scene,
+    Step,
+    Track,
+)
+from pepin.expression.markers import Cue
+
+
+class WeightedChooser:
+    """Variants drawn by weight, never the one drawn last time for the same intent."""
+
+    def __init__(self) -> None:
+        """No intent performed yet."""
+        self.last: dict[str, int] = {}
+
+    def choose(self, composition: Composition, scene: Scene, rng: random.Random) -> int:
+        """The index of the variant to perform."""
+        weights = [variant.weight for variant in composition.variants]
+        last = self.last.get(composition.name)
+        if len(weights) > 1 and last is not None:
+            weights[last] = 0.0
+        pick = rng.choices(range(len(weights)), weights)[0]
+        self.last[composition.name] = pick
+        return pick
+
+
+@dataclass(frozen=True)
+class Drawn:
+    """One step as drawn: whether it plays by its odds, where its stroke lands from the sync
+    point, its parameters, its names and whether it is the mirror image."""
+
+    step: Step
+    atom: Atom
+    plays: bool
+    at_s: float
+    params: Mapping[str, float]
+    names: Mapping[str, str]
+    mirrored: bool
+
+
+class BookRenderer:
+    """:class:`pepin.expression.animation.Renderer` over a book (with the arm's rest pose among
+    its poses, :func:`pepin.expression.book.with_rest`)."""
+
+    def __init__(self, book: Book, chooser: WeightedChooser | None = None) -> None:
+        """``chooser`` defaults to a fresh :class:`WeightedChooser`."""
+        self.book = book
+        self.chooser = chooser or WeightedChooser()
+
+    def render(
+        self,
+        intent: str,
+        scene: Scene,
+        seed: int,
+        cue: Cue | None = None,
+        *,
+        variant: int | None = None,
+    ) -> Performance:
+        """The performance of ``intent`` (``variant`` forces one, for a replay); ``KeyError``
+        for an intent the book does not hold."""
+        composition = self.book.compositions[intent]
+        rng = random.Random(seed)
+        index = variant if variant is not None else self.chooser.choose(composition, scene, rng)
+        drawn = [self._draw(step, rng) for step in composition.variants[index].steps]
+        able = [d for d in drawn if d.atom.part in scene.ready and self._posed(d)]
+        playing = [d for d in able if d.plays]
+        if not playing and able:
+            playing = [max(able, key=lambda d: d.step.p)]
+        clips = merge([self._unroll(d) for d in playing], "gesture")
+        return Performance(intent, seed, index, clips, cue)
+
+    def render_atom(self, name: str, seed: int, layer: Layer = "idle") -> Clip:
+        """One atom alone, its parameters drawn from its own ranges (the idle layer's)."""
+        drawn = self._draw(Step(name), random.Random(seed))
+        (clip,) = merge([self._unroll(drawn)], layer)
+        return clip
+
+    def _draw(self, step: Step, rng: random.Random) -> Drawn:
+        atom = self.book.atoms[step.atom]
+        plays = rng.random() < step.p
+        at_s = rng.uniform(step.at_s.lo, step.at_s.hi)
+        ranges = {**atom.params, **step.params}
+        params = {k: rng.uniform(r.lo, r.hi) for k, r in sorted(ranges.items())}
+        names = {k: rng.choice(options) for k, options in sorted(step.choices.items())}
+        mirrored = rng.random() < 0.5 if atom.mirror else False
+        return Drawn(step, atom, plays, at_s, params, names, mirrored)
+
+    def _posed(self, drawn: Drawn) -> bool:
+        """Every pose the step's keys name has been taught."""
+        return all(
+            pose_name(key.pose, drawn.names) in self.book.poses
+            for key in drawn.atom.keys
+            if key.pose is not None
+        )
+
+    def _unroll(self, drawn: Drawn) -> Unrolled:
+        """A step's atom over its cycles: (part, start from the sync point, stroke from its
+        start, duration, tracks, events)."""
+        atom, params = drawn.atom, drawn.params
+        period = params[PERIOD]
+        repeats = max(1, round(params.get(REPEATS, 1.0)))
+        hold = params.get(HOLD, 0.0)
+        stroke = atom.stroke * period
+        start = drawn.at_s - stroke
+        times: dict[str, list[float]] = {}
+        values: dict[str, list[float]] = {}
+        events: list[Event] = []
+        for cycle in range(repeats):
+            for key in atom.keys:
+                if cycle > 0 and key.at == 0.0 and atom.keys[-1].at == 1.0:
+                    continue  # the previous cycle's last key stands there already
+                t = (cycle + key.at) * period
+                pose = self.book.poses[pose_name(key.pose, drawn.names)] if key.pose else {}
+                joints = {**pose, **{k: v for k, v in key.values.items() if k != "expression"}}
+                for dof, raw in joints.items():
+                    value = number(raw, params)
+                    if drawn.mirrored and dof in atom.mirror:
+                        value = -value
+                    times.setdefault(dof, []).append(t)
+                    values.setdefault(dof, []).append(value)
+                face = key.values.get("expression")
+                if isinstance(face, str):
+                    name = drawn.names.get("name", "") if face == "$name" else face
+                    events.append(Event(t, name, hold if hold > 0 else None))
+        end = repeats * period
+        if hold > 0 and atom.part != "face":
+            for dof in times:
+                times[dof].append(end + hold)
+                values[dof].append(values[dof][-1])
+        duration = end + hold
+        tracks = [Track(dof, atom.mode, tuple(times[dof]), tuple(values[dof])) for dof in times]
+        return atom.part, start, stroke, duration, tracks, events
+
+
+Unrolled = tuple[PartName, float, float, float, list[Track], list[Event]]
+
+
+def merge(unrolled: Sequence[Unrolled], layer: Layer) -> tuple[Clip, ...]:
+    """The steps of each part as one clip, the part's first step setting its stroke."""
+    clips = []
+    for part in dict.fromkeys(u[0] for u in unrolled):
+        steps = [u for u in unrolled if u[0] == part]
+        offset = min(u[1] for u in steps)
+        end = max(u[1] + u[3] for u in steps)
+        tracks: list[Track] = []
+        events: list[Event] = []
+        for _, start, _, _, step_tracks, step_events in steps:
+            shift = start - offset
+            tracks += [
+                Track(tr.dof, tr.mode, tuple(t + shift for t in tr.times), tr.values)
+                for tr in step_tracks
+            ]
+            events += [Event(e.t_s + shift, e.name, e.hold_s) for e in step_events]
+        first = steps[0]
+        clips.append(
+            Clip(
+                part,
+                offset,
+                first[1] - offset + first[2],
+                end - offset,
+                tuple(tracks),
+                tuple(sorted(events, key=lambda e: e.t_s)),
+                layer,
+            )
+        )
+    return tuple(clips)
+
+
+def pose_name(pose: str | None, names: Mapping[str, str]) -> str:
+    """A key's pose: its name, or the drawn one for ``$pose``."""
+    if pose is None:
+        return ""
+    return names.get(pose[1:], "") if pose.startswith("$") else pose
+
+
+def number(raw: float | str, params: Mapping[str, float]) -> float:
+    """A key's value: a number, or a drawn parameter (``"$p"``, ``"-$p"``)."""
+    if isinstance(raw, str):
+        sign = -1.0 if raw.startswith("-") else 1.0
+        return sign * params[raw.lstrip("-").lstrip("$")]
+    return float(raw)

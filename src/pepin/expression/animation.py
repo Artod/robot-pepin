@@ -67,7 +67,10 @@ class Key:
 
 @dataclass(frozen=True)
 class Atom:
-    """A parametrised motion primitive of one part (config/animation.json's ``atoms``)."""
+    """A parametrised motion primitive of one part (config/animation.json's ``atoms``);
+    ``mirror`` names the degrees of freedom whose values change sign when a rendering draws
+    the mirror image (a glance left or right), ``callable`` False keeps it out of every
+    composition the brain may name (the idle layer's own)."""
 
     name: str
     part: PartName
@@ -76,17 +79,21 @@ class Atom:
     params: Mapping[str, Range]
     stroke: float = 0.5
     note: str = ""
+    mirror: tuple[str, ...] = ()
+    callable: bool = True
 
 
 @dataclass(frozen=True)
 class Step:
     """One atom in a composition: its stroke ``at_s`` from the sync point (negative: before),
-    the chance it plays, and its parameter ranges over the atom's own."""
+    the chance it plays, its parameter ranges over the atom's own, and its named parameters
+    (``"$name"`` of a face key, ``"$pose"`` of a pose key), one drawn from each list."""
 
     atom: str
     at_s: Range = Range(0.0, 0.0)
     p: float = 1.0
     params: Mapping[str, Range] = field(default_factory=dict)
+    choices: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
