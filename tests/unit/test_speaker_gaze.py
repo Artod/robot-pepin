@@ -324,6 +324,21 @@ def test_without_a_face_the_head_stays_on_the_voice_and_does_not_smile() -> None
     assert r.machine.phase == "track" and len(r.face.calls) == 1
 
 
+def test_the_face_picked_as_the_speaker_s_is_told_to_the_listener() -> None:
+    """Person recognition hears every frame's speaker face; a listener that breaks is logged."""
+    heard: list[tuple[FaceFrame, Any]] = []
+    r = rig(frames=[frame(face(4.0)), frame(), frame(face(1.0))])
+    r.machine.on_face = lambda f, s: heard.append((f, s))
+    wake(r, 240)
+    r.machine.tick(1.6)
+    run(r, until=3.7, start=1.6)
+    assert [s.pan_deg for _, s in heard] == [4.0, 1.0]  # no face, nothing told
+    r.machine.on_face = lambda f, s: 1 / 0
+    r.finder.frames.append(frame(face(0.5)))
+    run(r, until=4.7, start=3.7)
+    assert r.machine.phase == "track"
+
+
 def test_a_smile_without_a_face_when_asked_for() -> None:
     r = rig(settings=SpeakerSettings(doa_map=MAP, seek_frames=1, smile_unseen=True), frames=[None])
     wake(r, 240)

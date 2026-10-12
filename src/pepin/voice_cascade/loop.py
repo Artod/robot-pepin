@@ -31,6 +31,12 @@ is dropped and printed. With a switchboard
 new brain is built and warmed, then takes over at the next turn (the conversation starts
 afresh with it); a new voice loads beside the one speaking and takes over at its next sentence.
 
+With person recognition on (:class:`pepin.voice_cascade.stages.SpeakerId`, its switch
+``people``), each utterance of a conversation (and the wake, once its name is read) is also
+measured for who said it while Whisper reads, and the tag line names the speaker
+(``[говорит: Саша; тише обычного]``, the prosody words against that person's own baseline);
+off, the tag line is the prosody one as before.
+
 The body hears the conversation through observers
 (:class:`pepin.expression.conversation.ConversationObserver`), told each moment on the event
 loop: the conversation opened, the person started and stopped speaking, a part of a reply went
@@ -74,6 +80,8 @@ from pepin.voice_cascade.stages import (
     Played,
     Prosody,
     Sentence,
+    Speaker,
+    SpeakerId,
     Tagger,
     ToolDone,
     ToolUse,
@@ -222,13 +230,15 @@ class CascadeLoop:
         observers: Sequence[ConversationObserver] = (),
         flags: Sequence[LiveFlag] = (),
         vocabulary: Vocabulary = EMPTY,
+        people: SpeakerId | None = None,
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
         brain); ``switchboard``: the brain and the voice may be switched while it runs;
         ``observers`` hear the conversation's moments, ``flags`` are switched by name;
         ``vocabulary``: the intents and faces a marker may name (any other bare name is a
-        voice style, a spelled-out unknown one is dropped)."""
+        voice style, a spelled-out unknown one is dropped); ``people``: who said each
+        utterance, named in the tag line while its switch is on."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         self.brain, self.speech = brain, speech
@@ -285,6 +295,8 @@ class CascadeLoop:
         self.observers: list[ConversationObserver] = list(observers)
         self.flags: dict[str, LiveFlag] = {flag.flag: flag for flag in flags}
         self.vocabulary = vocabulary
+        self.people = people
+        self._people = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people")
         speech.on_audio = self._on_audio
         speech.on_done = self._on_spoken
         speech.on_bill = self._on_bill
@@ -329,6 +341,7 @@ class CascadeLoop:
             stop_player.set()
             self._whisper.shutdown(wait=False)
             self._praat.shutdown(wait=False)
+            self._people.shutdown(wait=False)
 
     def quiet(self) -> bool:
         """Nothing in flight: no utterance being read, no reply, no queued input, no audio, no
@@ -596,6 +609,10 @@ class CascadeLoop:
             if tagger is not None
             else None
         )
+        people = self.people if self.people is not None and self.people.on else None
+        who: asyncio.Future[Callable[[str], Speaker]] | None = None
+        if people is not None and self.conversation is not None:
+            who = loop.run_in_executor(self._people, people.measure, segment.pcm, segment.ended_s)
         text = (await reading).strip()
         prosody: Prosody | None = await measuring if measuring is not None else None
         read_s = self.clock()
@@ -619,6 +636,10 @@ class CascadeLoop:
             append_line(day_dir(self.logs, self.wall()) / "cascade_heard.jsonl", row)
             if not woke or not self.open(segment.pcm):
                 return
+            if people is not None and who is None:  # idle: nobody is looked at before the name
+                who = loop.run_in_executor(
+                    self._people, people.measure, segment.pcm, segment.ended_s
+                )
             self._tell("opened", heard_of(segment, text, noise))
         conversation = self.conversation
         assert conversation is not None
@@ -633,7 +654,20 @@ class CascadeLoop:
             self._resume("only noise followed")  # never cancelled, never asked again
             return
         conversation.last_heard_s = read_s
-        tag = tagger.line(prosody, text) if tagger is not None and prosody is not None else ""
+        if who is None:
+            tag = tagger.line(prosody, text) if tagger is not None and prosody is not None else ""
+        else:
+            speaker = await self._speaker(who, text)
+            key = speaker.key
+            body = (
+                tagger.describe(prosody, text, key)
+                if tagger is not None and prosody is not None and key is not None
+                else ""
+            )
+            tag = speaker.line(body)
+            conversation.log.event(
+                "speaker", self.clock(), head=speaker.head, **(speaker.log or {})
+            )
         timeline.mark("transcript", self.clock())
         print(f"heard> {tag + ' ' if tag else ''}{text}  ({whisper_ms} ms)", flush=True)
         if is_stop(text) and self.drives:
@@ -660,6 +694,16 @@ class CascadeLoop:
             self._hold(item)
             return
         self.inputs.put_nowait(item)
+
+    @staticmethod
+    async def _speaker(who: asyncio.Future[Callable[[str], Speaker]], text: str) -> Speaker:
+        """The utterance's speaker once its words are known; nobody when recognition broke
+        (logged: the voice goes on)."""
+        try:
+            return (await who)(text)
+        except Exception:
+            logger.exception("person recognition broke on an utterance")
+            return Speaker("", log={"error": "recognition broke"})
 
     # -- turns ---------------------------------------------------------------------------------
 

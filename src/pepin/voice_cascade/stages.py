@@ -1,7 +1,8 @@
 """The cascade's stages as small protocols, and what flows between them.
 
 Ears cut the mic into utterances (:class:`pepin.voice_cascade.ears.Ears`); a
-:class:`Transcriber` reads one; a :class:`Tagger` describes how it was said; a :class:`Brain`
+:class:`Transcriber` reads one; a :class:`Tagger` describes how it was said; a
+:class:`SpeakerId` says who said it; a :class:`Brain`
 streams the reply as sentences and tool calls; a :class:`Voice` turns each sentence into PCM as
 it is produced; the player (:class:`pepin.voice_cascade.player.Player`) paces it to the speaker.
 Each has a fake in :mod:`pepin.voice_cascade.fake`, so the whole loop runs in a test.
@@ -49,6 +50,44 @@ class Tagger(Protocol):
     def line(self, prosody: Prosody, text: str) -> str:
         """``[Артём: тише и медленнее обычного]`` against the running baseline, or "" when
         there is nothing to say yet; the utterance joins the baseline."""
+        ...
+
+    def describe(self, prosody: Prosody, text: str, key: str) -> str:
+        """The words alone (``тише и медленнее обычного``) against ``key``'s own baseline (a
+        recognised person's), "" while there is nothing to say; the utterance joins it."""
+        ...
+
+
+@dataclass(frozen=True)
+class Speaker:
+    """Who said an utterance, as person recognition names them: ``head`` is the tag line's
+    speaker part (``говорит: Саша``, "" for nobody), ``key`` keys their prosody baseline
+    (None: nobody known, so no prosody words), ``log`` what the conversation log keeps."""
+
+    head: str
+    key: str | None = None
+    log: dict[str, Any] | None = None
+
+    def line(self, body: str) -> str:
+        """The tag line: ``[говорит: Саша; тише обычного]``, a part left out when empty, ""
+        when both are."""
+        parts = [part for part in (self.head, body) if part]
+        return f"[{'; '.join(parts)}]" if parts else ""
+
+
+class SpeakerId(Protocol):
+    """Person recognition (:mod:`pepin.people`): measured while Whisper reads, named once the
+    words are known, behind its live switch."""
+
+    @property
+    def on(self) -> bool:
+        """Whether recognition runs (its switch)."""
+        ...
+
+    def measure(self, pcm: bytes, end_s: float) -> Callable[[str], Speaker]:
+        """The voice and the face of one utterance (on a worker thread; ``end_s`` the laptop's
+        monotonic end of the speech); returns the naming step, called on the event loop with
+        the words, never for Whisper's noise line."""
         ...
 
 

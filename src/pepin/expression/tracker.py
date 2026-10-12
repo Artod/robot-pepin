@@ -52,7 +52,15 @@ from pepin.expression.head import IDLE_LOOK, SPEAKER
 from pepin.expression.markers import Part
 from pepin.expression.plan import BodyLimits, head_after, split
 from pepin.expression.policy import SpeakerPolicy, face_aim
-from pepin.expression.speaker import DoaMap, DoaSource, FaceFinder, GazeDoor, HeadView
+from pepin.expression.speaker import (
+    DoaMap,
+    DoaSource,
+    FaceFinder,
+    FaceFrame,
+    FaceSighting,
+    GazeDoor,
+    HeadView,
+)
 from pepin.gaze import Aim, Reach, Speed
 
 if TYPE_CHECKING:
@@ -71,6 +79,7 @@ FACE_SOURCE = "expression"  # the face's expressions of the body layer, at the h
 BLIND_RETRY_S = 0.1  # a frame refused for a blind head is tried again this soon
 SPOKE_KEPT = 8  # the robot's latest speaking spans kept to judge an utterance by
 Report = Callable[[str], None]
+FaceListener = Callable[[FaceFrame, FaceSighting], None]  # a frame and the speaker's face in it
 
 
 def say(line: str) -> None:
@@ -182,11 +191,14 @@ class SpeakerGaze:
         face: FaceChannel | None,
         reach: Reach,
         report: Report = say,
+        on_face: FaceListener | None = None,
     ) -> None:
-        """The seams it drives; ``doa`` None or ``finder`` None: no voice or no faces."""
+        """The seams it drives; ``doa`` None or ``finder`` None: no voice or no faces;
+        ``on_face`` hears every frame's face picked as the speaker's (person recognition)."""
         self.door, self.doa, self.finder = door, doa, finder
         self.wheels, self.face, self.reach = wheels, face, reach
         self.report = report
+        self.on_face = on_face
         self.settings = settings
         self.policy = self._policy(settings)
         self.phase: Phase = "idle"
@@ -436,6 +448,11 @@ class SpeakerGaze:
             self._missed()
             return
         self.counts["faces"] += 1
+        if self.on_face is not None and frame is not None:
+            try:
+                self.on_face(frame, face)
+            except Exception:  # a listener never stops the gaze
+                logger.exception("the speaker's face listener broke")
         target = self.reach.clamp(face_aim(view.head, face))
         off = target.off(self.aim if self.aim is not None else view.head)
         band = s.refine_deg if self.phase != "track" else s.deadband_deg
@@ -644,11 +661,19 @@ class SpeakerGazeWorker:
             return None
 
 
-def robot_gaze(host: str, doa: DoaSource, *, on: bool | None = None) -> SpeakerGazeWorker:
+def robot_gaze(
+    host: str,
+    doa: DoaSource,
+    *,
+    on: bool | None = None,
+    finder: SnapshotFinder | None = None,
+    on_face: FaceListener | None = None,
+) -> SpeakerGazeWorker:
     """The speaker gaze on the robot: the arbiter's door on this Mac, the board's camera and
     head server at ``host``, the array's directions from ``doa`` (the cascade's audio link), the
     wheels' stub; built, and the finder's model loaded, the first time its switch is on (config/
-    expression.json's ``flags.speaker_gaze`` at the start when ``on`` is None)."""
+    expression.json's ``flags.speaker_gaze`` at the start when ``on`` is None). ``finder``: one
+    shared with person recognition (else its own); ``on_face`` hears the speaker's faces."""
 
     def build(settings: SpeakerSettings) -> SpeakerGaze:
         from pepin.deployment import config_file
@@ -658,19 +683,21 @@ def robot_gaze(host: str, doa: DoaSource, *, on: bool | None = None) -> SpeakerG
         from pepin.head_link import HeadClient
         from pepin.neck import NeckConfig
 
-        finder: SnapshotFinder | None = None
-        try:
-            finder = board_finder(host)  # config reads only: the model loads on warm()
-        except (OSError, ValueError, KeyError) as exc:
-            say(f"no face finder ({exc}): the head turns to the voice only")
+        looks = finder
+        if looks is None:
+            try:
+                looks = board_finder(host)  # config reads only: the model loads on warm()
+            except (OSError, ValueError, KeyError) as exc:
+                say(f"no face finder ({exc}): the head turns to the voice only")
         return SpeakerGaze(
             settings,
             door=SpeakerDoor(aim_wait_s=settings.aim_wait_s),
             doa=doa,
-            finder=finder,
+            finder=looks,
             wheels=NoWheels(),
             face=HeadClient(host, source=FACE_SOURCE).start(),
             reach=Reach.of(NeckConfig.from_json(config_file("neck.json"))),
+            on_face=on_face,
         )
 
     return SpeakerGazeWorker(build, on=flag_default() if on is None else on)
