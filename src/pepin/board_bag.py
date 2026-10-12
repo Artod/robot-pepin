@@ -55,8 +55,10 @@ logger = logging.getLogger(__name__)
 # is 50 messages a second of the recorder's ~300, and a replay of the inputs through the same
 # ekf.yaml gives it back (measured: 15 % of the recorder's CPU). Not /tf: the board's own dynamic
 # edges are that output and /neck/state again, and subscribing would pull the laptop's map ->
-# odom across the WiFi for nothing. Not the camera: the laptop films it.
+# odom across the WiFi for nothing. Not the camera: the laptop films it. The arm's encoders ride
+# beside the neck's (/arm/joint_states: 5 Hz at rest, 50 while it moves).
 TOPICS: tuple[str, ...] = (
+    "/arm/joint_states",
     "/cmd_vel",
     "/imu/data_raw",
     "/neck/state",

@@ -977,8 +977,9 @@ the stack does (one zenoh session, opened once) and writes one uncompressed MCAP
 under `/root/pepin-ros/maps/board_rec/<UTC start>/`.
 
 - **What**: `/scan`, `/odom`, `/imu/data_raw`, `/odom_laser`, `/zupt`, `/tof/<n>` and
-  `/tof/<n>/scan`, `/neck/state`, `/tf_static`, and `/cmd_vel` and `/vo` as they arrived: every
-  input of the board's EKF, so its output replays from them. No `/tf` and no camera.
+  `/tof/<n>/scan`, `/neck/state`, `/arm/joint_states`, `/tf_static`, and `/cmd_vel` and `/vo` as
+  they arrived: every input of the board's EKF, so its output replays from them. No `/tf` and no
+  camera.
 - **The cap**: every 30 s the oldest minute files go while the directory holds more than 20 GB or
   the card has under 10 GB free; the file being written is never touched. 20 GB is ~38 h at the
   0.14 MB/s these topics measure.
