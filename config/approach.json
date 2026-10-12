@@ -1,0 +1,8 @@
+{
+  "_note": "The approach tool's numbers (pepin.tools.approach, pepin.stand_pose.Distances): written as config/knobs.json writes a knob (default, range, note), in a file of their own because the tools are no ROS node; read at every call, so an edit counts at the next request. A distance a person says replaces front_m or side_m for that request.",
+  "front_m": {"default": 0.8, "range": [0.5, 1.5], "note": "to, in front of, behind: metres from the target's point (a person's face, a thing's box) to base_link; base_link is 6 cm behind the bumper"},
+  "side_m": {"default": 0.7, "range": [0.5, 1.5], "note": "right_of, left_of, beside: metres from the target's point to base_link, sideways in the target's frame"},
+  "person_min_m": {"default": 0.6, "range": [0.5, 1.0], "note": "never nearer a person than this plus two sigma of the depth they were measured at (a spoken distance included)"},
+  "ring_deg": {"default": 30.0, "range": [10.0, 90.0], "note": "the two alternatives turn the stand point this far about the target either way, same distance, when the planner refuses the first"},
+  "head_moved_deg": {"default": 2.0, "range": [0.5, 10.0], "note": "a box of the last see() picture is refused when the head has turned more than this since: the box would point at something else"}
+}
