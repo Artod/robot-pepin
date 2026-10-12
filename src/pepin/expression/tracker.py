@@ -46,7 +46,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from pepin.expression.conversation import SPEAKER_GAZE, Heard
-from pepin.expression.doa import VoiceBearing, utterance_readings, voice_of
+from pepin.expression.doa import VoiceBearing, fit_doa_map, utterance_readings, voice_of
 from pepin.expression.executors import FaceChannel, WheelMove, Wheels
 from pepin.expression.head import IDLE_LOOK, SPEAKER
 from pepin.expression.markers import Part
@@ -119,12 +119,7 @@ class SpeakerSettings:
         """From config/expression.json's object; ``ValueError`` naming a value no run can use."""
         speaker = data.get("speaker", {})
         doa = speaker.get("doa", {})
-        front, sign = doa.get("front_deg"), doa.get("sign")
-        doa_map = None
-        if front is not None and sign is not None:
-            if int(sign) not in (-1, 1):
-                raise ValueError(f"speaker.doa.sign is +1 or -1, not {sign!r}")
-            doa_map = DoaMap(float(front) % 360.0, int(sign))
+        doa_map = doa_map_of(doa)
         d = cls()
         values: dict[str, Any] = {}
         for name, default in vars(d).items():
@@ -158,6 +153,25 @@ class SpeakerSettings:
     def load(cls, path: str | Path | None = None) -> SpeakerSettings:
         """Read config/expression.json (or ``path``)."""
         return cls.from_config(_read_config(path))
+
+
+def doa_map_of(doa: Mapping[str, Any]) -> DoaMap | None:
+    """``speaker.doa``'s map: interpolated between its four ``readings`` when all are measured,
+    else the offset of ``front_deg`` and ``sign``, else None (unmeasured)."""
+    readings = doa.get("readings") or {}
+    places = [readings.get(p) for p in ("front", "left", "behind", "right")]
+    known = [float(v) for v in places if v is not None]
+    if len(known) == len(places):
+        fit = fit_doa_map(*known)
+        if fit.refusal is not None:
+            raise ValueError(f"speaker.doa.readings: {fit.refusal}")
+        return fit.doa_map
+    front, sign = doa.get("front_deg"), doa.get("sign")
+    if front is None or sign is None:
+        return None
+    if int(sign) not in (-1, 1):
+        raise ValueError(f"speaker.doa.sign is +1 or -1, not {sign!r}")
+    return DoaMap(float(front) % 360.0, int(sign))
 
 
 def flag_default(path: str | Path | None = None) -> bool:

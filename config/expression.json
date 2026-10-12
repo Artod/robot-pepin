@@ -60,11 +60,13 @@
   },
   "speaker": {
     "doa": {
-      "front_deg": null,
-      "sign": null,
+      "front_deg": 170.0,
+      "sign": -1,
+      "readings": {"front": 170.0, "left": 106.0, "behind": 343.0, "right": 278.0},
       "window_s": 1.0,
       "min_speech": 2,
-      "note": "The XVF3800 sits on the cart's front, not on the head. front_deg: the array's angle (0..359, 0 toward its USB-C side) of a voice straight ahead of the cart; sign: +1 when that angle grows toward the cart's left, -1 toward its right. Both null until measured (ros/tools/doa_calibrate.py --write: one phrase three times each at 1.5 m in front, left, behind and right; it writes the two numbers with the date, and refuses four readings that are not 90 +- 15 deg apart); null orients by faces alone (the head tilts to seek_tilt_deg where it points and looks for a face). window_s: the speech-flagged readings of the utterance's last window_s (the utterance's end mapped onto the board's clock by the newest reading) are averaged (circular mean) into its bearing; fewer than min_speech of them (about 10 a second arrive) and the voice has no bearing."
+      "measured": "MEASURED 2026-10-12 (ros/tools/doa_calibrate.py): front 170, left 106, behind 343, right 278 deg; quarter-turn misses +0, -26, +7, -18",
+      "note": "The XVF3800 sits on the cart's front-left (where the left arm would be), not on the head. readings: the array's angle (0..359, 0 toward its USB-C side) of a voice 1.5 m in front of, left of, behind and right of the cart; the bearing is interpolated between them (front, left, behind, right are 0, +90, 180, -90 deg exactly), which absorbs the off-centre array's uneven quarters. front_deg and sign (+1 when the angle grows toward the cart's left, -1 toward its right) alone turn the angle by an offset when the four are not all known. ros/tools/doa_calibrate.py --write measures and writes all of it (one phrase three times at each place; it refuses a reading nearer another quarter than its own); front_deg and sign null and no readings: the gaze orients by faces alone (the head tilts to seek_tilt_deg where it points and looks for a face). window_s: the speech-flagged readings of the utterance's last window_s (the utterance's end mapped onto the board's clock by the newest reading) are averaged (circular mean) into its bearing; fewer than min_speech of them (about 10 a second arrive) and the voice has no bearing."
     },
     "comfort_pan_deg": 60.0,
     "in_frame_deg": 25.0,

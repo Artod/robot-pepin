@@ -70,6 +70,7 @@ def test_the_fit_is_written_with_its_date_and_the_rest_of_the_file_stays(tmp_pat
     after = json.loads(path.read_text())
     doa = after["speaker"]["doa"]
     assert (doa["front_deg"], doa["sign"]) == (182.0, 1) and doa["measured"].startswith("MEASURED")
+    assert doa["readings"] == {"front": 182.0, "left": 271.0, "behind": 3.0, "right": 92.0}
     assert "front 182, left 271, behind 3, right 92" in doa["measured"]
     for key in ("flags", "timing", "parts"):
         assert after[key] == before[key]

@@ -87,15 +87,41 @@ def test_the_utterance_s_window_is_mapped_onto_the_board_s_clock_by_the_newest_r
     assert utterance_readings(FakeDoa(), heard, now=3.3, window_s=1.0) == []
 
 
-def test_the_calibration_gives_the_front_and_the_sign_and_refuses_a_skewed_circle() -> None:
+def test_the_calibration_gives_the_front_the_sign_and_the_quarters_and_refuses_a_lost_one() -> None:
     left_up = fit_doa_map(front=180.0, left=272.0, back=355.0, right=88.0)
-    assert left_up.doa_map == DoaMap(180.0, 1) and left_up.refusal is None
+    assert left_up.doa_map == DoaMap(180.0, 1, (272.0, 355.0, 88.0)) and left_up.refusal is None
     assert left_up.misses_deg[1] == pytest.approx(2.0)
     right_up = fit_doa_map(front=10.0, left=280.0, back=190.0, right=100.0)
-    assert right_up.doa_map == DoaMap(10.0, -1) and right_up.refusal is None
+    assert right_up.doa_map.sign == -1 and right_up.refusal is None
     skewed = fit_doa_map(front=180.0, left=230.0, back=0.0, right=90.0)
-    assert skewed.refusal is not None and "40 deg off" in skewed.refusal
-    assert "REFUSED" in skewed.text() and "front_deg 180, sign +1" in left_up.text()
+    assert skewed.refusal is None, "40 deg off: an uneven quarter the interpolation absorbs"
+    lost = fit_doa_map(front=180.0, left=220.0, back=0.0, right=90.0)
+    assert lost.refusal is not None and "50 deg off" in lost.refusal, "nearer the front than left"
+    assert "REFUSED" in lost.text() and "front_deg 180, sign +1" in left_up.text()
+    assert fit_doa_map(180.0, 270.0, 0.0, 90.0, tol_deg=60.0).refusal is None
+    assert fit_doa_map(180.0, 300.0, 250.0, 90.0, tol_deg=90.0).refusal is not None, "out of turn"
+
+
+TODAY = fit_doa_map(front=170.0, left=106.0, back=343.0, right=278.0)  # 2026-10-12, off-centre
+
+
+def test_the_off_centre_array_s_four_readings_are_its_quarter_turns_and_between_interpolates() -> (
+    None
+):
+    """The array at the cart's front-left read 170/106/343/278: misses of +0, -26, +7, -18 deg
+    under an offset and a sign; the interpolated map puts each on its quarter exactly."""
+    m = TODAY.doa_map
+    assert TODAY.refusal is None and m.quarters == (106.0, 343.0, 278.0)
+    assert [round(v) for v in TODAY.misses_deg] == [0, -26, 7, -18]
+    assert [bearing_deg(d, m) for d in (170.0, 106.0, 343.0, 278.0)] == [0.0, 90.0, 180.0, -90.0]
+    assert bearing_deg(138.0, m) == pytest.approx(45.0), "half way from the front to the left"
+    assert bearing_deg(44.5, m) == pytest.approx(135.0), "half way from the left to behind"
+    assert bearing_deg(310.5, m) == pytest.approx(-135.0)
+    assert bearing_deg(224.0, m) == pytest.approx(-45.0)
+    # the live run's voices: behind-left read 82 (+88 by the offset; the face was at +111)
+    assert bearing_deg(82.0, m) == pytest.approx(107.6, abs=0.1)
+    assert bearing_deg(82.0, DoaMap(170.0, -1)) == pytest.approx(88.0)
+    assert bearing_deg(246.0, m) == pytest.approx(-63.3, abs=0.1), "the quiet one: -76 before"
 
 
 # ---- the head and the wheels ----------
@@ -499,16 +525,23 @@ def test_a_minute_of_tracking_costs_sixty_frames_and_ninety_calls_to_the_door() 
 
 
 # ---- the knobs and the switch ----------
-def test_the_shipped_knobs_load_off_and_unmeasured() -> None:
+def test_the_shipped_knobs_load_off_and_measured_on_the_four_readings() -> None:
     settings = SpeakerSettings.load(REPO / "config/expression.json")
-    assert settings.doa_map is None and settings.ttl_s == 6.0 and settings.renew_s == 2.0
+    assert settings.doa_map == TODAY.doa_map and settings.ttl_s == 6.0 and settings.renew_s == 2.0
     assert settings.body.max_turn_deg == 30.0 and settings.min_speech == 2
     assert settings.refine_deg == 2.0 and settings.smile_unseen is False
     assert flag_default(REPO / "config/expression.json") is False
     measured = SpeakerSettings.from_config({"speaker": {"doa": {"front_deg": 400, "sign": -1}}})
-    assert measured.doa_map == DoaMap(40.0, -1)
+    assert measured.doa_map == DoaMap(40.0, -1), "the front alone: the offset and the sign"
+    part = {"front_deg": 170, "sign": -1, "readings": {"front": 170, "left": 106}}
+    assert SpeakerSettings.from_config({"speaker": {"doa": part}}).doa_map == DoaMap(170.0, -1)
+    unmeasured = SpeakerSettings.from_config({"speaker": {"doa": {"front_deg": None}}})
+    assert unmeasured.doa_map is None
     with pytest.raises(ValueError, match="sign"):
         SpeakerSettings.from_config({"speaker": {"doa": {"front_deg": 0, "sign": 2}}})
+    lost = {"readings": {"front": 180, "left": 220, "behind": 0, "right": 90}}
+    with pytest.raises(ValueError, match="readings"):
+        SpeakerSettings.from_config({"speaker": {"doa": lost}})
     with pytest.raises(ValueError, match="renew_s"):
         SpeakerSettings.from_config({"speaker": {"ttl_s": 2.0, "renew_s": 2.0}})
 
