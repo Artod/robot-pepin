@@ -47,6 +47,10 @@ class Register:
 
 
 REGISTERS = {
+    # The calibrated range in EEPROM (lerobot writes its range_min/range_max here): a goal
+    # outside it is not followed, and the arm's angles are counted from its middle.
+    "Min_Position_Limit": Register(9, 2),
+    "Max_Position_Limit": Register(11, 2),
     "Operating_Mode": Register(33, 1),
     "Torque_Enable": Register(40, 1),
     # A position move's ramp, 100 ticks/s^2 a unit (0..254; 0 is the servo's own maximum).
@@ -56,6 +60,9 @@ REGISTERS = {
     "Goal_Time": Register(44, 2),  # a timed move; 0 leaves the speed below in charge
     # In position mode the profile's top speed in ticks/s; in velocity mode the wheel's command.
     "Goal_Velocity": Register(46, 2, sign_magnitude=True),
+    # The torque the servo may use, in RAM, 0..1000 of its maximum (the arm's: a knob while it
+    # gestures, written with every energising block).
+    "Torque_Limit": Register(48, 2),
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
     "Present_Temperature": Register(63, 1),  # degrees C; the servo cuts out by itself at 70

@@ -138,10 +138,12 @@ def check_knots(
     max_speed: float,
     max_acc: float,
     names: Sequence[str] = (),
+    slack: float = CAP_SLACK,
 ) -> str | None:
     """Why a trajectory may not be played, None when it may: a knot outside a joint's limits,
     times that do not grow, a step faster than ``max_speed`` or a change of speed between two
-    steps faster than ``max_acc`` (finite differences, deg/s and deg/s^2). Never clamps."""
+    steps faster than ``max_acc`` (finite differences, deg/s and deg/s^2; ``slack`` times the
+    caps forgiven). Never clamps."""
 
     def name(j: int) -> str:
         return names[j] if j < len(names) else f"joint {j}"
@@ -162,7 +164,7 @@ def check_knots(
             return f"knot {k}: its time {t:.3f} s does not follow {t0:.3f} s"
         speeds = [(b - a) / dt for a, b in zip(d0, deg, strict=True)]
         for j, v in enumerate(speeds):
-            if abs(v) > max_speed * CAP_SLACK:
+            if abs(v) > max_speed * slack:
                 return (
                     f"knot {k} at {t:.2f} s: {name(j)} at {abs(v):.0f} deg/s, over {max_speed:.0f}"
                 )
@@ -170,7 +172,7 @@ def check_knots(
             dt_mid = (t - knots[k - 2][0]) / 2.0
             for j, (v0, v1) in enumerate(zip(previous, speeds, strict=True)):
                 acc = abs(v1 - v0) / dt_mid
-                if acc > max_acc * CAP_SLACK:
+                if acc > max_acc * slack:
                     return (
                         f"knot {k} at {t:.2f} s: {name(j)} at {acc:.0f} deg/s^2, over {max_acc:.0f}"
                     )

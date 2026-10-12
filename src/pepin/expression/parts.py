@@ -86,7 +86,8 @@ class ArmPart:
             return (
                 f"{clip.duration_s:.1f} s is longer than the board's {motion.max_duration_s:.0f} s"
             )
-        knots = sample(clip, self.base, JOINTS, self.knot_hz)
+        # a clip stretched by 1 / speed_scale needs no more knots than at full speed
+        knots = sample(clip, self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
         refusal = check_knots(
             knots,
             motion.limits(),
@@ -99,7 +100,7 @@ class ArmPart:
         return Trajectory(
             f"{name or 'gesture'}-{next(self._ids)}",
             self.source,
-            tuple(Knot(t, deg) for t, deg in knots),
+            tuple(Knot(round(t, 3), tuple(round(d, 2) for d in deg)) for t, deg in knots),
             "rest",
             0.0,
             name,

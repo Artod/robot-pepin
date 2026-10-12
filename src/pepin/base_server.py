@@ -33,6 +33,13 @@ moves answered on arrival; ``neck_jog`` walks the head at a rate for the game-mo
 (:mod:`pepin.teleop`) behind a half-second deadman of its own. The speed, ramp and lease are
 config/neck.json's ``motion`` block, live through ``neck_motion``.
 
+The SO-101 arm (ids 1-6) rides the same read as another group of the same kind
+(:class:`Riders`: every tick while energised, a few times a second at rest) and is played by
+:class:`pepin.arm_driver.ArmDriver` after the neck's step: ``arm_trajectory`` (a whole gesture,
+refused while the wheels are commanded to move; a twist during one sends the arm to rest),
+``arm_rest``, ``arm_halt``, ``arm_read``. Its caps, limits and rest pose are config/arm.json's
+``motion`` block (``--arm-config``).
+
 Run on the board::
 
     python -m pepin.base_server --config /opt/pepin/config/base.json
@@ -49,13 +56,16 @@ import math
 import signal
 import threading
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from typing import Any
 
+from pepin.arm_driver import ArmDriver, answer_line, trajectory_from
+from pepin.arm_motion import ArmMotion, load_arm_motion
 from pepin.base import LEFT, RIGHT, BusWatchdog, DiffDriveBase, with_suppressed_timeout
 from pepin.base_link import BASE_PORT, DEADMAN_S, STATE_HZ
 from pepin.bus import MotorBus, verify_motors
+from pepin.expression.trajectory import JOINTS, ArmAnswer
 from pepin.feetech import FeetechTcpClient
 from pepin.geometry import BaseConfig
 from pepin.kinematics import STOP, Twist
@@ -110,67 +120,80 @@ def jog_ticks_s(deg_s: float) -> float:
     return math.radians(deg_s) / RAD_PER_TICK
 
 
-class NeckEncoders:
-    """The neck's encoders as they ride in the wheels' read of every tick.
+class Riders:
+    """A group of servos whose encoders ride in the wheels' read of every tick (the neck's two,
+    the arm's six).
 
-    Both servos are asked in the same sync_read as the wheels, after them, and waited for only
-    ``window_s`` past the wheels' replies (pepin.feetech's optional ids): a dead head costs the
-    odometry that window and never a retry. ``silent_ticks`` reads in a row without both answers
-    take the pair out of the read; it rides along again every ``retry_s`` until it answers.
-    :meth:`riders` says whom to add to this tick's read, :meth:`heard` takes the answer, and
-    :attr:`ticks` is this tick's reading — the one the state line carries, under the stamp of
-    the same read as the odometry.
+    They are asked in the same sync_read as the wheels, after them, and waited for only
+    ``window_s`` past the wheels' replies (pepin.feetech's optional ids): a dead group costs the
+    odometry that window and never a retry. ``silent_ticks`` reads in a row without every answer
+    take the group out of the read; it rides along again every ``retry_s`` until it answers.
+    With ``every_s`` above zero the group rides at most that often while it is not ``eager``
+    (an arm resting with its torque off). :meth:`riders` says whom to add to this tick's read,
+    :meth:`heard` takes the answer, and :attr:`ticks` is this tick's reading, in ``names``'
+    order, under the stamp of the same read as the odometry.
     """
 
     def __init__(
         self,
-        names: tuple[str, str] = (PAN, TILT),
+        names: tuple[str, ...],
         *,
+        what: str = "servos",
         window_s: float = 0.003,
         silent_ticks: int = 3,
         retry_s: float = 5.0,
+        every_s: float = 0.0,
     ) -> None:
-        """``names`` are the (pan, tilt) motor names on the bus."""
+        """``names`` are the motor names on the bus; ``what`` names the group in the log."""
         self.names = names
+        self.what = what
         self.window_s = window_s
         self._silent_ticks = silent_ticks
         self._retry_s = retry_s
+        self.every_s = every_s
+        self.eager = True  # ride every tick (an idle group may ride every every_s)
+        self._rode_at = float("-inf")
         self._asked = True  # in every tick's read (until silent_ticks misses)
         self._missed = 0
         self._dropped_at = float("-inf")
         self._appeared = False
-        self.ticks: tuple[int, int] | None = None  # this tick's (pan, tilt), None: not heard
-        self._last: tuple[int, int] | None = None
+        self.ticks: tuple[int, ...] | None = None  # this tick's reading, None: not heard
+        self._last: tuple[int, ...] | None = None
         self._last_at = 0.0
         self._read_ms = 0.0
         self.error: str | None = None
 
     @property
     def live(self) -> bool:
-        """The pair has answered and is in the read: a write reaches servos that listen."""
+        """The group has answered and is in the read: a write reaches servos that listen."""
         return self._asked and self._last is not None
 
     def riders(self, now: float) -> list[str]:
-        """The neck's names to add to this tick's read: always while the pair answers, once a
-        ``retry_s`` after it fell silent, otherwise none."""
-        if self._asked or now - self._dropped_at >= self._retry_s:
+        """The names to add to this tick's read: while the group answers (every ``every_s``
+        when it is not eager), once a ``retry_s`` after it fell silent, otherwise none."""
+        if self._asked:
+            if not self.eager and self.every_s > 0 and now - self._rode_at < self.every_s:
+                return []
+            self._rode_at = now
+            return list(self.names)
+        if now - self._dropped_at >= self._retry_s:
             return list(self.names)
         return []
 
     def heard(self, now: float, raw: Mapping[str, int] | None, asked: bool, read_ms: float) -> None:
         """This tick's read: ``raw`` its answer, None when the wheels' read itself failed (then
-        nothing is learned about the neck); ``asked`` whether the neck rode in it."""
+        nothing is learned about the group); ``asked`` whether the group rode in it."""
         self.ticks = None
         if raw is None or not asked:
             return
         self._read_ms = read_ms
-        pan, tilt = raw.get(self.names[0]), raw.get(self.names[1])
-        if pan is not None and tilt is not None:
+        values = [raw.get(name) for name in self.names]
+        if all(v is not None for v in values):
             if not self.live:
                 self._appeared = True
                 if self._last is not None:
-                    logger.info("neck servos answer again: back in the tick's read")
-            self.ticks = (int(pan), int(tilt))
+                    logger.info("%s answer again: back in the tick's read", self.what)
+            self.ticks = tuple(int(v) for v in values if v is not None)
             self._last, self._last_at = self.ticks, now
             self._asked, self._missed, self.error = True, 0, None
             return
@@ -182,22 +205,46 @@ class NeckEncoders:
             self._asked, self._dropped_at = False, now
             self.error = f"no reply from {silent} in {self._missed} reads"
             logger.warning(
-                "neck servos %s silent for %d reads: out of the tick's read, asked again every"
-                " %.0f s",
+                "%s %s silent for %d reads: out of the tick's read, asked again every %.0f s",
+                self.what,
                 silent,
                 self._missed,
                 self._retry_s,
             )
 
     def take_appeared(self) -> bool:
-        """Whether the pair answered for the first time, or again after falling silent, since
+        """Whether the group answered for the first time, or again after falling silent, since
         the last call: their operating mode must be checked, their registers are unknown."""
         appeared, self._appeared = self._appeared, False
         return appeared
 
-    def reading(self) -> tuple[int, int] | None:
-        """The newest (pan, tilt) while the pair is live: at most ``silent_ticks`` reads old."""
+    def reading(self) -> tuple[int, ...] | None:
+        """The newest reading while the group is live: at most ``silent_ticks`` reads old."""
         return self._last if self.live else None
+
+    def age_s(self, now: float) -> float:
+        """Seconds since the newest reading (infinite before any)."""
+        return now - self._last_at if self._last is not None else float("inf")
+
+
+class NeckEncoders(Riders):
+    """The neck's two encoders (pan, tilt) as they ride in the wheels' read of every tick; its
+    ticks go out in every state line that heard them, and the ``neck`` command is answered from
+    the newest reading."""
+
+    def __init__(
+        self,
+        names: tuple[str, str] = (PAN, TILT),
+        *,
+        window_s: float = 0.003,
+        silent_ticks: int = 3,
+        retry_s: float = 5.0,
+    ) -> None:
+        """``names`` are the (pan, tilt) motor names on the bus."""
+        super().__init__(
+            names, what="neck servos", window_s=window_s, silent_ticks=silent_ticks,
+            retry_s=retry_s,
+        )  # fmt: skip
 
     def state_fields(self) -> dict[str, int]:
         """The state line's neck fields: this tick's ticks, or nothing when it did not hear them."""
@@ -216,6 +263,29 @@ class NeckEncoders:
         if not self.live:
             reply["error"] = self.error or "the neck servos have not answered yet"
         return reply
+
+
+def read_group(
+    bus: MotorBus, register: str, names: Sequence[str], what: str
+) -> dict[str, int] | None:
+    """One register of every servo of a group in one round trip, bounded by
+    ``MODE_CHECK_WINDOW_S`` (each servo optional, so a silent one costs that window and never a
+    retry); None, logged as ``what``, when the link failed or one of them did not answer."""
+    try:
+        values = bus.sync_read(
+            register,
+            [],
+            normalize=False,
+            optional=list(names),
+            optional_window_s=MODE_CHECK_WINDOW_S,
+        )
+    except (TimeoutError, OSError) as exc:
+        logger.warning("%s unread: %s", what, exc)
+        return None
+    if len(values) < len(names):
+        logger.warning("%s unread: only %s answered", what, sorted(values))
+        return None
+    return values
 
 
 def neck_error(text: str) -> dict[str, Any]:
@@ -568,7 +638,7 @@ class NeckMover:
                 )
         return None
 
-    def _move_time(self, targets: tuple[int, int], here: tuple[int, int] | None) -> float:
+    def _move_time(self, targets: tuple[int, int], here: tuple[int, ...] | None) -> float:
         """How long a move is given: half again the time its longer axis needs at the motion's
         top speed, plus a second, and never under ``NECK_MOVE_TIMEOUT_S``."""
         if here is None:
@@ -725,19 +795,8 @@ class NeckMover:
         retried within the tick: a pair that does not answer is asked again ``retry_s`` later."""
         self._mode_asked_at = now
         names = list(self._encoders.names)
-        try:
-            modes = self._bus.sync_read(
-                "Operating_Mode",
-                [],
-                normalize=False,
-                optional=names,
-                optional_window_s=MODE_CHECK_WINDOW_S,
-            )
-        except (TimeoutError, OSError) as exc:
-            logger.warning("neck operating mode unread: %s", exc)
-            return
-        if len(modes) < len(names):
-            logger.warning("neck operating mode unread: only %s answered", sorted(modes))
+        modes = read_group(self._bus, "Operating_Mode", names, "neck operating mode")
+        if modes is None:
             return
         wrong = {name: mode for name, mode in modes.items() if mode != POSITION_MODE}
         self._mode_ok = not wrong
@@ -801,11 +860,14 @@ class BaseServerCore:
         latency: LatencyTracker | None = None,
         neck: NeckEncoders | None = None,
         mover: NeckMover | None = None,
+        arm: ArmDriver | None = None,
         clock: Callable[[], float] | None = None,
     ) -> None:
         """``servo_names``: the roster :meth:`command` pings; ``latency`` feeds ``bus_p95_ms``;
         ``neck`` rides the tick's encoder read and answers the ``neck`` command, ``mover`` the
-        commands that move the head (None for either: those commands answer an error);
+        commands that move the head (None for either: those commands answer an error); ``arm``
+        plays the arm's trajectories, its encoders riding the same read (None: the ``arm_*``
+        commands answer an error);
         ``clock`` (the tick's own, time.monotonic on the board) stamps each state line with the
         middle of its encoder read, None with the time the line is asked for.
 
@@ -825,6 +887,8 @@ class BaseServerCore:
         self._latency = latency
         self._neck = neck
         self._mover = mover
+        self._arm_driver = arm
+        self._groups: list[Riders] = [g for g in (neck, arm.encoders if arm else None) if g]
         self._watchdog = BusWatchdog()
         self.twist = STOP
         self.armed = False
@@ -906,50 +970,60 @@ class BaseServerCore:
             return self._max_wheel_speed(message)
         elif cmd == "registers":
             return self._registers(message)
+        elif cmd == "arm_trajectory":
+            return self._arm_trajectory(message, now)
+        elif cmd in ("arm_rest", "arm_halt", "arm_read"):
+            return self._arm_command(cmd, now)
         else:
             logger.warning("unknown command %r", message)
         return None
 
     def tick(self, now: float) -> None:
-        """One control period: the encoders (wheels and neck in one read) -> odometry, the
-        deadman and the idle disarm, and then the neck's step and its one write, if any — the
-        wheels first, always.
+        """One control period: the encoders (wheels, neck and arm in one read) -> odometry, the
+        deadman and the idle disarm, and then the neck's and the arm's steps and their one write
+        each, if any — the wheels first, always.
 
         Raises ``RuntimeError`` when the servos have been silent for the
         watchdog's give-up time: the service exits and systemd restarts it.
         """
         self._tick_wheels(now)
         self._step_neck(now)
+        if self._arm_driver is not None:
+            self._arm_driver.step(now, self.moving)
 
     def take_replies(self) -> list[dict[str, Any]]:
-        """Answers that outlived the command that asked for them (a finished neck move), and
-        empties the list; :func:`serve` broadcasts them — the client that asked is only one of
-        the readers, and by then it may be gone."""
-        return self._mover.take_replies() if self._mover is not None else []
+        """Answers that outlived the command that asked for them (a finished neck move, an arm
+        trajectory done, preempted or halted), and empties the list; :func:`serve` broadcasts
+        them — the client that asked is only one of the readers, and by then it may be gone."""
+        replies = self._mover.take_replies() if self._mover is not None else []
+        if self._arm_driver is not None:
+            replies += [answer_line(a) for a in self._arm_driver.take_answers()]
+        return replies
 
     def _read_encoders(self, riders: list[str]) -> dict[str, int]:
-        """One sync_read of Present_Position: both wheels, and ``riders`` (the neck) after them
-        as optional ids that only the window of :class:`NeckEncoders` is spent waiting for."""
-        if not riders or self._neck is None:
+        """One sync_read of Present_Position: both wheels, and ``riders`` (the neck, the arm)
+        after them as optional ids that only the longest group's window is spent waiting for."""
+        if not riders or not self._groups:
             return self._bus.sync_read("Present_Position", [LEFT, RIGHT], normalize=False)
         return self._bus.sync_read(
             "Present_Position",
             [LEFT, RIGHT],
             normalize=False,
             optional=riders,
-            optional_window_s=self._neck.window_s,
+            optional_window_s=max(group.window_s for group in self._groups),
         )
 
     def _tick_wheels(self, now: float) -> None:
         before = self._clock() if self._clock is not None else now
-        riders = self._neck.riders(now) if self._neck is not None else []
+        asked = [(group, group.riders(now)) for group in self._groups]
+        riders = [name for _, names in asked for name in names]
         started = time.perf_counter()
         try:
             raw = self._read_encoders(riders)
             travel = self._base.wheel_travel(raw)
         except TimeoutError as exc:
-            if self._neck is not None:
-                self._neck.heard(now, None, bool(riders), 0.0)
+            for group, names in asked:
+                group.heard(now, None, bool(names), 0.0)
             self._read_at = now
             verdict = self._watchdog.failed(now)
             self.bus_ok = False
@@ -963,9 +1037,9 @@ class BaseServerCore:
                 ) from exc
             return
         self._read_at = (before + self._clock()) / 2.0 if self._clock is not None else now
-        if self._neck is not None:
-            read_ms = (time.perf_counter() - started) * 1000.0
-            self._neck.heard(now, raw, bool(riders), read_ms)
+        read_ms = (time.perf_counter() - started) * 1000.0
+        for group, names in asked:
+            group.heard(now, raw, bool(names), read_ms)
         if self._watchdog.recovered(now) is not None:
             self._base.reprime()  # an unseen half turn must not alias into a jump
             travel = (0.0, 0.0)
@@ -1025,22 +1099,28 @@ class BaseServerCore:
         # /neck/state and base_link -> camera_link. Absent when the neck did not answer it.
         if self._neck is not None:
             message.update(self._neck.state_fields())
+        # The arm's angles of the same read and its motion (absent when the read left it out).
+        arm = self._arm_driver.state_fields(stamp) if self._arm_driver is not None else None
+        if arm is not None:
+            message["arm"] = arm
         self._acc = [0.0, 0.0]
         # The servos' temperature, read at most every 5 s and only while the bus answers: the
         # speed cap was raised to what the servos can do (2026-09-30), the neck holds its torque
         # for as long as a lease lasts, and the servo's own cut-out is 70 C. None until the first
-        # read; the neck rides along as optional ids, as in the tick's read.
+        # read; the neck and an answering arm ride along as optional ids, as in the tick's read.
         if self.bus_ok and now - self._temperature_at >= 5.0:
             self._temperature_at = now
             riders = self._neck.riders(now) if self._neck is not None else []
+            if self._arm_driver is not None and self._arm_driver.encoders.live:
+                riders += list(self._arm_driver.encoders.names)
             try:
-                if riders and self._neck is not None:
+                if riders:
                     raw = self._bus.sync_read(
                         "Present_Temperature",
                         [LEFT, RIGHT],
                         normalize=False,
                         optional=riders,
-                        optional_window_s=self._neck.window_s,
+                        optional_window_s=max(group.window_s for group in self._groups),
                     )
                 else:
                     raw = self._bus.sync_read("Present_Temperature", [LEFT, RIGHT], normalize=False)
@@ -1060,13 +1140,45 @@ class BaseServerCore:
         return self._p95_ms
 
     def release(self) -> None:
-        """Stop and free the wheels, and the neck with them (shutdown)."""
+        """Stop and free the wheels, and the neck and the arm with them (shutdown)."""
         with_suppressed_timeout(lambda: self._apply(STOP))
         if self.armed:
             with_suppressed_timeout(lambda: self._disarm("the last client left"))
         if self._mover is not None:
             # A neck left holding would stay energised with nobody left to release it.
             with_suppressed_timeout(self._mover.release)
+        if self._arm_driver is not None:
+            with_suppressed_timeout(self._arm_driver.release)
+
+    def _arm_trajectory(self, message: dict[str, Any], now: float) -> dict[str, Any]:
+        """Hand one ``arm_trajectory`` to the arm: refused while the wheels are commanded to
+        move, malformed, or as the driver judges it; ``accepted`` otherwise (its end comes
+        through :meth:`take_replies`)."""
+        trajectory_id = str(message.get("id", ""))
+        if self._arm_driver is None:
+            return answer_line(ArmAnswer(trajectory_id, "refused", "no arm on this base server"))
+        if self.moving:
+            refusal = "the wheels are commanded to move"
+            return answer_line(ArmAnswer(trajectory_id, "refused", refusal))
+        try:
+            trajectory = trajectory_from(message)
+        except ValueError as exc:
+            return answer_line(ArmAnswer(trajectory_id, "refused", f"malformed: {exc}"))
+        refused = self._arm_driver.trajectory(trajectory, now)
+        return answer_line(refused or ArmAnswer(trajectory.id, "accepted"))
+
+    def _arm_command(self, cmd: str, now: float) -> dict[str, Any]:
+        """``arm_rest``, ``arm_halt`` (answered with the phase they leave the arm in) and
+        ``arm_read`` (the newest reading, no bus traffic of its own)."""
+        if self._arm_driver is None:
+            return {"type": cmd, "error": "no arm on this base server"}
+        if cmd == "arm_read":
+            return self._arm_driver.read_reply(now)
+        if cmd == "arm_rest":
+            self._arm_driver.rest(now)
+        else:
+            self._arm_driver.halt(now)
+        return {"type": cmd, "phase": self._arm_driver.status(now).phase}
 
     def _max_wheel_speed(self, message: dict[str, Any]) -> dict[str, Any]:
         """The ``max_wheel_speed`` request: the wheel ceiling in force, set first when the message
@@ -1290,6 +1402,12 @@ def main() -> None:
         help="the neck (config/neck.json): the ids read with the wheels, the limits and the"
         " motion the neck commands obey; absent, those commands answer an error",
     )
+    parser.add_argument(
+        "--arm-config",
+        default="/opt/pepin/config/arm.json",
+        help="the arm (config/arm.json's motion block): its ids, rest pose, limits and caps;"
+        " absent, the arm_* commands answer an error and the arm is never read or written",
+    )
     args = parser.parse_args()
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname).1s %(name)s: %(message)s"
@@ -1315,8 +1433,10 @@ def main() -> None:
     if bus is None:
         return  # stopped before the bus ever answered
     neck_cfg = load_neck_config(args.neck_config) if neck_ids else None
+    arm_motion = load_arm_config(args.arm_config)
     with bus:
         neck, mover = neck_parts(bus, neck_cfg) if neck_ids else (None, None)
+        arm = arm_part(bus, arm_motion, motors) if arm_motion is not None else None
         core = BaseServerCore(
             bus,
             config,
@@ -1324,6 +1444,7 @@ def main() -> None:
             latency=bus.latency,
             neck=neck,
             mover=mover,
+            arm=arm,
             disarm_after_s=config.disarm_after_s,
             disarm_without_travel=config.disarm_without_travel,
             idle_travel_m=config.idle_travel_m,
@@ -1349,6 +1470,42 @@ def neck_parts(bus: MotorBus, config: NeckConfig | None) -> tuple[NeckEncoders, 
         retry_s=motion.retry_s,
     )
     return encoders, NeckMover(bus, encoders, config) if config is not None else None
+
+
+def arm_part(bus: MotorBus, motion: ArmMotion, motors: Mapping[str, int]) -> ArmDriver | None:
+    """The arm's driver over the roster's names for its ids (``servo1``..``servo6``), its
+    encoders riding the wheels' read; None (logged) when an id is not on the roster."""
+    names = {motor_id: name for name, motor_id in motors.items()}
+    missing = [joint for joint in JOINTS if motion.ids[joint] not in names]
+    if missing:
+        logger.warning("arm ids of %s are not on the roster: no arm", missing)
+        return None
+    bus_names = tuple(names[motion.ids[joint]] for joint in JOINTS)
+    encoders = Riders(
+        bus_names,
+        what="arm servos",
+        window_s=motion.read_window_ms / 1000.0,
+        silent_ticks=motion.silent_ticks,
+        retry_s=motion.retry_s,
+        every_s=1.0 / motion.idle_read_hz,
+    )
+    encoders.eager = False
+    return ArmDriver(
+        bus,
+        encoders,
+        motion,
+        lambda register: read_group(bus, register, bus_names, f"arm {register}"),
+    )
+
+
+def load_arm_config(path: str) -> ArmMotion | None:
+    """config/arm.json's motion block at ``path``, or None (logged) when it cannot be read:
+    the wheels and the neck do not depend on the arm."""
+    try:
+        return load_arm_motion(path)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        logger.warning("no arm motion (%s): the arm commands will answer an error", exc)
+        return None
 
 
 def load_neck_ids(path: str) -> dict[str, int]:
