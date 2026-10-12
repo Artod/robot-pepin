@@ -169,36 +169,96 @@ class ProsodyConfig:
     stretch_min_s: float = 0.25
 
 
-DEFAULT_FILLERS_BY_TOOL: Mapping[str, tuple[str, ...]] = {
-    "see": ("Сейчас гляну.", "Так, смотрю."),
-    "look": ("Сейчас гляну.", "Так, смотрю."),
-    "look_around": ("Сейчас осмотрюсь.", "Так, оглядываюсь."),
-    "find": ("Сейчас поищу.", "Так, ищу."),
-    "recall": ("Дай вспомнить.", "Сейчас вспомню."),
-    "remember_person": ("Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."),
-    "forget_person": ("Хорошо, забываю.",),
+Phrases = Mapping[str, tuple[str, ...]]  # a language's code ("ru", "en") -> its lines
+# the fillers' contexts (pepin.voice_cascade.fillers), and where their language comes from: the
+# script of the person's last words, or conversation.language alone
+FILLER_CONTEXTS = ("tool", "thinking", "again", "backchannel")
+LANGUAGE_FROM = ("utterance", "config")
+DEFAULT_NEUTRAL = ("Хм…", "Ммм…", "Э-э…", "Хм-м…")
+DEFAULT_THINKING: Phrases = {
+    "ru": ("Так…", "Ну…", "Сейчас…", "Так-так…", "Секундочку…"),  # noqa: RUF001
+    "en": ("Well…", "Let me see…", "So…", "Okay, so…", "One sec…"),
+}
+DEFAULT_COMMON: Phrases = {
+    "ru": ("Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент."),
+    "en": ("One sec.", "Just a moment.", "Hang on.", "Give me a sec."),
+}
+DEFAULT_AGAIN: Phrases = {
+    "ru": ("Ещё секундочку.", "Уже почти.", "Почти готово.", "Сейчас-сейчас."),
+    "en": ("Almost there.", "Just a sec more.", "Bear with me."),
+}
+DEFAULT_BACKCHANNEL: Phrases = {
+    "ru": ("угу", "ага", "мм"),  # noqa: RUF001
+    "en": ("mm-hmm", "uh-huh", "yeah"),
+}
+DEFAULT_FILLERS_BY_TOOL: Mapping[str, Phrases] = {
+    "see": {
+        "ru": ("Сейчас гляну.", "Так, смотрю.", "Дай гляну."),
+        "en": ("Let me look.", "Looking.", "Let me see that."),
+    },
+    "look": {
+        "ru": ("Сейчас гляну.", "Так, смотрю.", "Дай посмотрю."),
+        "en": ("Let me look.", "Looking.", "Let me check."),
+    },
+    "look_around": {
+        "ru": ("Сейчас осмотрюсь.", "Так, оглядываюсь.", "Дай осмотрюсь."),
+        "en": ("Let me look around.", "Looking around."),
+    },
+    "find": {
+        "ru": ("Сейчас поищу.", "Так, ищу.", "Дай поищу."),
+        "en": ("Let me find it.", "Looking for it.", "Searching."),
+    },
+    "recall": {
+        "ru": ("Дай вспомнить.", "Сейчас вспомню.", "Так, вспоминаю."),
+        "en": ("Let me remember.", "Let me think back."),
+    },
+    "remember_person": {
+        "ru": ("Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."),
+        "en": ("Let me remember you.", "Okay, remembering you."),
+    },
+    "forget_person": {
+        "ru": ("Хорошо, забываю.", "Ладно, стираю."),
+        "en": ("Okay, forgetting.", "Alright, I'll forget."),
+    },
+    "gesture": {"ru": ("Смотри!", "Вот так!", "Гляди!"), "en": ("Watch!", "Like this!", "Look!")},
 }
 
 
 @dataclass(frozen=True)
-class FillerLines:
-    """What the robot says by itself while a slow tool runs before its reply's first word: the
-    tool's own lines (``by_tool``), else the common ones (the file's ``any``), and one of
-    ``again`` when the wait goes on."""
+class FillerBook:
+    """The fillers' phrase book (:mod:`pepin.voice_cascade.fillers`): per context, each
+    ``{language: lines}`` (:attr:`common` is the file's ``any``: a slow tool's lines when it has
+    none of its own), and :attr:`neutral` hums that need no language."""
 
-    common: tuple[str, ...] = ("Минуточку.", "Секунду.", "Так…", "Сейчас.", "Почти готово.")
-    again: tuple[str, ...] = ("Ещё секундочку.", "Уже почти.")
-    by_tool: Mapping[str, tuple[str, ...]] = field(
-        default_factory=lambda: dict(DEFAULT_FILLERS_BY_TOOL)
+    common: Phrases = field(default_factory=lambda: dict(DEFAULT_COMMON))
+    again: Phrases = field(default_factory=lambda: dict(DEFAULT_AGAIN))
+    thinking: Phrases = field(default_factory=lambda: dict(DEFAULT_THINKING))
+    backchannel: Phrases = field(default_factory=lambda: dict(DEFAULT_BACKCHANNEL))
+    by_tool: Mapping[str, Phrases] = field(
+        default_factory=lambda: {tool: dict(own) for tool, own in DEFAULT_FILLERS_BY_TOOL.items()}
     )
+    neutral: tuple[str, ...] = DEFAULT_NEUTRAL
 
-    def for_tool(self, tool: str) -> tuple[str, ...]:
-        """The lines a filler for ``tool`` is chosen from."""
-        return self.by_tool.get(tool) or self.common
+    def for_tool(self, tool: str, language: str) -> tuple[str, ...]:
+        """The lines a filler for ``tool`` is chosen from in ``language``: its own, else the
+        common ones (none in a language the book lacks)."""
+        return self.by_tool.get(tool, {}).get(language) or self.common.get(language, ())
 
-    def lines(self) -> tuple[str, ...]:
-        """Every line once, in the file's order (the clips to make)."""
-        every = [*self.common, *self.again, *(x for own in self.by_tool.values() for x in own)]
+    def languages(self) -> tuple[str, ...]:
+        """Every language the book has a line in, in the file's order."""
+        books = (self.thinking, self.common, *self.by_tool.values(), self.again, self.backchannel)
+        return tuple(dict.fromkeys(language for book in books for language in book))
+
+    def lines(self, language: str | None = None, *, backchannel: bool = True) -> tuple[str, ...]:
+        """Every line once (the clips to make): the neutral hums, then each language's thinking,
+        common, tools', again and backchannel lines (``language``: that one's alone;
+        ``backchannel`` False: without those)."""
+        books = [self.thinking, self.common, *self.by_tool.values(), self.again]
+        if backchannel:
+            books.append(self.backchannel)
+        every = list(self.neutral)
+        for lang in self.languages() if language is None else (language,):
+            every += [line for book in books for line in book.get(lang, ())]
         return tuple(dict.fromkeys(every))
 
 
@@ -265,7 +325,6 @@ class CascadeConfig:
     backchannel: bool = False
     backchannel_delay_s: float = 0.3
     backchannel_min_speech_s: float = 0.8
-    backchannel_lines: tuple[str, ...] = ("угу", "мм")  # noqa: RUF001
     prosody_tags: bool = True
     prosody: ProsodyConfig = field(default_factory=ProsodyConfig)
     # conversation
@@ -273,8 +332,16 @@ class CascadeConfig:
     max_session_s: float = 900.0
     report_drive_start: bool = True
     error_line: str = "Извини, у меня сбой связи."  # noqa: RUF001
-    fillers: FillerLines = field(default_factory=FillerLines)
+    conversation_language: str = "ru"  # at a conversation's start (the fillers' language)
+    fillers: FillerBook = field(default_factory=FillerBook)
+    filler_language_from: str = "utterance"
+    filler_thinking_s: float = 1.2  # the brain's first token this late after the close: a hum
     filler_again_s: float = 4.0  # the second filler after this long without a word (0: none)
+    # per context: the chance a filler's moment passes in silence, the least time between two
+    filler_silent_p: Mapping[str, float] = field(
+        default_factory=lambda: {"thinking": 0.25, "backchannel": 0.25}
+    )
+    filler_cooldown_s: Mapping[str, float] = field(default_factory=lambda: {"backchannel": 2.0})
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -298,6 +365,7 @@ class CascadeConfig:
         conv = data.get("conversation", {})
         money = data.get("money", {})
         d = cls()
+        language = str(conv.get("language", d.conversation_language))
         config = cls(
             wake=str(ears.get("wake", d.wake)),
             silence_s=float(ears.get("silence_s", d.silence_s)),
@@ -353,7 +421,6 @@ class CascadeConfig:
             barge_in_words_every_s=float(barge.get("words_every_s", d.barge_in_words_every_s)),
             backchannel_delay_s=float(back.get("delay_s", d.backchannel_delay_s)),
             backchannel_min_speech_s=float(back.get("min_speech_s", d.backchannel_min_speech_s)),
-            backchannel_lines=tuple(str(x) for x in back.get("lines", d.backchannel_lines)),
             prosody=ProsodyConfig(
                 speaker=str(pros.get("speaker", d.prosody.speaker)),
                 min_baseline=int(pros.get("min_baseline", d.prosody.min_baseline)),
@@ -371,8 +438,13 @@ class CascadeConfig:
             max_session_s=float(conv.get("max_session_s", d.max_session_s)),
             report_drive_start=bool(conv.get("report_drive_start", d.report_drive_start)),
             error_line=str(conv.get("error_line", d.error_line)),
-            fillers=filler_lines(conv, d.fillers),
+            conversation_language=language,
+            fillers=filler_book(conv, back, d.fillers, language),
+            filler_language_from=str(conv.get("filler_language_from", d.filler_language_from)),
+            filler_thinking_s=float(conv.get("filler_thinking_s", d.filler_thinking_s)),
             filler_again_s=float(conv.get("filler_again_s", d.filler_again_s)),
+            filler_silent_p=by_context(conv.get("filler_silent_p"), d.filler_silent_p),
+            filler_cooldown_s=by_context(conv.get("filler_cooldown_s"), d.filler_cooldown_s),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -466,8 +538,29 @@ class CascadeConfig:
                 "conversation.idle_close_s > 0, conversation.filler_again_s >= 0 and"
                 " money.daily_budget_cad > 0"
             )
+        self.check_fillers()
         if b.model not in self.prices:
             raise ValueError(f"no price for {b.model}: add it to money.prices_usd_per_mtok")
+
+    def check_fillers(self) -> None:
+        """``ValueError`` when the fillers' knobs cannot work."""
+        if self.filler_language_from not in LANGUAGE_FROM or not self.conversation_language:
+            raise ValueError(
+                f"conversation.filler_language_from: one of {', '.join(LANGUAGE_FROM)};"
+                " conversation.language: a language's code (ru)"
+            )
+        if self.filler_thinking_s < 0:
+            raise ValueError("conversation.filler_thinking_s >= 0 (0: no thinking filler)")
+        for key, table, top in (
+            ("filler_silent_p", self.filler_silent_p, 1.0),
+            ("filler_cooldown_s", self.filler_cooldown_s, None),
+        ):
+            for context, value in table.items():
+                if context not in FILLER_CONTEXTS or value < 0 or (top is not None and value > top):
+                    raise ValueError(
+                        f"conversation.{key}: {{context: value}}, the contexts"
+                        f" {', '.join(FILLER_CONTEXTS)}, values from 0{' to 1' if top else ''}"
+                    )
 
     def check_voice(self, v: VoiceConfig) -> None:
         """``ValueError`` when the voice (or its fallback) cannot work."""
@@ -543,24 +636,64 @@ def stt_config(section: Mapping[str, Any], base: SttConfig) -> SttConfig:
     )
 
 
-def filler_lines(conversation: Mapping[str, Any], default: FillerLines) -> FillerLines:
-    """The ``fillers`` block of the conversation section; the old ``tool_filler`` string (read
-    when ``fillers`` is absent or null; also a string or a list given as ``fillers``) is the
-    common lines alone; "" or {}: no fillers."""
+def filler_book(
+    conversation: Mapping[str, Any],
+    backchannel: Mapping[str, Any],
+    default: FillerBook,
+    language: str,
+) -> FillerBook:
+    """The ``fillers`` block of the conversation section: ``any``, ``again``, ``thinking``,
+    ``backchannel`` and each of ``by_tool`` as :func:`phrases`, ``neutral`` a list; a context
+    left out has no lines. The old forms still read: the ``tool_filler`` string (when
+    ``fillers`` is absent or null), or a string or a list as ``fillers``, is ``language``'s
+    common lines alone; "" or {}: no fillers. ``backchannel.lines`` (the old place, a list:
+    ``language``'s) wins when given; without it or a ``backchannel`` of the block, the
+    default's."""
     block = conversation.get("fillers")
     if block is None:
         block = conversation.get("tool_filler")
     if block is None:
-        return default
-    if isinstance(block, str | list):
-        lines = [block] if isinstance(block, str) else block
-        return FillerLines(tuple(str(x) for x in lines if x), (), {})
-    by_tool = block.get("by_tool", {})
-    return FillerLines(
-        tuple(str(x) for x in block.get("any", ()) if x),
-        tuple(str(x) for x in block.get("again", ()) if x),
-        {str(tool): tuple(str(x) for x in own if x) for tool, own in by_tool.items()},
-    )
+        book = default
+    elif isinstance(block, str | list):
+        book = FillerBook(phrases(block, language), {}, {}, default.backchannel, {}, ())
+    else:
+        given = block.get("backchannel")
+        book = FillerBook(
+            common=phrases(block.get("any"), language),
+            again=phrases(block.get("again"), language),
+            thinking=phrases(block.get("thinking"), language),
+            backchannel=default.backchannel if given is None else phrases(given, language),
+            by_tool={
+                str(tool): phrases(own, language) for tool, own in block.get("by_tool", {}).items()
+            },
+            neutral=tuple(str(x) for x in block.get("neutral", ()) if x),
+        )
+    old = backchannel.get("lines")
+    return book if old is None else replace(book, backchannel=phrases(old, language))
+
+
+def phrases(value: Any, language: str) -> dict[str, tuple[str, ...]]:
+    """``{language: lines}`` as the file writes it, or a list (one string) as ``language``'s
+    lines; empty lines dropped, and a language left with none; null: none."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return {
+            str(lang): own
+            for lang, lines in value.items()
+            if (own := phrases(lines, str(lang)).get(str(lang)))
+        }
+    lines = tuple(str(x) for x in ([value] if isinstance(value, str) else value) if x)
+    return {language: lines} if lines else {}
+
+
+def by_context(value: Any, default: Mapping[str, float]) -> dict[str, float]:
+    """A ``{context: number}`` knob of the fillers over its defaults (null: the defaults)."""
+    if value is None:
+        return dict(default)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"a fillers' knob: {{context: number}}, not {value!r}")
+    return {**default, **{str(context): float(x) for context, x in value.items()}}
 
 
 def brain_config(section: Mapping[str, Any]) -> BrainConfig:

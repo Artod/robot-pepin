@@ -58,6 +58,11 @@ class Timeline:
         with self._lock:
             return stage in self.marks
 
+    def at(self, stage: str) -> float | None:
+        """When ``stage`` was stamped (None: not yet)."""
+        with self._lock:
+            return self.marks.get(stage)
+
     def ms(self) -> dict[str, int | None]:
         """Each stage in milliseconds after the person stopped (None: never reached)."""
         with self._lock:

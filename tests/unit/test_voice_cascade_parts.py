@@ -83,7 +83,7 @@ def test_overrides_switch_a_preset_and_a_flag_for_one_run() -> None:
     )
     assert config.brain.model == "claude-sonnet-5-5"
     assert config.brain.thinking == "between_tools"
-    assert config.barge_in and config.backchannel_lines == ("мм",)
+    assert config.barge_in and config.fillers.backchannel == {"ru": ("мм",)}
     opus = CascadeConfig.load(CONFIG, ["brain.preset=opus", "brain.effort=medium"])
     assert (opus.brain.thinking, opus.brain.effort) == ("adaptive", "medium")
 

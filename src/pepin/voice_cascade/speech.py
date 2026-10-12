@@ -95,6 +95,7 @@ class SpeechWorker:
         clips: Sequence[str] = (),
         asides: Sequence[str] = (),
         clock: Callable[[], float] = time.monotonic,
+        clip_idle_s: float = CLIP_IDLE_S,
     ) -> None:
         """``on_audio`` hears every chunk handed to the player; ``on_done`` every job finished
         (cut or not); ``on_bill`` the bill of every sentence a paid voice said; all on this
@@ -102,12 +103,13 @@ class SpeechWorker:
         load and played from memory when a job says one of them without a style
         (:func:`pepin.voice_cascade.text.clip_key`); none with a paid voice. ``asides``: the
         lines of backchannel jobs (fillers, "мм"), made by :func:`aside_voice` once the voice
-        is ready, while no job waits."""
+        is ready, in order, each after ``clip_idle_s`` without a job."""
         self.player = player
         self.clip_lines = tuple(unique(clips))
         self.aside_lines = tuple(unique(asides))
         self.on_audio, self.on_done, self.on_bill = on_audio, on_done, on_bill
         self.clock = clock
+        self.clip_idle_s = clip_idle_s
         self.ready = threading.Event()
         self.error: BaseException | None = None
         self.lock = threading.Lock()
@@ -134,6 +136,12 @@ class SpeechWorker:
     def says_asides(self) -> bool:
         """The current voice says asides (a paid voice without a local fallback does not)."""
         return aside_voice(self._slot[0]) is not None
+
+    def has_clip(self, line: str) -> bool:
+        """The current voice says ``line`` as an aside from memory: its clip is made (read
+        from any thread)."""
+        voice, clips = self._slot
+        return aside_voice(voice) is not None and clip_key(speakable(line)) in clips
 
     def start(self) -> None:
         """Load the voice on the worker's thread, then serve jobs; :attr:`ready` is set when
@@ -192,7 +200,7 @@ class SpeechWorker:
         one (on this thread, the one that speaks with it)."""
         while True:
             try:
-                item = self._jobs.get(timeout=CLIP_IDLE_S if self._unmade else None)
+                item = self._jobs.get(timeout=self.clip_idle_s if self._unmade else None)
             except queue.Empty:
                 self._make_clip()
                 continue
