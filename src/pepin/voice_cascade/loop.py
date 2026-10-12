@@ -98,11 +98,14 @@ from pepin.voice_cascade.stages import (
     ToolDone,
     ToolUse,
     Transcriber,
+    Transcript,
     Usage,
     VoiceBill,
 )
 from pepin.voice_cascade.text import speakable
 from pepin.voice_cascade.timeline import Timeline
+from pepin.voice_cascade.timing import log_rows
+from pepin.voice_cascade.transcriber import read_early, read_timed, transcript_of
 from pepin.voice_cascade.turn import TurnWorker
 from pepin.voice_cascade.turn_text import TextJudge
 from pepin.voice_live.audio import Resampler
@@ -638,8 +641,9 @@ class CascadeLoop:
         self._event("backchannel", text=line)
 
     def _read_early(self, pcm: bytes) -> concurrent.futures.Future[str]:
-        """Whisper on an utterance not yet closed (the ears call this from the mic's thread)."""
-        return self._whisper.submit(self.transcriber.transcribe, pcm)
+        """Whisper on an utterance not yet closed (the ears call this from the mic's thread);
+        the words' timings, when the transcriber gives them, are kept beside the text."""
+        return read_early(self._whisper, self.transcriber, pcm)
 
     def _read_words(self, pcm: bytes, t: float) -> Pending:
         """Whisper on a voice over the reply (the barge-in detector, from the mic's thread)."""
@@ -777,11 +781,12 @@ class CascadeLoop:
         spec = await self._settle(early)
         timeline = Timeline(segment.ended_s)
         timeline.mark("closed", closed_s)
+        reading: asyncio.Future[str] | asyncio.Future[Transcript]
         if early is not None and not early.cancelled():
             reading = asyncio.wrap_future(early)  # started in the pause: done, or nearly
         else:
             early = None
-            reading = loop.run_in_executor(self._whisper, self.transcriber.transcribe, segment.pcm)
+            reading = loop.run_in_executor(self._whisper, read_timed, self.transcriber, segment.pcm)
         tagger = self.tagger if self.config.prosody_tags else None
         measured = spec.prosody if spec is not None else None  # the same audio's
         measuring = (
@@ -793,8 +798,11 @@ class CascadeLoop:
         who: asyncio.Future[Callable[[str], Speaker]] | None = None
         if people is not None and self.conversation is not None:
             who = loop.run_in_executor(self._people, people.measure, segment.pcm, segment.ended_s)
-        text = (await reading).strip()
+        transcript = transcript_of(await reading, early)
+        text = transcript.text.strip()
         prosody: Prosody | None = await measuring if measuring is not None else measured
+        if prosody is not None and transcript.words:
+            prosody = replace(prosody, words=transcript.words)
         read_s = self.clock()
         noise = not text or is_hallucination(text)
         if continues:
@@ -823,9 +831,10 @@ class CascadeLoop:
             self._tell("opened", heard_of(segment, text, noise, voice_db))
         conversation = self.conversation
         assert conversation is not None
+        timed = {"words": log_rows(transcript.words)} if transcript.words else {}
         conversation.log.event(
             "heard", read_s, text=text, noise=noise, whisper_ms=whisper_ms, early=early is not None,
-            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db, engine=engine,
+            seconds=round(segment.duration_s, 2), voice_peak_db=voice_db, engine=engine, **timed,
         )  # fmt: skip
         self._tell("speech_ended", heard_of(segment, text, noise, voice_db))
         if noise:

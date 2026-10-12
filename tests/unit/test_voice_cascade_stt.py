@@ -15,6 +15,7 @@ import pytest
 from pepin.voice_cascade.config import DEFAULT_STT, TRANSCRIBER_ENGINES, CascadeConfig
 from pepin.voice_cascade.stages import Transcriber
 from pepin.voice_cascade.stt import build, runtime
+from pepin.voice_cascade.stt.gigaam import spells_letters
 from pepin.voice_cascade.transcriber import (
     Choice,
     SwitchingTranscriber,
@@ -28,14 +29,36 @@ PCM = b"\x00\x40" * 1600  # 0.1 s at half scale
 
 
 class OnnxModel:
-    """onnx-asr's recogniser: remembers each call's samples and options."""
+    """onnx-asr's recogniser: remembers each call's samples and options (a timed one's too)."""
 
     def __init__(self) -> None:
         self.calls: list[tuple[int, float, int, dict[str, Any]]] = []
+        self.timed: list[TimedOnnxModel] = []
 
     def recognize(self, samples: Any, *, sample_rate: int, **options: Any) -> str:
         self.calls.append((len(samples), float(samples.max(initial=0.0)), sample_rate, options))
         return "  Сколько ты жрёшь\n токенов? "
+
+    def with_timestamps(self) -> TimedOnnxModel:
+        self.timed.append(TimedOnnxModel(self))
+        return self.timed[-1]
+
+
+class TimedOnnxModel:
+    """onnx-asr's timestamped recogniser: the text, each BPE token, its frame and log-prob."""
+
+    def __init__(self, model: OnnxModel) -> None:
+        self.model = model
+
+    def recognize(self, samples: Any, *, sample_rate: int, **options: Any) -> SimpleNamespace:
+        self.model.recognize(samples, sample_rate=sample_rate, **options)
+        tokens = [" Сколько", " ты", " жр", "ёшь", " токенов", "?"]
+        return SimpleNamespace(
+            text="  Сколько ты жрёшь\n токенов? ",
+            tokens=tokens,
+            timestamps=[0.0, 0.04, 0.04, 0.08, 0.08, 0.08],
+            logprobs=[-0.1, -0.2, -0.3, -0.1, -0.5, -0.2],
+        )
 
 
 class Onnx:
@@ -179,6 +202,34 @@ def test_gigaam_runs_on_the_cpu_with_its_threads_and_hands_on_one_clean_line(onn
     assert call == (1600, 0.5, 16000, {})  # s16le as float samples; no language: Russian only
 
 
+def test_gigaam_times_its_words_from_the_frames_its_decoder_emitted(onnx: Onnx) -> None:
+    engine = build("gigaam", DEFAULT_STT["gigaam"], "ru")
+    assert len(onnx.models[0].timed) == 1  # timings on: the timed recogniser warmed at the load
+    heard = engine.transcribe_timed(PCM)  # type: ignore[attr-defined]
+    assert heard.text == "Сколько ты жрёшь токенов?"  # the same line as transcribe's
+    assert [w.text for w in heard.words] == ["Сколько", "ты", "жрёшь", "токенов"]
+    words = {w.text: w for w in heard.words}
+    assert [u.text for u in words["жрёшь"].units] == ["жр", "ёшь"]  # BPE: a unit a token
+    assert not words["жрёшь"].letters
+    assert words["Сколько"].start == 0.0 and words["Сколько"].end == pytest.approx(0.04)
+    assert words["жрёшь"].logprob == pytest.approx(-0.4)
+    assert words["токенов"].logprob == pytest.approx(-0.7)  # its question mark's included
+    assert words["токенов"].end == pytest.approx(0.1)  # the last sound lasts to the end
+
+
+def test_gigaam_without_timings_reads_the_text_alone(onnx: Onnx) -> None:
+    config = CascadeConfig.load(CONFIG, ["transcriber.gigaam.timings=false"])
+    engine = build("gigaam", config.stt["gigaam"], "ru")
+    assert onnx.models[0].timed == []
+    heard = engine.transcribe_timed(PCM)  # type: ignore[attr-defined]
+    assert heard.text == "Сколько ты жрёшь токенов?" and heard.words == ()
+
+
+def test_the_character_models_time_letters() -> None:
+    assert spells_letters("gigaam-v3-ctc") and spells_letters("gigaam-v3-rnnt")
+    assert not spells_letters("gigaam-v3-e2e-rnnt") and not spells_letters("gigaam-v3-e2e-ctc")
+
+
 def test_canary_forces_the_language_both_ways(onnx: Onnx) -> None:
     config = CascadeConfig.load(CONFIG)
     engine = build("canary", config.stt["canary"], "ru")
@@ -239,9 +290,11 @@ def test_a_switch_builds_the_engine_by_name_and_frees_the_old_one(onnx: Onnx, ml
         whisper, choice_of("mlx", config), load, lambda: wanted[0],
         report=lines.append, spawn=now, footprint=lambda: next(sizes), settle_s=0,
     )  # fmt: skip
+    assert switch.transcribe_timed(PCM).words == ()  # Whisper gives no timings
     switch.poll()
     assert switch.name == "gigaam:gigaam-v3-e2e-rnnt" and whisper.closed
     assert switch.transcribe(PCM) == "Сколько ты жрёшь токенов?"
+    assert len(switch.transcribe_timed(PCM).words) == 4
     assert lines[0].startswith("transcriber: mlx:whisper-large-v3-turbo -> gigaam:")
     assert "footprint 3.00 -> 4.00 with both -> 1.50 GB" in lines[0]
     wanted[0] = choice_of("parakeet", config)
