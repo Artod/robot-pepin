@@ -3,12 +3,17 @@ detector alone.
 
 A look is one ``GET /snapshot`` from ustreamer on the board (with ``extra_headers=1``: the V4L2
 capture stamp), the left eye cut out upright (:func:`pepin.face_sensor.frames.cut_eye`), and
-SCRFD from the face sensor's InsightFace pack with identity off
-(:class:`pepin.face_sensor.backends.InsightFace` ``identity=False``: no ArcFace, no expression net,
-no landmarker), so the cascade carries one small network. Each face's bearing comes through the
-eye's lens (:meth:`pepin.face_sensor.geometry.Lens.bearing_deg`, the stereo calibration's raw
-left eye), and its head yaw, roughly, from the detector's five points. Nothing runs between
-looks: the speaker gaze asks at the wake and about once a second while a conversation lasts.
+SCRFD alone from the face sensor's InsightFace pack (:class:`pepin.face_sensor.backends.Scrfd`:
+no ArcFace, no expression net, no landmarker), so the cascade carries one small network. Each
+face's bearing comes through the eye's lens (:meth:`pepin.face_sensor.geometry.Lens.bearing_deg`,
+the stereo calibration's raw left eye), and its head yaw, roughly, from the detector's five
+points. Nothing runs between looks: the speaker gaze asks at the wake and about once a second
+while a conversation lasts.
+
+MEASURED on this Mac (2026-10-11, scratch/expression/finder_probe.py, CoreML): the detector adds
+~170 MB to the process (180 MB peak with a cold CoreML cache; FaceAnalysis with identity off
+added 550-800 MB, because it opens every network of the pack), loads in 0.1-0.25 s, detects in
+6-7 ms (2.7 ms of CPU); a snapshot takes 45 ms (52 ms p90, 42 KB).
 
 The weights are config/face_sensor.json's ``detector_pack`` (``models/face/buffalo_l``, its
 ``det_10g.onnx`` alone is read) under the checkout the cascade runs from; CoreML compiles the
@@ -196,16 +201,15 @@ def board_finder(host: str | None = None) -> SnapshotFinder:
         lens = Lens.nominal(800, 600, cfg.hfov_deg)
 
     def load() -> Detector:
-        from pepin.face_sensor.backends import InsightFace
+        from pepin.face_sensor.backends import Scrfd
 
         m = cfg.models
-        return InsightFace(
+        return Scrfd(
             cfg.path(m.detector_pack),
             device=cfg.device,
             cache=cfg.path(m.coreml_cache),
             det_size=m.det_size,
             det_threshold=m.det_threshold,
-            identity=False,
         )
 
     return SnapshotFinder(snapshots, load, lens)
