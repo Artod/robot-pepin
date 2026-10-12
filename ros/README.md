@@ -588,13 +588,18 @@ curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the 
 
 **The speaker gaze** (`pepin.expression.tracker`, in the voice cascade, flag `speaker_gaze`, off as
 shipped): on the robot's name the head turns to the voice (the array's direction of arrival),
-takes a snapshot, finds the face (SCRFD alone), centres it, smiles once, and follows the person
-at a frame a second while the conversation lasts; at its close the look is released and the head
-goes home. The array's direction needs its front and sense once per mounting (nothing moves, it
-listens): `uv run python ros/tools/doa_calibrate.py --write`, a voice 1.5 m in front of the cart,
-then left, behind, right, three phrases each. Then `scripts/voice_cascade.py switch --flag
-speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without the
-calibration the head looks up where it points and finds the face by the camera alone.
+takes a snapshot, finds the face (SCRFD alone; a far one from 28 px, and 10 deg higher before
+giving up), centres it, smiles once at a clear face, and follows the person at three frames a
+second, leading a walking one; whoever speaks with words from elsewhere is looked at at once,
+and a look that finds nobody returns to the face it left within 0.7 s. Quiet utterances, few
+speech readings and sounds without words never move the head alone; the robot's name always
+does. At the close the look is released and the head goes home. Every decision is a `gaze_*`
+event in the conversation's `events.jsonl`. The array's direction needs four readings once per
+mounting (nothing moves, it listens): `uv run python ros/tools/doa_calibrate.py --write`, a voice
+1.5 m in front of the cart, then left, behind, right, three phrases each; the bearing is
+interpolated between them (the array sits off the cart's centre). Then `scripts/voice_cascade.py
+switch --flag speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without
+the calibration the head looks up where it points and finds the face by the camera alone.
 
 ## Gestures: the body as one animated character
 

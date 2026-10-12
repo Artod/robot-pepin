@@ -343,21 +343,18 @@ class SpeakerGaze:
             self._judged(now, heard, voice, "no bearing")
             return
         elsewhere = self.policy.new_speaker(self.voice, bearing)
-        if heard.named and heard.words:
-            if not elsewhere and self.phase == "track":
-                self._judged(now, heard, voice, "the robot's name, from the face held")
-                return
+        if heard.named and heard.words and (elsewhere or self.phase == "voice"):
             self._judged(now, heard, voice, "the robot's name", f"the name: {voice.text()}")
             self._look_toward(bearing, now, "the robot's name", check=False)
+            return
+        if not elsewhere:  # the person held (or being sought) speaks
+            self.votes = []
+            self._judged(now, heard, voice, "agrees")
             return
         doubt = self._doubt(voice, heard)
         if doubt is not None:
             self.counts["sounds_ignored"] += 1
             self._judged(now, heard, voice, doubt, f"not moved by {voice.text()}: {doubt}")
-            return
-        if not elsewhere:
-            self.votes = []
-            self._judged(now, heard, voice, "agrees")
             return
         if not heard.words:
             self._vote(heard, voice, bearing, now)
@@ -525,7 +522,7 @@ class SpeakerGaze:
         pan = head.pan_rad
         toward = self.voice
         if toward is not None and (
-            place is not None or abs(toward - head.pan_rad) > math.radians(s.in_frame_deg)
+            place is not None or abs(_wrap(toward - head.pan_rad)) > math.radians(s.in_frame_deg)
         ):
             pan = self._turn(toward, tilt).pan_rad
         aim = self.reach.clamp(Aim(pan, tilt))

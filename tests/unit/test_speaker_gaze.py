@@ -703,6 +703,14 @@ def test_the_robot_s_name_turns_the_head_whatever_the_gates_and_seeks_in_full() 
     assert r.door.aims()[-1][0].pan_rad == pytest.approx(rad(60)), "his remembered place"
 
 
+def test_the_person_held_speaking_quietly_or_by_name_moves_nothing_and_prints_nothing() -> None:
+    r = tracking([])
+    aims, lines = len(r.door.aims()), len(r.said)
+    utter(r, 235, 3.0, 4.0, "тихо", peak=-35.0)  # +55: 5 deg off his face, a whisper
+    utter(r, 245, 5.0, 6.0, "Пепин, смотри", named=True)
+    assert len(r.door.aims()) == aims and len(r.said) == lines and r.machine.phase == "track"
+
+
 def test_a_face_lost_for_face_lost_s_lets_the_next_voice_turn_the_head_for_good() -> None:
     r = tracking([frame() for _ in range(10)])
     run(r, until=3.7, start=1.6)
