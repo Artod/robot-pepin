@@ -207,7 +207,7 @@ def test_a_person_s_box_gives_the_head_near_its_top_its_middle_lying_and_the_edg
 
 def test_the_vision_body_detector_runs_where_pyobjc_vision_is_installed() -> None:
     """Apple Vision's human rectangles on an empty picture: no person, no error (skipped
-    without pyobjc-framework-Vision: uv add --group face pyobjc-framework-Vision)."""
+    without pyobjc-framework-Vision: uv add --group macos pyobjc-framework-Vision)."""
     pytest.importorskip("Vision")
     detector = VisionBodies()
     detector.warm()

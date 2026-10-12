@@ -167,7 +167,7 @@ def body_sighting(box: PersonBox, lens: Lens, *, head_frac: float) -> BodySighti
 class VisionBodies:
     """:class:`BodyDetector` over Apple Vision's human rectangles (full bodies), on the device
     (Vision picks the Neural Engine); ``ImportError`` from :meth:`warm` without
-    pyobjc-framework-Vision (``uv add --group face pyobjc-framework-Vision``)."""
+    pyobjc-framework-Vision (``uv add --group macos pyobjc-framework-Vision``)."""
 
     def __init__(self) -> None:
         self._vision: Any = None
