@@ -1,14 +1,19 @@
 """The face sensor: who is in front of Pepin, where, looking and talking or not, and how their face
 looks, as one JSON line a second in data/face/latest.json (pepin.face_sensor).
 
-    uv run --group face python scripts/face_sensor.py run                     # the head camera
     uv run --group face python scripts/face_sensor.py run --source CLIP.mjpeg # a recorded drive
+    uv run --group face python scripts/face_sensor.py run --source board      # the head camera
     uv run --group face python scripts/face_sensor.py bench FILE_OR_DIR...    # stage times, outputs
     uv run --group face python scripts/face_sensor.py enrol NAME IMAGE_OR_CLIP...
     uv run --group face python scripts/face_sensor.py list | forget NAME
 
 Models, thresholds, rate and device: config/face_sensor.json. Weights: models/face/ (gitignored).
 Enrolled people: data/faces/<name>.npz; output: data/face/ (both gitignored, never uploaded).
+
+The live run on the head camera is retired from the robot's defaults (2026-10-12): the robot's
+faces come from the perception service on camera_stream's one stream (pepin.perception_service),
+and its identity store is person recognition's people.db; ``run`` needs its source named, and the
+bench and enrolment stay as they were.
 """
 
 from __future__ import annotations
@@ -98,10 +103,23 @@ def build(cfg: FaceSensorConfig) -> tuple[FacePipeline, Gallery, str]:
     return pipeline, gallery, faces.name
 
 
+RETIRED = (
+    "the live face sensor is retired from the robot's defaults (2026-10-12): the head camera has"
+    " one reader, camera_stream, and the perception service fans it out (faces, people,"
+    " embeddings on demand; ros/models.sh start perception); person recognition's people.db is"
+    " the one identity store. Name a source to run it anyway: --source CLIP.mjpeg | VIDEO |"
+    " IMAGE, or --source board for a second stream client of the board (it costs the board"
+    " ~28 Mbit/s and the other streams' latency)"
+)
+
+
 def cmd_run(args: argparse.Namespace, cfg: FaceSensorConfig) -> int:
     """The sensor itself, until Ctrl-C (or the end of a recording, or ``--seconds``)."""
     from pepin.face_sensor.runner import run_live, run_recording
 
+    if args.source is None:
+        print(RETIRED, file=sys.stderr)
+        return 2
     url, upside_down = camera(cfg.source.eye)
     source = open_source(
         args.source,
@@ -239,7 +257,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true")
     sub = ap.add_subparsers(dest="command", required=True)
     run = sub.add_parser("run", help="watch a source and publish a line a second")
-    run.add_argument("--source", default="board", help="board | URL | CLIP.mjpeg | VIDEO | IMAGE")
+    run.add_argument(
+        "--source",
+        default=None,
+        help="board | URL | CLIP.mjpeg | VIDEO | IMAGE; no default: the board is said by name",
+    )
     run.add_argument("--seconds", type=float, default=0.0, help="stop after this long (0: never)")
     bench = sub.add_parser("bench", help="stage times and outputs over images and clips")
     bench.add_argument("paths", nargs="+", help="images, folders of images, .mjpeg or video clips")

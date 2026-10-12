@@ -90,7 +90,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `laptop.sh` | Runs the navigation and camera stacks on the laptop | `ros/laptop.sh nav [down \| logs] \| vslam \| vio \| kick NODE \| logs \| stop` |
 | `lib.sh` | Shared helpers: one multiplexed ssh connection to the board | sourced by `ros/*.sh` |
 | `map.sh` | Saves the map being built as a file | `ros/map.sh save NAME` |
-| `models.sh` | The depth and localisation model services as launchd jobs | `ros/models.sh install \| start \| stop \| restart \| status \| logs [depth \| localization]` |
+| `models.sh` | The depth, localisation and perception services as launchd jobs | `ros/models.sh install \| start \| stop \| restart \| status \| logs [depth \| localization \| perception]` |
 | `neck.sh` | The neck servos through the base server: read, move, hold | `ros/neck.sh read \| home \| goto PAN TILT \| hold PAN TILT \| motion \| registers` |
 | `preflight.sh` | Ready for a goal: pose, lidar, planner, snapshots, ToF, Foxglove, one plan | `ros/preflight.sh [--no-plan]` |
 | `push.sh` | Copies changed files to the robot and restarts only the nodes that import them | `ros/push.sh [--dry-run] FILE...` |
@@ -139,6 +139,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `pepin.head_server` | Board server that owns the head ESP32's serial port (TCP 3340) | `python -m pepin.head_server` |
 | `pepin.i2c_recover` | Frees a locked I2C bus on the board without a power cycle | `python -m pepin.i2c_recover check \| recover` (board) |
 | `pepin.localization_service` | The localisation models on the laptop GPU as one HTTP service | `ros/models.sh start localization` |
+| `pepin.perception_service` | The one camera channel: camera_stream's left eye in a ring, faces and people, embeddings, as one HTTP service | `ros/models.sh start perception` |
 | `pepin.push` | Which running nodes a changed file needs restarted, or why a push refuses | `uv run python -m pepin.push plan FILE...` |
 | `pepin.red_button` | The base's own stop, confirmed by the wheels | `python3 -m pepin.red_button [--host BOARD]` |
 | `pepin.speed` | The cart's speed ceiling: check a value, read the file, read or set the base | `python -m pepin.speed check X \| file \| base --host H --port P` |

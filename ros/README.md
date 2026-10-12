@@ -524,6 +524,81 @@ and `/marks_audit/phantoms` (a red cloud), and a report line every 10 s: `marks 
 (lidar 97, camera-only 106, unexplained 11), nearest camera-only 0.42 m`. Its `marks_audit` flag
 switches it off live.
 
+## One camera channel
+
+The head camera has ONE reader, `camera_stream` in `pepin-vslam`: it decodes the board's
+stream, cuts and rectifies the two eyes and publishes them for depth, the VO and RTAB-Map. After
+each frame is published, its left picture (the rectified eye: fx 454.5, 82.8 x 66.9 deg) goes
+to the **perception service** on this Mac (`pepin.perception_service`, `127.0.0.1:8792`, the
+`perception` job of `ros/models.sh`), and everything on the laptop that wants the camera reads
+that service: the speaker gaze (faces and people, by record), person recognition (the speaker's
+face embedded on demand) and the `see` tool (the JPEG itself). The voice process decodes no
+picture and runs no network.
+
+```
+board ustreamer ──MJPEG──> camera_stream (decode, split, rectify, publish /camera/*)
+                              └─ FrameFeed: one-slot mailbox, own thread, JPEG q90, POST ──┐
+perception service :8792  <───────────────────── host.docker.internal:8792 ────────────────┘
+  ring: 10 s of frames as sent (frame number -> JPEG, board exposure stamp, optics)
+  detector thread, 10 Hz on the newest frame: SCRFD (ane) + Apple Vision (from the JPEG bytes)
+  -> GET /latest (long poll)      the gaze's finder, people
+  -> GET /frame/newest.jpg        see: the first frame exposed after the head settled
+  -> GET /frame/<n>.jpg           a frame by number
+  -> POST /embed                  ArcFace of one face of one frame, on demand
+  -> GET /health                  rates, ms per stage, the newest record, the clock envelope
+```
+
+**The stamps.** Every frame carries camera_stream's own stamp (the board's clock, dated to the
+exposure); a record keeps it beside its arrival on this Mac (`arrived`, reports only). The gaze
+asks for a record exposed after the arbiter's `blind_until` and `see` for a frame exposed after
+it (`see` waits for the head to stop first, 0.3 s at most in all, then takes the newest frame,
+marked `still: false`): board time against board time, never this Mac's clock. `/health`'s
+`arrival_minus_stamp` (min/median ms) is the clock check: a negative minimum means the board's
+clock runs ahead of this Mac's.
+
+**The pixel space.** Faces are measured in the rectified eye's pixels, so the face-size
+thresholds are that eye's: the gaze's `seek_min_face_px` 24 and `track_min_face_px` 34, people's
+`min_px` 34 and `strong_px` 52 (the raw eye's 28/40/40/60 x 454.5/528, the same distance for a
+centred face; off the axis the rectified picture is stretched and a face reads wider).
+
+| switch | where | what |
+| --- | --- | --- |
+| `perception_feed` (flag, on) | camera_stream | the sender; off, nothing is sent and the line says `perception off` |
+| `perception_hz` (knob, 20) | camera_stream | frames a second at most to the service |
+| `perception_quality` (knob, 90) | camera_stream | the JPEG quality of the picture sent (77 KB at 800x600) |
+| `perception_url` (parameter) | camera_stream | where it sends; `PEPIN_PERCEPTION_URL` in `ros/laptop.sh vslam`'s environment |
+| `detect_hz`, `ring_s`, `faces`, `persons`, `identity_device`, `look_wait_s`, `see_wait_s` | config/models.json `perception` | the service's pace, memory and devices; the consumers' waits (read at start) |
+| `vision.source` (live, `service`) | the voice | `snapshot`: the path before the service (ustreamer's `/snapshot` decoded and searched in the voice process, ArcFace local), for a day the service is broken; `scripts/voice_cascade.py switch --knob vision.source=snapshot` |
+
+Bring-up, once per checkout, then with every `ros/laptop.sh vslam` (it starts the job when it is
+installed, and `ros/laptop.sh stop` stops it):
+
+```bash
+ros/models.sh install perception          # the launchd job; waits for /health
+ros/models.sh status perception           # frames/s in, detections/s, ms, faces and persons now
+ros/models.sh logs perception             # its report line every minute frames come
+ros/models.sh restart perception          # after a change to pepin.perception*; stop | start
+ros/laptop.sh kick camera_stream          # the sender is camera_stream's: a code change needs a kick
+ros/flags.sh set camera_stream perception_feed false    # the sender off, live (true: on)
+ros/preflight.sh --no-plan                # its vision line: OK 20.0 frames/s in, 10.0 detected/s, ...
+curl -s 127.0.0.1:8792/health | python3 -m json.tool
+uv run python scripts/voice_cascade.py switch --knob vision.source=snapshot   # the way round
+```
+
+camera_stream's report line carries `publish period median/p95` and the feed's own
+`perception 20.0/s sent (... q90, <= 20/s), 0 dropped, 0 refused, 0 failed, encode 0.9/1.1 ms,
+post 0.4/0.6 ms`; a service that is down costs camera_stream one refused connection every 2 s.
+The voice's turn lines end with the vision cell, `vision 20.0 in / 10.0 detected per s, detect
+19 ms, 1 face 1 person` (`vision DOWN (127.0.0.1:8792: ros/models.sh start perception)` while it
+is down: `see` then answers an error naming the service, and the gaze turns to the voice only).
+
+Measured on this Mac (2026-10-12, the stored frames through a real service at 20 Hz beside the
+live voice and the ROS stack): per detected frame decode 1.6 ms, SCRFD 10.2 ms (p95 11.4), Vision
+7.4 ms (p95 8.2), total 19.2 ms (p95 21.2); the service holds 398 MB, 787 MB with ArcFace loaded
+(1.9 ms a face, let go after 5 idle minutes); `/latest` and `/frame/newest.jpg` answer in 0.2 ms
+on the loopback, `/embed` in 3 ms. The face sensor's live run (`scripts/face_sensor.py run`, a
+second stream client of the board) is retired from the defaults: `run` needs `--source` named.
+
 ## Gaze: the head's one owner
 
 `pepin_bringup.gaze` runs beside Nav2 in `pepin-macnav` and is the only thing that moves the
@@ -591,8 +666,9 @@ curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the 
 
 **The speaker gaze** (`pepin.expression.tracker`, in the voice cascade, flag `speaker_gaze`, off as
 shipped): on the robot's name the head turns to the voice (the array's direction of arrival),
-takes a snapshot, finds the face (SCRFD alone, on the CPU and the Neural Engine, never the GPU the
-voice uses: `finder.compute_units`; a far one from 28 px, and 10 deg higher before giving up),
+takes the camera channel's first record exposed after the head settled ("One camera channel"
+above: faces and people found by the perception service on the rectified left eye, on the CPU
+and the Neural Engine, never the GPU the voice uses; a far face from 24 px of that eye),
 centres it, smiles once at a clear face, and follows the person at ten frames a second while it
 listens and one while it speaks, none while the voice makes a reply's first chunk, leading a
 walking one; whoever speaks with words from elsewhere is looked at at once,
@@ -687,7 +763,8 @@ the speaker of each utterance in front of the words the brain reads (`[гово�
 `[говорит: похоже, Саша]`, `[говорит: кто-то новый]`; the prosody words follow, measured against
 that person's own baseline) from the voice (WeSpeaker ResNet34-LM, an utterance of at least 1 s)
 and the face (ArcFace alone on the speaker gaze's tracked face, else on the dominant face of a
-fresh snapshot). A new person is named by the brain's `remember_person(name)` (the stranger who
+fresh record of the camera channel; the perception service embeds it, `POST /embed`, so the
+voice process loads no face net unless `vision.source` is `snapshot`). A new person is named by the brain's `remember_person(name)` (the stranger who
 spoke last, or the one new face in view when someone introduces them) and deleted by
 `forget_person(name)`. The store is `data/people/people.db` on this Mac (names and embeddings,
 nothing else, never uploaded). Weights, once per checkout (models/ is gitignored):
@@ -763,6 +840,7 @@ minute, and every live flag on it back to its default.
 | `camera_stream` | `camera_stamp` | choice: send, grab | grab | yes | which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the stream URL and falls back to send per frame without it, counted in the report line) |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
+| `camera_stream` | `perception_feed` | bool | on | yes | the left picture of every published frame (rectified on a calibrated stereo head) goes to the perception service on the laptop (perception_url) as a JPEG with its stamp, optics and brightness: the one camera channel the speaker gaze, person recognition and see read. The pump drops a reference into a one-slot mailbox; the feed's own thread encodes (perception_quality) and POSTs at perception_hz at most, a slow service costing frames, never the pump's time |
 | `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's base bridge publishes that edge live from the neck's encoders, because two publishers of one edge fight |
 | `contact_scan` | `contact_scan` | bool | on | yes | the contact line is published; off, the node is a subscriber that costs nothing — the costmap's own contact_layer.enabled is the other end of the same demo switch, and either one alone takes the camera's floor line out |
 | `contact_scan` | `shadow` | bool | on | yes | the last floor pixel on a face stands a band's width UP that face, so its ray lands past the foot: on, that width is taken back off the range (pepin.contact.band_shadow); off is the raw boundary ray |
@@ -840,6 +918,8 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `bag_recorder` | `tail_s` | number 0..60 | 2.0 | goal_bag ring: a goal's bag ends this many seconds after the goal ended (the cart settling); the bag is cut this long and ~1 s after the end |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason |
 | `camera_stream` | `camera_stamp_lag_s` | number 0..0.3 | 0.0 | camera_stamp grab only: every grab stamp is dated this many seconds earlier; 0 (the default) FOLLOWS THE CAMERA'S RATE: config/camera.json's rate rule (0.885 x the frame period + 3.5 ms) on the period this node measures from the grab stamps (the median of the last 31 intervals, printed in the report line with the configured rate beside it), because the capture stamp sits one frame period behind the picture at any rate (92 / 48 / 33 ms at 10 / 20 / 30 fps, 2026-10-07, scratch/vio_rate/lag_clip.py); 0.09, the default until 2026-10-07, is the fixed lag of 10 fps. The fixed value dates every grab stamp that much earlier, to the exposure the V4L2 capture stamp sits behind (about one frame period at 10 fps whatever the light: a buffered frame, not the exposure); the send fallback is left alone. Measured with the head's gyro against the pictures' own motion (image flow vs /head/imu, scratch/vio_night/cam_imu_lag.py): 90/90 ms by day, 92/95 ms at night (2026-10-04); with 0.09 live the residual read +1 ms. config/camera.json's head_imu.time_offset_s is measured against stamps dated head_imu.stamp_lag_s at head_imu.camera_fps, and ros/laptop.sh vio reads the live value at its start: restart the VIO after a change |
+| `camera_stream` | `perception_hz` | number 1..30 | 20.0 | perception_feed: frames a second at most sent to the perception service (a frame offered within three quarters of a period of the last one taken is passed over); 20 is the camera's rate, so every frame goes and the service's ring holds 10 s of all of them, while its detector takes 10 a second (config/models.json perception.detect_hz) |
+| `camera_stream` | `perception_quality` | integer 50..100 | 90 | perception_feed: the JPEG quality of the left picture sent (800x600: 77 KB at 90, 61 KB at 85; encoding 0.65 / 0.62 ms in this container, 2026-10-12, scratch/perception_1012/channel_costs.txt); the ring keeps these bytes, so see hands the LLM exactly them |
 | `contact_scan` | `max_range` | number 0.1..10 | 2.0 | metres past which a column is called clear instead of ended; the costmap's contact_layer.obstacle_max_range must match it |
 | `depth_fusion` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `depth_fusion` | `lean_gate_deg` | number 0..90 | 3.0 | a scan taken while the cart leans more than this many degrees is not integrated into the map; only with imu_lean on, which is where the lean is known at all |
@@ -1407,26 +1487,27 @@ core; nothing in `vslam.launch.py` starts them. Open a database with the tools o
 
 ## The model services
 
-Docker on macOS has no GPU, so the learned models run on the laptop as two host processes (two
-failure domains), which the containers reach as `http://host.docker.internal:<port>` (bound to
-127.0.0.1):
+Docker on macOS has no GPU and no Neural Engine, so the learned models run on the laptop as three
+host processes (three failure domains), which the containers reach as
+`http://host.docker.internal:<port>` (bound to 127.0.0.1):
 
 | job | process | port | models (device from `config/models.json`) |
 | --- | --- | --- | --- |
 | `depth` | `pepin.depth_service` | 8790 | the mono depth network, RAFT-Stereo (as `ros/depth_host.sh`) |
 | `localization` | `pepin.localization_service` | 8791 | XFeat (`/xfeat`, cpu), LighterGlue (`/match`, cpu), BoQ-DINOv2 place descriptors (`/place`, mps) |
+| `perception` | `pepin.perception_service` | 8792 | the one camera channel: SCRFD (ane), Apple Vision, ArcFace on demand (ane) ("One camera channel") |
 
-Both are launchd jobs run from the repository's uv environment and loaded on demand: their plists
+All are launchd jobs run from the repository's uv environment and loaded on demand: their plists
 live in `~/Library/Application Support/pepin/launchd` (`PEPIN_LAUNCHD_DIR`), so nothing loads them
 at login. While a job is loaded launchd restarts it when it dies. `ros/laptop.sh vslam` starts
-both and `ros/laptop.sh stop` stops them.
+the installed ones and `ros/laptop.sh stop` stops them.
 
 | command | what it does |
 | --- | --- |
-| `ros/models.sh install [depth\|localization\|all]` | write the job's plist and start it; waits for `/health` |
+| `ros/models.sh install [depth\|localization\|perception\|all]` | write the job's plist and start it; waits for `/health` |
 | `ros/models.sh start\|stop\|restart [...]` | load / unload / kill-and-respawn the job |
 | `ros/models.sh status [...]` | launchd's word and each `/health`: every model's tag (its weights' hash), device, requests and ms |
-| `ros/models.sh logs [depth\|localization]` | follow `logs/models_<job>.out` |
+| `ros/models.sh logs [depth\|localization\|perception]` | follow `logs/models_<job>.out` |
 | `ros/models.sh fetch-xfeat` | clone XFeat at the commit the image pins into `models/accelerated_features` |
 | `ros/models.sh uninstall [...]` | stop and remove |
 
