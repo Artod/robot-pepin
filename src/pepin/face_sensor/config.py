@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 CONFIG_FILE = "face_sensor.json"
-DEVICES = ("coreml", "mps", "cpu")
+DEVICES = ("coreml", "mps", "ane", "cpu")
 EYES = ("left", "right", "full")
 STAMP_MODES = ("grab", "send", "arrival")
 REPO = Path(__file__).resolve().parents[3]

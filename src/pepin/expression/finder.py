@@ -17,11 +17,15 @@ added 550-800 MB, because it opens every network of the pack), loads in 0.1-0.25
 
 The weights are config/face_sensor.json's ``detector_pack`` (``models/face/buffalo_l``, its
 ``det_10g.onnx`` alone is read) under the checkout the cascade runs from; CoreML compiles the
-network at the first load into ``coreml_cache``.
+network at the first load into ``coreml_cache``. Where it runs is config/expression.json's
+``finder.compute_units``: ``CPUAndNeuralEngine`` keeps it off the GPU, where the voice's Qwen3-TTS
+runs (2026-10-12: with the detector free to use the GPU the voice's first chunk took 230-400 ms
+instead of 100-150); a network CoreML refuses runs on the CPU.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import threading
@@ -29,6 +33,7 @@ import time
 import urllib.request
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Protocol
 
 import numpy as np
@@ -42,6 +47,8 @@ logger = logging.getLogger(__name__)
 
 Image = NDArray[np.uint8]
 SNAPSHOT_TIMEOUT_S = 2.0
+# config/expression.json's finder.compute_units (CoreML's names) as a detector device
+UNITS_DEVICE = {"CPUAndNeuralEngine": "ane", "ALL": "coreml", "CPUAndGPU": "mps", "CPU": "cpu"}
 
 
 @dataclass(frozen=True)
@@ -188,19 +195,37 @@ class SnapshotFinder:
             if self._detector is None:
                 t0 = time.perf_counter()
                 self._detector = self._load()
-                logger.info("face detector loaded in %.1f s", time.perf_counter() - t0)
+                device = getattr(self._detector, "device", "?")
+                logger.info("face detector loaded in %.1f s (%s)", time.perf_counter() - t0, device)
             return self._detector
+
+
+def finder_device(path: str | Path | None = None) -> str:
+    """config/expression.json's ``finder.compute_units`` as a detector device (``ane`` when
+    unset); ``ValueError`` for a name CoreML does not have."""
+    if path is None:
+        from pepin.deployment import config_file
+
+        path = config_file("expression.json")
+    units = json.loads(Path(path).read_text()).get("finder", {}).get("compute_units")
+    if units is None:
+        return "ane"
+    if units not in UNITS_DEVICE:
+        raise ValueError(f"finder.compute_units is one of {', '.join(UNITS_DEVICE)}, not {units!r}")
+    return UNITS_DEVICE[units]
 
 
 def board_finder(host: str | None = None) -> SnapshotFinder:
     """The finder on the robot: config/camera.json's snapshot, config/face_sensor.json's pack
-    (detector only) and lens; the detector loads on :meth:`SnapshotFinder.warm`."""
+    (detector only) and lens, config/expression.json's compute units; the detector loads on
+    :meth:`SnapshotFinder.warm`."""
     from pepin.audio_link import board_host
     from pepin.camera import CameraConfig
     from pepin.deployment import config_file
     from pepin.face_sensor.config import FaceSensorConfig
 
     cfg = FaceSensorConfig.load()
+    device = finder_device()
     cam = CameraConfig.load(config_file("camera.json"), board=host or board_host())
     eye = cfg.source.eye
     upside_down = bool(cam.rig and cam.rig.upside_down and eye != "full")
@@ -217,7 +242,7 @@ def board_finder(host: str | None = None) -> SnapshotFinder:
         m = cfg.models
         return Scrfd(
             cfg.path(m.detector_pack),
-            device=cfg.device,
+            device=device,
             cache=cfg.path(m.coreml_cache),
             det_size=m.det_size,
             det_threshold=m.det_threshold,

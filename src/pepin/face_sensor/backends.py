@@ -44,19 +44,48 @@ IMAGENET_STD = np.array([0.229, 0.224, 0.225], dtype=np.float32)
 MESH_PX = 256
 
 
+# CoreML's compute units for each device name: coreml lets CoreML choose (the GPU included),
+# mps keeps it off the Neural Engine, ane off the GPU (the voice's Qwen3-TTS runs there). The
+# Neural Engine takes SCRFD only as a NeuralNetwork model: onnxruntime 1.30's default ML Program
+# falls back to the CPU there (33 ms a frame against 5.6, scratch/gaze_robust/ane_probe.py).
+COMPUTE_UNITS = {"coreml": None, "mps": "CPUAndGPU", "ane": "CPUAndNeuralEngine"}
+
+
 def providers(device: str, cache: Path) -> tuple[list[str], list[dict[str, str]]]:
-    """onnxruntime's providers and their options for ``device`` (CPU when CoreML is absent)."""
+    """onnxruntime's providers and their options for ``device`` (``cpu``, ``coreml``, ``mps``,
+    ``ane``; CPU when CoreML is absent)."""
     import onnxruntime as ort
 
     if device == "cpu" or COREML not in ort.get_available_providers():
         if device != "cpu":
             logger.warning("onnxruntime has no CoreML provider here; running on the CPU")
         return [CPU], [{}]
+    if device not in COMPUTE_UNITS:
+        raise ValueError(f"device is cpu, {', '.join(COMPUTE_UNITS)}; not {device!r}")
     cache.mkdir(parents=True, exist_ok=True)
     options = {"ModelCacheDirectory": str(cache)}
-    if device == "mps":
-        options["MLComputeUnits"] = "CPUAndGPU"
+    units = COMPUTE_UNITS[device]
+    if units is not None:
+        options["MLComputeUnits"] = units
+    if device == "ane":
+        options["ModelFormat"] = "NeuralNetwork"
     return [COREML, CPU], [options, {}]
+
+
+def session_options(device: str, threads: int = 1) -> Any:
+    """onnxruntime's session options for ``device``, None for its defaults. On ``ane`` the few
+    nodes CoreML leaves to onnxruntime's CPU run on ``threads`` that do not spin while they
+    wait (the default pool spun ~50 ms of CPU a frame around a 6 ms detection)."""
+    if device != "ane":
+        return None
+    import onnxruntime as ort
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = threads
+    options.inter_op_num_threads = 1
+    options.add_session_config_entry("session.intra_op.allow_spinning", "0")
+    options.add_session_config_entry("session.inter_op.allow_spinning", "0")
+    return options
 
 
 def require(path: Path, what: str) -> Path:
@@ -134,13 +163,48 @@ class Scrfd:
             raise FileNotFoundError(f"no det_*.onnx in {pack} (see config/face_sensor.json)")
         self.name = found[0].name
         names, options = providers(device, cache)
+        sess = session_options(device)
+        try:
+            self._model = self._load(
+                model_zoo, found[0], names, options, sess, det_size, det_threshold
+            )
+        except Exception as exc:  # CoreML refusing the network: the CPU runs it
+            if names[0] != COREML:
+                raise
+            logger.warning("CoreML (%s) refused the detector, running it on the CPU: %s",
+                           device, exc)  # fmt: skip
+            names, options = [CPU], [{}]
+            self._model = self._load(
+                model_zoo,
+                found[0],
+                names,
+                options,
+                session_options(device, 2),
+                det_size,
+                det_threshold,
+            )
+        self.providers = names
+        self.device = device if names[0] == COREML else "cpu"
+
+    @staticmethod
+    def _load(
+        zoo: Any,
+        path: Path,
+        names: list[str],
+        options: list[dict[str, str]],
+        sess: Any,
+        det_size: int,
+        det_threshold: float,
+    ) -> Any:
         kwargs: dict[str, Any] = {"providers": names, "provider_options": options}
+        if sess is not None:
+            kwargs["sess_options"] = sess
         if names[0] == COREML:  # FaceAnalysis's own fixed input for a CoreML detector
             kwargs["_coreml_detector_input_size"] = (det_size, det_size)
-        self._model: Any = model_zoo.get_model(str(found[0]), **kwargs)
+        model: Any = zoo.get_model(str(path), **kwargs)
         ctx = 0 if names[0] == COREML else -1
-        self._model.prepare(ctx, input_size=(det_size, det_size), det_thresh=det_threshold)
-        self.providers = names
+        model.prepare(ctx, input_size=(det_size, det_size), det_thresh=det_threshold)
+        return model
 
     def detect(self, image: Image) -> list[Detection]:
         """Every face above the threshold, with its five landmarks."""
