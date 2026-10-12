@@ -15,7 +15,9 @@ from pathlib import Path
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
 from pepin.voice_cascade.stages import Brain, Voice
 
-NOT_FOR_THE_BRAIN = frozenset({"say"})  # the brain speaks through the voice, not a tool
+# say: the brain speaks through the voice, not a tool. find: it needs the world service (:8798),
+# which is not part of the stack yet; offering it made the brain blame the head when it failed.
+NOT_FOR_THE_BRAIN = frozenset({"say", "find"})
 ECHO = "echo"  # the brain that repeats what it heard (no API call)
 API_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 

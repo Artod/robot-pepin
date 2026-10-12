@@ -626,7 +626,7 @@ class CascadeLoop:
             woke = not noise and (self.config.wake == "always" or is_wake(text))
             print(
                 f"heard (idle, {whisper_ms} ms): {text!r}"
-                + ("  -> WAKE" if woke else "  (Whisper's noise line)" if noise else ""),
+                + ("  -> WAKE" if woke else "  (noise line)" if noise else ""),
                 flush=True,
             )
             row = {

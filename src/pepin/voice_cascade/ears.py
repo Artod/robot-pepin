@@ -84,7 +84,7 @@ class TurnSegmenter(Segmenter):
         if not self.talking:
             return None
         segment = Segment(b"".join(self._voiced), ended_s)
-        self.reset()
+        self.reset(keep_quiet_tail=True)
         return segment if segment.duration_s >= self.min_s else None
 
     def audio(self) -> bytes:

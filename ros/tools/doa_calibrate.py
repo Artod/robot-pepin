@@ -83,12 +83,24 @@ def listen(args: argparse.Namespace) -> list[float]:
     client = AudioClient(args.host, args.port).start(listen=True)
     heard = utterances(client, args.threshold_db, args.hold_s, args.gap_s)
     readings: list[float] = []
+
+    def next_said() -> Utterance:
+        # the board closes a fresh link once early on (the cascade sees the same and reconnects)
+        nonlocal client, heard
+        while True:
+            try:
+                return next(heard)
+            except StopIteration:
+                print("  (audio link lost: reconnecting)", flush=True)
+                client = AudioClient(args.host, args.port).start(listen=True)
+                heard = utterances(client, args.threshold_db, args.hold_s, args.gap_s)
+
     try:
         for place in PLACES:
             print(f"\n{place} of the cart, 1.5 m away: say the phrase {args.per_place} times")
             got: list[float] = []
             while len(got) < args.per_place:
-                said = next(heard)
+                said = next_said()
                 got.append(said.deg)
                 print(
                     f"  {len(got)}: {said.deg:.0f} deg ({said.speech} speech readings,"
@@ -133,9 +145,19 @@ def main() -> int:
     ap.add_argument("--gap-s", type=float, default=0.4, help="the quiet that ends one")
     ap.add_argument("--readings", type=float, nargs=4, metavar=("FRONT", "LEFT", "BEHIND", "RIGHT"))
     ap.add_argument("--write", action="store_true", help="write the fit to config/expression.json")
+    ap.add_argument(
+        "--tol-deg", type=float, default=None,
+        help="accept readings this far off their quarter turn (default: the fit's own; the camera"
+        " refines the aim, so 30 is fine for an off-centre array)",
+    )  # fmt: skip
     args = ap.parse_args()
     readings = list(args.readings) if args.readings else listen(args)
-    fit = fit_doa_map(*readings)
+    front, left, back, right = readings
+    fit = (
+        fit_doa_map(front, left, back, right)
+        if args.tol_deg is None
+        else fit_doa_map(front, left, back, right, tol_deg=args.tol_deg)
+    )
     print("\n" + fit.text())
     if fit.refusal is not None:
         return 1

@@ -510,3 +510,17 @@ def test_a_gained_voice_scales_the_engine_s_pcm_and_clips() -> None:
     hot = np.frombuffer(with_gain(np.array([30_000], dtype="<i2").tobytes(), 20.0), dtype="<i2")
     assert int(hot[0]) == 32767
     assert with_gain(b"", -3.0) == b"" and with_gain(b"\x01\x00", 0.0) == b"\x01\x00"
+
+
+def test_a_word_right_after_a_close_keeps_its_first_sound_in_the_lead_in() -> None:
+    ears = ears_with(["silent"], lead_s=1.0)
+    frames = quiet(1.2) + tone(0.6) + quiet(0.6) + quiet(0.1) + tone(0.6) + quiet(0.6)
+    segments = []
+    for i, frame in enumerate(frames):
+        for event in ears.feed(frame, i * FRAME_S):
+            if event.kind == "segment" and event.segment is not None:
+                segments.append(event.segment)
+    assert len(segments) == 2
+    # the second word started 0.1 s after the first close: its lead-in is the quiet tail that
+    # ended the first utterance, not an empty buffer
+    assert segments[1].duration_s >= 0.6 + 0.5
