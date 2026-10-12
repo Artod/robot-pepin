@@ -63,6 +63,12 @@
 // a stale edge is never republished. This replaced pepin_bringup.neck_state (a Python process
 // polling the base server at 2-20 Hz, git history before 2026-10-02).
 //
+// THE ARM rides it too: a line whose read heard the SO-101 (every tick while it is energised,
+// `idle_read_hz` while it rests, never on a board without config/arm.json) carries its six
+// angles in degrees, and each such line becomes /arm/joint_states (sensor_msgs/JointState: the
+// URDF's joint names, radians; arm.hpp), stamped with that read like the neck. A line without
+// them publishes nothing.
+//
 // THE HEAD IMU (head_imu_enable, off until the head exists): a second JsonLineLink to head_server
 // (TCP 3340, pepin.head_server owns the head ESP32's serial port) subscribes to its IMU lines and
 // publishes every sample (under `head_imu_publish_hz`, every n-th) as /head/imu in the chip's
@@ -102,6 +108,7 @@
 #include <sensor_msgs/msg/joint_state.hpp>
 #include <tf2_ros/transform_broadcaster.h>
 
+#include "pepin_base_cpp/arm.hpp"
 #include "pepin_base_cpp/gyro_bias.hpp"
 #include "pepin_base_cpp/head_imu.hpp"
 #include "pepin_base_cpp/head_line.hpp"
@@ -148,8 +155,8 @@ constexpr double kNaN = std::numeric_limits<double>::quiet_NaN();
 // silently taking a mutex inside std::atomic.
 static_assert(std::atomic<double>::is_always_lock_free, "the IMU loop must not lock");
 
-/// Bridges the base server to ROS: /odom and odom->base_link out, /cmd_vel down to wheels, and
-/// the neck's encoders as /neck/state and base_link -> camera_link.
+/// Bridges the base server to ROS: /odom and odom->base_link out, /cmd_vel down to wheels, the
+/// neck's encoders as /neck/state and base_link -> camera_link, the arm's as /arm/joint_states.
 class BaseBridge : public rclcpp::Node
 {
 public:
@@ -301,6 +308,7 @@ public:
     twist_covariance_ = odometry_twist_covariance();
 
     odom_publisher_ = create_publisher<nav_msgs::msg::Odometry>("odom", 10);
+    arm_publisher_ = create_publisher<sensor_msgs::msg::JointState>("arm/joint_states", 10);
     // Five deep, RELIABLE: what the EKF subscribes with (odom2_queue_size), and what the slip
     // watch's publisher on the same topic uses.
     zupt_publisher_ = create_publisher<nav_msgs::msg::Odometry>("zupt", 5);
@@ -388,6 +396,7 @@ private:
     if (state.has_value()) {
       const LineTime when = line_time(*state);  // once: the head and the wheels share a stamp
       publish_neck(*state, when);  // first: odom_publish mutes the wheels, not the head
+      publish_arm(*state, when);
       publish_state(*state, when);
     }
   }
@@ -560,6 +569,46 @@ private:
       neck_heard_.load(), neck_lines_.load(), neck_sent_.load(), neck_pan_ticks_.load(),
       angles.pan_rad * kRadToDeg, neck_tilt_ticks_.load(), angles.pitch_rad * kRadToDeg,
       neck_arrival_stamped_.load());
+    return line;
+  }
+
+  /// Reader thread: a line that carries the arm's angles as /arm/joint_states, at that read's
+  /// stamp; a line without them publishes nothing.
+  void publish_arm(const BaseState & state, const LineTime & when)
+  {
+    if (!state.arm_read) {
+      return;
+    }
+    if (!when.dated) {
+      ++arm_arrival_stamped_;
+    }
+    const auto radians = arm_radians(state.arm_deg);
+    sensor_msgs::msg::JointState joints;
+    joints.header.stamp = when.read;
+    joints.name.assign(kArmJointNames.begin(), kArmJointNames.end());
+    joints.position.assign(radians.begin(), radians.end());
+    arm_publisher_->publish(joints);
+    ++arm_sent_;
+  }
+
+  /// The arm as a report line prints it: how many lines carried its angles, all published.
+  ///
+  /// ``arm: 300 of 3000 lines carried the angles, published on /arm/joint_states; 0 dated on
+  /// arrival`` once a minute.
+  std::string arm_state() const
+  {
+    char line[160];
+    if (arm_sent_.load() == 0) {
+      std::snprintf(
+        line, sizeof(line), "arm: none of %ld lines carried the angles, nothing published",
+        neck_lines_.load());
+      return line;
+    }
+    std::snprintf(
+      line, sizeof(line),
+      "arm: %ld of %ld lines carried the angles, published on /arm/joint_states; %ld dated on "
+      "arrival",
+      arm_sent_.load(), neck_lines_.load(), arm_arrival_stamped_.load());
     return line;
   }
 
@@ -1292,13 +1341,13 @@ private:
   {
     if (imu_enable_) {
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 60000, "%s; %s; %s; %s; %s", imu_state().c_str(),
+        get_logger(), *get_clock(), 60000, "%s; %s; %s; %s; %s; %s", imu_state().c_str(),
         gyro_bias_state().c_str(), zupt_state().c_str(), neck_state().c_str(),
-        odom_stamp_state().c_str());
+        arm_state().c_str(), odom_stamp_state().c_str());
     } else {
       RCLCPP_INFO_THROTTLE(
-        get_logger(), *get_clock(), 60000, "%s; %s", neck_state().c_str(),
-        odom_stamp_state().c_str());
+        get_logger(), *get_clock(), 60000, "%s; %s; %s", neck_state().c_str(),
+        arm_state().c_str(), odom_stamp_state().c_str());
     }
     log_head_status();
     const auto change = link_->take_status_change();
@@ -1684,6 +1733,12 @@ private:
   std::atomic<double> neck_pan_rad_{0.0};
   std::atomic<double> neck_pitch_rad_{0.0};
   std::atomic<double> base_yaw_rate_{0.0};  // the base gyro's last bias-corrected yaw rate
+
+  // THE ARM (publish_arm): its counters, written by the reader thread (neck_lines_ counts every
+  // line for both).
+  std::atomic<long> arm_sent_{0};
+  std::atomic<long> arm_arrival_stamped_{0};
+  rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr arm_publisher_;
 
   // THE HEAD IMU (declare_head, on_head_line): fixed at start but for the counters, which the
   // head reader thread writes and the status timer reads.

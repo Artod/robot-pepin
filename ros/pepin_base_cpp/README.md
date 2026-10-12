@@ -1,8 +1,9 @@
 # pepin_base_cpp
 
 The base bridge in C++: `/cmd_vel` down to the board's base server, its state stream up as
-`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw`, the rest `/zupt`, and the neck's
-encoders as `/neck/state` and `base_link -> camera_link`. It is the
+`/odom` and `odom -> base_link`, the MPU6050 as `/imu/data_raw`, the rest `/zupt`, the neck's
+encoders as `/neck/state` and `base_link -> camera_link`, and the arm's as `/arm/joint_states`. It
+is the
 board's only base bridge: the Python one it was ported from (same node name, parameters and wire
 protocol) cost ~190 MB RSS and ~10% of a core, this one ~25 MB and ~1%, and RAM runs out first;
 that node is in git history before 2026-10-02. Its live switches are described in
@@ -17,6 +18,7 @@ that node is in git history before 2026-10-02. Its live switches are described i
 - `include/pepin_base_cpp/zupt.hpp` — when the cart is certainly still, for the EKF's /zupt.
 - `include/pepin_base_cpp/wheel_noise.hpp` — /odom's twist covariance from the measured motion.
 - `include/pepin_base_cpp/neck.hpp` — the neck's ticks as joint angles and the camera's pose.
+- `include/pepin_base_cpp/arm.hpp` — the arm's angles off the state line as joint states.
 - `src/base_bridge.cpp` — the node: /odom, TF, the /cmd_vel sink, the 5 Hz resend, the neck.
 
 ## Neck
@@ -47,6 +49,20 @@ minute: how many lines carried the ticks, how many went out, where the head poin
 Board cost, AN ESTIMATE until a census: one JointState and one transform per state line, about
 what the /odom beside them costs (+2-3 % of a core); it retired `pepin_bringup.neck_state`, a
 Python process at 10 % and 66 MB.
+
+## Arm
+
+The base server reads the SO-101's six servos in the same sync_read (`pepin.arm_driver`: every tick
+while the arm is energised, `idle_read_hz` 5 while it rests with its torque off, never on a board
+without `/opt/pepin/config/arm.json`) and a line whose read heard them carries
+`"arm": {"deg": [six angles], "torque", "phase", "id", "progress_s", "error"}`: degrees in
+`pepin.expression.trajectory.JOINTS` order, lerobot's calibration = the URDF's convention. Each such
+line becomes `/arm/joint_states` (`sensor_msgs/JointState`: `shoulder_pan`, `shoulder_lift`,
+`elbow_flex`, `wrist_flex`, `wrist_roll`, `gripper`, radians, no velocity or effort), stamped with
+that read like the neck; a line without them publishes nothing. Its reader is `pepin.arm`
+(depth_fusion's `arm_filter`, `config/arm.json` `joints.source: topic`). No parameters and no
+switch: a board without the arm publishes nothing. The minute line: `arm: N of M lines carried the
+angles, published on /arm/joint_states; K dated on arrival`.
 
 ## IMU
 
@@ -216,6 +232,10 @@ skipped without a `c++`).
   holds every answer to `pepin.neck`'s within 1e-9.
 - `test/wheel_noise_contract.cpp` — the law's defaults on rest, a straight, a pivot and a stop,
   then a law and stamped twists from stdin held to `pepin.wheel_noise` with config/base.json.
+- `test/arm_contract.cpp` — the joint names, degrees to radians and the rows that publish nothing,
+  then config/arm.json's poses from stdin held to `pepin.arm`'s reading of them; with
+  `nlohmann/json.hpp` on the include path (the containers, not the Mac) the state line's `arm`
+  parse in `protocol.hpp` too.
 - `test/protocol_samples.json` — wire lines recorded from the Python bridge this one was ported
   from: the twists and stops `protocol.hpp` must encode byte for byte, and the state lines it must
   parse.

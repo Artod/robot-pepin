@@ -1,5 +1,6 @@
 """The C++ base bridge's own contracts, compiled and run: the gyro's bias tracker, the IMU's probe
-schedule, the zero-velocity update and the neck's model (ros/pepin_base_cpp/test/*_contract.cpp).
+schedule, the zero-velocity update, the neck's model and the arm's joints
+(ros/pepin_base_cpp/test/*_contract.cpp).
 
 The package has no ament test target and the board image is not built on a laptop, so each
 contract is one stand-alone main() over its header, no ROS and no gtest. This test compiles each
@@ -8,6 +9,7 @@ with the host's c++ and holds its verdict; without a compiler it is skipped, nev
 
 from __future__ import annotations
 
+import json
 import math
 import shutil
 import subprocess
@@ -30,6 +32,7 @@ CONTRACTS = (
     "mast_contract",
     "imu_probe_contract",
     "wheel_noise_contract",
+    "arm_contract",
 )
 
 
@@ -326,3 +329,47 @@ def test_the_wheel_noise_law_in_c_plus_plus_answers_what_pepin_wheel_noise_answe
         want = got if got is not None else (0.001, 0.01)
         assert (float(var_v), float(var_w)) == pytest.approx(want, rel=1e-12), (v, w, t)
     assert held >= 4, "the hold was exercised"
+
+
+@pytest.mark.slow
+def test_the_arm_joints_in_c_plus_plus_are_what_pepin_arm_reads(tmp_path: Path) -> None:
+    """The bridge publishes /arm/joint_states from arm.hpp: pepin.arm_driver writes the angles
+    (degrees, JOINTS order) and pepin.arm reads the topic for depth_fusion's arm_filter (the
+    URDF's joint names, radians). config/arm.json's parked pose, rest pose and limits come out as
+    math.radians of each, and the parked pose through the topic is the pose pepin.arm builds from
+    the file's pose_deg; a row that is not six finite angles publishes nothing."""
+    from pepin.arm import ArmModel, JointHistory, arm_pose
+    from pepin.expression.trajectory import JOINTS
+
+    binary = _compile("arm_contract", tmp_path)
+    data = json.loads((REPO / "config/arm.json").read_text())
+    pose, motion = data["joints"]["pose_deg"], data["motion"]
+    rows = [
+        [float(pose[n]) for n in JOINTS],
+        [float(motion["rest_deg"][n]) for n in JOINTS],
+        [float(motion["limits_deg"][n][0]) for n in JOINTS],
+        [float(motion["limits_deg"][n][1]) for n in JOINTS],
+    ]
+    broken = ["1 2 3 4 5", "1 2 3 4 5 6 7", "nan 1 2 3 4 5", "1 2 3 4 5 inf", ""]
+    text = "\n".join([*(" ".join(repr(v) for v in row) for row in rows), *broken]) + "\n"
+    ran = subprocess.run(
+        [str(binary), "--stdin"], input=text, capture_output=True, text=True, check=False
+    )
+    assert ran.returncode == 0, ran.stdout + ran.stderr
+    names, *answers = ran.stdout.splitlines()
+    model = ArmModel.load(REPO / "config/arm.json")
+    assert names.split()[1:] == list(JOINTS)
+    assert sorted(JOINTS) == sorted(model.joint_names)
+    assert answers[len(rows) :] == ["refused"] * len(broken)
+    published = [[float(v) for v in a.split()[1:]] for a in answers[: len(rows)]]
+    for row, answer, radians in zip(rows, answers, published, strict=False):
+        assert answer.startswith("rad ")
+        assert radians == pytest.approx([math.radians(d) for d in row], abs=1e-12)
+    history = JointHistory()
+    history.add(10.0, list(JOINTS), published[0])
+    topic = arm_pose(replace(model, source="topic"), history, 10.0)
+    config = arm_pose(model, None, 10.0)
+    assert topic is not None and config is not None
+    assert (topic.source, config.source) == ("topic", "config")
+    assert [n for n, _ in topic.angles] == [n for n, _ in config.angles]
+    assert [a for _, a in topic.angles] == pytest.approx([a for _, a in config.angles], abs=1e-12)

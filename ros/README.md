@@ -12,8 +12,8 @@ laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + 
 pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
   costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (C++: /odom,
   velocity smoother), goal_server               /imu/data_raw, /zupt, /neck/state, the camera's
-  (127.0.0.1:3337), run_recorder, gaze          tf), EKF (odom -> base_link), rf2o, tof_bridge
-  (the head's one owner, 127.0.0.1:3339)
+  (127.0.0.1:3337), run_recorder, gaze          tf, /arm/joint_states), EKF (odom -> base_link),
+  (the head's one owner, 127.0.0.1:3339)        rf2o, tof_bridge
 pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, the wheels),
   camera, depth, visual odometry, the           pepin-tof.service (:3335), ser2net (:3333,
   volume, foxglove_bridge (ws 8765)             the servo bus, the base server's own link)
@@ -618,7 +618,10 @@ uv run python scripts/gesture.py teach raised                       # torque off
 tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performances and cues
 ```
 
-A board without `config/arm.json` in `/opt/pepin/config` never reads or writes the arm. Every
+The base bridge publishes the arm's angles as `/arm/joint_states` (the URDF's joint names, radians,
+at each read's stamp: every tick while the arm is energised, 5 Hz at rest), which depth_fusion's
+`arm_filter` reads under `config/arm.json` `joints.source: topic`. A board without `config/arm.json`
+in `/opt/pepin/config` never reads or writes the arm, and publishes nothing there. Every
 cue line says the stream second it was planned for, the one it went at and how late; the
 board's `accepted`/`done` come back as `arm` lines with the laptop's time.
 
