@@ -26,8 +26,8 @@ person asks for takes the head from the conversation.
   without blinding it. Refused whole, never clamped: a key past the reach or ``clip_max_deg``,
   a tilt reversing faster than ``clip_max_hz`` (2.5 Hz: the mast rings at 5.3 Hz; the board's
   tilt ramp caps every move at 600 deg/s^2 by itself); the gesture then plays without its head.
-  ``POST /release`` with ``fade_s`` (config/expression.json's ``parts.head.fade_s``) takes it
-  back over that long.
+  ``POST /release`` with ``fade_s`` (the head's of config/expression.json's ``layers.fade_s``)
+  takes it back over that long.
 
 On the door a clip is a :class:`ClipLook`, answered when it ends or is refused (a loop at once);
 :class:`pepin.gaze_link.GazeClient` sends it.
