@@ -114,8 +114,11 @@ def report(turns: Sequence[Mapping[str, Any]]) -> list[str]:
     lines += histogram(steps, [name for name, _, _ in STEPS])
     eot = [t["eot"] for t in turns if t.get("eot")]
     if eot:
-        by_model = sum(1 for e in eot if e["closed_by"] == "model")
+        by_model = sum(1 for e in eot if e["closed_by"] in ("model", "both"))
+        waited = sum(1 for e in eot if e["closed_by"] == "wait")
         lines += ["", f"end-of-turn model ({by_model} of {len(eot)} closed by it):"]
+        if waited:
+            lines.append(f"{waited} of {len(eot)} waited for unfinished words")
         lines += histogram(eot, ["saved_ms", "model_ms"])
         lines += histogram(eot, ["p"], digits=2)[1:]
     if usage:

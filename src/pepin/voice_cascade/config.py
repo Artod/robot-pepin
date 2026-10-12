@@ -27,6 +27,13 @@ VOICE_ENGINES = ("qwen3", "gemini", "say")  # gemini: a cloud voice with a local
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
+# ears.turn_model: a model above, or the words and the sound together (voice_cascade.turn_text)
+TWO_GATES = "two-gates"
+TURN_METHODS = (*TURN_MODELS, TWO_GATES)
+TURN_ACOUSTIC = ("pause", *TURN_MODELS)  # two-gates' sound: the pause alone or a model's p
+# end-of-turn text models: name -> Hugging Face repo (model_quant.onnx, tokenizer.json):
+# videosdk-live's Namo Turn Detector v1, Apache-2.0
+TEXT_MODELS = {"namo-ru": "videosdk-live/Namo-Turn-Detector-v1-Russian"}
 BARGE_IN_DETECTORS = ("level", "vad", "words")  # pepin.voice_cascade.barge_in
 WORDS_GATES = ("vad", "level")
 # speech to text: mlx (Whisper on the GPU), whispercpp (the encoder on the Neural Engine) and
@@ -171,6 +178,12 @@ class CascadeConfig:
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
     turn_threshold: float = 0.85
+    turn_acoustic: str = "pause"  # two-gates: the sound's gate
+    turn_text_model: str | None = None  # two-gates: None the rules, else a TEXT_MODELS name
+    turn_early_close_s: float = 0.25  # two-gates: the words and the sound agree
+    turn_incomplete_s: float = 0.8  # two-gates: the words unfinished
+    turn_complete_p: float = 0.7  # two-gates' text model: p this high makes a lone word whole
+    turn_incomplete_p: float = 0.02  # ... and p this low vetoes (the words wait)
     # transcriber
     transcriber_engine: str = "mlx"
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"  # the mlx engine's model
@@ -256,6 +269,12 @@ class CascadeConfig:
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
             turn_threshold=float(turn.get("threshold", d.turn_threshold)),
+            turn_acoustic=str(turn.get("acoustic", d.turn_acoustic)),
+            turn_text_model=turn.get("text_model") or None,
+            turn_early_close_s=float(turn.get("early_close_s", d.turn_early_close_s)),
+            turn_incomplete_s=float(turn.get("incomplete_s", d.turn_incomplete_s)),
+            turn_complete_p=float(turn.get("complete_p", d.turn_complete_p)),
+            turn_incomplete_p=float(turn.get("incomplete_p", d.turn_incomplete_p)),
             transcriber_engine=str(tr.get("engine", d.transcriber_engine)),
             whisper_repo=str(mlx.get("model", d.whisper_repo)),
             whispercpp_model=str(cpp.get("model", d.whispercpp_model)),
@@ -346,14 +365,15 @@ class CascadeConfig:
         self.check_voice(self.voice)
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
-        if self.turn_model is not None and self.turn_model not in TURN_MODELS:
-            raise ValueError(f"ears.turn_model: one of {', '.join(TURN_MODELS)} or null")
+        if self.turn_model is not None and self.turn_model not in TURN_METHODS:
+            raise ValueError(f"ears.turn_model: one of {', '.join(TURN_METHODS)} or null")
         if not 0 < self.turn_min_silence_s < self.silence_s:
             raise ValueError("turn.min_silence_s: above 0 and under ears.silence_s")
         if not 1.0 <= self.turn_window_s <= 8.0 or not 0.0 < self.turn_threshold <= 1.0:
             raise ValueError(
                 "turn.window_s in 1..8 s (the model's input) and turn.threshold in 0..1"
             )
+        self.check_two_gates()
         if not 0.1 <= self.silence_s <= 3.0 or self.barge_in_hold_s <= 0:
             raise ValueError("ears.silence_s in 0.1..3 s and barge_in.hold_s > 0")
         if self.barge_in_detector not in BARGE_IN_DETECTORS:
@@ -413,6 +433,30 @@ class CascadeConfig:
         config = replace(self, **{k: v for k, v in changes.items() if v is not None})
         config.check()
         return config
+
+    def check_two_gates(self) -> None:
+        """``ValueError`` when the two-gates knobs cannot work (the names and ranges whatever
+        the method; their order against the other blocks with ``ears.turn_model`` two-gates)."""
+        if self.turn_acoustic not in TURN_ACOUSTIC:
+            raise ValueError(f"turn.acoustic: one of {', '.join(TURN_ACOUSTIC)}")
+        if self.turn_text_model is not None and self.turn_text_model not in TEXT_MODELS:
+            raise ValueError(f"turn.text_model: one of {', '.join(TEXT_MODELS)} or null")
+        if not 0.0 <= self.turn_incomplete_p < self.turn_complete_p <= 1.0:
+            raise ValueError("turn.incomplete_p under turn.complete_p, both in 0..1")
+        if self.turn_model != TWO_GATES:
+            return
+        if not 0.1 <= self.turn_early_close_s <= self.silence_s <= self.turn_incomplete_s <= 3.0:
+            raise ValueError(
+                "turn.early_close_s from 0.1 s up to ears.silence_s, turn.incomplete_s from"
+                " ears.silence_s up to 3 s"
+            )
+        if not 0 < self.early_s < self.turn_early_close_s:
+            raise ValueError(
+                "ears.turn_model two-gates reads the early transcript: transcriber.early_s above"
+                " 0 and under turn.early_close_s"
+            )
+        if self.turn_acoustic != "pause" and self.turn_min_silence_s >= self.turn_early_close_s:
+            raise ValueError("turn.min_silence_s under turn.early_close_s: the model asked first")
 
     @property
     def price(self) -> ModelPrice:

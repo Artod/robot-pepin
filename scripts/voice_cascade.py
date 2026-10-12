@@ -15,6 +15,7 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
     uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
+    uv run python scripts/voice_cascade.py --set ears.turn_model=two-gates  # words + pause
     uv run python scripts/voice_cascade.py --set transcriber.engine=whispercpp  # Neural Engine
     uv run python scripts/voice_cascade.py --voice gemini-lite   # Gemini TTS (GEMINI_API_KEY)
 
@@ -71,6 +72,7 @@ from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import (
     CONFIG_FILE,
     TRANSCRIBER_ENGINES,
+    TWO_GATES,
     CascadeConfig,
     voice_preset,
 )
@@ -106,6 +108,7 @@ from pepin.voice_cascade.transcriber import (
     wanted_from,
 )
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
+from pepin.voice_cascade.turn_text import TextJudge, build_judge
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
 from pepin.voice_live.events import Events, StatePrinter
@@ -493,9 +496,21 @@ def main() -> int:
         report=lambda line: print(line, flush=True),
     )
     turn: TurnWorker | None = None
-    if config.turn_model is not None:
-        print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
-        turn = TurnWorker(SmartTurn(config.turn_model))
+    judge: TextJudge | None = None
+    sound = config.turn_model
+    if config.turn_model == TWO_GATES:
+        sound = None if config.turn_acoustic == "pause" else config.turn_acoustic
+        words = config.turn_text_model or "rules"
+        print(f"end of turn: two gates, the words by {words}, the sound by"
+              f" {config.turn_acoustic}", flush=True)  # fmt: skip
+        judge = build_judge(
+            config.turn_text_model,
+            complete_p=config.turn_complete_p,
+            incomplete_p=config.turn_incomplete_p,
+        )
+    if sound is not None:
+        print(f"loading the end-of-turn model ({sound})...", flush=True)
+        turn = TurnWorker(SmartTurn(sound))
     tagger: Tagger | None = None
     if config.prosody_tags:
         tagger = ProsodyTagger(config.prosody, emotion=emotion_model(config.prosody.emotion_model))
@@ -576,6 +591,7 @@ def main() -> int:
         flags=[body.engine, people] + ([gaze] if gaze is not None else []),
         vocabulary=body.vocabulary,
         people=people,
+        judge=judge,
     )
     loop.paid_ledger = ledger
     holder.append(loop)

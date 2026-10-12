@@ -165,6 +165,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `jog.py` | Gentle single-motor jog for bring-up | `uv run python scripts/jog.py wheel \| neck --port PORT --id N` |
 | `setup_motor_id.py` | Assigns a bus ID to one Feetech servo | `uv run python scripts/setup_motor_id.py --port PORT --id N` |
 | `timesync.py` | The board's clock offset from the laptop over NTP, one line | `ros/time.sh offset` |
+| `turn_eval.py` | End-of-turn methods (silence, Smart Turn, two-gates) replayed on recorded turns, with mid-sentence pauses inserted: cuts before the last word, merges, the close after it; the text judges on the early reads | `uv run --group stt-gigaam python scripts/turn_eval.py data/voice/DAY... [--live-cuts DIR] [--pauses 0.25 0.5 0.8] [--methods M...] [--set K=V] [-v]` |
 | `voice.py` | Voice loop: the array, Gemini on the audio, the robot's tools, speech | `uv run python scripts/voice.py` |
 | `voice_live.py` | Voice over the Gemini Live API with a local wake gate | `uv run python scripts/voice_live.py [--dry-run]` |
 | `voice_cascade.py` | Voice cascade: local Whisper, Claude with the tools, local Qwen3-TTS; per-stage latency, `--bench` p50/p90 | `uv run python scripts/voice_cascade.py [--brain sonnet] [--bench DIR]` |
