@@ -8,6 +8,7 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py play greeting --speed 0.2
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
+    uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
 
 ``play`` renders the intent from config/animation.json (seed and variant printed, so a run is
 replayed with them), stretches its arm clip by 1/speed, checks it against config/arm.json's
@@ -31,7 +32,7 @@ from typing import Any
 
 from pepin.arm_motion import ArmMotion, load_arm_motion
 from pepin.audio_link import board_host
-from pepin.expression.animation import Scene
+from pepin.expression.animation import Clip, Scene, Track
 from pepin.expression.arm_link import ArmClient
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.mix import stretched
@@ -198,6 +199,43 @@ class _NoLink:
         """Nothing."""
 
 
+def nudge(args: argparse.Namespace, motion: ArmMotion) -> int:
+    """One joint ``deg`` from rest and back over ``seconds``, at ``speed``: the first motion
+    of a live test (no jump at torque-on, rest, torque off)."""
+    if args.joint not in JOINTS:
+        print(f"a joint: one of {', '.join(JOINTS)}")
+        return 2
+    seconds = args.seconds
+    track = Track(args.joint, "additive", (0.0, 0.4 * seconds, 0.6 * seconds, seconds),
+                  (0.0, args.deg, args.deg, 0.0))  # fmt: skip
+    part = ArmPart(_NoLink(), motion, speed_scale=args.speed)
+    clip = stretched(Clip("arm", 0.0, 0.0, seconds, (track,)), 1.0 / args.speed)
+    planned = part.plan(clip, f"nudge-{args.joint}")
+    if isinstance(planned, str):
+        print(f"refused here: {planned}")
+        return 3
+    print(f"{args.joint} {args.deg:+.1f} deg and back over {clip.duration_s:.1f} s at speed"
+          f" {args.speed} ({len(planned.knots)} knots), then rest and torque off")  # fmt: skip
+    if args.dry_run:
+        return 0
+    client = connect(args.host)
+    try:
+        client.send(planned)
+        for wanted in (("accepted", *DONE), DONE):
+            answer = client.wait_answer(planned.id, wanted, seconds + 15.0)
+            print(f"  board: {answer.status if answer else 'no answer'}"
+                  f"{': ' + answer.reason if answer and answer.reason else ''}")  # fmt: skip
+            if answer is None or answer.status in DONE:
+                break
+    except KeyboardInterrupt:
+        client.halt()
+        print("\nhalt sent: the arm holds where it is, then rests by itself")
+        return 130
+    finally:
+        client.close()
+    return 0
+
+
 def teach(args: argparse.Namespace, motion: ArmMotion) -> int:
     if not re.fullmatch(r"[a-z][a-z0-9_]{0,31}", args.name) or args.name == "rest":
         print("a pose's name: lower_snake_case, not rest (config/arm.json's)")
@@ -258,6 +296,12 @@ def main() -> int:
     p.add_argument("--knot-hz", type=float, default=25.0, help="knots a second at speed 1")
     p.add_argument("--no-face", action="store_true", help="leave the face alone")
     p.add_argument("--dry-run", action="store_true", help="print the plan, send nothing")
+    n = sub.add_parser("nudge", help="one joint some degrees from rest and back, slowly")
+    n.add_argument("joint", help=", ".join(JOINTS))
+    n.add_argument("deg", type=float)
+    n.add_argument("--seconds", type=float, default=2.0, help="the motion at speed 1")
+    n.add_argument("--speed", type=float, default=0.2, help="share of the caps")
+    n.add_argument("--dry-run", action="store_true", help="print the plan, send nothing")
     t = sub.add_parser("teach", help="write the arm's present angles as a pose of the book")
     t.add_argument("name")
     args = ap.parse_args()
@@ -268,6 +312,8 @@ def main() -> int:
         return read(args.host)
     if args.command in ("rest", "halt"):
         return simple(args.host, f"arm_{args.command}")
+    if args.command == "nudge":
+        return nudge(args, motion)
     if args.command == "play":
         return play(args, motion)
     return teach(args, motion)
