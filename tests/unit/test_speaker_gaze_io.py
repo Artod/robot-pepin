@@ -1,5 +1,6 @@
 """The speaker gaze's two outside seams: the arbiter's door (pepin.expression.door) over a fake
-client, and the face finder (pepin.expression.finder) over a fake camera and detector."""
+client, and the finder (pepin.expression.finder) over a fake camera and detectors: faces, and
+people's boxes."""
 
 from __future__ import annotations
 
@@ -10,7 +11,16 @@ import numpy as np
 import pytest
 
 from pepin.expression.door import SpeakerDoor, answer_of, view_of
-from pepin.expression.finder import Picture, SnapshotFinder, head_yaw_deg, snapshot_url
+from pepin.expression.finder import (
+    PersonBox,
+    Picture,
+    SnapshotFinder,
+    VisionBodies,
+    body_sighting,
+    head_yaw_deg,
+    snapshot_url,
+)
+from pepin.expression.speaker import Ease
 from pepin.face_sensor.geometry import Lens
 from pepin.face_sensor.models import Detection
 from pepin.gaze import Aim
@@ -155,3 +165,66 @@ def test_the_head_s_yaw_from_the_five_points_and_the_snapshot_beside_the_stream(
     assert snapshot_url("http://10.0.0.187:8080/stream?extra_headers=1") == (
         "http://10.0.0.187:8080/snapshot?extra_headers=1"
     )
+
+
+def test_an_eased_aim_carries_its_speed_and_ramp_to_the_arbiter() -> None:
+    client = Client({"status": "done", "pan_rad": 0.5, "tilt_rad": 0.05})
+    door(client).aim(Aim(0.5, 0.05), speed="saccade", ttl_s=6.0, ease=Ease(200.0, 650.0, "turn"))
+    ((_, (request, _)),) = client.calls
+    assert (request["speed_deg_s"], request["acc_deg_s2"]) == (200.0, 650.0)
+    assert request["speed"] == "saccade", "an arbiter that predates the ease moves at this"
+
+
+class Bodies:
+    def __init__(self, found: list[PersonBox]) -> None:
+        self.found = found
+
+    def detect(self, image: Any) -> list[PersonBox]:
+        return self.found
+
+
+def test_a_person_s_box_gives_the_head_near_its_top_its_middle_lying_and_the_edge_cut() -> None:
+    """Through a 90 deg pinhole (fx 400 at 800x600): a standing box 120 px wide and 400 tall,
+    centred: its head 12 % of the height below the top; a lying one (wider than tall): its
+    middle; one whose top the frame cuts: the edge."""
+    lens = Lens.nominal(800, 600, 90.0)
+    standing = body_sighting(PersonBox(340, 100, 460, 500, 0.7), lens, head_frac=0.12)
+    assert standing.pan_deg == pytest.approx(0.0) and standing.head_pan_deg == pytest.approx(0.0)
+    assert standing.head_tilt_deg == pytest.approx(math.degrees(math.atan((148 - 300) / 400)))
+    assert standing.half_width_deg == pytest.approx(math.degrees(math.atan(60 / 400)), abs=0.3)
+    assert not standing.cut
+    lying = body_sighting(PersonBox(100, 380, 500, 520, 0.6), lens, head_frac=0.12)
+    middle = math.degrees(math.atan2(150 / 400, math.hypot(1.0, 100 / 400)))  # (300, 450) px
+    assert lying.head_tilt_deg == pytest.approx(middle)
+    cut = body_sighting(PersonBox(300, 0, 500, 600, 0.8), lens, head_frac=0.12)
+    assert cut.cut and cut.head_tilt_deg == pytest.approx(-math.degrees(math.atan(300 / 400)))
+    picture = Picture(np.zeros((600, 800, 3), dtype=np.uint8), 0.0)
+    finder = SnapshotFinder(Camera(picture), lambda: Faces([]), lens,
+                            bodies=Bodies([PersonBox(340, 100, 460, 500, 0.7)]))  # fmt: skip
+    found = finder.look()
+    assert found is not None and found.faces == () and found.bodies == (standing,)
+
+
+def test_the_vision_body_detector_runs_where_pyobjc_vision_is_installed() -> None:
+    """Apple Vision's human rectangles on an empty picture: no person, no error (skipped
+    without pyobjc-framework-Vision: uv add --group macos pyobjc-framework-Vision)."""
+    pytest.importorskip("Vision")
+    detector = VisionBodies()
+    detector.warm()
+    assert detector.detect(np.zeros((600, 800, 3), dtype=np.uint8)) == []
+
+
+def test_a_finder_whose_body_detector_cannot_load_runs_faces_only() -> None:
+    class Missing:
+        def warm(self) -> None:
+            raise ImportError("No module named 'Vision'")
+
+        def detect(self, image: Any) -> list[PersonBox]:
+            raise AssertionError("never asked")
+
+    picture = Picture(np.zeros((600, 800, 3), dtype=np.uint8), 0.0)
+    finder = SnapshotFinder(Camera(picture), lambda: Faces([]), Lens.nominal(800, 600, 90.0),
+                            bodies=Missing())  # fmt: skip
+    finder.warm()
+    found = finder.look()
+    assert finder.bodies is None and found is not None and found.bodies == ()

@@ -1,74 +1,56 @@
 """The speaker gaze: the head on the person the robot talks with, the head's base layer.
 
-A conversation opens on the robot's name: the head turns to the voice (the array's direction of
-arrival, :mod:`pepin.expression.doa`), takes a frame, finds the face, centres it and smiles once,
-then follows whoever speaks while the conversation lasts::
+One engine, coarse to fine, after Pepper's basic awareness (a stimulus turns the head, a look
+checks for a person there, a person found is engaged and tracked, none: back to the one engaged
+before):
 
-    idle --opened--> turn to the voice --> seek (seek_frames, seek_every_s apart, at seek_tilt_deg
-                     and again seek_sweep_deg higher)
-      seek --a face--> refine onto it, smile once (a face of track_min_face_px or more) --> track
-      seek --no face--> voice (back at seek_tilt_deg, stays on the voice, no smile)
-      voice --a face--> refine, smile --> track
-      track: track_hz frames while the person speaks or is silent, track_speaking_hz while the
-             robot speaks, only while the head stands still, is ours and carries no gesture; a
-             face off the centre by more than deadband_deg is re-aimed where it will be lead_s
-             later (constant velocity over the last two sightings, at most lead_max_deg ahead;
-             slow up to saccade_over_deg, else a saccade); an aim under aim_min_deg from the last
-             one is never written (the look is renewed every renew_s instead)
-      track --no face in frames for face_lost_s--> voice (the head stays where it is)
-      drive(True) --> paused (the arbiter let the head go at the drive's start)
-      drive(False) --> the next utterance with words orients again
-      closed, or the switch off --> release --> idle (no frames, no calls)
+1. STIMULI. The array's direction stream (:mod:`pepin.expression.doa`: about 10 readings a
+   second, speech-flagged, on the board's clock) with the robot's own speaking spans cut out, so
+   an utterance that overlaps a reply keeps its clean part; the utterances the ears close (words,
+   peak level, the robot's name); one head-camera frame at a time (:mod:`pepin.expression.
+   finder`: faces, and people's boxes when a body detector runs); the robot speaking.
+2. PEOPLE (:mod:`pepin.expression.tracks`): a few tracks, each a bearing and a head aim placed by
+   a face, a body box or a voice; freshness decides between them.
+3. WHOM (:mod:`pepin.expression.policy`): the person speaking. The name always wins; a person
+   seen before is switched to at once; an unknown voice while someone is engaged is a check (one
+   frame there, back when nobody); a sound, a quiet or a thin utterance moves nothing.
+4. HOW: one ``angles`` aim, pan and tilt together, eased on the servo's own trapezoid
+   (:class:`pepin.expression.speaker.Ease`): a TURN (``turn_acc_deg_s2``: 20 deg in 0.35 s, 60
+   in 0.61 s) to a new person, an ADJUST (``adjust_acc_deg_s2``) for corrections, follows and the
+   seek's stops. Tracking keeps a dead band and leads a moving face. A SEEK runs only when the
+   person engaged has a bearing and nobody is seen there: the last ``doa_follow_s`` of the voice
+   first, then ``seek_pan_deg`` outward and inward of the bearing at the remembered tilt, one
+   frame a stop, then back to the voice. While the person speaks and nothing has seen them for
+   ``seen_fresh_s``, the head FOLLOWS the voice's stream. Past ``comfort_pan_deg`` the head goes
+   first and the wheels turn the rest (:mod:`pepin.expression.plan`, at most ``wheels.
+   max_turn_deg``) on their own thread, the head re-centring as the body comes round.
 
-Who speaks now is looked at: look, verify, return. Each utterance is judged by its bearing:
+The phases: ``seek`` (looking for the person engaged: a check, or the stops), ``track`` (they
+are seen), ``voice`` (nobody seen: the head on their voice, frames go on), ``paused`` (a drive)
+and ``idle`` (no conversation, or the switch off: no frames, no calls). The person engaged is
+lost after ``face_lost_frames`` frames AND ``face_lost_s`` without them (one missed frame at the
+1 Hz of the robot's speech is no loss); the head then goes to their voice when it was heard
+after they were last seen.
 
-* a sound is no speaker: without words (noise, nothing read), with fewer than ``doa_min_speech``
-  of the array's speech-flagged readings, or with a peak under ``doa_min_dbfs`` (a quiet voice
-  gives a wrong bearing: on 2026-10-12 a question at -31 dBFS read -76 deg off a face tracked
-  at +25) it never moves the head alone; ``reaim_votes`` word-less sounds in a row from
-  about one place (within ``reaim_deg`` of each other) make a look there, like an utterance;
-* an utterance with words ``reaim_deg`` or more off the person held is someone speaking: the head
-  looks there at once (at the remembered place of a person heard there before, else at the
-  bearing). While a face is tracked the look is a check: one frame at the tilt and one
-  ``seek_sweep_deg`` higher within ``verify_s`` of the first; a face there becomes the target,
-  none and the head goes back to the face it left. With no face held it is a full seek;
-* the robot's name in an utterance always turns the head to it (a full seek, the head staying on
-  the voice when no face is found), the gates aside.
-
-The voice comes first: from a reply's first part going to the voice until its first audio
-chunk is with the player (``hold_for_voice``), no frame is taken and nothing is detected, so the
-voice's first chunk never waits on the detector; the detector itself runs on the CPU and the
-Neural Engine, never the GPU the voice uses (config/expression.json ``finder.compute_units``,
-:mod:`pepin.expression.finder`).
-
-Each person looked at is remembered (``remember_targets`` of them: the face's place, its last
-box, when): the seam for two interlocutors, and the way back after a check that found nobody.
-
-The head is held through the arbiter's door as an ``angles`` look of the idle band, source
-``voice.speaker`` (:mod:`pepin.expression.head`): TTL ``ttl_s``, renewed every ``renew_s``
-(an aim renews it too); a renewal that finds nothing live (a ``look`` the person asked for, a
-stall look took the head) asks again and queues behind it, so the head comes back when that look
-ends. While the robot speaks its own voice is in the array: an utterance overlapping the robot's
-speech moves nothing (frames go on). A frame counts only while the head is ours, still and
-carries no gesture (an overlay other than the idle layer's breath): a thinking glance pulls the
-head away and brings it back without the target being lost. The smile goes through the head
-server's face owner (source ``expression``).
-
-Past ``comfort_pan_deg`` the HEAD GOES FIRST, as far as it reaches, and the wheels then turn the
-rest (:mod:`pepin.expression.plan`, at most ``wheels.max_turn_deg``) on their own thread
-(:class:`pepin.expression.wheels.WheelsExecutor`): the request returns at once, the voice answers
-meanwhile, and every ``step_deg`` the wheels have turned the head re-centres by as much (slowly),
-so it stays on the person while the body comes round; their end re-centres it once more. Frames
-wait while the body turns. When the wheels turn less (refused, blocked, halted because the
-person spoke or a drive began), the head stays as far as it reaches; a turn cut by a halt is
-finished by the next utterance's orientation.
+The voice comes first: from a reply's first part going to the voice until its first audio chunk
+is with the player (``hold_for_voice``) no frame is taken, and while the robot speaks frames come
+at ``track_speaking_hz``; the detector runs on the CPU and the Neural Engine, never the GPU the
+voice uses (config/expression.json ``finder``). The head is held through the arbiter's door as
+an ``angles`` look of the idle band, source ``voice.speaker`` (:mod:`pepin.expression.head`):
+TTL ``ttl_s``, renewed every ``renew_s`` (an aim renews it too); a renewal that finds the look
+gone (a ``look`` the person asked for took the head) asks again, queued behind it. A frame counts
+only while the head is ours, still and carries no gesture (the idle layer's breath aside). The
+smile goes through the head server's face owner (source ``expression``), once a conversation, at
+the first clear face.
 
 Every decision prints one line (``say``) and, through :class:`pepin.expression.conversation.
 EventSink`, lands in the conversation's events.jsonl on the session clock: ``gaze_wake``,
-``gaze_voice`` (each utterance's bearing and verdict), ``gaze_reaim`` (each aim asked of the
-arbiter and why), ``gaze_face`` (a face found), ``gaze_lost`` (a seek, a check or a face that came
-to nothing; the door lost), ``gaze_wheels`` (a turn of the wheels ended: asked, turned, why) and
-``gaze_release``.
+``gaze_voice`` (each utterance's bearing, verdict and track), ``gaze_doa`` (each utterance's
+readings: ``[seconds before its end on the board's clock, the array's angle, 1 speech / 0 not /
+-1 not the person's: the robot's own voice, or from before the wheels last turned the cart]``),
+``gaze_reaim`` (each aim asked of the arbiter, why, its profile and its time), ``gaze_face`` (a
+person found: by face or body), ``gaze_lost`` (a seek, a check or a person that came to nothing;
+the door lost), ``gaze_wheels`` and ``gaze_release``.
 
 :class:`SpeakerGaze` is the machine, single-threaded and clocked by its caller (tests drive it on
 a fake clock); :class:`SpeakerGazeWorker` is the cascade's observer and the live switch
@@ -91,43 +73,53 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-from pepin.audio_signal import circular_mean_deg
 from pepin.expression.conversation import SPEAKER_GAZE, EventSink, Heard
-from pepin.expression.doa import VoiceBearing, fit_doa_map, utterance_readings, voice_of
+from pepin.expression.doa import (
+    Span,
+    UtteranceDoa,
+    VoiceBearing,
+    board_offset,
+    fit_doa_map,
+    recent_voice,
+    utterance_voice,
+)
 from pepin.expression.executors import FaceChannel, WheelMove, WheelReport, Wheels
 from pepin.expression.head import IDLE_LOOK, SPEAKER
 from pepin.expression.markers import Part
-from pepin.expression.plan import BodyLimits, split
-from pepin.expression.policy import SpeakerPolicy, face_aim
+from pepin.expression.plan import BodyLimits, split, sweep
+from pepin.expression.policy import decide, doubt
 from pepin.expression.speaker import (
     DoaMap,
     DoaSource,
+    Ease,
     FaceFinder,
     FaceFrame,
     FaceSighting,
     GazeDoor,
     HeadView,
-    Target,
 )
+from pepin.expression.tracks import Sighting, Track, Tracks, sightings, wrap
 from pepin.gaze import Aim, Reach, Speed
 
 if TYPE_CHECKING:
     from pepin.expression.conversation import ConversationObserver, LiveFlag
     from pepin.expression.door import SpeakerDoor
     from pepin.expression.finder import SnapshotFinder
-    from pepin.expression.speaker import TargetPolicy
     from pepin.expression.wheels import WheelsExecutor
     from pepin.voice_live.sources import BoardLink
 
 logger = logging.getLogger(__name__)
 
 Phase = Literal["idle", "seek", "voice", "track", "paused"]
+Move = Literal["turn", "adjust"]
 CONFIG_FILE = "expression.json"
 FACE_SOURCE = "expression"  # the face's expressions of the body layer, at the head server
 BLIND_RETRY_S = 0.1  # a frame refused for a blind head is tried again this soon
+TICK_EPS_S = 1e-6
+FOLLOW_EVERY_S = 0.1  # the voice's stream is read this often while the head follows it
+LISTEN_MAX_S = 30.0  # an utterance never closed is not followed longer than this
 SPOKE_KEPT = 8  # the robot's latest speaking spans kept to judge an utterance by
 TEXT_KEPT = 40  # an utterance's words kept in its event, to pair it with the loop's "heard"
-LEAD_WINDOW_S = 0.5  # two sightings further apart than this give no speed to lead by
 Report = Callable[[str], None]
 FaceListener = Callable[[FaceFrame, FaceSighting], None]  # a frame and the speaker's face in it
 WheelEvent = tuple[str, int, Any]  # ("moved", turn id, degrees) or ("done", turn id, WheelReport)
@@ -135,12 +127,10 @@ WheelEvent = tuple[str, int, Any]  # ("moved", turn id, degrees) or ("done", tur
 
 @dataclass
 class Turning:
-    """A turn of the wheels toward the speaker, running: its id, the person's bearing when it
-    began (radians, the cart's frame then), how far it was asked and how far the wheels have
-    turned so far (degrees, + left)."""
+    """A turn of the wheels toward the speaker, running: its id, how far it was asked and how
+    far the wheels have turned so far (degrees, + left)."""
 
     id: int
-    voice: float
     asked_deg: float
     turned_deg: float = 0.0
 
@@ -159,30 +149,39 @@ class SpeakerSettings:
     window_s: float = 1.0
     min_speech: int = 2
     comfort_pan_deg: float = 60.0
-    in_frame_deg: float = 25.0
-    seek_tilt_deg: float = -5.0
-    seek_sweep_deg: float = 10.0
-    seek_frames: int = 3
+    seek_tilt_deg: float = 3.0
+    seek_pan_deg: float = 20.0
+    seek_frames: int = 1
     seek_every_s: float = 0.4
     seek_min_face_px: float = 28.0
     track_min_face_px: float = 40.0
+    min_body_score: float = 0.5
     track_hz: float = 10.0
     track_speaking_hz: float = 1.0
     hold_for_voice: bool = True
     lead_s: float = 0.3
     lead_max_deg: float = 10.0
     match_deg: float = 20.0
+    voice_match_deg: float = 25.0
     refine_deg: float = 2.0
     deadband_deg: float = 6.0
     saccade_over_deg: float = 15.0
     aim_min_deg: float = 1.0
-    reaim_deg: float = 35.0
     verify_s: float = 0.7
-    reaim_votes: int = 2
     face_lost_s: float = 2.0
-    doa_min_speech: int = 4
-    doa_min_dbfs: float = -28.0
-    remember_targets: int = 3
+    face_lost_frames: int = 3
+    doa_min_speech: int = 6
+    doa_min_dbfs: float = -18.0
+    doa_follow_s: float = 0.5
+    doa_moved_deg: float = 8.0
+    follow_min_speech: int = 3
+    follow_max_deg: float = 35.0
+    seen_fresh_s: float = 1.0
+    max_tracks: int = 4
+    track_forget_s: float = 300.0
+    turn_speed_deg_s: float = 200.0
+    turn_acc_deg_s2: float = 650.0
+    adjust_acc_deg_s2: float = 400.0
     ttl_s: float = 6.0
     renew_s: float = 2.0
     aim_wait_s: float = 2.0
@@ -200,6 +199,12 @@ class SpeakerSettings:
     def speaking_every_s(self) -> float:
         """The time between tracking frames while the robot speaks."""
         return 1.0 / self.track_speaking_hz
+
+    def ease(self, move: Move) -> Ease | None:
+        """The profile of a turn or an adjustment; None when its ramp is 0 (the arbiter's own
+        saccade or slow speed)."""
+        acc = self.turn_acc_deg_s2 if move == "turn" else self.adjust_acc_deg_s2
+        return Ease(self.turn_speed_deg_s, acc, move) if acc > 0.0 else None
 
     @classmethod
     def from_config(cls, data: Mapping[str, Any]) -> SpeakerSettings:
@@ -239,12 +244,16 @@ class SpeakerSettings:
             raise ValueError("speaker: renew_s must be shorter than ttl_s")
         if self.seek_frames < 0 or self.track_hz <= 0 or self.seek_every_s <= 0:
             raise ValueError("speaker: seek_frames >= 0, seek_every_s and track_hz > 0")
-        if self.reaim_votes < 1 or self.remember_targets < 0 or self.verify_s < 0:
-            raise ValueError("speaker: reaim_votes >= 1, remember_targets and verify_s >= 0")
-        if self.lead_max_deg < 0 or self.face_lost_s < 0 or self.seek_sweep_deg < 0:
-            raise ValueError("speaker: lead_max_deg, face_lost_s and seek_sweep_deg >= 0")
+        if self.max_tracks < 1 or self.face_lost_frames < 1 or self.verify_s < 0:
+            raise ValueError("speaker: max_tracks and face_lost_frames >= 1, verify_s >= 0")
+        if self.lead_max_deg < 0 or self.face_lost_s < 0 or self.seek_pan_deg < 0:
+            raise ValueError("speaker: lead_max_deg, face_lost_s and seek_pan_deg >= 0")
         if self.track_speaking_hz <= 0 or self.lead_s < 0 or self.aim_min_deg < 0:
             raise ValueError("speaker: track_speaking_hz > 0, lead_s and aim_min_deg >= 0")
+        if self.turn_speed_deg_s <= 0 or self.turn_acc_deg_s2 < 0 or self.adjust_acc_deg_s2 < 0:
+            raise ValueError("speaker: turn_speed_deg_s > 0, turn_ and adjust_acc_deg_s2 >= 0")
+        if self.doa_follow_s <= 0 or self.follow_min_speech < 1 or self.doa_moved_deg < 0:
+            raise ValueError("speaker: doa_follow_s > 0, follow_min_speech >= 1, doa_moved >= 0")
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> SpeakerSettings:
@@ -288,8 +297,8 @@ def _read_config(path: str | Path | None) -> dict[str, Any]:
 
 
 class SpeakerGaze:
-    """The speaker gaze's state machine: every moment and every tick from one thread, each call
-    to the door, the finder, the wheels and the face made from it, ``now`` the laptop's clock."""
+    """The speaker gaze's engine: every moment and every tick from one thread, each call to the
+    door, the finder, the wheels and the face made from it, ``now`` the laptop's clock."""
 
     def __init__(
         self,
@@ -305,8 +314,8 @@ class SpeakerGaze:
         on_face: FaceListener | None = None,
         events: EventSink | None = None,
     ) -> None:
-        """The seams it drives; ``doa`` None or ``finder`` None: no voice or no faces;
-        ``on_face`` hears every frame's face picked as the speaker's (person recognition);
+        """The seams it drives; ``doa`` None or ``finder`` None: no voice or no eyes;
+        ``on_face`` hears every frame's face of the person engaged (person recognition);
         ``events`` takes every decision as an event of the conversation's log."""
         self.door, self.doa, self.finder = door, doa, finder
         self.wheels, self.face, self.reach = wheels, face, reach
@@ -314,26 +323,28 @@ class SpeakerGaze:
         self.on_face = on_face
         self.events = events
         self.settings = settings
-        self.policy = self._policy(settings)
+        self.tracks = self._tracks_of(settings)
         self.phase: Phase = "idle"
         self.conversation = False
-        self.voice: float | None = None  # the person's bearing in the cart's frame (radians)
+        self.engaged: int | None = None  # the track the head serves
+        self.engaged_s = 0.0  # when it was engaged (or returned to)
+        self.fallback: int | None = None  # the track a check returns to
+        self.centre: float | None = None  # the bearing the look (and a seek's stops) centre on
         self.aim: Aim | None = None  # the aim last asked of the arbiter
-        self.seek_left = 0  # frames left at this tilt of a seek
-        self.tilts_left: list[float] = []  # the seek's higher tilts still to try (radians)
+        self.stops: list[Aim] | None = None  # a seek's stops still to look at (None: not begun)
+        self.seek_left = 0  # frames left at this stop of a seek
         self.verifying = False  # the seek is a check that returns to ``fallback``
         self.verify_until: float | None = None  # the check's end, set at its first frame
-        self.fallback: Target | None = None  # the face a check returns to when it finds nobody
-        self.target: Target | None = None  # the face tracked now
-        self.targets: list[Target] = []  # the people looked at before, the latest first
-        self.seen: tuple[float, float] | None = None  # the last sighting: when, its bearing
-        self.votes: list[float] = []  # bearings of word-less sounds in a row from elsewhere
+        self.misses = 0  # frames in a row without the person engaged
+        self.listening: float | None = None  # the person's utterance began (laptop clock)
         self.next_frame: float | None = None
         self.next_renew: float | None = None
+        self.next_follow: float | None = None
         self.smiled = False
         self.reorient = False  # the next utterance turns the head (after a drive, a switch)
         self.voice_hold = False  # a reply's first chunk is being synthesised: no frames
-        self.spoke: list[tuple[float, float | None]] = []  # the robot's speaking spans
+        self.spoke: list[Span] = []  # the robot's speaking spans
+        self.turned_s: float | None = None  # the wheels last moved the cart (its bearings)
         self.wake: Heard | None = None  # the cascade tells it once more as heard: not twice
         self.counts: Counter[str] = Counter()
         self.turning: Turning | None = None  # the wheels' turn toward the person, running
@@ -345,73 +356,109 @@ class SpeakerGaze:
         self.post: Callable[[WheelEvent], None] = self.inbox.append
 
     def configure(self, settings: SpeakerSettings) -> None:
-        """New knobs (the switch turned on re-reads them)."""
+        """New knobs (the switch turned on re-reads them); the people known stay."""
         self.settings = settings
-        self.policy = self._policy(settings)
+        known = self.tracks
+        self.tracks = self._tracks_of(settings)
+        self.tracks.adopt(known)
 
     @staticmethod
-    def _policy(settings: SpeakerSettings) -> SpeakerPolicy:
-        return SpeakerPolicy(
-            match_deg=settings.match_deg,
-            doa_jump_deg=settings.reaim_deg,
-            min_px=settings.track_min_face_px,
-            near_min_px=settings.seek_min_face_px,
+    def _tracks_of(s: SpeakerSettings) -> Tracks:
+        return Tracks(
+            default_tilt_rad=math.radians(s.seek_tilt_deg),
+            match_deg=s.match_deg,
+            voice_match_deg=s.voice_match_deg,
+            seen_fresh_s=s.seen_fresh_s,
+            forget_s=s.track_forget_s,
+            max_tracks=s.max_tracks,
+            min_new_px=s.track_min_face_px,
         )
+
+    @property
+    def track(self) -> Track | None:
+        """The person engaged now."""
+        return self.tracks.get(self.engaged)
+
+    @property
+    def voice(self) -> float | None:
+        """The bearing of the person engaged (radians, the cart's frame), None for nobody."""
+        track = self.track
+        return None if track is None else track.pan
 
     # ---- the moments ---------------------------------------------------------------------------
     def opened(self, wake: Heard, now: float) -> None:
-        """A conversation opened on ``wake``: turn to its voice."""
+        """A conversation opened on ``wake``: engage its voice (a remembered person there keeps
+        their tilt) and seek them."""
         self.conversation, self.smiled, self.reorient = True, False, False
-        self.wake = wake
-        self.targets, self.target, self.votes = [], None, []
-        voice = self.bearing(wake, now)
+        self.wake, self.listening = wake, None
+        self.tracks.forget(now)
+        voice = self._utterance(wake, now)
         self._note("gaze_wake", now, f"wake: {voice.text()}", **_voice_fields(voice, wake))
-        self._orient(voice.bearing_rad, now, "wake")
+        bearing = voice.bearing_rad
+        if bearing is None:  # the map unmeasured, no reading: where the head points
+            view = self._state()
+            bearing = view.head.pan_rad if view is not None and view.head is not None else 0.0
+        track, _ = self.tracks.heard(bearing, now, self._kept())
+        self.engaged = None
+        self._engage(track, now, "wake")
 
     def heard(self, heard: Heard, now: float) -> None:
-        """An utterance of the conversation: whoever speaks is looked at (a check while a face
-        is tracked); a sound without words, a quiet one, one over the robot's own voice or the
-        wake told again moves nothing alone."""
+        """An utterance of the conversation, judged as a stimulus, then by its track."""
+        self.listening = None
         if not self.conversation or heard == self.wake:
-            return
-        if self._robot_spoke(heard):
-            self.counts["over_robot"] += 1
-            self._judged(now, heard, None, "over the robot's own voice")
             return
         if self.phase == "paused" and not self.reorient:
             return  # a drive runs
-        voice = self.bearing(heard, now)
+        s = self.settings
+        voice = self._utterance(heard, now)
+        if voice.robot and voice.speech < s.doa_min_speech:
+            self.counts["over_robot"] += 1
+            self._judged(now, heard, voice, "over the robot's own voice or its turn")
+            return
         bearing = voice.bearing_rad
+        if bearing is None:
+            self._judged(now, heard, voice, "no bearing")
+            return
         if self.reorient:
             if not heard.words:
                 self._judged(now, heard, voice, "no words")
                 return
             self.reorient = False
-            self._judged(now, heard, voice, "after a pause", f"after a pause: {voice.text()}")
-            self._look_toward(bearing, now, "after a pause", check=False)
+            track, _ = self.tracks.heard(bearing, now, self._kept())
+            self._judged(now, heard, voice, "after a pause", f"after a pause: {voice.text()}",
+                         track=track.id)  # fmt: skip
+            self._engage(track, now, "after a pause")
             return
-        if bearing is None:
-            self._judged(now, heard, voice, "no bearing")
+        named = heard.named and heard.words
+        if not named:
+            why = doubt(heard, voice, min_speech=s.doa_min_speech, min_dbfs=s.doa_min_dbfs)
+            if why is not None:
+                self.counts["sounds_ignored"] += 1
+                line = None if not heard.words else f"not moved by {voice.text()}: {why}"
+                self._judged(now, heard, voice, why, line)
+                return
+        engaged = self.tracks.get(self.fallback) if self.verifying else self.track
+        centre = self.centre
+        speaker, new = self.tracks.heard(bearing, now, self._kept())
+        decision = decide(engaged, speaker, named=named)
+        if decision.act == "stay":
+            self._judged(now, heard, voice, decision.why, track=speaker.id)
+            moved = centre is not None and abs(wrap(speaker.pan - centre)) > math.radians(
+                s.doa_moved_deg
+            )
+            if self.phase in ("seek", "voice") and not self.verifying and moved:
+                self._engage(speaker, now, "the voice moved", move="adjust")
             return
-        elsewhere = self.policy.new_speaker(self.voice, bearing)
-        if heard.named and heard.words and (elsewhere or self.phase == "voice"):
-            self._judged(now, heard, voice, "the robot's name", f"the name: {voice.text()}")
-            self._look_toward(bearing, now, "the robot's name", check=False)
-            return
-        if not elsewhere:  # the person held (or being sought) speaks
-            self.votes = []
-            self._judged(now, heard, voice, "agrees")
-            return
-        doubt = self._doubt(voice, heard)
-        if doubt is not None:
-            self.counts["sounds_ignored"] += 1
-            self._judged(now, heard, voice, doubt, f"not moved by {voice.text()}: {doubt}")
-            return
-        if not heard.words:
-            self._vote(heard, voice, bearing, now)
-            return
-        self._judged(now, heard, voice, "elsewhere", f"a voice elsewhere: {voice.text()}")
-        self._look_toward(bearing, now, "a voice elsewhere", check=self.phase == "track")
+        line = f"{decision.why}: {voice.text()}"
+        self._judged(now, heard, voice, decision.why, line, track=speaker.id, new=new)
+        self._engage(speaker, now, decision.why, check=decision.act == "check")
+
+    def speech_started(self, t: float, now: float) -> None:
+        """The person began an utterance at ``t``: while nobody sees them, the head follows
+        their voice."""
+        if self.conversation:
+            self.listening = t
+            self.next_follow = now
 
     def speaking(self, on: bool, now: float) -> None:
         """The robot's voice starts (a reply's part queued: frames wait for its first chunk,
@@ -435,29 +482,34 @@ class SpeakerGaze:
         self.voice_hold = False
 
     def drive(self, active: bool, now: float) -> None:
-        """A drive started (the arbiter let the head go, the wheels are the drive's) or ended
-        (the next utterance orients)."""
+        """A drive started (the arbiter let the head go, the wheels are the drive's; every
+        bearing goes stale) or ended (the next utterance orients)."""
         if active:
-            self._forget_track()
+            self._forget_look()
             self._let_wheels_go("a drive starts")
+            self.tracks.clear()
+            self.engaged = None
             self.phase, self.aim, self.next_frame, self.next_renew = "paused", None, None, None
             self.reorient = False
         elif self.conversation:
             self.reorient = True
 
     def closed(self, reason: str, now: float) -> None:
-        """The conversation is over: the head is let go and nothing runs until the next one."""
+        """The conversation is over: the head is let go and nothing runs until the next one;
+        the people stay known (their places for the tilt, until forgotten)."""
         self.conversation = False
-        self.stop(now, f"the conversation closed ({reason})")
+        self.stop(now, f"the conversation closed ({reason})", forget=False)
 
-    def stop(self, now: float, why: str) -> None:
+    def stop(self, now: float, why: str, *, forget: bool = True) -> None:
         """Let the head go now (the switch off, the conversation's end), and the wheels."""
         self._let_wheels_go(why)
         held = self.phase != "idle" or self.aim is not None
         self.voice_hold = False
         self.phase, self.aim, self.next_frame, self.next_renew = "idle", None, None, None
-        self.voice, self.target, self.targets = None, None, []
-        self._forget_track()
+        self.engaged, self.listening, self.next_follow = None, None, None
+        self._forget_look()
+        if forget:
+            self.tracks.clear()
         if held:
             self.door.release()
             self.counts["releases"] += 1
@@ -469,8 +521,8 @@ class SpeakerGaze:
             self.phase, self.reorient = "paused", True
 
     def warm(self) -> None:
-        """Load what the first wake would wait for (the face finder's model); a finder that
-        cannot load (no weights) is dropped: the head then stays on the voice."""
+        """Load what the first wake would wait for (the finder's models); a finder that cannot
+        load (no weights) is dropped: the head then stays on the voice."""
         warm = getattr(self.finder, "warm", None)
         if not callable(warm):
             return
@@ -482,107 +534,133 @@ class SpeakerGaze:
 
     # ---- the clock ---------------------------------------------------------------------------
     def tick(self, now: float) -> float | None:
-        """Do what is due (the wheels' word, a renewal, a frame, a lost head asked for again);
-        when next, None for nothing until a moment. A frame waits while the body turns."""
+        """Do what is due (the wheels' word, a renewal, the voice followed, a frame, a lost head
+        asked for again); when next, None for nothing until a moment. A frame waits while the
+        body turns."""
         while self.inbox:
             self.wheels_event(self.inbox.popleft(), now)
         if self.phase in ("idle", "paused"):
             return None
+        now_ = now + TICK_EPS_S  # a moment due a hair later is due now (clocks add in floats)
         if self.aim is None:  # the door did not answer, or refused: ask again in a while
-            if self.next_renew is None or now >= self.next_renew:
-                self._orient(self.voice, now, "asked again")
+            if self.next_renew is None or now_ >= self.next_renew:
+                track = self.track
+                if track is not None:
+                    self._engage(track, now, "asked again", check=self.verifying)
+                else:
+                    self.next_renew = now + self.settings.renew_s
             return self.next_renew
-        if self.next_renew is not None and now >= self.next_renew:
+        if self.next_renew is not None and now_ >= self.next_renew:
             self._renew(now)
+        following = self._following(now)
+        if following and self.next_follow is not None and now_ >= self.next_follow:
+            self.next_follow = now + FOLLOW_EVERY_S
+            self._follow(now)
         waiting = self.voice_hold or self.turning is not None  # the voice's first chunk, the body
-        if self.next_frame is not None and now >= self.next_frame and not waiting:
+        if self.next_frame is not None and now_ >= self.next_frame and not waiting:
             self._frame(now)
         frame = None if waiting else self.next_frame  # the voice's moment, the wheels' end
-        due = [t for t in (self.next_renew, frame) if t is not None]
+        follow = self.next_follow if self._following(now) else None
+        due = [t for t in (self.next_renew, frame, follow) if t is not None]
         return min(due) if due else None
 
     # ---- the voice -----------------------------------------------------------------------------
-    def bearing(self, heard: Heard, now: float) -> VoiceBearing:
-        """``heard``'s voice: its last ``window_s`` of speech readings, mapped to the cart."""
+    def _utterance(self, heard: Heard, now: float) -> VoiceBearing:
+        """``heard``'s bearing from its clean readings; its readings logged (``gaze_doa``)."""
         if self.doa is None:
             return VoiceBearing(None, None, 0, 0)
         s = self.settings
-        readings = utterance_readings(self.doa, heard, now, s.window_s)
-        return voice_of(readings, s.doa_map, s.min_speech)
+        found = utterance_voice(self.doa, heard, now, window_s=s.window_s, doa_map=s.doa_map,
+                                min_speech=s.min_speech, spans=self._unheard())  # fmt: skip
+        self._log_readings(heard, found, now)
+        return found.voice
 
-    def _doubt(self, voice: VoiceBearing, heard: Heard) -> str | None:
-        """Why the utterance's bearing is no speaker's (too few speech readings, too quiet);
-        None when it is one."""
-        s = self.settings
-        if voice.speech < s.doa_min_speech:
-            return f"{voice.speech} speech readings, under {s.doa_min_speech}"
-        if heard.peak_db is not None and heard.peak_db < s.doa_min_dbfs:
-            return f"quiet, peak {heard.peak_db:.1f} dBFS under {s.doa_min_dbfs:.0f}"
-        return None
-
-    def _vote(self, heard: Heard, voice: VoiceBearing, bearing: float, now: float) -> None:
-        """A word-less sound from elsewhere: ``reaim_votes`` in a row from about one place make
-        a look there."""
-        s = self.settings
-        reach = math.radians(s.reaim_deg)
-        if self.votes and abs(_wrap(bearing - _mean(self.votes))) > reach:
-            self.votes = []  # somewhere else again: a new run
-        self.votes.append(bearing)
-        n = len(self.votes)
-        if n < s.reaim_votes:
-            self._judged(now, heard, voice, f"no words: vote {n} of {s.reaim_votes}")
+    def _log_readings(self, heard: Heard, found: UtteranceDoa, now: float) -> None:
+        offset = board_offset(self.doa, now) if self.doa is not None else None
+        if not found.readings or offset is None:
             return
-        where = _mean(self.votes)
-        self.votes = []
-        self._judged(
-            now, heard, voice, f"no words: {n} in a row", f"{n} sounds from {_deg(where):+.0f} deg"
+        end = heard.end_s + offset
+        rows = [
+            [round(r.stamp_s - end, 2), r.deg, -1 if mine else int(r.speech)]
+            for r, mine in zip(found.readings, found.robot, strict=True)
+        ]
+        self._note("gaze_doa", now, None, text=heard.text[:TEXT_KEPT], readings=rows)
+
+    def _following(self, now: float) -> bool:
+        """Whether the head follows the voice's stream now: the person speaks, nobody has seen
+        them lately, no check, no turn of the body under way."""
+        track = self.track
+        if self.listening is None or track is None or self.aim is None:
+            return False
+        if now - self.listening > LISTEN_MAX_S:
+            self.listening = None
+            return False
+        return (
+            self.phase in ("seek", "voice")
+            and not self.verifying
+            and self.turning is None
+            and not track.fresh(now, self.settings.seen_fresh_s)
         )
-        self._look_toward(where, now, "sounds in a row", check=self.phase == "track")
 
-    def _robot_spoke(self, heard: Heard) -> bool:
-        """Whether the robot spoke during ``heard`` (its own voice is then in the array)."""
-        return any(
-            start <= heard.end_s and (end is None or end >= heard.start_s)
-            for start, end in self.spoke
-        )
-
-    # ---- the head ----------------------------------------------------------------------------
-    def _look_toward(self, bearing: float | None, now: float, why: str, *, check: bool) -> None:
-        """Look where a voice came from: at a remembered person's place near it, else at the
-        bearing; ``check``: the face tracked now is kept to return to when nobody is there."""
-        held = self.target if self.phase == "track" else None
-        if held is not None:
-            self._remember(held)
-        place = None
-        if bearing is not None:
-            known = self.policy.recall(
-                [t for t in self.targets if t is not held],
-                bearing,
-                within_rad=math.radians(self.settings.reaim_deg),
-            )
-            place = known.aim if known is not None else None
-        self.fallback = held if check else None
-        self.target, self.votes = None, []
-        if place is not None:
-            why = f"{why}, a person heard there before"
-        self._orient(bearing, now, why, place=place, verify=check and held is not None)
-
-    def _orient(
-        self,
-        voice: float | None,
-        now: float,
-        why: str,
-        *,
-        place: Aim | None = None,
-        verify: bool = False,
-    ) -> None:
-        """Turn to ``voice`` or to a remembered ``place``: the head at once as far as it
-        reaches, the wheels the rest past the comfortable pan (started, never waited for); then
-        seek a face: ``seek_frames`` at each tilt, or (``verify``) one frame at each within
-        ``verify_s``."""
+    def _follow(self, now: float) -> bool:
+        """The voice's last ``doa_follow_s``: moved more than ``doa_moved_deg`` (and at most
+        ``follow_max_deg``: a jump is a new voice, judged when its utterance ends) from the
+        person engaged, the head goes there (a seek begins again there); whether it moved."""
+        track = self.track
+        if self.doa is None or track is None or self.aim is None:
+            return False
         s = self.settings
-        self.voice = voice if place is None else place.pan_rad
-        self.seen = None
+        voice = recent_voice(self.doa, now, window_s=s.doa_follow_s, doa_map=s.doa_map,
+                             min_speech=s.follow_min_speech, spans=self._unheard())  # fmt: skip
+        bearing = voice.bearing_rad
+        if bearing is None:
+            return False
+        moved = abs(wrap(bearing - track.pan))
+        if moved <= math.radians(s.doa_moved_deg) or moved > math.radians(s.follow_max_deg):
+            return False
+        self.tracks.followed(track, bearing, now)
+        self.counts["follows"] += 1
+        self.centre = track.pan
+        target = self.reach.clamp(Aim(track.pan, track.head.tilt_rad))
+        if not self._hold(target, now, "the voice moved", "adjust", track=track.id):
+            return True
+        if self.phase == "seek":
+            self.stops, self.seek_left = None, max(1, s.seek_frames)
+            self.next_frame = now + BLIND_RETRY_S
+        return True
+
+    def _unheard(self) -> list[Span]:
+        """The spans whose readings are not the person's place now: the robot speaking (its own
+        voice is in the array), and everything up to the wheels' last motion (the cart turned
+        under the array since)."""
+        if self.turned_s is None:
+            return self.spoke
+        return [(-math.inf, self.turned_s), *self.spoke]
+
+    def _robot_speaking(self) -> bool:
+        """Whether a span of the robot's speech is open."""
+        return bool(self.spoke) and self.spoke[-1][1] is None
+
+    # ---- engaging ------------------------------------------------------------------------------
+    def _kept(self) -> set[int]:
+        return {t for t in (self.engaged, self.fallback) if t is not None}
+
+    def _engage(
+        self, track: Track, now: float, why: str, *, check: bool = False, move: Move = "turn"
+    ) -> None:
+        """Serve ``track``: one aim at its head (the wheels the rest past the comfortable pan,
+        started, never waited for), then frames: a check (``check``: one frame within
+        ``verify_s``, back to the person engaged before when nobody is there) or a seek."""
+        s = self.settings
+        before = self.tracks.get(self.fallback) if self.verifying else self.track
+        if check and before is not None and before.id != track.id:
+            self.fallback = before.id
+        elif not check:
+            self.fallback = None
+        self.engaged, self.engaged_s, self.misses = track.id, now, 0
+        self.centre = track.pan
+        self.stops, self.verify_until = None, None
+        self.verifying = check and self.fallback is not None
         view = self._state()
         if view is None:
             self._lost(now, "the arbiter's door does not answer")
@@ -590,29 +668,18 @@ class SpeakerGaze:
         if view.driving:
             self.phase, self.reorient, self.aim = "paused", True, None
             return
-        head = view.head if view.head is not None else Aim(0.0, math.radians(s.seek_tilt_deg))
-        tilt = math.radians(s.seek_tilt_deg) if place is None else place.tilt_rad
-        pan, body_deg = head.pan_rad, 0.0
-        toward = self.voice
-        if toward is not None:  # the body by the person's bearing, the head by where it points
-            body_deg = self._body_share(toward, tilt)
-            if place is not None or abs(_wrap(toward - head.pan_rad)) > math.radians(
-                s.in_frame_deg
-            ):
-                pan = toward
+        body_deg = self._body_share(track.pan, track.head.tilt_rad)
         if body_deg == 0.0:
             self._let_wheels_go("the head alone faces the person")
-        aim = self.reach.clamp(Aim(pan, tilt))
-        if not self._hold(aim, "saccade", now, why):
+        aim = self.reach.clamp(track.head)
+        if not self._hold(aim, now, why, move, start=view.head, track=track.id,
+                          source=track.source):  # fmt: skip
             return
-        if toward is not None and body_deg != 0.0:
-            self._start_wheels(toward, body_deg)
+        if body_deg != 0.0:
+            self._start_wheels(body_deg)
         self.counts["orients"] += 1
-        sweep = math.radians(s.seek_sweep_deg)
-        self.tilts_left = [tilt - sweep] if sweep > 0.0 else []
-        self.verifying, self.verify_until = verify and self.finder is not None, None
         if self.finder is None:
-            self.phase, self.next_frame, self.fallback = "voice", None, None
+            self.phase, self.next_frame, self.fallback, self.verifying = "voice", None, None, False
             return
         self.phase, self.next_frame = "seek", now
         self.seek_left = 1 if self.verifying else s.seek_frames
@@ -620,22 +687,22 @@ class SpeakerGaze:
             self._unseen(now)
 
     # ---- the wheels ----------------------------------------------------------------------------
-    def _body_share(self, voice: float, tilt: float) -> float:
-        """How far the wheels turn toward ``voice`` (degrees, + left): what lies past the
+    def _body_share(self, bearing: float, tilt: float) -> float:
+        """How far the wheels turn toward ``bearing`` (degrees, + left): what lies past the
         comfortable pan, at most a request's worth; 0 within it."""
         s = self.settings
         plan = split(
-            voice,
+            bearing,
             tilt,
             comfort_rad=math.radians(s.comfort_pan_deg),
             max_turn_rad=math.radians(s.body.max_turn_deg),
         )
         return math.degrees(plan.body_rad)
 
-    def _start_wheels(self, voice: float, deg: float) -> None:
-        """The wheels' turn of ``deg`` toward ``voice``, started on their thread: this returns
-        at once, their word comes back through :attr:`post`."""
-        turn = Turning(next(self._turn_ids), voice, deg)
+    def _start_wheels(self, deg: float) -> None:
+        """The wheels' turn of ``deg``, started on their thread: this returns at once, their
+        word comes back through :attr:`post`."""
+        turn = Turning(next(self._turn_ids), deg)
         self.turning = turn
         self.counts["wheel_turns"] += 1
 
@@ -660,6 +727,7 @@ class SpeakerGaze:
         turn = self.turning
         if turn is None or turn.id != turn_id:
             return  # a turn replaced or let go
+        self.turned_s = now
         if kind == "moved":
             self._moved_with_cart(turn, float(payload))
             self._recentre(turn, now)
@@ -681,36 +749,46 @@ class SpeakerGaze:
                    backed_m=round(report.backed_m, 3), attempts=report.attempts)  # fmt: skip
 
     def _moved_with_cart(self, turn: Turning, turned_deg: float) -> None:
-        """The wheels have turned ``turned_deg`` of ``turn`` so far: every remembered person
-        (and the face a check returns to) moved with the cart by what is new."""
+        """The wheels have turned ``turned_deg`` of ``turn`` so far: every person known moved
+        with the cart by what is new."""
         new = math.radians(turned_deg - turn.turned_deg)
         turn.turned_deg = turned_deg
         if new == 0.0:
             return
-        self.targets = [_turned(t, new) for t in self.targets]
-        if self.fallback is not None:
-            self.fallback = _turned(self.fallback, new)
+        self.tracks.turned(new)
+        if self.centre is not None:
+            self.centre = wrap(self.centre - new)
 
     def _recentre(self, turn: Turning, now: float) -> None:
-        """The person's bearing moved with the cart: the head follows it (slowly when it is a
-        small correction), as far as it reaches."""
-        self.voice = _wrap(turn.voice - math.radians(turn.turned_deg))
-        if self.aim is None or self.phase in ("idle", "paused"):
+        """The person's bearing moved with the cart: the head follows it (an adjustment when it
+        is small), as far as it reaches."""
+        track = self.track
+        if track is None or self.aim is None or self.phase in ("idle", "paused"):
             return
-        target = self.reach.clamp(Aim(self.voice, self.aim.tilt_rad))
+        target = self.reach.clamp(Aim(track.head.pan_rad, self.aim.tilt_rad))
         off = target.off(self.aim)
         if off <= math.radians(self.settings.refine_deg):
             return
-        speed: Speed = "slow" if off <= math.radians(self.settings.saccade_over_deg) else "saccade"
-        if self._hold(target, speed, now, "the body turned", turned_deg=round(turn.turned_deg, 1)):
+        move: Move = "adjust" if off <= math.radians(self.settings.saccade_over_deg) else "turn"
+        if self._hold(target, now, "the body turned", move, turned_deg=round(turn.turned_deg, 1)):
             self.counts["recentres"] += 1
 
-    def _hold(self, aim: Aim, speed: Speed, now: float, why: str, **fields: Any) -> bool:
-        """Ask the arbiter to hold the head at ``aim`` (replacing this source's last aim);
-        whether the request lives (done, or queued behind a better look)."""
-        answer = self.door.aim(aim, speed=speed, ttl_s=self.settings.ttl_s)
+    # ---- the head ----------------------------------------------------------------------------
+    def _hold(
+        self, aim: Aim, now: float, why: str, move: Move, *, start: Aim | None = None, **fields: Any
+    ) -> bool:
+        """Ask the arbiter to hold the head at ``aim`` (replacing this source's last aim), a
+        turn or an adjustment (from ``start`` when no aim of ours holds the head yet); whether
+        the request lives (done, or queued behind a better look)."""
+        s = self.settings
+        ease = s.ease(move)
+        speed: Speed = "saccade" if move == "turn" else "slow"
+        before = self.aim if self.aim is not None else start
+        answer = self.door.aim(aim, speed=speed, ttl_s=s.ttl_s, ease=ease)
         self.counts["aims"] += 1
-        self.next_renew = now + self.settings.renew_s
+        self.next_renew = now + s.renew_s
+        if ease is not None and before is not None:
+            fields["move_s"] = round(ease.seconds(math.degrees(aim.off(before))), 2)
         self._note(
             "gaze_reaim",
             now,
@@ -718,7 +796,7 @@ class SpeakerGaze:
             why=why,
             pan_deg=_deg(aim.pan_rad),
             tilt_deg=_deg(aim.tilt_rad),
-            speed=speed,
+            speed=speed if ease is None else ease.name,
             status=answer.status,
             **fields,
         )
@@ -734,7 +812,7 @@ class SpeakerGaze:
         """The head is not ours: stay on the voice, ask again after ``renew_s``."""
         line = f"no head ({why}); asking again in {self.settings.renew_s:.0f} s"
         self._note("gaze_lost", now, line, what="head", why=why)
-        self._forget_track()
+        self._forget_look()
         self.phase, self.aim, self.next_frame = "voice", None, None
         self.next_renew = now + self.settings.renew_s
 
@@ -745,16 +823,16 @@ class SpeakerGaze:
         self.counts["renewals"] += 1
         if live == 0 and self.aim is not None:
             self.counts["reposts"] += 1
-            self._hold(self.aim, "saccade", now, "asked again")
+            self._hold(self.aim, now, "asked again", "turn")
 
-    # ---- the faces ---------------------------------------------------------------------------
+    # ---- the frames --------------------------------------------------------------------------
     def _frame(self, now: float) -> None:
-        """One frame while the head is ours, still and carries no gesture; the speaker's face
+        """One frame while the head is ours, still and carries no gesture; the person engaged
         centred (refined after a turn, re-aimed past the dead band while tracking)."""
         try:
             self._look(now)
         finally:  # at the rate of the phase the frame left the machine in
-            if self.next_frame is not None and self.next_frame <= now:
+            if self.next_frame is not None and self.next_frame <= now + TICK_EPS_S:
                 s = self.settings
                 if self.phase != "seek":
                     self.next_frame = now + (
@@ -786,135 +864,161 @@ class SpeakerGaze:
                 return
         frame = self.finder.look()
         self.counts["frames"] += 1
-        tracking = self.phase == "track"
-        face = self.policy.pick(self.voice, frame, view.head, seeking=not tracking)
-        if face is None:
+        people = sightings(frame, view.head, min_face_px=s.seek_min_face_px,
+                           min_body_score=s.min_body_score)  # fmt: skip
+        track = self.track
+        seeking = track if self.phase in ("seek", "voice") else None
+        seek_rad = math.radians(s.seek_pan_deg + s.match_deg)
+        seen = self.tracks.seen(people, now, seeking=seeking, seek_rad=seek_rad, keep=self._kept())
+        mine = seen.get(track.id) if track is not None else None
+        if track is None or mine is None:
             self._missed(now, looked=True)
             return
-        self.counts["faces"] += 1
-        if self.on_face is not None and frame is not None:
+        self._seen(track, mine, frame, now)
+
+    def _seen(self, track: Track, mine: Sighting, frame: FaceFrame | None, now: float) -> None:
+        """The person engaged is in the frame: centred, tracked, smiled at once."""
+        s = self.settings
+        self.misses = 0
+        self.counts["faces" if mine.face is not None else "bodies"] += 1
+        if self.on_face is not None and frame is not None and mine.face is not None:
             try:
-                self.on_face(frame, face)
+                self.on_face(frame, mine.face)
             except Exception:  # a listener never stops the gaze
                 logger.exception("the speaker's face listener broke")
-        seen = face_aim(view.head, face)
-        seen = Aim(_wrap(seen.pan_rad), seen.tilt_rad)
-        lead = self._lead(seen.pan_rad, now) if tracking else 0.0
-        target = self.reach.clamp(Aim(seen.pan_rad + lead, seen.tilt_rad))
-        off = target.off(self.aim if self.aim is not None else view.head)
+        tracking = self.phase == "track"
+        lead = track.lead(s.lead_s, math.radians(s.lead_max_deg)) if tracking else 0.0
+        target = self.reach.clamp(Aim(track.head.pan_rad + lead, track.head.tilt_rad))
+        off = target.off(self.aim) if self.aim is not None else math.inf
         band = max(s.deadband_deg if tracking else s.refine_deg, s.aim_min_deg)
+        px = round(mine.face.width_px) if mine.face is not None else None
         if off > math.radians(band):
-            speed: Speed = "slow" if off <= math.radians(s.saccade_over_deg) else "saccade"
-            why = "the face moved" if tracking else "onto the face"
-            if not self._hold(
-                target, speed, now, why, px=round(face.width_px), lead_deg=_deg(lead)
-            ):
+            move: Move = "adjust" if off <= math.radians(s.saccade_over_deg) else "turn"
+            if tracking:
+                why = "the person moved"
+            else:
+                why = "onto the face" if mine.face is not None else "onto the person"
+            if not self._hold(target, now, why, move, px=px, lead_deg=_deg(lead),
+                              source=mine.source, track=track.id):  # fmt: skip
                 return
             self.counts["reaims"] += 1
-        self.voice, self.seen = seen.pan_rad, (now, seen.pan_rad)
-        self.target = Target(seen, face, now)
-        small = face.width_px < s.track_min_face_px
+        self.centre = track.pan
+        small = mine.face is None or mine.face.width_px < s.track_min_face_px
         if not tracking:
-            pan, tilt = _deg(seen.pan_rad), _deg(seen.tilt_rad)
-            line = f"a face at {pan:+.0f}/{tilt:+.0f} deg, {face.width_px:.0f} px: tracking"
-            if small and not self.smiled:
+            pan, tilt = _deg(track.head.pan_rad), _deg(track.head.tilt_rad)
+            what = f"a face, {px} px" if mine.face is not None else "a person (body)"
+            line = f"{what} at {pan:+.0f}/{tilt:+.0f} deg: tracking"
+            if mine.face is not None and small and not self.smiled:
                 line += " (small: no smile yet)"
-            self._note(
-                "gaze_face",
-                now,
-                line,
-                pan_deg=pan,
-                tilt_deg=tilt,
-                px=round(face.width_px),
-                score=round(face.score, 2),
-                small=small,
-                check=self.verifying,
-            )
-            self.phase, self.votes, self.fallback, self.verifying = "track", [], None, False
-            match = math.radians(s.match_deg)  # the person found is held, no longer remembered
-            self.targets = [
-                t for t in self.targets if abs(_wrap(t.aim.pan_rad - seen.pan_rad)) > match
-            ]
+            score = round(mine.face.score, 2) if mine.face is not None else None
+            self._note("gaze_face", now, line, pan_deg=pan, tilt_deg=tilt, px=px, score=score,
+                       small=small, check=self.verifying, source=mine.source,
+                       track=track.id)  # fmt: skip
+            self.phase, self.fallback, self.verifying, self.stops = "track", None, False, None
+            self.engaged_s = now
         if not small:
             self._smile()
 
-    def _lead(self, pan: float, now: float) -> float:
-        """How far a moving face will have gone ``lead_s`` from now (radians of pan): constant
-        velocity over the last two sightings, at most ``lead_max_deg``; 0 when they are more
-        than ``LEAD_WINDOW_S`` apart."""
-        s = self.settings
-        if self.seen is None:
-            return 0.0
-        then, before = self.seen
-        dt = now - then
-        if dt <= 0.0 or dt > LEAD_WINDOW_S:
-            return 0.0
-        cap = math.radians(s.lead_max_deg)
-        return max(-cap, min(cap, _wrap(pan - before) / dt * s.lead_s))
-
-    def _robot_speaking(self) -> bool:
-        """Whether a span of the robot's speech is open."""
-        return bool(self.spoke) and self.spoke[-1][1] is None
-
     def _missed(self, now: float, *, looked: bool) -> None:
-        """A frame without the speaker's face (``looked``: one was taken): a seek tilts higher,
-        then runs out (a check back to the face it left); a tracked face unseen for
-        ``face_lost_s`` is lost."""
+        """A frame without the person engaged (``looked``: one was taken): a check goes back,
+        a seek reads the voice again, then takes its next stop, then gives up; a person tracked
+        is lost after ``face_lost_frames`` such frames and ``face_lost_s``."""
         s = self.settings
+        track = self.track
         if self.phase == "seek":
             self.seek_left -= 1
             late = self.verify_until is not None and now >= self.verify_until
             if self.seek_left > 0 and not late:
                 return
-            if self.tilts_left and not late and self.aim is not None:
-                higher = self.reach.clamp(Aim(self.aim.pan_rad, self.tilts_left.pop(0)))
-                if self._hold(higher, "saccade", now, "seek higher"):
-                    self.seek_left = 1 if self.verifying else s.seek_frames
+            if self.verifying or track is None:
+                self._unseen(now)
+                return
+            if self.stops is None:  # arrived, nobody: the voice once more, then the stops
+                if self._follow(now):
+                    return
+                if self.listening is not None:  # they speak on: their voice leads, no sweep yet
+                    self.seek_left = 1
+                    return
+                centre = self.centre if self.centre is not None else track.pan
+                self.stops = sweep(centre, track.head.tilt_rad,
+                                   span_rad=math.radians(s.seek_pan_deg))  # fmt: skip
+            while self.stops:
+                stop = self.reach.clamp(self.stops.pop(0))
+                if self.aim is not None and stop.off(self.aim) <= math.radians(s.aim_min_deg):
+                    continue  # at the neck's reach: the same place
+                if self._hold(stop, now, "seek", "adjust", track=track.id):
+                    self.seek_left = max(1, s.seek_frames)
+                    self.next_frame = now + BLIND_RETRY_S
                 return
             self._unseen(now)
-        elif self.phase == "track" and looked and self.target is not None:
-            unseen = now - self.target.seen_s
-            if unseen >= s.face_lost_s:
-                self._remember(self.target)
-                line = f"the face is lost ({unseen:.1f} s unseen): the head stays on its place"
-                self._note("gaze_lost", now, line, what="face", unseen_s=round(unseen, 2))
-                self.phase = "voice"
-                self._forget_track()
+        elif looked and track is not None and self.phase == "track":
+            self.misses += 1
+            since = max(track.seen_s or 0.0, self.engaged_s)
+            unseen = now - since
+            if self.misses >= s.face_lost_frames and unseen >= s.face_lost_s:
+                self._lose(track, now, unseen)
+
+    def _lose(self, track: Track, now: float, unseen: float) -> None:
+        """The person engaged is gone from the frames: the head goes to their voice when it was
+        heard while nothing saw them (``seen_fresh_s`` after the last sighting), else stays;
+        frames go on."""
+        s = self.settings
+        self.phase, self.centre = "voice", track.pan
+        line = f"the person is lost ({unseen:.1f} s, {self.misses} frames unseen)"
+        voice = track.voice_pan
+        last_seen = track.seen_s if track.seen_s is not None else -math.inf
+        newer = track.heard_s is not None and track.heard_s - last_seen > s.seen_fresh_s
+        aim = self.aim
+        far = (
+            voice is not None
+            and aim is not None
+            and abs(wrap(voice - aim.pan_rad)) > math.radians(s.doa_moved_deg)
+        )
+        if newer and far and voice is not None and aim is not None:
+            self.tracks.followed(track, voice, track.heard_s or now)
+            self.centre = track.pan
+            line += f": to the voice at {_deg(voice):+.0f} deg"
+            self._note("gaze_lost", now, line, what="face", unseen_s=round(unseen, 2),
+                       frames=self.misses, track=track.id)  # fmt: skip
+            self._hold(self.reach.clamp(Aim(voice, aim.tilt_rad)), now, "to the voice",
+                       "adjust", track=track.id)  # fmt: skip
+            return
+        line += ": the head stays on its place"
+        self._note("gaze_lost", now, line, what="face", unseen_s=round(unseen, 2),
+                   frames=self.misses, track=track.id)  # fmt: skip
 
     def _unseen(self, now: float) -> None:
-        """A seek found nobody: a check goes back to the face it left; any other stays on the
-        voice at the seek tilt."""
+        """A seek found nobody: a check goes back to the person engaged before; any other
+        stays on the voice."""
         s = self.settings
-        fallback, verifying = self.fallback, self.verifying
-        self._forget_track()
-        if fallback is not None and verifying:
-            pan = _deg(fallback.aim.pan_rad)
+        fallback = self.tracks.get(self.fallback) if self.verifying else None
+        self._forget_look()
+        if fallback is not None:
+            pan = _deg(fallback.head.pan_rad)
             line = f"nobody toward the voice: back to the face at {pan:+.0f} deg"
-            self._note("gaze_lost", now, line, what="check")
-            if self._hold(self.reach.clamp(fallback.aim), "saccade", now, "back to the face"):
-                self.phase, self.voice = "track", fallback.aim.pan_rad
-                self.target = replace(fallback, seen_s=now)  # it gets face_lost_s to show again
+            self._note("gaze_lost", now, line, what="check", track=self.engaged)
+            self.engaged, self.engaged_s, self.misses = fallback.id, now, 0
+            self.centre = fallback.pan
+            if self._hold(self.reach.clamp(fallback.head), now, "back to the face", "turn",
+                          track=fallback.id):  # fmt: skip
+                self.phase = "track"
             return
         self.phase = "voice"
-        self._note("gaze_lost", now, "no face: the head stays on the voice", what="seek")
-        tilt = math.radians(s.seek_tilt_deg)
-        if self.aim is not None and abs(self.aim.tilt_rad - tilt) > math.radians(s.aim_min_deg):
-            self._hold(self.reach.clamp(Aim(self.aim.pan_rad, tilt)), "saccade", now, "seek tilt")
+        self._note("gaze_lost", now, "nobody seen: the head stays on the voice", what="seek",
+                   track=self.engaged)  # fmt: skip
+        track = self.track
+        if track is not None and self.aim is not None:
+            centre = self.centre if self.centre is not None else track.pan
+            back = self.reach.clamp(Aim(centre, track.head.tilt_rad))
+            if back.off(self.aim) > math.radians(s.aim_min_deg):
+                self._hold(back, now, "back to the voice", "adjust", track=track.id)
         if s.smile_unseen:
             self._smile()
 
-    def _forget_track(self) -> None:
-        """A seek's, a check's and a track's working state cleared (the people remembered stay)."""
+    def _forget_look(self) -> None:
+        """A seek's, a check's and a track's working state cleared (the people known stay)."""
         self.fallback, self.verifying, self.verify_until = None, False, None
-        self.tilts_left, self.votes, self.seen = [], [], None
-        self.target = None
-
-    def _remember(self, target: Target) -> None:
-        """``target`` the latest person looked at; one remembered at its place is replaced, and
-        only ``remember_targets`` are kept."""
-        match = math.radians(self.settings.match_deg)
-        others = [t for t in self.targets if abs(_wrap(t.aim.pan_rad - target.aim.pan_rad)) > match]
-        self.targets = [target, *others][: self.settings.remember_targets]
+        self.stops, self.misses = None, 0
 
     def _smile(self) -> None:
         """Once a conversation, through the face's owner."""
@@ -936,12 +1040,14 @@ class SpeakerGaze:
         voice: VoiceBearing | None,
         verdict: str,
         line: str | None = None,
+        **extra: Any,
     ) -> None:
         """An utterance's verdict: its line (when it says something) and its event."""
         fields = _voice_fields(voice, heard)
-        if self.phase == "track" and self.voice is not None:
-            fields["face_deg"] = _deg(self.voice)
-        self._note("gaze_voice", now, line, verdict=verdict, phase=self.phase, **fields)
+        track = self.track
+        if self.phase == "track" and track is not None:
+            fields["face_deg"] = _deg(track.pan)
+        self._note("gaze_voice", now, line, verdict=verdict, phase=self.phase, **fields, **extra)
 
     def _note(self, kind: str, now: float, line: str | None, /, **fields: Any) -> None:
         """One decision: its line in the cascade's output, its event in the conversation's log."""
@@ -971,22 +1077,9 @@ def _voice_fields(voice: VoiceBearing | None, heard: Heard) -> dict[str, Any]:
             readings=voice.readings,
             speech=voice.speech,
         )
+        if voice.robot:
+            fields["robot"] = voice.robot
     return fields
-
-
-def _turned(target: Target, turned: float) -> Target:
-    """``target`` as seen from the cart once it turned ``turned`` radians (+ left)."""
-    return replace(target, aim=Aim(_wrap(target.aim.pan_rad - turned), target.aim.tilt_rad))
-
-
-def _mean(bearings: list[float]) -> float:
-    """The circular mean of bearings in radians (the first when they cancel out)."""
-    mean = circular_mean_deg([math.degrees(b) for b in bearings])
-    return bearings[0] if mean is None else _wrap(math.radians(mean))
-
-
-def _wrap(rad: float) -> float:
-    return math.atan2(math.sin(rad), math.cos(rad))
 
 
 def _deg(rad: float) -> float:
@@ -1068,7 +1161,8 @@ class SpeakerGazeWorker:
         self._post("opened", wake)
 
     def speech_started(self, t: float) -> None:
-        """Nothing: an utterance counts once it is read."""
+        """The person began an utterance: the head may follow their voice."""
+        self._post("listening", t)
 
     def speech_ended(self, heard: Heard) -> None:
         """An utterance was read."""
@@ -1162,6 +1256,7 @@ class SpeakerGazeWorker:
             "off": lambda m: m.stop(now, "the switch is off"),
             "opened": lambda m: m.opened(args[0], now),
             "heard": lambda m: m.heard(args[0], now),
+            "listening": lambda m: m.speech_started(args[0], now),
             "speaking": lambda m: m.speaking(args[0], at),
             "voiced": lambda m: m.voiced(now),
             "drive": lambda m: m.drive(args[0], now),
@@ -1195,7 +1290,7 @@ def robot_gaze(
     """The speaker gaze on the robot: the arbiter's door on this Mac, the board's camera and
     head server at ``host``, the array's directions from ``doa`` (the cascade's audio link),
     ``wheels`` (the cascade's one :class:`pepin.expression.wheels.WheelsExecutor`; none: the head
-    alone); built, and the finder's model loaded, the first time its switch is on (config/
+    alone); built, and the finder's models loaded, the first time its switch is on (config/
     expression.json's ``flags.speaker_gaze`` at the start when ``on`` is None). ``finder``: one
     shared with person recognition (else its own); ``on_face`` hears the speaker's faces."""
 
@@ -1210,7 +1305,7 @@ def robot_gaze(
         looks = finder
         if looks is None:
             try:
-                looks = board_finder(host)  # config reads only: the model loads on warm()
+                looks = board_finder(host)  # config reads only: the models load on warm()
             except (OSError, ValueError, KeyError) as exc:
                 say(f"no face finder ({exc}): the head turns to the voice only")
         return SpeakerGaze(
@@ -1234,7 +1329,6 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         door: SpeakerDoor,
         finder: SnapshotFinder,
         turn: WheelsExecutor,
-        policy: SpeakerPolicy,
         link: BoardLink,
     ) -> None:
         observer: ConversationObserver = worker
@@ -1242,6 +1336,5 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         gaze_door: GazeDoor = door
         faces: FaceFinder = finder
         wheels: Wheels = turn
-        target: TargetPolicy = policy
         doa: DoaSource = link
-        del observer, flag, gaze_door, faces, wheels, target, doa
+        del observer, flag, gaze_door, faces, wheels, doa

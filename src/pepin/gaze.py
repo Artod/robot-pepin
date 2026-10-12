@@ -302,7 +302,9 @@ class Look:
     """One request: its views (empty: home), the still frames wanted at each, the hold after the
     last, the band, the TTL, the speed, whether it takes the head from its own band, and
     ``hold_s``: above 0, a glance (answered at ``frames`` or ``hold_s`` after settling, atomic).
-    A ``clip`` carries its :class:`Overlay` instead of views."""
+    A ``clip`` carries its :class:`Overlay` instead of views. ``speed_deg_s`` and ``acc_deg_s2``:
+    the move's own ceilings over ``speed``'s (``neck_target``'s; None: the speed's own), so a
+    look can ease in and out on the servo's trapezoid."""
 
     source: str
     views: tuple[Aim, ...]
@@ -316,6 +318,8 @@ class Look:
     id: str = field(default_factory=new_id)
     hold_s: float = 0.0
     overlay: Overlay | None = None
+    speed_deg_s: float | None = None
+    acc_deg_s2: float | None = None
 
 
 @dataclass
@@ -370,9 +374,11 @@ class HeadDriver(Protocol):
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """Send the head to ``aim`` (``None``: home); ``hold`` keeps the servos energised;
-        ``speed_deg_s`` a ceiling of the move's own (an overlay's key) over ``speed``'s."""
+        ``speed_deg_s`` and ``acc_deg_s2`` ceilings of the move's own (an overlay's key, an
+        eased look) over ``speed``'s."""
         ...
 
     def take_refusal(self) -> Refusal | None:
@@ -869,7 +875,16 @@ class Arbiter:
         if refusal is not None:
             self._wait(held, refusal, now)
             return
-        self._send(aim, home=home, owner=held.look.id, speed=held.look.speed, now=now)
+        look = held.look
+        self._send(
+            aim,
+            home=home,
+            owner=look.id,
+            speed=look.speed,
+            now=now,
+            speed_deg_s=look.speed_deg_s,
+            acc_deg_s2=look.acc_deg_s2,
+        )
 
     def _wait(self, held: _Held, refusal: Refusal, now: float) -> None:
         if held.waiting_since is None:
@@ -896,6 +911,7 @@ class Arbiter:
         now: float,
         offset: Aim | None = None,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """One write of the base ``aim`` with an overlay's ``offset`` on top (the playing
         overlay's current one when None): a lifted home is held like any aim."""
@@ -907,18 +923,27 @@ class Arbiter:
             not home or lifted,
             now,
             speed_deg_s,
+            acc_deg_s2,
         )
         written = _Write(aim, home and not lifted, now, owner, offset=lift)
         self._before, self._head = self._head, written
 
     def _out(
-        self, aim: Aim | None, speed: Speed, hold: bool, now: float, speed_deg_s: float | None
+        self,
+        aim: Aim | None,
+        speed: Speed,
+        hold: bool,
+        now: float,
+        speed_deg_s: float | None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """One write to the driver; a ceiling of its own is passed only when there is one."""
-        if speed_deg_s is None:
-            self._driver.write(aim, speed=speed, hold=hold, now=now)
-        else:
-            self._driver.write(aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s)
+        ceilings: dict[str, float] = {}
+        if speed_deg_s is not None:
+            ceilings["speed_deg_s"] = speed_deg_s
+        if acc_deg_s2 is not None:
+            ceilings["acc_deg_s2"] = acc_deg_s2
+        self._driver.write(aim, speed=speed, hold=hold, now=now, **ceilings)
         self.counts["writes"] += 1
 
     # ---- the overlay -------------------------------------------------------------------------
@@ -1338,7 +1363,8 @@ def look_from_json(
     """A request as the doors receive it, resolved to views; the refusal in words otherwise.
 
     ``kind`` point (``target`` {frame, x, y, z}), direction ({bearing_rad, pitch_rad} in
-    base_link), angles ({pan_rad, tilt_rad}), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
+    base_link), angles ({pan_rad, tilt_rad}; ``speed_deg_s`` and ``acc_deg_s2``, optional, are the
+    move's own ceilings: an eased look), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
     or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s},
     ...], loop, idle}; a loop's last key closes its period and equals its first); ``hold`` true
     keeps the head on the last view for the rest of the TTL (``dwell_s`` = ``ttl_s``);
@@ -1379,6 +1405,9 @@ def look_from_json(
             id=str(data.get("id") or new_id()),
             overlay=overlay,
         )
+    ceilings = _ceilings(data)
+    if isinstance(ceilings, str):
+        return ceilings
     views = _views(kind, target, cfg, to_base)
     if isinstance(views, str):
         return views
@@ -1398,7 +1427,25 @@ def look_from_json(
         preempt=bool(data.get("preempt", False)),
         kind=cast(Kind, kind),
         id=str(data.get("id") or new_id()),
+        speed_deg_s=ceilings[0],
+        acc_deg_s2=ceilings[1],
     )
+
+
+def _ceilings(data: dict[str, Any]) -> tuple[float | None, float | None] | str:
+    """A look's own ``speed_deg_s`` and ``acc_deg_s2`` (absent: None), or why refused."""
+    found: list[float | None] = []
+    for key in ("speed_deg_s", "acc_deg_s2"):
+        value = data.get(key)
+        if value is None:
+            found.append(None)
+            continue
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"{key} is a number, not {value!r}"
+        if not math.isfinite(value) or value <= 0.0:
+            return f"{key} is a finite number above 0, not {value!r}"
+        found.append(float(value))
+    return found[0], found[1]
 
 
 def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay | str:
@@ -1539,9 +1586,11 @@ class BaseServerHead(_BaseLink):
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """``neck_home`` or ``neck_goto`` in ticks; the profile speed is the board's own (no
-        ceiling of a move's own: overlays are refused on this driver)."""
+        ceiling of a move's own: overlays are refused on this driver, an eased look moves at
+        the board's pace)."""
         if aim is None:
             message: dict[str, Any] = {"cmd": "neck_home", "hold": hold}
         else:
@@ -1620,10 +1669,12 @@ class NeckTargetHead(_BaseLink):
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` for a slow
         look, ``return_deg_s`` for the way home after a drive, ``speed_deg_s`` when given (an
-        overlay's key)."""
+        overlay's key, an eased look); ``acc_deg_s2`` the ramp ceiling when given (the board
+        keeps the tilt's own cap under it)."""
         where = aim if aim is not None else home_aim(self._cfg)
         message: dict[str, Any] = {
             "cmd": "neck_target",
@@ -1636,6 +1687,8 @@ class NeckTargetHead(_BaseLink):
             message["speed_deg_s"] = self._slow_deg_s()
         elif speed == "return" and self._return_deg_s is not None:
             message["speed_deg_s"] = self._return_deg_s()
+        if acc_deg_s2 is not None and acc_deg_s2 > 0.0:
+            message["acc_deg_s2"] = acc_deg_s2
         with self._lock:
             self._held = message if hold else None
             self._sent_at = now
@@ -1717,9 +1770,12 @@ class EitherHead:
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         """The chosen driver's."""
-        self.chosen.write(aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s)
+        self.chosen.write(
+            aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s, acc_deg_s2=acc_deg_s2
+        )
 
     def take_refusal(self) -> Refusal | None:
         """The chosen driver's."""
