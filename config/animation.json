@@ -1,5 +1,5 @@
 {
-  "_note": "The gesture book (pepin.expression.book): the motion atoms, the compositions the brain names in its text ({laugh}) or through the gesture tool, the arm poses taught by hand, the idle layer and the robot's moments. An atom is ONE cycle of keys at shares (at 0..1) of its period_s; a value is a number, \"$param\" or \"-$param\" of its params (drawn uniformly from [lo, hi] at each performance); repeats and hold_s are reserved. Degrees: the head's pan_deg + left, tilt_deg + down (offsets on whatever holds the head); the arm's joints in config/arm.json's convention (additive: offsets on the pose under it; absolute: a pose, starting and ending on rest); the wheels' yaw_deg + left and x_m + forward (no wheel executor yet: those steps are left out). A step's at_s puts the atom's stroke (stroke x its first cycle) that far from the marker's word (negative: before it), p is the chance it plays, params narrow the atom's ranges, a string or a list of strings names a face (name) or a pose (pose). Timing and variety from .claude/research/brain/expression/expressive_motion.md (2026-10-11): strokes on the word or up to 0.2 s before it, amplitude ranges of about +-20 %, period ranges of about +-12 %, optional parts with their odds, mirror images, never the same variant twice running. Arm atoms are sized to keep config/arm.json's caps (90 deg/s, 360 deg/s^2) at speed 1: the arm's beats and clicks are slow, so emphasis and laughter ride the head and the face; raise the caps on the bench before raising these.",
+  "_note": "The gesture book (pepin.expression.book): the motion atoms, the compositions the brain names in its text ({laugh}) or through the gesture tool, the arm poses taught by hand, the idle layer and the robot's moments. An atom is ONE cycle of keys at shares (at 0..1) of its period_s; a value is a number, \"$param\" or \"-$param\" of its params (drawn uniformly from [lo, hi] at each performance); repeats and hold_s are reserved. Degrees: the head's pan_deg + left, tilt_deg + down (offsets on whatever holds the head); the arm's joints in config/arm.json's convention (additive: offsets on the pose under it; absolute: a pose, starting and ending on rest); the wheels' yaw_deg + left and x_m + forward (pepin.expression.wheels; sized to config/expression.json's wheels caps at speed 1, a clip faster than them is refused). A step's at_s puts the atom's stroke (stroke x its first cycle) that far from the marker's word (negative: before it), p is the chance it plays, params narrow the atom's ranges, a string or a list of strings names a face (name) or a pose (pose). Timing and variety from .claude/research/brain/expression/expressive_motion.md (2026-10-11): strokes on the word or up to 0.2 s before it, amplitude ranges of about +-20 %, period ranges of about +-12 %, optional parts with their odds, mirror images, never the same variant twice running. Arm atoms are sized to keep config/arm.json's caps (90 deg/s, 360 deg/s^2) at speed 1: the arm's beats and clicks are slow, so emphasis and laughter ride the head and the face; raise the caps on the bench before raising these.",
   "poses": {
     "note": "Arm poses taught by hand (scripts/gesture.py teach NAME: torque off, the arm placed, its six angles written here), one angle per joint of config/arm.json. rest is not here: it is config/arm.json's motion.rest_deg. None is taught yet: a step naming a pose that is not here is left out (the rest of the gesture plays). The compositions name raised (the forearm up, ready to wave) and offer (the gripper forward, open hand)."
   },
@@ -64,23 +64,23 @@
     },
     "body_turn": {
       "part": "body", "mode": "additive", "stroke": 0.6,
-      "params": {"amp_deg": [10.0, 30.0], "period_s": [0.6, 1.0]},
+      "params": {"amp_deg": [10.0, 30.0], "period_s": [1.5, 2.0]},
       "keys": [{"at": 0.0, "yaw_deg": 0.0}, {"at": 1.0, "yaw_deg": "$amp_deg"}],
       "mirror": ["yaw_deg"],
-      "note": "a turn in place (stays turned); no wheel executor yet"
+      "note": "a turn in place (stays turned); 30 deg in 1.5 s keeps config/expression.json's wheels caps (30 deg/s, 90 deg/s^2) at speed 1"
     },
     "body_wiggle": {
       "part": "body", "mode": "additive", "stroke": 0.25,
-      "params": {"amp_deg": [2.0, 5.0], "period_s": [0.7, 1.0], "repeats": [2, 4]},
+      "params": {"amp_deg": [2.0, 4.0], "period_s": [1.8, 2.2], "repeats": [1, 2]},
       "keys": [{"at": 0.0, "yaw_deg": 0.0}, {"at": 0.25, "yaw_deg": "$amp_deg"}, {"at": 0.75, "yaw_deg": "-$amp_deg"}, {"at": 1.0, "yaw_deg": 0.0}],
       "mirror": ["yaw_deg"],
-      "note": "yaw +-3 deg, back to the start pose; no wheel executor yet"
+      "note": "a slow sway, yaw +-2-4 deg, back to the start pose; the wheels' ramp (90 deg/s^2) makes anything quicker than ~1.8 s a cycle a refusal"
     },
     "body_rock": {
       "part": "body", "mode": "additive", "stroke": 0.5,
-      "params": {"amp_m": [0.01, 0.02], "period_s": [0.5, 0.7]},
+      "params": {"amp_m": [0.01, 0.02], "period_s": [0.9, 1.2]},
       "keys": [{"at": 0.0, "x_m": 0.0}, {"at": 0.5, "x_m": "$amp_m"}, {"at": 1.0, "x_m": 0.0}],
-      "note": "forward 1-2 cm and back; no wheel executor yet"
+      "note": "forward 1-2 cm and back; 2 cm each way in 0.45 s keeps the wheels' ramp (0.5 m/s^2) at speed 1"
     },
     "arm_pose": {
       "part": "arm", "mode": "absolute", "stroke": 1.0,

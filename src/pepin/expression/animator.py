@@ -99,6 +99,7 @@ class EngineConfig:
     seed: int | None = None
     face_hold_s: float = 2.0
     arm_speed_scale: float = 0.2
+    body_speed_scale: float = 0.2
     caps: Caps = field(default_factory=Caps)
 
 
@@ -126,6 +127,7 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
         seed=None if seed is None else int(seed),
         face_hold_s=float(layers.get("face_hold_s", d.face_hold_s)),
         arm_speed_scale=float(arm.get("speed_scale", d.arm_speed_scale)),
+        body_speed_scale=float(data.get("wheels", {}).get("speed_scale", d.body_speed_scale)),
         caps=Caps(
             per_part=int(caps.get("per_part", c.per_part)),
             per_reply=int(caps.get("per_reply", c.per_reply)),
@@ -513,17 +515,17 @@ class GestureEngine:
         return Outcome(True, f"seed {performance.seed}, variant {performance.variant}", seconds)
 
     def _render(self, intent: str, source: str, cue: Cue | None) -> Performance | None:
-        """``intent`` rendered for the parts ready now, the arm's clip stretched to its speed
-        scale; logged with its seed. None when it cannot be played."""
+        """``intent`` rendered for the parts ready now, the arm's and the body's clips stretched
+        to their speed scales; logged with its seed. None when it cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
         scene = Scene(ready, speaking=bool(self._replying), conversation=self._conversation)
         seed = self.config.seed if self.config.seed is not None else self.seeds.randrange(2**31)
         performance = self.renderer.render(intent, scene, seed, cue)
+        scales = {"arm": self.config.arm_speed_scale, "body": self.config.body_speed_scale}
         clips = tuple(
-            stretched(c, 1.0 / self.config.arm_speed_scale) if c.part == "arm" else c
-            for c in performance.clips
+            stretched(c, 1.0 / scales[c.part]) if c.part in scales else c for c in performance.clips
         )
         capped = source in ("marker", "moment") and any(c.part == "arm" for c in clips)
         if capped and self._count(lambda arm: arm) >= self.config.caps.arm_per_minute:

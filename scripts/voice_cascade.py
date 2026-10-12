@@ -65,6 +65,7 @@ from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.expression.finder import SnapshotFinder, board_finder
 from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
+from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
 from pepin.people.worker import robot_people
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
@@ -177,11 +178,20 @@ class Body:
         self.engine, self.vocabulary, self.closers = engine, vocabulary, closers
 
     @classmethod
-    def build(cls, host: str, player: Player, *, fake: bool, face: bool, logs: Path) -> Body:
-        """The engine over the real arm, head and face (``fake``: a fake arm that answers at
-        rest and a head door that only records; ``face`` False: a face that only records),
-        every performance, cue and answer logged to ``logs/<day>/cascade_gestures.jsonl`` and
-        the notable ones printed."""
+    def build(
+        cls,
+        host: str,
+        player: Player,
+        *,
+        fake: bool,
+        face: bool,
+        logs: Path,
+        wheels: WheelsExecutor | None = None,
+    ) -> Body:
+        """The engine over the real arm, head, face and ``wheels`` (``fake``: a fake arm that
+        answers at rest and a head door that only records; ``face`` False: a face that only
+        records; no ``wheels``: the body never moves), every performance, cue and answer logged
+        to ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
         from pepin.arm_motion import load_arm_motion
         from pepin.expression.animation import PartName
         from pepin.expression.animator import GestureEngine, engine_config
@@ -256,7 +266,7 @@ class Body:
             "arm": arm,
             "face": FacePart(channel, latency_s=float(face_knobs.get("latency_s", 0.05))),
             "head": head,
-            "body": NoBody(),
+            "body": wheels if wheels is not None else NoBody(),
         }
         on = bool(knobs.get("flags", {}).get("gestures", False))
         engine = GestureEngine(parts, player, load, on=on, record=record).start()
@@ -548,9 +558,18 @@ def main() -> int:
             print(f"no face finder ({exc}): the gaze turns to the voice, people by voice only")
     people = robot_people(finder)  # voices only without the robot's camera
     robot.people = people  # the remember_person / forget_person tools' door
+    # The wheels' one owner for the gaze's turn and the gestures' body (no I/O until a motion;
+    # each moves only behind its own flag); the guard stops them when the person speaks.
+    wheels: WheelsExecutor | None = None
+    if on_robot:
+        try:
+            wheels = robot_wheels(args.host)
+        except (OSError, ValueError, TypeError) as exc:  # the voice starts whatever the knobs say
+            print(f"no wheels for expression (config/expression.json wheels: {exc})")
+    guards = [WheelsGuard(wheels)] if wheels is not None else []
     if on_robot:  # the robot, its array, its head
         assert isinstance(mic, BoardLink)
-        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face)
+        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face, wheels=wheels)
 
     body = Body.build(
         args.host,
@@ -558,6 +577,7 @@ def main() -> int:
         fake=fake_drive_s is not None,
         face=not quiet_run and not args.no_face,
         logs=args.logs,
+        wheels=wheels,
     )
     robot.animator = body.engine  # the gesture tool's door
     switchboard = Switchboard(
@@ -587,7 +607,7 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
-        observers=[body.engine, people] + ([gaze] if gaze is not None else []),
+        observers=[*guards, body.engine, people] + ([gaze] if gaze is not None else []),
         flags=[body.engine, people] + ([gaze] if gaze is not None else []),
         vocabulary=body.vocabulary,
         people=people,
@@ -617,6 +637,8 @@ def main() -> int:
     finally:
         if gaze is not None:
             gaze.close()  # the head let go before the links close
+        if wheels is not None:
+            wheels.close()
         people.close()
         speech.close()
         if turn is not None:
