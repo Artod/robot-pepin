@@ -418,6 +418,56 @@ def test_the_door_state_names_the_driver_and_the_reach(node: Gaze) -> None:
     assert node._door_renew({"source": "nobody"}) == {"renewed": 0}
 
 
+BREATH_CLIP = {
+    "source": "voice.idle",
+    "kind": "clip",
+    "ttl_s": 6.0,
+    "target": {
+        "keys": [
+            {"at_s": at, "pan_rad": 0.0, "tilt_rad": tilt, "speed_deg_s": 0.6}
+            for at, tilt in ((0.0, -0.01), (2.0, 0.01), (4.0, -0.01))
+        ],
+        "loop": True,
+        "idle": True,
+    },
+}
+
+
+def test_a_looped_overlay_is_answered_at_once_shown_in_the_state_and_released(
+    node: Gaze,
+) -> None:
+    state_line(node, pan_ticks=2029, tilt_ticks=2311)  # neck_target: keys while moving
+    answer = node._door_look(BREATH_CLIP)
+    assert answer["status"] == "granted"
+    overlay = node._door_state({})["overlay"]
+    assert overlay["source"] == "voice.idle" and overlay["loop"] and overlay["idle"]
+    node._step()
+    assert link(node).sent[-1]["cmd"] == "neck_target"
+    assert link(node).sent[-1]["speed_deg_s"] == 0.6
+    assert node._door_release({"source": "voice.idle", "fade_s": 0.35}) == {"released": 1}
+    assert node._door_state({})["overlay"] is None
+    assert node._door_release({"source": "voice.idle"}) == {"released": 0}
+    assert "names its source" in node._door_release({})["error"]
+    assert "not a number" in node._door_release({"source": "x", "fade_s": "soon"})["error"]
+    node._report()
+    assert "overlays 1" in node.logger.texts("info")[-1]
+
+
+def test_an_overlay_is_refused_during_a_drive_and_by_today_s_neck_goto_server(node: Gaze) -> None:
+    refused = node._door_look(BREATH_CLIP)
+    assert refused["status"] == "denied" and "neck_target" in refused["reason"]
+    state_line(node, pan_ticks=2029, tilt_ticks=2311)
+    node._on_nav_status("navigate_to_pose", goals(4))
+    driving = node._door_look(BREATH_CLIP)
+    assert driving["status"] == "denied" and "during a drive" in driving["reason"]
+
+
+def test_a_release_lets_every_request_of_its_source_go(node: Gaze) -> None:
+    node._arbiter.submit(Look("voice.speaker", (node._arbiter.home,), 5, 0, 6.0, 6.0), 0.0)
+    assert node._door_release({"source": "voice.speaker"}) == {"released": 1}
+    assert node._arbiter.pending() == []
+
+
 def test_path_gaze_looks_along_the_plan_with_neck_target(node: Gaze) -> None:
     node._switches.set("path_gaze", True)
     state_line(node, pan_ticks=2029, tilt_ticks=2311, v=0.3)

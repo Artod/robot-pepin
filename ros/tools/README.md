@@ -22,6 +22,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | Feature flags and config knobs | `ros/flags.sh` | `ros/flags.sh list [NODE]` |
 | Planner and controller trials without the robot | `ros/sim.sh` | `ros/sim.sh up`, `ros/sim.sh scenario FILE` |
 | The arm and the gestures: read, rest, halt, play an intent, teach a pose | `scripts/gesture.py` | `uv run python scripts/gesture.py read \| rest \| halt \| play NAME [--speed 0.2] [--seed N] [--dry-run] \| teach POSE` |
+| Where the array's front is (the speaker gaze's voice bearing) | `ros/tools/doa_calibrate.py` | `uv run python ros/tools/doa_calibrate.py --write` |
 
 ## ros/tools
 
@@ -32,6 +33,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `bt_watch.py` | The behaviour tree's decisive transitions, one line each | `python3 -u /tools/bt_watch.py` (pepin-macnav) |
 | `build_rmw_zenoh_fix.sh` | Builds the patched `librmw_zenoh_cpp.so` in a throwaway container | `ros/tools/build_rmw_zenoh_fix.sh` |
 | `clip_to_bag.py` | A drive's camera clip as a stereo camera bag stamped by capture time | `ros/clip_to_bag.sh RUN` |
+| `doa_calibrate.py` | The microphone array's front and sense of rotation for the speaker gaze: a voice in front, left, behind, right, three phrases each; listens only | `uv run python ros/tools/doa_calibrate.py [--write \| --readings F L B R]` |
 | `flags_doc.py` | Renders the nodes' flags and knobs into ros/README.md; checks it is current | `ros/tools/flags_doc.py [--check \| nodes \| where NODE]` |
 | `foxglove_probe.py` | Read-only probe of the foxglove_bridge websocket | `python3 ros/tools/foxglove_probe.py [--port 8765]` |
 | `gaze_preset.py` | The gaze arbiter's follow, glance and reverse knobs set as a named preset | `uv run python ros/tools/gaze_preset.py baseline \| follow \| show` |

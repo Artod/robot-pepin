@@ -62,6 +62,10 @@ class BoardLink:
         """The array's newest direction of arrival (None before the first)."""
         return self._client.latest_doa()
 
+    def doa_between(self, t0: float, t1: float) -> list[DoaReading]:
+        """The directions read within ``t0..t1`` (the board's clock)."""
+        return self._client.doa_between(t0, t1)
+
     def close(self) -> None:
         """Stop the threads and drop the link."""
         self._stop.set()

@@ -56,6 +56,7 @@ from typing import Any
 
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
+from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.bench import ReplayMic, utterances
@@ -487,6 +488,9 @@ def main() -> int:
         turns = turns or len(args.say)
     else:
         mic = link or BoardLink(args.host)
+    gaze: SpeakerGazeWorker | None = None
+    if isinstance(mic, BoardLink) and fake_drive_s is None:  # the robot, its array, its head
+        gaze = robot_gaze(args.host, mic)
 
     body = Body.build(
         args.host,
@@ -523,8 +527,8 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
-        observers=[body.engine],
-        flags=[body.engine],
+        observers=[body.engine] + ([gaze] if gaze is not None else []),
+        flags=[body.engine] + ([gaze] if gaze is not None else []),
         vocabulary=body.vocabulary,
     )
     loop.paid_ledger = ledger
@@ -546,6 +550,8 @@ def main() -> int:
         if moving and fake_drive_s is None:
             print("halt:", robot.halt(), flush=True)
     finally:
+        if gaze is not None:
+            gaze.close()  # the head let go before the links close
         speech.close()
         if turn is not None:
             turn.close()

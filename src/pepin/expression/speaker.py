@@ -49,13 +49,16 @@ class DoaSource(Protocol):
 @dataclass(frozen=True)
 class FaceSighting:
     """One face in a frame: its bearing from the optical axis in degrees (pan + left, tilt +
-    down), its box width in pixels, the detector's score, and who it is when the finder knows."""
+    down), its box width in pixels, the detector's score, who it is when the finder knows, and
+    how far the head is turned from the camera (degrees, from the detector's five points; 0
+    faces the robot) when the finder reads it."""
 
     pan_deg: float
     tilt_deg: float
     width_px: float
     score: float
     who: str | None = None
+    yaw_deg: float | None = None
 
 
 @dataclass(frozen=True)
@@ -87,8 +90,8 @@ class GazeAnswer:
 @dataclass(frozen=True)
 class HeadView:
     """The arbiter's state as the speaker gaze reads it: the head's angles, the source and band
-    holding it, whether a frame now would be blurred (the blind interval, the board's clock), and
-    whether a drive runs."""
+    holding it, whether a frame now would be blurred (the blind interval, the board's clock),
+    whether a drive runs, and the source of the overlay playing on top ("" for none)."""
 
     head: Aim | None
     holder: str
@@ -96,6 +99,7 @@ class HeadView:
     blind: bool
     blind_until: float | None
     driving: bool
+    overlay: str = ""
 
 
 class GazeDoor(Protocol):

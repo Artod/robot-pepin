@@ -3,6 +3,8 @@
 
 * :class:`InsightFace`: SCRFD detection and ArcFace identity from an InsightFace model pack
   (``buffalo_l``: SCRFD-10GF and ResNet50 ArcFace; weights non-commercial).
+* :class:`Scrfd`: the pack's SCRFD alone (the speaker gaze's finder, :mod:`pepin.expression.
+  finder`): ~170 MB in the process against 550-800 MB for the pack opened with identity off.
 * :class:`EmotiEffOnnx`: EmotiEffLib's ``enet_b0_8_va_mtl`` (8 AffectNet classes plus valence and
   arousal) run straight through onnxruntime with the library's own preprocessing (224 px, RGB,
   ImageNet mean and std). The library's recognizer is not used because it reads weights only from
@@ -114,6 +116,48 @@ class InsightFace:
                 image, landmark=np.asarray(face.kps, dtype=np.float32), image_size=112
             )
         return unit(self._recognizer.get_feat(crop))
+
+
+class Scrfd:
+    """SCRFD alone from an InsightFace pack (its ``det_*.onnx``): FaceAnalysis opens every
+    network of a pack to learn its task, the 174 MB ArcFace and the 144 MB 3D landmarker
+    included, even when only the detector is kept; implements Detector."""
+
+    def __init__(
+        self,
+        pack: Path,
+        *,
+        device: str,
+        cache: Path,
+        det_size: int = 640,
+        det_threshold: float = 0.5,
+    ) -> None:
+        """Load the pack's detector alone."""
+        from insightface import model_zoo
+
+        require(pack, "the InsightFace model pack")
+        found = sorted(pack.glob("det_*.onnx"))
+        if not found:
+            raise FileNotFoundError(f"no det_*.onnx in {pack} (see config/face_sensor.json)")
+        self.name = found[0].name
+        names, options = providers(device, cache)
+        kwargs: dict[str, Any] = {"providers": names, "provider_options": options}
+        if names[0] == COREML:  # FaceAnalysis's own fixed input for a CoreML detector
+            kwargs["_coreml_detector_input_size"] = (det_size, det_size)
+        self._model: Any = model_zoo.get_model(str(found[0]), **kwargs)
+        ctx = 0 if names[0] == COREML else -1
+        self._model.prepare(ctx, input_size=(det_size, det_size), det_thresh=det_threshold)
+        self.providers = names
+
+    def detect(self, image: Image) -> list[Detection]:
+        """Every face above the threshold, with its five landmarks."""
+        boxes, kpss = self._model.detect(image, max_num=0)
+        faces = []
+        for i in range(boxes.shape[0]):
+            x0, y0, x1, y1, score = (float(v) for v in boxes[i])
+            kps = tuple((float(x), float(y)) for x, y in kpss[i]) if kpss is not None else ()
+            faces.append(Detection((x0, y0, x1, y1), score, kps))
+        return faces
 
 
 class EmotiEffOnnx:

@@ -25,7 +25,18 @@ depth frames at each, how long to hold, which band, how long the request may liv
   ended, and the frames fused while it held the head still (late frames are counted for
   :data:`LATE_S`), for the node's report;
 * the head is BLIND from the write that starts a move until it has settled plus one frame period:
-  :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on.
+  :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on;
+* an OVERLAY (kind ``clip``, :class:`Overlay`) is keyed offsets ADDED to the aim of whatever holds
+  the head (home when nothing does), each key written at its time at its own speed ceiling: it
+  takes nothing from the holder, which keeps its status, its TTL and its aim, and the head goes
+  back to the holder's aim when it ends. One plays at a time: a newer one replaces it, except
+  that an ``idle`` overlay (breathing, a fidget) gives way to any other and never replaces one.
+  It plays only over a holder of its band or a worse one, needs a driver that takes targets
+  while moving (``neck_target``), and is refused whole (never clamped) past the reach, past
+  ``clip_max_deg`` or with a tilt that reverses faster than ``clip_max_hz``; a ``loop`` repeats
+  its keys until withdrawn or its TTL lapses (renewed like any request). An overlay whose
+  offsets all stay within ``clip_still_deg`` (a breath) writes without starting a move: the head
+  is not blind for it.
 
 Pure: time is passed in, the encoders' readings and the fused frames' stamps are fed in, and the
 ROS node (``pepin_bringup.gaze``) wires the topics, the base server and the doors. Two drivers
@@ -36,6 +47,7 @@ written while driving).
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 import threading
@@ -55,12 +67,18 @@ from pepin.neck import (
     ticks_for,
 )
 
-Kind = Literal["point", "direction", "angles", "scan", "track", "home"]
+Kind = Literal["point", "direction", "angles", "scan", "track", "home", "clip"]
 Speed = Literal["saccade", "slow", "return"]  # "return": the slow way home after a drive
 Status = Literal["queued", "granted", "done", "denied", "preempted", "expired"]
 Phase = Literal["home", "still", "saccade", "track", "returning"]
 
-KINDS: tuple[str, ...] = ("point", "direction", "angles", "scan", "track", "home")
+KINDS: tuple[str, ...] = ("point", "direction", "angles", "scan", "track", "home", "clip")
+CLIP_KEYS_MAX = 64  # the keys one overlay may carry
+# What an overlay is told on a driver that moves the neck one move at a time, at rest.
+OVERLAY_DRIVER = (
+    "a head overlay needs a base server that takes neck_target (keys while the head moves);"
+    " this one moves the neck one move at a time"
+)
 SPEEDS: tuple[str, ...] = ("saccade", "slow")
 
 # The bands, lowest first: who asks, and what they win over. HOME is the arbiter's own.
@@ -96,6 +114,10 @@ class Aim:
         """The larger of the two joint differences, radians."""
         return max(abs(self.pan_rad - other.pan_rad), abs(self.tilt_rad - other.tilt_rad))
 
+    def plus(self, other: Aim) -> Aim:
+        """This aim with ``other``'s angles added (an overlay's offset)."""
+        return Aim(self.pan_rad + other.pan_rad, self.tilt_rad + other.tilt_rad)
+
     def as_dict(self) -> dict[str, float]:
         """Radians and degrees, rounded, for a JSON answer."""
         return {
@@ -128,6 +150,8 @@ class Refusal:
     transient: bool
 
 
+ZERO = Aim(0.0, 0.0)  # no offset
+
 # The blind tail in frame periods when the gaze node's frame_period_s knob is 0 (its default):
 # 1.05 periods of config/camera.json's rate, the 0.105 s it was at 10 fps (one 9.5 fps frame).
 BLIND_TAIL_PER_PERIOD = 1.05
@@ -138,7 +162,7 @@ class GazeSettings:
     """The arbiter's numbers (config/knobs.json's ``gaze`` block, live); ``ttl_s`` is the
     default TTL of the operator, navigation, person, sensor, driving and idle bands;
     ``dark_patience_s`` how long a look waits on frames the depth gate drops as dark (0: until
-    its TTL)."""
+    its TTL); ``clip_*`` bound an overlay (offset, tilt reversal rate, the still overlay)."""
 
     frames: int = 3
     settle_tol_deg: float = 1.0
@@ -146,6 +170,9 @@ class GazeSettings:
     frame_period_s: float = 0.105
     ttl_s: tuple[float, float, float, float, float, float] = (0.5, 3.0, 10.0, 2.0, 0.5, 20.0)
     dark_patience_s: float = 1.5
+    clip_max_deg: float = 30.0
+    clip_max_hz: float = 2.5
+    clip_still_deg: float = 1.0
 
     def ttl_for(self, band: int) -> float:
         """The default TTL of a band's request."""
@@ -158,10 +185,124 @@ def new_id() -> str:
 
 
 @dataclass(frozen=True)
+class OverlayKey:
+    """One key of an overlay: seconds from its start, the pan (+ left) and tilt (+ down) offsets
+    in radians added to the holder's aim, and the speed ceiling of the move to it."""
+
+    at_s: float
+    pan_rad: float
+    tilt_rad: float
+    speed_deg_s: float
+
+    @property
+    def offset(self) -> Aim:
+        """The key's offset as an :class:`Aim`."""
+        return Aim(self.pan_rad, self.tilt_rad)
+
+
+@dataclass(frozen=True)
+class Overlay:
+    """A clip's keys in time order; ``loop``: they repeat every :attr:`period_s` until the look
+    is withdrawn or lapses; ``idle``: the idle layer's, giving way to any other overlay."""
+
+    keys: tuple[OverlayKey, ...]
+    loop: bool = False
+    idle: bool = False
+
+    @property
+    def period_s(self) -> float:
+        """The last key's time: one pass (a loop's period)."""
+        return self.keys[-1].at_s if self.keys else 0.0
+
+    @property
+    def reach_rad(self) -> float:
+        """The largest offset of any key on either axis."""
+        return max((max(abs(k.pan_rad), abs(k.tilt_rad)) for k in self.keys), default=0.0)
+
+    def end_s(self) -> float:
+        """When a pass is over: the last key's time plus its move from the key before it at its
+        own ceiling (the travel the head still owes after the last write)."""
+        if not self.keys:
+            return 0.0
+        last = self.keys[-1]
+        before = self.keys[-2].offset if len(self.keys) > 1 else Aim(0.0, 0.0)
+        travel_deg = math.degrees(last.offset.off(before))
+        return last.at_s + travel_deg / max(last.speed_deg_s, 1e-6)
+
+    def key_at(self, elapsed_s: float) -> tuple[int, int]:
+        """The key due ``elapsed_s`` after the start (-1 before the first) and the pass it is in
+        (always 0 without ``loop``)."""
+        if not self.keys:
+            return -1, 0
+        cycle = 0
+        if self.loop and self.period_s > 0.0 and elapsed_s >= self.period_s:
+            cycle = int(elapsed_s // self.period_s)
+            elapsed_s -= cycle * self.period_s
+        due = [i for i, key in enumerate(self.keys) if key.at_s <= elapsed_s]
+        if due:
+            return due[-1], cycle
+        if cycle > 0:  # a loop's next pass before its first key: the previous pass's last key
+            return len(self.keys) - 1, cycle - 1
+        return -1, 0
+
+    def offset_at(self, index: int) -> Aim:
+        """Key ``index``'s offset; none (0, 0) before the first."""
+        return self.keys[index].offset if 0 <= index < len(self.keys) else Aim(0.0, 0.0)
+
+    def refusal(self, settings: GazeSettings) -> str | None:
+        """Why the overlay is refused by the knobs alone, in words; None when it plays."""
+        limit = settings.clip_max_deg
+        if math.degrees(self.reach_rad) > limit + 1e-9:
+            return (
+                f"an overlay key {math.degrees(self.reach_rad):.1f} deg off the holder's aim is"
+                f" past clip_max_deg {limit:.0f}"
+            )
+        if self.loop and self.period_s <= 0.0:
+            return "a looped overlay needs its last key after 0 s (its period)"
+        fastest = _tilt_half_period_s(self)
+        hz = settings.clip_max_hz
+        if hz > 0.0 and fastest is not None and fastest < 0.5 / hz - 1e-9:
+            return (
+                f"the tilt reverses {fastest:.2f} s after its last turn: faster than"
+                f" clip_max_hz {hz:.1f} (the mast rings at 5.3 Hz)"
+            )
+        return None
+
+
+def _tilt_half_period_s(overlay: Overlay) -> float | None:
+    """The shortest time between two turns of the tilt's direction (the start of its motion
+    counts as a turn; a loop wraps round: its closing key is the next pass's first, never
+    written itself), None when it never turns."""
+    keys = overlay.keys
+    if overlay.loop and len(keys) > 1:
+        keys = keys[:-1]
+    points = [(0.0, 0.0)] + [(k.at_s, k.tilt_rad) for k in keys]
+    if overlay.loop and keys:
+        period = overlay.period_s
+        points += [(period + k.at_s, k.tilt_rad) for k in keys]
+        points.append((2 * period + keys[0].at_s, keys[0].tilt_rad))
+    turns: list[float] = []
+    direction = 0
+    previous = points[0][1]
+    for at_s, tilt in points[1:]:
+        step = tilt - previous
+        previous = tilt
+        if abs(step) < 1e-9:
+            continue
+        sign = 1 if step > 0 else -1
+        if sign != direction:
+            turns.append(at_s)
+            direction = sign
+    gaps = [b - a for a, b in itertools.pairwise(turns)]
+    return min(gaps) if gaps else None
+
+
+@dataclass(frozen=True)
 class Look:
     """One request: its views (empty: home), the still frames wanted at each, the hold after the
     last, the band, the TTL, the speed, whether it takes the head from its own band, and
-    ``hold_s``: above 0, a glance (answered at ``frames`` or ``hold_s`` after settling, atomic)."""
+    ``hold_s``: above 0, a glance (answered at ``frames`` or ``hold_s`` after settling, atomic).
+    A ``clip`` carries its :class:`Overlay` instead of views."""
 
     source: str
     views: tuple[Aim, ...]
@@ -174,6 +315,7 @@ class Look:
     kind: Kind = "angles"
     id: str = field(default_factory=new_id)
     hold_s: float = 0.0
+    overlay: Overlay | None = None
 
 
 @dataclass
@@ -220,8 +362,17 @@ class HeadDriver(Protocol):
         """Why a write cannot go out now, or ``None`` when it can."""
         ...
 
-    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
-        """Send the head to ``aim`` (``None``: home); ``hold`` keeps the servos energised."""
+    def write(
+        self,
+        aim: Aim | None,
+        *,
+        speed: Speed,
+        hold: bool,
+        now: float,
+        speed_deg_s: float | None = None,
+    ) -> None:
+        """Send the head to ``aim`` (``None``: home); ``hold`` keeps the servos energised;
+        ``speed_deg_s`` a ceiling of the move's own (an overlay's key) over ``speed``'s."""
         ...
 
     def take_refusal(self) -> Refusal | None:
@@ -281,7 +432,8 @@ class HeldLook:
 
 @dataclass
 class _Write:
-    """The arbiter's last accepted write and what became of it."""
+    """The arbiter's last accepted write and what became of it: ``aim`` is the holder's (the
+    base), ``offset`` an overlay's on top of it, and the head was sent to their sum."""
 
     aim: Aim
     home: bool
@@ -289,6 +441,28 @@ class _Write:
     owner: str  # the request that wrote it ("" for the arbiter's own home)
     settled: HeadReading | None = None  # the reading it settled on; None while the head moves
     timed_out: bool = False
+    offset: Aim = field(default_factory=lambda: Aim(0.0, 0.0))
+
+    @property
+    def sent(self) -> Aim:
+        """Where the head was sent: the base plus the overlay's offset."""
+        return self.aim.plus(self.offset)
+
+
+@dataclass
+class _Playing:
+    """The overlay playing: its request, its TTL clock, when it started, and the key, pass and
+    base it was last written at."""
+
+    look: Look
+    overlay: Overlay
+    created: float
+    started: float
+    on_done: Callable[[Outcome], None] | None
+    key: int = -1
+    cycle: int = 0
+    base: Aim | None = None
+    still: bool = False  # every offset within clip_still_deg: written without starting a move
 
 
 @dataclass(frozen=True)
@@ -336,13 +510,23 @@ class Arbiter:
     subscriptions, :meth:`step` from a timer; answers are delivered outside the lock.
     """
 
-    def __init__(self, driver: HeadDriver, home: Aim, settings: GazeSettings | None = None) -> None:
+    def __init__(
+        self,
+        driver: HeadDriver,
+        home: Aim,
+        settings: GazeSettings | None = None,
+        reach: Reach | None = None,
+    ) -> None:
         self._driver = driver
         self.home = home
         self.settings = settings if settings is not None else GazeSettings()
+        self.reach = reach  # an overlay's keys over the holder's aim are refused past it
+        self._back_deg_s = 0.0  # the speed the head goes back to its holder at after an overlay
+        self._back_still = False
         self._lock = threading.RLock()
         self._held: list[_Held] = []
         self._active: _Held | None = None
+        self._playing: _Playing | None = None  # the overlay on top of the holder
         self._head: _Write | None = None  # None: nothing written since the start
         self._before: _Write | None = None  # the belief before the newest write (a refusal)
         self._retry_at = 0.0
@@ -393,7 +577,7 @@ class Arbiter:
 
     def release(self, now: float, by: str, *, keep: Callable[[Look], bool]) -> int:
         """Drop every request ``keep`` refuses, as preempted ``by``; how many went. A glance under
-        way is not cut: it goes once answered."""
+        way is not cut: it goes once answered. An overlay ``keep`` refuses ends too."""
         with self._lock:
             refused = [h for h in self._held if not keep(h.look)]
             for held in refused:
@@ -401,24 +585,38 @@ class Arbiter:
                     held.let_go = True
                 else:
                     self._finish(held, "preempted", f"by {by}", now)
+            playing = self._playing
+            ended = playing is not None and not keep(playing.look)
+            if playing is not None and ended:
+                self._end_overlay(playing, "preempted", f"by {by}", now)
         self._deliver()
-        return sum(1 for h in refused if not h.let_go)
+        return sum(1 for h in refused if not h.let_go) + int(ended)
 
-    def withdraw(self, source: str, now: float, by: str) -> int:
+    def withdraw(self, source: str, now: float, by: str, fade_s: float = 0.0) -> int:
         """Take back every request of ``source``, as preempted ``by``, a glance under way too:
         its own asker's word, which :meth:`release` is not (the reverse look let go at the first
-        forward command); how many went."""
+        forward command); its overlay goes too, the head back on the holder's aim over
+        ``fade_s`` (0: at the overlay's last key's speed); how many went."""
         with self._lock:
             mine = [h for h in self._held if h.look.source == source]
             for held in mine:
                 self._finish(held, "preempted", f"by {by}", now)
+            playing = self._playing
+            overlay = playing is not None and playing.look.source == source
+            if playing is not None and overlay:
+                self._end_overlay(playing, "preempted", f"by {by}", now, fade_s=fade_s)
         self._deliver()
-        return len(mine)
+        return len(mine) + int(overlay)
 
     def holds(self, source: str) -> bool:
         """Whether a request of ``source`` holds the head."""
         with self._lock:
             return self._active is not None and self._active.look.source == source
+
+    def overlay(self) -> Look | None:
+        """The overlay playing on top of the holder, None when none plays."""
+        with self._lock:
+            return self._playing.look if self._playing is not None else None
 
     def glancing(self, source: str) -> bool:
         """Whether ``source`` holds the head with a glance not yet answered."""
@@ -441,7 +639,7 @@ class Arbiter:
             if not self._readings:
                 return False
             reading = self._readings[-1]
-            believed = self._head.aim if self._head is not None else self.home
+            believed = self._head.sent if self._head is not None else self.home
             if reading.aim.off(believed) <= tol_rad:
                 return False
             self._head = _Write(reading.aim, False, now, "", settled=reading)
@@ -457,14 +655,18 @@ class Arbiter:
 
     def renew(self, source: str, now: float) -> int:
         """Restart the TTL of ``source``'s requests, and the dwell of one already answered
-        (``see`` keeps a look; path gaze keeps its aim); how many."""
+        (``see`` keeps a look; path gaze keeps its aim), and of its overlay; how many."""
         with self._lock:
             mine = [h for h in self._held if h.look.source == source]
             for held in mine:
                 held.created = now
                 if held.answered:
                     held.answered_at = now
-        return len(mine)
+            playing = self._playing
+            overlay = playing is not None and playing.look.source == source
+            if playing is not None and overlay:
+                playing.created = now
+        return len(mine) + int(overlay)
 
     # ---- the decision ------------------------------------------------------------------------
     def step(self, now: float) -> None:
@@ -473,6 +675,10 @@ class Arbiter:
             self._close_books(now)
             self._expire(now)
             self._choose(now)
+            playing, active = self._playing, self._active
+            if playing is not None and active is not None and active.look.band < playing.look.band:
+                # before the better look writes: its write carries no offset
+                self._end_overlay(playing, "preempted", f"by {active.look.source}", now)
             self._take_refusal(now)
             self._settle(now)
             active = self._active
@@ -480,6 +686,7 @@ class Arbiter:
                 self._go_home(now)
             elif not active.answered:
                 self._serve(active, now)
+            self._play(now)
             phase = self._current_phase()
             if phase != self._phase:
                 self._phase, self._since = phase, self._phase_stamp(phase, now)
@@ -518,6 +725,8 @@ class Arbiter:
             return self._deny(look, "track is not built yet", on_done)
         if not 0 <= look.band < HOME:
             return self._deny(look, f"band {look.band} is not one of 0..{HOME - 1}", on_done)
+        if look.kind == "clip":
+            return self._take_overlay(look, now, on_done)
         if look.kind != "home" and not look.views:
             return self._deny(look, "no view to look at", on_done)
         for older in [h for h in self._held if h.look.source == look.source]:
@@ -677,10 +886,196 @@ class Arbiter:
             return
         self._send(self.home, home=True, owner="", speed="saccade", now=now)
 
-    def _send(self, aim: Aim, *, home: bool, owner: str, speed: Speed, now: float) -> None:
-        self._driver.write(None if home else aim, speed=speed, hold=not home, now=now)
-        self._before, self._head = self._head, _Write(aim, home, now, owner)
+    def _send(
+        self,
+        aim: Aim,
+        *,
+        home: bool,
+        owner: str,
+        speed: Speed,
+        now: float,
+        offset: Aim | None = None,
+        speed_deg_s: float | None = None,
+    ) -> None:
+        """One write of the base ``aim`` with an overlay's ``offset`` on top (the playing
+        overlay's current one when None): a lifted home is held like any aim."""
+        lift = self._overlay_offset() if offset is None else offset
+        lifted = lift != ZERO
+        self._out(
+            None if home and not lifted else aim.plus(lift),
+            speed,
+            not home or lifted,
+            now,
+            speed_deg_s,
+        )
+        written = _Write(aim, home and not lifted, now, owner, offset=lift)
+        self._before, self._head = self._head, written
+
+    def _out(
+        self, aim: Aim | None, speed: Speed, hold: bool, now: float, speed_deg_s: float | None
+    ) -> None:
+        """One write to the driver; a ceiling of its own is passed only when there is one."""
+        if speed_deg_s is None:
+            self._driver.write(aim, speed=speed, hold=hold, now=now)
+        else:
+            self._driver.write(aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s)
         self.counts["writes"] += 1
+
+    # ---- the overlay -------------------------------------------------------------------------
+    def _take_overlay(
+        self, look: Look, now: float, on_done: Callable[[Outcome], None] | None
+    ) -> Outcome:
+        """An overlay is played over the holder (or home), refused whole, or replaces the one
+        playing; an idle one gives way to any other."""
+        overlay = look.overlay
+        if overlay is None or not overlay.keys:
+            return self._deny(look, "a clip carries its keys", on_done)
+        if not self._driver.moves_while_driving:
+            return self._deny(look, OVERLAY_DRIVER, on_done)
+        holder = self._best()
+        if holder is not None and holder.look.band < look.band:
+            return self._deny(
+                look,
+                f"the head is held by {holder.look.source} ({BANDS[holder.look.band]} band),"
+                f" which an overlay of the {BANDS[look.band]} band never plays over",
+                on_done,
+            )
+        why = overlay.refusal(self.settings)
+        base = self._holder_aim(holder)
+        for key in overlay.keys:
+            if why is None:
+                why = self._reach_refusal(base.plus(key.offset))
+        if why is not None:
+            return self._deny(look, why, on_done)
+        playing = self._playing
+        if playing is not None:
+            mine = playing.look.source == look.source
+            if not mine and overlay.idle and not playing.overlay.idle:
+                return self._deny(
+                    look, f"{playing.look.source}'s overlay plays: an idle one gives way", on_done
+                )
+            by = f"a newer request of {look.source}" if mine else look.source
+            self._end_overlay(playing, "preempted", f"by {by}", now)
+        still = math.degrees(overlay.reach_rad) <= self.settings.clip_still_deg + 1e-9
+        self._playing = _Playing(look, overlay, now, now, on_done, still=still)
+        self.counts["requests"] += 1
+        self.counts["overlays"] += 1
+        return Outcome(look.id, look.source, "granted")
+
+    def _holder_aim(self, held: _Held | None = None) -> Aim:
+        """The aim of ``held`` (the request holding the head when None): home for none."""
+        held = self._active if held is None else held
+        if held is None or not held.look.views:
+            return self.home
+        return held.look.views[min(held.view, len(held.look.views) - 1)]
+
+    def _reach_refusal(self, aim: Aim) -> str | None:
+        return self.reach.refusal(aim) if self.reach is not None else None
+
+    def _overlay_offset(self) -> Aim:
+        """The playing overlay's offset as last written; none before its first key."""
+        playing = self._playing
+        if playing is None:
+            return ZERO
+        return playing.overlay.offset_at(playing.key)
+
+    def _play(self, now: float) -> None:
+        """The overlay's key due now written over the holder's aim; its end, its TTL, a better
+        band, the reach; with none playing, the head owed back to the holder's aim."""
+        playing = self._playing
+        if playing is None:
+            self._write_back(now)
+            return
+        look, overlay = playing.look, playing.overlay
+        if now - playing.created > look.ttl_s:
+            self._end_overlay(playing, "expired", f"not ended within its {look.ttl_s:.1f} s", now)
+            self._write_back(now)
+            return
+        elapsed = now - playing.started
+        if not overlay.loop and elapsed >= overlay.end_s():
+            self._end_overlay(playing, "done", "", now)
+            self._write_back(now)
+            return
+        index, cycle = overlay.key_at(elapsed)
+        base = self._holder_aim()
+        if index < 0 or ((index, cycle) == (playing.key, playing.cycle) and base == playing.base):
+            return
+        key = overlay.keys[index]
+        why = self._reach_refusal(base.plus(key.offset))
+        if why is not None:
+            self._end_overlay(playing, "denied", why, now)
+            self._write_back(now)
+            return
+        head = self._head
+        if head is not None and head.aim == base and head.offset == key.offset:
+            playing.key, playing.cycle, playing.base = index, cycle, base  # already written
+            return
+        if now < self._retry_at or self._driver.blocked(now) is not None:
+            return
+        playing.key, playing.cycle, playing.base = index, cycle, base
+        self._lift(base, key.offset, playing.still, look.id, key.speed_deg_s, now)
+
+    def _lift(
+        self, base: Aim, offset: Aim, still: bool, owner: str, speed_deg_s: float, now: float
+    ) -> None:
+        """The head sent to ``base`` plus ``offset``: a still overlay over a settled head moves
+        it without starting a move (no blind interval), anything else is a write like any."""
+        head = self._head
+        active = self._active
+        home = active is None or not active.look.views
+        if still and head is not None and head.settled is not None and head.aim == base:
+            lifted = offset != ZERO
+            target = None if home and not lifted else base.plus(offset)
+            self._out(target, "saccade", not home or lifted, now, speed_deg_s)
+            head.offset, head.home = offset, home and not lifted
+            return
+        holder = active.look.id if active is not None and offset == ZERO else owner
+        self._send(
+            base,
+            home=home,
+            owner=holder,
+            speed="saccade",
+            now=now,
+            offset=offset,
+            speed_deg_s=speed_deg_s,
+        )
+
+    def _write_back(self, now: float) -> None:
+        """No overlay plays and the head still carries an offset: back to the holder's aim, at
+        the ended overlay's return speed."""
+        head = self._head
+        if head is None or head.offset == ZERO:
+            return
+        if now < self._retry_at or self._driver.blocked(now) is not None:
+            return
+        self._lift(self._holder_aim(), ZERO, self._back_still, "", self._back_deg_s, now)
+
+    def _end_overlay(
+        self, playing: _Playing, status: Status, reason: str, now: float, *, fade_s: float = 0.0
+    ) -> None:
+        """The overlay ends: answered, and the speed the head goes back at is kept (its offset
+        over ``fade_s``, else the last key's ceiling)."""
+        if self._playing is playing:
+            self._playing = None
+        head = self._head
+        offset_deg = math.degrees(head.offset.off(ZERO)) if head is not None else 0.0
+        last = playing.overlay.keys[-1].speed_deg_s if playing.overlay.keys else 0.0
+        self._back_deg_s = offset_deg / fade_s if fade_s > 0.0 and offset_deg > 0.0 else last
+        self._back_still = playing.still
+        reading = self._readings[-1] if self._readings else None
+        outcome = Outcome(
+            playing.look.id,
+            playing.look.source,
+            status,
+            reason=reason,
+            reached=status == "done",
+            pan_rad=reading.pan_rad if reading else None,
+            tilt_rad=reading.tilt_rad if reading else None,
+            took_ms=(now - playing.started) * 1000.0,
+        )
+        self.counts[status] += 1
+        if playing.on_done is not None:
+            self._outbox.append((playing.on_done, outcome))
 
     def _take_refusal(self, now: float) -> None:
         """A refused write never moved the head: the belief goes back to before it, and the
@@ -695,6 +1090,9 @@ class Arbiter:
         active = self._active
         if active is not None and active.look.id == owner and not active.answered:
             self._wait(active, refusal, now)
+        playing = self._playing
+        if playing is not None and playing.look.id == owner:
+            self._end_overlay(playing, "denied", refusal.why, now)
 
     def _settle(self, now: float) -> None:
         """Whether the head has settled on the last write: the driver confirmed it, or two
@@ -706,20 +1104,23 @@ class Arbiter:
         tol = math.radians(self.settings.settle_tol_deg)
         arrival = self._driver.take_arrival()
         after = [r for r in self._readings if r.stamp > head.at]
-        if arrival is not None and arrival.aim.off(head.aim) <= tol:
+        sent = head.sent
+        if arrival is not None and arrival.aim.off(sent) <= tol:
             head.settled = arrival
         elif (
             len(after) == 2
             and after[0].aim.off(after[1].aim) <= STILL_RAD
-            and after[1].aim.off(head.aim) <= tol
+            and after[1].aim.off(sent) <= tol
         ):
             head.settled = after[1]
         elif now - head.at > self.settings.move_timeout_s:
             newest = self._readings[-1] if self._readings else None
-            head.settled = newest or HeadReading(head.aim.pan_rad, head.aim.tilt_rad, now)
+            head.settled = newest or HeadReading(sent.pan_rad, sent.tilt_rad, now)
             head.timed_out = True
-            if newest is not None:
-                head.aim = newest.aim  # where it really is: the next request writes again
+            if newest is not None:  # where it really is: the next request writes again
+                head.aim = Aim(
+                    newest.pan_rad - head.offset.pan_rad, newest.tilt_rad - head.offset.tilt_rad
+                )
             self.counts["timeouts"] += 1
             return
         else:
@@ -937,10 +1338,11 @@ def look_from_json(
     """A request as the doors receive it, resolved to views; the refusal in words otherwise.
 
     ``kind`` point (``target`` {frame, x, y, z}), direction ({bearing_rad, pitch_rad} in
-    base_link), angles ({pan_rad, tilt_rad}), scan ({views: [{pan_rad, tilt_rad}, ...]}) or
-    home; ``hold`` true keeps the head on the last view for the rest of the TTL (``dwell_s`` =
-    ``ttl_s``); ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why
-    not).
+    base_link), angles ({pan_rad, tilt_rad}), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
+    or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s},
+    ...], loop, idle}; a loop's last key closes its period and equals its first); ``hold`` true
+    keeps the head on the last view for the rest of the TTL (``dwell_s`` = ``ttl_s``);
+    ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why not).
     """
     kind = str(data.get("kind", "angles"))
     if kind not in KINDS:
@@ -949,7 +1351,7 @@ def look_from_json(
     if not source:
         return "a request names its source"
     try:
-        band = int(data.get("band", PERSON))
+        band = int(data.get("band", IDLE if kind == "clip" else PERSON))
         frames = int(data.get("frames", settings.frames))
         ttl_s = float(data.get("ttl_s", settings.ttl_for(band)))
         dwell_s = ttl_s if data.get("hold") else float(data.get("dwell_s", 0.0))
@@ -961,6 +1363,22 @@ def look_from_json(
     target = data.get("target") or {}
     if not isinstance(target, dict):
         return "target is an object"
+    if kind == "clip":
+        overlay = overlay_from_json(target, settings)
+        if isinstance(overlay, str):
+            return overlay
+        return Look(
+            source=source,
+            views=(),
+            band=band,
+            frames=0,
+            dwell_s=0.0,
+            ttl_s=max(ttl_s, 0.0),
+            preempt=bool(data.get("preempt", False)),
+            kind="clip",
+            id=str(data.get("id") or new_id()),
+            overlay=overlay,
+        )
     views = _views(kind, target, cfg, to_base)
     if isinstance(views, str):
         return views
@@ -981,6 +1399,38 @@ def look_from_json(
         kind=cast(Kind, kind),
         id=str(data.get("id") or new_id()),
     )
+
+
+def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay | str:
+    """A clip's ``target`` as an :class:`Overlay`, or why it is refused (the knobs' bounds
+    included: the arbiter never clamps)."""
+    raw = target.get("keys")
+    if not isinstance(raw, list) or not raw:
+        return "a clip carries its keys: [{at_s, pan_rad, tilt_rad, speed_deg_s}, ...]"
+    if len(raw) > CLIP_KEYS_MAX:
+        return f"a clip carries at most {CLIP_KEYS_MAX} keys, not {len(raw)}"
+    keys: list[OverlayKey] = []
+    try:
+        for item in raw:
+            key = OverlayKey(
+                float(item["at_s"]),
+                float(item.get("pan_rad", 0.0)),
+                float(item.get("tilt_rad", 0.0)),
+                float(item["speed_deg_s"]),
+            )
+            values = (key.at_s, key.pan_rad, key.tilt_rad, key.speed_deg_s)
+            if not all(math.isfinite(v) for v in values):
+                return "a clip's key is a finite number on every field"
+            if key.at_s < 0.0 or (keys and key.at_s < keys[-1].at_s):
+                return "a clip's keys are in time order, from 0 s"
+            if key.speed_deg_s <= 0.0:
+                return "a clip's key moves at a speed above 0 deg/s"
+            keys.append(key)
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        return f"a clip's key is incomplete: {exc!r}"
+    overlay = Overlay(tuple(keys), loop=bool(target.get("loop")), idle=bool(target.get("idle")))
+    why = overlay.refusal(settings)
+    return why if why is not None else overlay
 
 
 def _views(
@@ -1081,8 +1531,17 @@ class BaseServerHead(_BaseLink):
                 )
         return None
 
-    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
-        """``neck_home`` or ``neck_goto`` in ticks; the profile speed is the board's own."""
+    def write(
+        self,
+        aim: Aim | None,
+        *,
+        speed: Speed,
+        hold: bool,
+        now: float,
+        speed_deg_s: float | None = None,
+    ) -> None:
+        """``neck_home`` or ``neck_goto`` in ticks; the profile speed is the board's own (no
+        ceiling of a move's own: overlays are refused on this driver)."""
         if aim is None:
             message: dict[str, Any] = {"cmd": "neck_home", "hold": hold}
         else:
@@ -1153,16 +1612,27 @@ class NeckTargetHead(_BaseLink):
         with self._lock:
             return self._quiet(now)
 
-    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
+    def write(
+        self,
+        aim: Aim | None,
+        *,
+        speed: Speed,
+        hold: bool,
+        now: float,
+        speed_deg_s: float | None = None,
+    ) -> None:
         """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` for a slow
-        look, ``return_deg_s`` for the way home after a drive."""
+        look, ``return_deg_s`` for the way home after a drive, ``speed_deg_s`` when given (an
+        overlay's key)."""
         where = aim if aim is not None else home_aim(self._cfg)
         message: dict[str, Any] = {
             "cmd": "neck_target",
             "pan_rad": where.pan_rad,
             "tilt_rad": where.tilt_rad,
         }
-        if speed == "slow":
+        if speed_deg_s is not None and speed_deg_s > 0.0:
+            message["speed_deg_s"] = speed_deg_s
+        elif speed == "slow":
             message["speed_deg_s"] = self._slow_deg_s()
         elif speed == "return" and self._return_deg_s is not None:
             message["speed_deg_s"] = self._return_deg_s()
@@ -1239,9 +1709,17 @@ class EitherHead:
         """The chosen driver's."""
         return self.chosen.blocked(now)
 
-    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
+    def write(
+        self,
+        aim: Aim | None,
+        *,
+        speed: Speed,
+        hold: bool,
+        now: float,
+        speed_deg_s: float | None = None,
+    ) -> None:
         """The chosen driver's."""
-        self.chosen.write(aim, speed=speed, hold=hold, now=now)
+        self.chosen.write(aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s)
 
     def take_refusal(self) -> Refusal | None:
         """The chosen driver's."""
