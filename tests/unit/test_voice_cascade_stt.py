@@ -236,7 +236,7 @@ def test_a_switch_builds_the_engine_by_name_and_frees_the_old_one(onnx: Onnx, ml
         return built[-1]
 
     switch = SwitchingTranscriber(
-        whisper, configured(config), load, lambda: wanted[0],
+        whisper, choice_of("mlx", config), load, lambda: wanted[0],
         report=lines.append, spawn=now, footprint=lambda: next(sizes), settle_s=0,
     )  # fmt: skip
     switch.poll()
