@@ -21,8 +21,12 @@ Every turn prints one line of its timeline (:mod:`pepin.voice_cascade.timeline`)
 brain's cache tokens and price, the brain and the voice that spoke (and a cloud voice's first
 audio and price), and logs it with everything else (:mod:`pepin.voice_cascade.log`).
 
-A sentence the brain starts with ``{шёпотом}`` is said in that style, and so is the rest of the
-reply until another marker (``{}``: the plain voice again). With a switchboard
+Each sentence is parsed for markers (:func:`pepin.expression.markers.parse`) and goes to the
+voice as one part or more, by the player's part index: ``{шёпотом}`` at its start, or after a
+comma, says what follows in that style, and so does the rest of the reply until another style
+marker (``{}``: the plain voice again); an intent (``{laugh}``) or a face (``{face:smile}``)
+rides its part to the observers, never to the voice; a spelled-out name the vocabulary lacks
+is dropped and printed. With a switchboard
 (:mod:`pepin.voice_cascade.control`) the brain and the voice are switched while it runs: a
 new brain is built and warmed, then takes over at the next turn (the conversation starts
 afresh with it); a new voice loads beside the one speaking and takes over at its next sentence.
@@ -52,7 +56,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pepin.expression.conversation import SLOW_TOOL, ConversationObserver, Heard, LiveFlag
-from pepin.expression.markers import Part
+from pepin.expression.markers import EMPTY, Vocabulary, parse
 from pepin.tools.registry import Result, fail, ok, progress_to, render
 from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
 from pepin.voice_cascade.brain import END_CONVERSATION
@@ -77,7 +81,7 @@ from pepin.voice_cascade.stages import (
     Usage,
     VoiceBill,
 )
-from pepin.voice_cascade.text import speakable, split_style
+from pepin.voice_cascade.text import speakable
 from pepin.voice_cascade.timeline import Timeline
 from pepin.voice_cascade.turn import TurnWorker
 from pepin.voice_live.audio import Resampler
@@ -143,7 +147,9 @@ class Reply:
     id: int
     input: Input
     task: asyncio.Task[None] | None = None
-    sentences: list[str] = field(default_factory=list)
+    sentences: list[str] = field(default_factory=list)  # as the brain wrote them, markers kept
+    # one per voice call, by the player's index: (its sentence's index, its spoken text)
+    parts: list[tuple[int, str]] = field(default_factory=list)
     usage: Usage = field(default_factory=Usage)
     calls: int = 0
     tools: list[dict[str, Any]] = field(default_factory=list)
@@ -215,11 +221,14 @@ class CascadeLoop:
         switchboard: Switchboard | None = None,
         observers: Sequence[ConversationObserver] = (),
         flags: Sequence[LiveFlag] = (),
+        vocabulary: Vocabulary = EMPTY,
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
         brain); ``switchboard``: the brain and the voice may be switched while it runs;
-        ``observers`` hear the conversation's moments, ``flags`` are switched by name."""
+        ``observers`` hear the conversation's moments, ``flags`` are switched by name;
+        ``vocabulary``: the intents and faces a marker may name (any other bare name is a
+        voice style, a spelled-out unknown one is dropped)."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         self.brain, self.speech = brain, speech
@@ -275,6 +284,7 @@ class CascadeLoop:
         self._log_resampler: tuple[int, int, Resampler] | None = None
         self.observers: list[ConversationObserver] = list(observers)
         self.flags: dict[str, LiveFlag] = {flag.flag: flag for flag in flags}
+        self.vocabulary = vocabulary
         speech.on_audio = self._on_audio
         speech.on_done = self._on_spoken
         speech.on_bill = self._on_bill
@@ -681,7 +691,7 @@ class CascadeLoop:
         try:
             await self.brain.turn(reply.input.text, self._tool, lambda e: self._heard(reply, e))
             reply.generated = True
-            self._say(reply, SpeechJob(reply.id, len(reply.sentences), kind="end"))
+            self._say(reply, SpeechJob(reply.id, len(reply.parts), kind="end"))
             await self._played_out(reply)
             self._tell("reply_done", reply.id)
             self.brain.commit()
@@ -698,8 +708,8 @@ class CascadeLoop:
             self.brain.abandon()
             self._unmute(reply, "the brain failed")  # what it said before the error, in order
             if not reply.audio and self.config.error_line:
-                self.speech.say(SpeechJob(reply.id, len(reply.sentences), self.config.error_line))
-            self.speech.say(SpeechJob(reply.id, len(reply.sentences) + 1, kind="end"))
+                self.speech.say(SpeechJob(reply.id, len(reply.parts), self.config.error_line))
+            self.speech.say(SpeechJob(reply.id, len(reply.parts) + 1, kind="end"))
         finally:
             if reply.outcome in ("committed", "error", "stopped"):
                 self._finish(reply)
@@ -714,17 +724,28 @@ class CascadeLoop:
             timeline.mark("first_token", now)
         elif isinstance(event, Sentence):
             timeline.mark("first_sentence", now)
-            index = len(reply.sentences)
+            sentence = len(reply.sentences)
             reply.sentences.append(event.text)
-            style, rest = split_style(event.text)
-            if style is not None:  # in force for the rest of the reply
-                reply.style = style
-                reply.styles.append(style)
-            self._say(reply, SpeechJob(reply.id, index, event.text, style=reply.style))
-            self._tell("part_queued", reply.id, index, Part(speakable(rest), style))
+            parsed = parse(event.text, self.vocabulary)
+            first = len(reply.parts)
+            for part in parsed.parts:
+                if part.style is not None:  # in force for the rest of the reply
+                    reply.style = part.style
+                    reply.styles.append(part.style)
+                if not part.text and not part.markers:
+                    continue  # a style for the sentences after this one, nothing to say
+                index = len(reply.parts)
+                reply.parts.append((sentence, part.text))
+                self._say(reply, SpeechJob(reply.id, index, part.text, style=reply.style))
+                self._tell("part_queued", reply.id, index, part)
+            markers = [m.raw for part in parsed.parts for m in part.markers]
+            if parsed.dropped:
+                print(f"  (markers dropped, they name nothing: {' '.join(parsed.dropped)})",
+                      flush=True)  # fmt: skip
             if log is not None:
-                log.event("sentence", now, turn=reply.id, index=index, text=event.text,
-                          style=reply.style)  # fmt: skip
+                log.event("sentence", now, turn=reply.id, index=sentence, text=event.text,
+                          style=reply.style, parts=list(range(first, len(reply.parts))),
+                          markers=markers, dropped=list(parsed.dropped))  # fmt: skip
         elif isinstance(event, ToolUse):
             if event.name in SLOW_TOOLS and not reply.sentences and not reply.filled:
                 reply.filled = True  # nothing said yet: the wait is announced locally
@@ -768,8 +789,8 @@ class CascadeLoop:
         if reply is None or reply.finished.is_set():
             return
         reply.barged_s = event.t
-        said = [split_style(s)[1] for s in reply.sentences]  # the style marker was not heard
-        reply.played = self.player.heard(reply.id, played, said)
+        by_part = self.player.heard(reply.id, played, [text for _, text in reply.parts])
+        reply.played = in_sentences(reply.parts, len(reply.sentences), by_part)
         reply.outcome = "interrupted"
         self._tell("reply_cut", reply.id)
         await self._cancel(reply)
@@ -1251,6 +1272,18 @@ def voice_cell(reply: Reply) -> str:
     if stood_in:
         cell += f", {len(stood_in)} of {len(bills)} by {stood_in[0].engine}"
     return cell
+
+
+def in_sentences(parts: list[tuple[int, str]], sentences: int, played: Played) -> Played:
+    """What was heard of a reply counted in its parts (the player's marks) counted in its
+    sentences, as the brain keeps them: the sentences before the part cut, then the parts of
+    the cut sentence heard whole and the words of the one cut."""
+    if played.sentences >= len(parts):
+        return Played(sentences, "")
+    cut = parts[played.sentences][0]
+    before = [text for sentence, text in parts[: played.sentences] if sentence == cut]
+    partial = " ".join(t for t in [*before, played.partial] if t)
+    return Played(cut, partial)
 
 
 def heard_of(segment: Segment, text: str, noise: bool) -> Heard:

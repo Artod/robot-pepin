@@ -1,11 +1,13 @@
 """The speaker side: the voice's PCM paced to the speaker (:class:`pepin.voice_live.audio.Pacer`),
 with a clock of what has actually played.
 
-Every reply sentence is marked by where its audio sits in the stream fed to the pacer, and the
-speaker is wrapped (:class:`PlayoutClock`) so the time each block plays is known. A barge-in
-asks :meth:`Player.flush` how far the stream had played: that, against the marks, is which
-sentences the person heard (:meth:`Player.heard`). The same clock times the speaker's start and
-end of each turn, and keeps each block's level (:meth:`PlayoutClock.level_between`): the
+Every part of a reply (a sentence, or a piece of one a style marker cut; one voice call each)
+is marked by where its audio sits in the stream fed to the pacer, and the speaker is wrapped
+(:class:`PlayoutClock`) so the time each block plays is known. A barge-in asks
+:meth:`Player.flush` how far the stream had played: that, against the marks, is which parts
+the person heard (:meth:`Player.heard`). The same marks place the body's cues on the reply's
+audio (:meth:`Player.mark`, :meth:`Player.played`). The same clock times the speaker's start
+and end of each turn, and keeps each block's level (:meth:`PlayoutClock.level_between`): the
 reference a barge-in detector predicts the robot's own echo from.
 """
 
@@ -127,7 +129,7 @@ class Player:
         self._lock = threading.Lock()
         self._fed = 0.0  # stream seconds fed (aligned to the played clock at every flush)
         self._kind: Kind = "reply"
-        self._marks: dict[tuple[int, int], list[float]] = {}  # (turn, sentence) -> [start, end]
+        self._marks: dict[tuple[int, int], list[float]] = {}  # (turn, part) -> [start, end]
         self.flushed_at: float | None = None
 
     def start(self) -> threading.Event:
@@ -135,7 +137,7 @@ class Player:
         return self.pacer.start()
 
     def feed(self, pcm: bytes, kind: Kind, turn: int, index: int) -> None:
-        """Queue a chunk of sentence ``index`` of reply ``turn`` (a backchannel: index -1)."""
+        """Queue a chunk of part ``index`` of reply ``turn`` (a backchannel: index -1)."""
         if not pcm:
             return
         duration = len(pcm) / SAMPLE_BYTES / self.rate

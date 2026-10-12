@@ -18,6 +18,7 @@ import pytest
 from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.expression.conversation import GESTURES, SLOW_TOOL, Heard
 from pepin.expression.fakes import FakeFlag, RecordingObserver
+from pepin.expression.markers import EMPTY, Vocabulary
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
@@ -89,6 +90,7 @@ class Rig:
         switchboard: Switchboard | None = None,
         observers: Sequence[Any] = (),
         flags: Sequence[Any] = (),
+        vocabulary: Vocabulary = EMPTY,
         **config: Any,
     ) -> None:
         self.config = CascadeConfig().with_changes(
@@ -121,6 +123,7 @@ class Rig:
             switchboard=switchboard,
             observers=observers,
             flags=flags,
+            vocabulary=vocabulary,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -507,6 +510,32 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
     ]  # fmt: skip
     assert observer.calls[-1] == ("closed", ("stopped",))
+
+
+def test_markers_ride_their_parts_to_the_body_and_never_reach_the_voice(tmp_path: Path) -> None:
+    observer = RecordingObserver()
+    script: list[list[Step]] = [["Ну {laugh} да, {тихо} все спят.", "{gesture:nope} Ладно."]]
+    rig = Rig(tmp_path, ["Пепин, привет"], script, observers=[observer],
+              vocabulary=Vocabulary(frozenset({"laugh"}), frozenset()))  # fmt: skip
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.voice.spoken == ["Ну да,", "все спят.", "Ладно."]
+    assert rig.voice.styles == ["", "тихо", "тихо"]
+    parts = [args for name, args in observer.calls if name == "part_queued"]
+    assert [(index, part.text, [m.name for m in part.markers]) for _, index, part in parts] == [
+        (0, "Ну да,", ["laugh"]), (1, "все спят.", []), (2, "Ладно.", []),
+    ]  # fmt: skip
+    (turn,) = rig.loop.turns
+    assert turn["reply"] == "Ну {laugh} да, {тихо} все спят. {gesture:nope} Ладно."  # as written
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    sentences = [r for r in rows if r["event"] == "sentence"]
+    assert [r["parts"] for r in sentences] == [[0, 1], [2]]
+    assert sentences[0]["markers"] == ["{laugh}"] and sentences[1]["dropped"] == ["{gesture:nope}"]
 
 
 class BrokenVoice(ToneVoice):

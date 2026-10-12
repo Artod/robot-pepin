@@ -16,6 +16,7 @@ from typing import Any
 import pytest
 
 from pepin.audio_link import RATE
+from pepin.expression.markers import parse
 from pepin.voice_cascade.config import DEFAULT_PRICES, CascadeConfig
 from pepin.voice_cascade.control import (
     ControlFile,
@@ -29,7 +30,7 @@ from pepin.voice_cascade.fake import ToneVoice
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import Billed, VoiceBill
-from pepin.voice_cascade.text import speakable, split_style
+from pepin.voice_cascade.text import speakable
 from pepin.voice_cascade.transcriber import (
     Choice,
     SwitchingTranscriber,
@@ -50,11 +51,15 @@ CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
 
 
 def test_a_style_marker_leads_a_sentence_and_is_never_read_aloud() -> None:
-    assert split_style("{шёпотом} Я тут.") == ("шёпотом", "Я тут.")
-    assert split_style("{style: грустно,  тихо}Ну вот.") == ("грустно, тихо", "Ну вот.")
-    assert split_style("{} Как обычно.") == ("", "Как обычно.")
-    assert split_style("Без стиля.") == (None, "Без стиля.")
-    assert split_style("Слово {в середине}.")[0] is None
+    def first(sentence: str) -> tuple[str | None, str]:
+        part = parse(sentence).parts[0]
+        return part.style, part.text
+
+    assert first("{шёпотом} Я тут.") == ("шёпотом", "Я тут.")
+    assert first("{style: грустно,  тихо}Ну вот.") == ("грустно, тихо", "Ну вот.")
+    assert first("{} Как обычно.") == ("", "Как обычно.")
+    assert first("Без стиля.") == (None, "Без стиля.")
+    assert first("Слово {в середине}.") == (None, "Слово.")  # it waits for the next sentence
     assert speakable("{радостно} Привет!") == "Привет!"
     assert speakable("{шёпотом}") == ""
 
