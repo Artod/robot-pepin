@@ -446,7 +446,7 @@ class GestureEngine:
 
     def _drive(self, active: bool) -> None:
         self._driving = active
-        if active:
+        if active and (self._on or self._playing):
             self._rest_all()
 
     def _closed(self) -> None:
@@ -454,7 +454,8 @@ class GestureEngine:
         self._listening = False
         self._replying.clear()
         self._spoken.clear()
-        self._rest_all()
+        if self._on or self._playing:  # off and idle: no line to any owner
+            self._rest_all()
 
     def _rest_all(self) -> None:
         self._waiting.clear()

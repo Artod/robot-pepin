@@ -151,6 +151,89 @@ def expression_flags() -> set[str]:
     return {name for name in data.get("flags", {}) if name != "note"}
 
 
+class Body:
+    """The gesture engine of this run (config/expression.json's ``gestures`` switch at the start,
+    live through ``switch --flag``), its parts, the marker vocabulary, and what to close."""
+
+    HEAD = "the gaze arbiter's clip overlay is not built yet (the gaze-speaker branch)"
+
+    def __init__(self, engine: Any, vocabulary: Any, closers: list[Any]) -> None:
+        """Built by :meth:`build`."""
+        self.engine, self.vocabulary, self.closers = engine, vocabulary, closers
+
+    @classmethod
+    def build(cls, host: str, player: Player, *, fake: bool, face: bool, logs: Path) -> Body:
+        """The engine over the real arm and face (``fake``: a fake arm that answers at rest;
+        ``face`` False: a face that only records), every performance and cue logged to
+        ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
+        from pepin.arm_motion import load_arm_motion
+        from pepin.expression.animation import PartName
+        from pepin.expression.animator import GestureEngine, engine_config
+        from pepin.expression.arm_link import ArmClient
+        from pepin.expression.book import face_names, load_book, vocabulary, with_rest
+        from pepin.expression.executors import Executor, NoBody
+        from pepin.expression.fakes import FakeArmLink, FakeFace
+        from pepin.expression.parts import Absent, ArmPart, FacePart
+        from pepin.expression.trajectory import ArmLink, ArmStatus
+        from pepin.voice_cascade.log import append_line, day_dir
+
+        def record(kind: str, fields: dict[str, Any]) -> None:
+            wall = time.time()
+            row = {"t": round(wall, 3), "kind": kind, **fields}
+            append_line(day_dir(logs, wall) / "cascade_gestures.jsonl", row)
+            if kind != "cue" or not fields.get("ok"):
+                print(f"  (gesture {kind}: {json.dumps(fields, ensure_ascii=False)})", flush=True)
+
+        def answered(answer: Any, t: float) -> None:
+            record("arm", {"id": answer.id, "status": answer.status, "reason": answer.reason})
+
+        motion = load_arm_motion()
+        knobs = json.loads(config_file("expression.json").read_text())
+
+        def load() -> Any:
+            data = json.loads(config_file("expression.json").read_text())
+            return with_rest(load_book(), motion.rest_deg), engine_config(data)
+
+        closers: list[Any] = []
+        link: ArmLink
+        if fake:
+            link = FakeArmLink(state=ArmStatus(0.0, motion.rest(), False, "off"))
+        else:
+            client = ArmClient(host, on_answer=answered).start()
+            link = client
+            closers.append(client)
+        arm_knobs = knobs.get("parts", {}).get("arm", {})
+        face_knobs = knobs.get("parts", {}).get("face", {})
+        channel: Any = FakeFace()
+        if face:
+            from pepin.head_link import HeadClient
+
+            channel = HeadClient(host, source="expression").start()
+            closers.append(channel)
+        arm = ArmPart(
+            link,
+            motion,
+            latency_s=float(arm_knobs.get("latency_s", 0.06)),
+            speed_scale=float(arm_knobs.get("speed_scale", 0.2)),
+            knot_hz=float(arm_knobs.get("knot_hz", 25.0)),
+        )
+        parts: dict[PartName, Executor] = {
+            "arm": arm,
+            "face": FacePart(channel, latency_s=float(face_knobs.get("latency_s", 0.05))),
+            "head": Absent("head", cls.HEAD),
+            "body": NoBody(),
+        }
+        on = bool(knobs.get("flags", {}).get("gestures", False))
+        engine = GestureEngine(parts, player, load, on=on, record=record).start()
+        return cls(engine, vocabulary(engine.book, face_names()), closers)
+
+    def close(self) -> None:
+        """The engine's thread stopped, the links let go (the board rests the arm itself)."""
+        self.engine.close()
+        for closer in self.closers:
+            closer.close()
+
+
 def switch(argv: list[str]) -> int:
     """``switch --brain X --voice Y --transcriber Z --flag NAME=on``: ask the running loop for
     a switch and print its answers until each part is applied or has failed."""
@@ -405,6 +488,14 @@ def main() -> int:
     else:
         mic = link or BoardLink(args.host)
 
+    body = Body.build(
+        args.host,
+        player,
+        fake=fake_drive_s is not None,
+        face=not quiet_run and not args.no_face,
+        logs=args.logs,
+    )
+    robot.animator = body.engine  # the gesture tool's door
     switchboard = Switchboard(
         control,
         configure=lambda brain, voice: configure(brain, voice),
@@ -432,6 +523,9 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
+        observers=[body.engine],
+        flags=[body.engine],
+        vocabulary=body.vocabulary,
     )
     loop.paid_ledger = ledger
     holder.append(loop)
@@ -440,8 +534,9 @@ def main() -> int:
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
         f" {b.cache}), voice {config.voice.name} ({config.voice.model}), wake {config.wake};"
         f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
-        f" {config.prosody_tags}, turn_model {config.turn_model}. Logs: {args.logs}; switch:"
-        " scripts/voice_cascade.py switch --brain NAME --voice NAME",
+        f" {config.prosody_tags}, turn_model {config.turn_model}, gestures"
+        f" {'on' if body.engine.on else 'off'}. Logs: {args.logs}; switch:"
+        " scripts/voice_cascade.py switch --brain NAME --voice NAME --flag gestures=on",
         flush=True,
     )
     try:
@@ -457,6 +552,7 @@ def main() -> int:
         transcriber.close()  # whisper.cpp's server, when that engine is in use
         if face is not None:
             face.close()
+        body.close()
         for closable in (mic, speaker):
             close = getattr(closable, "close", None)
             if close is not None:

@@ -538,6 +538,51 @@ def test_markers_ride_their_parts_to_the_body_and_never_reach_the_voice(tmp_path
     assert sentences[0]["markers"] == ["{laugh}"] and sentences[1]["dropped"] == ["{gesture:nope}"]
 
 
+def test_a_marker_moves_the_body_on_its_word_and_the_tool_reaches_the_same_engine(
+    tmp_path: Path,
+) -> None:
+    """The gesture engine as the loop's observer, on the real player's clock: the head's clip
+    of ``{agreement}`` goes once its part's audio has played up to the word (less the clip's
+    preparation), not before the part is queued; a barge-in would drop it; the flag is live."""
+    from pepin.expression.animator import EngineConfig, GestureEngine
+    from pepin.expression.book import load_book
+    from pepin.expression.fakes import FakeExecutor
+    from pepin.expression.parts import Absent
+
+    book = load_book(Path(__file__).resolve().parents[2] / "config" / "animation.json")
+    head, face = FakeExecutor("head"), FakeExecutor("face")
+    records: list[tuple[str, dict[str, Any]]] = []
+    script: list[list[Step]] = [["Ну что ж. Я, {agreement} пожалуй, соглашусь с тобой."]]
+    rig = Rig(tmp_path, ["Пепин, согласен?"], script, seconds_per_char=0.03)
+    engine = GestureEngine(
+        {"head": head, "face": face, "arm": Absent("arm", "test"), "body": Absent("body", "-")},
+        rig.player,
+        lambda: (book, EngineConfig(arm_speed_scale=1.0, seed=5, audio_lag_s=0.0)),
+        on=True,
+        record=lambda kind, fields: records.append((kind, fields)),
+    ).start()
+    rig.loop.observers.append(engine)
+    rig.loop.vocabulary = Vocabulary(frozenset(book.compositions), frozenset())
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 10.0)
+
+    try:
+        asyncio.run(rig.run(scenario))
+    finally:
+        engine.close()
+    assert rig.voice.spoken == ["Ну что ж.", "Я, пожалуй, соглашусь с тобой."]
+    (performance,) = [f for k, f in records if k == "performance"]
+    assert performance["intent"] == "agreement" and performance["part"] == 1
+    cue = next(f for k, f in records if k == "cue" and f["part"] == "head")
+    assert cue["ok"] and abs(cue["late_s"]) < 0.1  # sent on the player's clock, on time
+    # the word: the second part starts after the first's 0.27 s, the marker 0.1 into its 0.9 s;
+    # the nod's clip starts its preparation (its stroke less ~0.1 s) before the word
+    assert 0.27 + 0.09 - 0.45 < cue["planned"] < 0.27 + 0.09
+    assert [c[0] for c in head.calls].count("play") == 1
+
+
 class BrokenVoice(ToneVoice):
     """A voice whose model never loads."""
 

@@ -262,6 +262,7 @@ def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
         "express",
         "show",
         "servo_temperatures",
+        "gesture",
         "look",
         "look_around",
         "see",

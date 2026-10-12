@@ -14,6 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
+from pepin.expression.executors import Outcome
 from pepin.gaze import DRIVE_REFUSAL
 from pepin.tools.clients import HeadMove, HeadPose, HeadReach, ServiceDownError
 from pepin.tools.registry import Image, ToolError
@@ -394,10 +395,31 @@ class FakeBody:
         return dict(self.temps)
 
 
+@dataclass
+class FakeAnimator:
+    """The gesture engine: every intent asked is kept; ``refusal`` refuses them all."""
+
+    performed: list[tuple[str, str]] = field(default_factory=list)
+    refusal: str | None = None
+
+    def perform(self, intent: str, *, source: str) -> Outcome:
+        """Kept; played for two seconds unless refused."""
+        self.performed.append((intent, source))
+        if self.refusal is not None:
+            return Outcome(False, self.refusal)
+        return Outcome(True, "seed 1, variant 0", 2.0)
+
+    def hush(self, why: str) -> None:
+        """Nothing plays."""
+
+    def last(self) -> None:
+        """Nothing kept."""
+
+
 def fake_robot(**replace: Any) -> Robot:
     """A robot made of fakes sharing one :class:`FakeClock`; ``replace`` swaps any part
-    (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``) or sets
-    ``drive_timeout_s``."""
+    (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``,
+    ``animator``) or sets ``drive_timeout_s``."""
     clock = replace.pop("clock", None) or FakeClock()
     neck = replace.pop("neck", None) or FakeNeck(clock)
     parts: dict[str, Any] = {
@@ -408,6 +430,7 @@ def fake_robot(**replace: Any) -> Robot:
         "speech": FakeSpeech(),
         "face": FakeFace(),
         "body": FakeBody(),
+        "animator": FakeAnimator(),
     }
     parts.update(replace)
     return Robot(clock=clock, sleep=clock.sleep, **parts)

@@ -550,6 +550,7 @@ def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel() 
         "say": {"text": "hi"},
         "express": {"emotion": "happy"},
         "show": {"text": "Temps\nleft: 41/70 C"},
+        "gesture": {"name": "greeting"},
     }
     for t in TOOLS:
         assert call(robot, t.name, **arguments.get(t.name, {}))["ok"], t.name

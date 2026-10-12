@@ -131,6 +131,7 @@ files = [
     "scripts/extrinsics.py",
     "scripts/voice_live.py",
     "scripts/voice_cascade.py",
+    "scripts/gesture.py",
     "scripts/barge_in_eval.py",
     "scripts/face_sensor.py",
     "apps/macos",
