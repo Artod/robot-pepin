@@ -10,6 +10,8 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
     {"cmd": "go", "place": "printer"}      {"cmd": "go", "x": -11.4, "y": 0.8, "yaw_deg": 140}
     {"cmd": "cancel"}                      {"cmd": "where"}
     {"cmd": "places"}                      {"cmd": "planner", "name": "navfn"}
+    {"cmd": "clearance", "radius_m": 1.0}  (where's ``navigating`` and ``lidar``, and the newest
+                                           scan's returns near the cart, for the voice's wheels)
 
 and answers with one JSON line per event: accepted, feedback, arrival, done. It also owns the
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
@@ -79,7 +81,7 @@ from pepin.watch import (
     Preflight,
     Readiness,
 )
-from pepin_bringup.msgs import stamp_seconds, yaw_of
+from pepin_bringup.msgs import scan_arrays, stamp_seconds, yaw_of
 from pepin_bringup.node_kit import Switches, TfLookup, spin_main
 
 PORT = 3337
@@ -201,6 +203,19 @@ RPP_GOAL_CHECKER = "xy_only_goal_checker"
 # Nav2 to the Mac, where neither its port nor its process is.
 LIDAR_SCAN_TOPIC = "/scan"
 LIDAR_SILENT_S = 5.0  # no scan for this long: `where` says so
+# `clearance` (the voice's expressive wheels, pepin.expression.wheels, ten times a second while
+# they move): the newest scan's returns near the cart, decoded only when asked.
+CLEARANCE_RADIUS_M = 1.0  # the default; the request may name its own, up to the max
+CLEARANCE_MAX_RADIUS_M = 3.0
+
+
+def scan_message(raw: bytes) -> Any:
+    """A raw /scan (as the subscription keeps it) as a ``sensor_msgs/LaserScan``."""
+    from rclpy.serialization import deserialize_message
+
+    return deserialize_message(raw, LaserScan)
+
+
 # Goals that are running on an action server, by action_msgs/GoalStatus: ACCEPTED, EXECUTING and
 # CANCELING (a canceling goal still drives until its server lets it go).
 ACTIVE_STATUSES = (1, 2, 3)
@@ -296,6 +311,10 @@ class GoalServer(Node):
         # after it (see _go: the recorder alone may take 8 s between the two).
         self._spin_handle: Any = None
         self._cancels = 0
+        # When the last cancel came (ros/stop.sh always sends one): `clearance` tells its age, and
+        # the voice's wheels take it for the red button even when the base's stop line was
+        # overwritten by their own next twist before any state line showed it.
+        self._cancelled_at: float | None = None
         # Whether ANY goal runs on the navigators, whoever sent it: their latched status lists,
         # read here beside them. `where` answers it, and the measured motions refuse on it.
         self._nav_active: dict[str, bool] = dict.fromkeys((*NAV_ACTIONS, "spin"), False)
@@ -307,8 +326,11 @@ class GoalServer(Node):
                 lambda msg, a=action: self._on_nav_status(a, msg),
                 status_qos,
             )
-        # The lidar as Nav2 receives it, taken raw: only its arrival matters here.
+        # The lidar as Nav2 receives it, taken raw: only its arrival matters here, and its returns
+        # only when `clearance` asks (decoded then, never per scan).
         self._last_scan_at: float | None = None
+        self._last_scan: bytes | None = None
+        self._laser: tuple[Any, Any] | None = None  # base_link <- laser (config/lidar.json)
         self._started_at = time.monotonic()
         self.create_subscription(
             LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
@@ -351,9 +373,39 @@ class GoalServer(Node):
         )
         self._up = True  # last: everything above exists, the timers may run
 
-    def _on_scan(self, _raw: bytes) -> None:
-        """A scan arrived (unparsed): the lidar reaches Nav2."""
-        self._last_scan_at = time.monotonic()
+    def _on_scan(self, raw: bytes) -> None:
+        """A scan arrived (kept unparsed): the lidar reaches Nav2."""
+        self._last_scan, self._last_scan_at = raw, time.monotonic()
+
+    def clearance(self, radius_m: float, now: float) -> dict[str, Any]:
+        """``clearance``'s answer: whether anything navigates, the lidar's status, how long ago
+        the last cancel came (None: none since the start), the newest scan's age and its returns
+        within ``radius_m`` of the cart (base_link, metres, through config/lidar.json's mount:
+        the numbers the static transform is published from)."""
+        from pepin.expression.clearance import near_points
+        from pepin.mounts import load_lidar_mount
+
+        cancelled = self._cancelled_at
+        answer: dict[str, Any] = {
+            "event": "clearance",
+            "navigating": self.navigating(),
+            "lidar": self.lidar_status(now),
+            "cancel_age_s": None if cancelled is None else round(now - cancelled, 3),
+            "scan_age_s": None,
+            "points": [],
+        }
+        raw, at = self._last_scan, self._last_scan_at
+        if raw is None or at is None:
+            return answer
+        if self._laser is None:
+            mount = load_lidar_mount()
+            self._laser = (mount.rotation(), mount.translation())
+        angles, ranges = scan_arrays(scan_message(raw))
+        radius = min(max(radius_m, 0.0), CLEARANCE_MAX_RADIUS_M)
+        points = near_points(angles, ranges, self._laser[0], self._laser[1], radius)
+        answer["scan_age_s"] = round(now - at, 3)
+        answer["points"] = [[round(float(x), 3), round(float(y), 3)] for x, y in points]
+        return answer
 
     def lidar_status(self, now: float) -> str:
         """``ok``, or how long no scan has reached this node (report only)."""
@@ -484,6 +536,9 @@ class GoalServer(Node):
                     **pose,
                 },
             )
+        elif command == "clearance":
+            radius = float(request.get("radius_m", CLEARANCE_RADIUS_M))
+            self._send(connection, self.clearance(radius, time.monotonic()))
         elif command == "planner":
             self._send(connection, self.pick_planner(str(request.get("name", ""))))
         elif command == "cancel":
@@ -673,6 +728,7 @@ class GoalServer(Node):
             spin, self._spin_handle = self._spin_handle, None
             was_driving, self._driving = self._driving, False
             self._cancels += 1
+            self._cancelled_at = time.monotonic()
         if handle is not None and send:
             handle.cancel_goal_async()
         if spin is not None:

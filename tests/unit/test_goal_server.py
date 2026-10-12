@@ -523,6 +523,47 @@ def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> N
     assert not node.navigating()
 
 
+def test_clearance_tells_the_voice_s_wheels_the_drive_the_cancel_and_the_returns_near_the_cart(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The newest scan is kept raw and decoded only when asked; its returns come back in
+    base_link through config/lidar.json's mount, the far ones left out; a cancel (ros/stop.sh
+    always sends one) is told by its age."""
+    lidar = json.loads((Path(__file__).resolve().parents[2] / "config/lidar.json").read_text())
+    forward = math.radians(-lidar["yaw_offset_deg"])  # the laser's bearing of the cart's nose
+    scan = ros_stubs.LaserScan(
+        angle_min=forward, angle_increment=math.pi / 2, range_min=0.05, range_max=12.0,
+        ranges=[0.5, 2.5, float("inf")],
+    )  # fmt: skip
+    decoded: list[bytes] = []
+
+    def decode(raw: bytes) -> Any:
+        decoded.append(raw)
+        return scan
+
+    monkeypatch.setattr(goal_server_module, "scan_message", decode)
+    node = server(tmp_path)
+    wire = Wire()
+    node._handle({"cmd": "clearance"}, wire)
+    (empty,) = wire.events()
+    assert empty["event"] == "clearance" and empty["scan_age_s"] is None and empty["points"] == []
+    assert empty["navigating"] is False and empty["cancel_age_s"] is None
+    node.subs[goal_server_module.LIDAR_SCAN_TOPIC][1](b"raw scan")
+    assert decoded == [], "a scan is not decoded on arrival"
+    wire = Wire()
+    node._handle({"cmd": "clearance", "radius_m": 1.0}, wire)
+    (answer,) = wire.events()
+    assert decoded == [b"raw scan"] and answer["lidar"] == "ok"
+    ((x, y),) = answer["points"]
+    assert abs(x - (0.5 + lidar["x_m"])) < 1e-3 and abs(y) < 1e-3, "the cart's nose, 0.5 m"
+    node._handle({"cmd": "cancel"}, Wire())
+    wire = Wire()
+    node._handle({"cmd": "clearance", "radius_m": 3.0}, wire)
+    (after,) = wire.events()
+    assert after["cancel_age_s"] is not None and after["cancel_age_s"] < 1.0
+    assert len(after["points"]) == 2, "the 2.5 m return within a 3 m radius"
+
+
 def test_face_events_follow_a_drive_behind_their_flag(tmp_path: Path, monkeypatch: Any) -> None:
     """On by default: the door is opened at the start. Focused when Nav2 takes the goal, one
     struggle per new recovery, happy at the arrival (ending the focus); the lease rides the
