@@ -7,6 +7,7 @@ a paid voice's local fallback, nobody for a paid voice without one)."""
 
 import random
 import time
+from collections.abc import Iterator
 from itertools import pairwise
 from pathlib import Path
 from typing import Any
@@ -26,7 +27,13 @@ from pepin.voice_cascade.fillers import (
     thinking_due,
 )
 from pepin.voice_cascade.player import Player
-from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
+from pepin.voice_cascade.speech import (
+    CLIP_TRIES,
+    SpeechJob,
+    SpeechWorker,
+    clip_limit_s,
+    make_clip,
+)
 from pepin.voice_cascade.stages import VoiceBill
 
 CONFIG = Path(__file__).resolve().parents[2] / "config" / "voice_cascade.json"
@@ -315,3 +322,37 @@ def test_a_swapped_in_paid_voice_makes_its_filler_clips_with_its_fallback() -> N
     wait_for(lambda: loaded == [None] and "секунду" in worker.clips)
     worker.close()
     assert fallback.spoken == ["Секунду."] and new.spoken == []  # no opener paid for either
+
+
+class Babbler(ToneVoice):
+    """A voice that babbles on for a minute on the first ``bad`` takes of each line."""
+
+    def __init__(self, bad: int) -> None:
+        super().__init__(rate=24_000, seconds_per_char=0.01, chunk_s=0.1)
+        self.bad = bad
+        self.takes: dict[str, int] = {}
+        self.chunks = 0  # of babble yielded
+
+    def stream(self, text: str, style: str = "") -> Iterator[bytes]:
+        take = self.takes[text] = self.takes.get(text, 0) + 1
+        if take > self.bad:
+            yield from super().stream(text, style)
+            return
+        for _ in range(600):  # 0.1 s chunks: 60 s
+            self.chunks += 1
+            yield b"\x00\x01" * int(0.1 * self.rate)
+
+
+def test_a_clip_that_babbles_on_is_cut_and_made_again_or_never_kept() -> None:
+    once = Babbler(bad=1)
+    pcm = make_clip(once, "Хм…")
+    assert pcm is not None and len(pcm) <= clip_limit_s("Хм…") * once.rate * 2
+    assert once.takes == {"Хм…": 2} and once.chunks <= 26  # cut at 2.5 s, not after 60
+    assert clip_limit_s("Секундочку, запоминаю.") == pytest.approx(5.5)  # 0.25 s a character
+    always = Babbler(bad=CLIP_TRIES)
+    assert make_clip(always, "Э-э…") is None and always.takes == {"Э-э…": CLIP_TRIES}
+    voice = Babbler(bad=CLIP_TRIES)
+    worker, _, _ = worker_with(voice, asides=["Хм…", "Так…"])
+    wait_for(lambda: voice.takes.get("Так…") == CLIP_TRIES)
+    worker.close()
+    assert not any(map(worker.has_clip, ["Хм…", "Так…"]))  # never said as a filler
