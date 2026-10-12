@@ -332,12 +332,14 @@ def test_a_smile_without_a_face_when_asked_for() -> None:
 
 
 def test_past_the_comfort_the_wheels_turn_the_rest_and_the_stub_leaves_it_to_the_head() -> None:
-    turning = rig(wheels=FakeWheels())
+    turning = rig(settings=SpeakerSettings(doa_map=MAP, doa_jump_deg=20.0), wheels=FakeWheels())
     wake(turning, 280)  # 100 deg left
     (move,) = [c[1][0] for c in turning.wheels.calls]
     assert move == WheelMove(turn_deg=pytest.approx(30.0))
     assert turning.door.aims()[0][0].pan_rad == pytest.approx(rad(70))
     assert turning.machine.voice == pytest.approx(rad(70)), "the person moved with the cart"
+    turning.machine.heard(Heard(0.0, 1.2, "Пепин"), 1.7)  # the cascade tells the wake again
+    assert len(turning.door.aims()) == 1, "its readings are from before the turn: ignored"
     stub = rig()
     wake(stub, 280)
     assert stub.door.aims()[0][0].pan_rad == pytest.approx(rad(100)), "NoWheels: the head alone"
@@ -468,6 +470,17 @@ def test_no_finder_holds_the_voice_without_frames() -> None:
     wake(r, 240)
     assert r.machine.phase == "voice" and r.machine.next_frame is None
     assert r.machine.tick(1.6) == pytest.approx(3.6), "the renewals go on"
+
+
+def test_a_minute_of_tracking_costs_sixty_frames_and_ninety_calls_to_the_door() -> None:
+    """The budget: a frame a second (one state read before each), a renewal every 2 s, no
+    aim while the person stands still."""
+    r = tracking([frame(face(1.0)) for _ in range(70)])
+    before = dict(r.machine.counts)
+    run(r, until=61.6, start=1.6)
+    spent = {k: r.machine.counts[k] - before.get(k, 0) for k in ("frames", "states", "renewals")}
+    assert spent == {"frames": 60, "states": 60, "renewals": 30}
+    assert r.machine.counts["aims"] == before["aims"], "still: nothing re-aimed"
 
 
 # ---- the knobs and the switch ----------

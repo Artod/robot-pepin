@@ -199,6 +199,7 @@ class SpeakerGaze:
         self.smiled = False
         self.reorient = False  # the next utterance turns the head (after a drive, a switch)
         self.spoke: list[tuple[float, float | None]] = []  # the robot's speaking spans
+        self.wake: Heard | None = None  # the cascade tells it once more as heard: not twice
         self.counts: Counter[str] = Counter()
 
     def configure(self, settings: SpeakerSettings) -> None:
@@ -214,14 +215,16 @@ class SpeakerGaze:
     def opened(self, wake: Heard, now: float) -> None:
         """A conversation opened on ``wake``: turn to its voice."""
         self.conversation, self.smiled, self.reorient = True, False, False
+        self.wake = wake
         voice = self.bearing(wake, now)
         self.report(f"wake: {voice.text()}")
         self._orient(voice.bearing_rad, now)
 
     def heard(self, heard: Heard, now: float) -> None:
         """An utterance of the conversation: a new speaker (or the first after a drive) turns
-        the head; one over the robot's own voice, or noise, moves nothing."""
-        if not self.conversation or heard.noise:
+        the head; one over the robot's own voice, noise, or the wake told again moves
+        nothing."""
+        if not self.conversation or heard.noise or heard == self.wake:
             return
         if self._robot_spoke(heard):
             self.counts["over_robot"] += 1
