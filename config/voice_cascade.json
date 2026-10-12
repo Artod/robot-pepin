@@ -158,8 +158,8 @@
     "window": 200,
     "z": 2.0,
     "emotion_model": null,
-    "stretch_ratio": 2.0,
-    "stretch_min_s": 0.25,
+    "stretch_ratio": 3.0,
+    "stretch_min_s": 0.4,
     "stretch_note": "a drawn-out vowel joins the tag line spelled as people write one, [Артём: растянуто: прииинтер]: a vowel at least stretch_ratio times this person's usual vowel in its place (the running median; a phrase's last vowel apart) and stretch_min_s long; null ratio: never. Needs transcriber.gigaam.timings. 2026-10-12 (scratch/gigaam_timing_1012/stretch_eval.py, the e2e-rnnt's tokens): Artem's usual vowel 0.10 s, a phrase's last 0.13 s (162 far-field utterances); 'а при́нтер' of cascade_144219 (his stress correction) called прииинтер, 0.36 s x2.8; on the 162 ordinary utterances 7.4 % of words are called (x2.5 and 0.3 s: 3.5 %), most of them his own drawls while thinking (температуруууу, ууумеешь, нуууу); a vowel lengthened x3 by PSOLA called 21 of 40 times, the right letter 14 (a vowel shorter than 0.08 s stays under the floor)",
     "note": "the tag line names speaker while person recognition is off (config/people.json, switch people; on, it names the recognised person, [говорит: Саша; тише обычного], each person with a baseline of their own, and nobody unknown gets prosody words), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean (2.0: Artem's deliberate contrasts sit at 2.7-6 sd, and with five numbers z 1.0 flagged 8 of the 10 tagged phrases of the 2026-10-08 bench): loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
   },
