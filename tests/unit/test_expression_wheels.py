@@ -533,7 +533,8 @@ def test_the_goal_server_s_returns_are_placed_through_the_laser_s_mount() -> Non
 def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     settings = WheelsSettings.load(REPO / "config/expression.json")
     lim = settings.limits
-    assert (lim.max_turn_deg, lim.max_rock_m, lim.attempts) == (30.0, 0.02, 3)
+    # shipped at 0 until the first supervised motion (2026-10-12); the design bounds are 30 / 0.02
+    assert (lim.max_turn_deg, lim.max_rock_m, lim.attempts) == (0.0, 0.0, 3)
     assert (lim.backoff_m, lim.max_backoff_m) == (0.03, 0.06)
     assert settings.speed_scale == 0.2
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
