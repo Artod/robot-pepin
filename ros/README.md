@@ -586,6 +586,16 @@ curl -s 127.0.0.1:3339/state | python3 -m json.tool          # holder, overlay, 
 curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the speaker gaze lets go
 ```
 
+**The speaker gaze** (`pepin.expression.tracker`, in the voice cascade, flag `speaker_gaze`, off as
+shipped): on the robot's name the head turns to the voice (the array's direction of arrival),
+takes a snapshot, finds the face (SCRFD alone), centres it, smiles once, and follows the person
+at a frame a second while the conversation lasts; at its close the look is released and the head
+goes home. The array's direction needs its front and sense once per mounting (nothing moves, it
+listens): `uv run python ros/tools/doa_calibrate.py --write`, a voice 1.5 m in front of the cart,
+then left, behind, right, three phrases each. Then `scripts/voice_cascade.py switch --flag
+speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without the
+calibration the head looks up where it points and finds the face by the camera alone.
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
