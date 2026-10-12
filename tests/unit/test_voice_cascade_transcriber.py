@@ -65,7 +65,9 @@ def test_a_control_value_names_an_engine_and_maybe_its_model() -> None:
     config = CascadeConfig.load(CONFIG)
     assert choice_of("whispercpp", config) == Choice("whispercpp", "large-v3-turbo")
     assert choice_of("whispercpp:large-v3", config) == Choice("whispercpp", "large-v3")
-    assert choice_of({"engine": "mlx"}, config) == configured(config)
+    assert choice_of({"engine": "mlx"}, config) == Choice(
+        "mlx", "mlx-community/whisper-large-v3-turbo"
+    )
     assert choice_of({"engine": "whispercpp", "model": "large-v3"}, config) == Choice(
         "whispercpp", "large-v3"
     )
