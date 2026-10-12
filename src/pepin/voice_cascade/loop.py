@@ -17,6 +17,18 @@ sentences and tools wait until the new utterance is read. Words join both uttera
 turn (the reply is dropped and the brain asked again); Whisper's noise line lets the reply go
 on as if nothing had been heard.
 
+With ``brain.speculative`` on, the brain is asked at the early read of a pause (the ears'
+``words``), before the utterance closes: when the words look complete (two-gates' verdict; any
+words with the silence rule or Smart Turn), hold ``brain.speculative_min_words`` at least, and
+nothing else is in flight in the conversation (no reply, no utterance being read or held, not a
+continuation of the one before; person recognition off, since who spoke is named at the close).
+The tag line is written from the same audio without joining the baseline. That reply is kept
+silent as above (its voice jobs, tools and the body's cues wait). The close with the same read
+lets it go on, its first token often already there; any other close drops it (its call billed)
+and the words are asked again; a brain error before the close is dropped the same way. At most
+one such call an utterance; the conversation's summary counts them (asked, kept, dropped and
+what the dropped ones cost).
+
 Every turn prints one line of its timeline (:mod:`pepin.voice_cascade.timeline`) with the
 brain's cache tokens and price, the brain and the voice that spoke (and a cloud voice's first
 audio and price), and logs it with everything else (:mod:`pepin.voice_cascade.log`).
@@ -62,7 +74,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from pepin.expression.conversation import SLOW_TOOL, ConversationObserver, Heard, LiveFlag
-from pepin.expression.markers import EMPTY, Vocabulary, parse
+from pepin.expression.markers import EMPTY, Part, Vocabulary, parse
 from pepin.tools.registry import Result, fail, ok, progress_to, render
 from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
 from pepin.voice_cascade.brain import END_CONVERSATION
@@ -98,6 +110,7 @@ from pepin.voice_live.budget import Ledger
 from pepin.voice_live.events import Events, State
 from pepin.voice_live.sources import FrameSink
 from pepin.voice_live.wake import Segment, is_goodbye, is_hallucination, is_stop, is_wake
+from pepin.voice_live.wake import words as words_of
 
 logger = logging.getLogger(__name__)
 
@@ -119,6 +132,9 @@ BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
 # a held utterance (or a reply kept silent) waits this long after the person stopped without
 # an utterance to read
 HOLD_RELEASE_S = 0.3
+# a reply dropped for the turn after it (the person went on; asked early on other words): it
+# answered no turn of its own
+UNANSWERED = frozenset(("merged", "speculative"))
 
 
 class Mic(Protocol):
@@ -141,6 +157,30 @@ class Input:
     goodbye: bool = False
     eot: dict[str, Any] | None = None  # the end-of-turn model's verdict on the utterance
     fragments: int = 1  # utterances joined into this turn (the person went on)
+    speculation: Speculation | None = None  # asked at the early read, before the close
+
+
+@dataclass(eq=False)
+class Speculation:
+    """A turn asked at the early read of an utterance still open (``brain.speculative``): kept
+    when the close brings the same read, dropped otherwise."""
+
+    read: concurrent.futures.Future[str]  # the early read it answers
+    input: Input
+    prosody: Prosody | None  # measured on the read's audio: the close's own when kept
+    asked_s: float
+    reply: Reply | None = None  # once the conductor has begun it
+    state: Literal["asked", "kept", "dropped"] = "asked"
+
+
+@dataclass
+class Speculative:
+    """A conversation's calls asked early: kept by the close, dropped, what the dropped cost."""
+
+    asked: int = 0
+    kept: int = 0
+    dropped: int = 0
+    wasted_usd: float = 0.0
 
 
 def _set_event() -> asyncio.Event:
@@ -178,7 +218,8 @@ class Reply:
     styles: list[str] = field(default_factory=list)  # every style it asked for
     bills: list[VoiceBill] = field(default_factory=list)  # a paid voice's, one per sentence
     muted: bool = False  # the person may be going on: its voice jobs and tools wait
-    waiting: list[SpeechJob] = field(default_factory=list)  # its voice jobs while muted
+    # while muted: what it does once free, in order (its voice jobs, the body's cues)
+    waiting: list[Callable[[], None]] = field(default_factory=list)
     free: asyncio.Event = field(default_factory=_set_event)  # set while not muted
 
 
@@ -195,6 +236,7 @@ class Conversation:
     usage: Usage = field(default_factory=Usage)
     voice_usd: float = 0.0  # a paid voice's estimate
     closing: str | None = None
+    speculative: Speculative = field(default_factory=Speculative)
 
     @property
     def usd(self) -> float:
@@ -258,7 +300,7 @@ class CascadeLoop:
                 own_text=self._own_text,
                 played=player.playout.level_between,
             )
-        self.ears = Ears(config, player.playback, turn, early, detector, judge)
+        self.ears = Ears(config, player.playback, turn, early, detector, judge, self._on_words)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
         self.last_log: CascadeLog | None = None  # the conversation that closed last
@@ -282,6 +324,8 @@ class CascadeLoop:
         self.continuing = 0  # utterances begun as a continuation, not yet read (replies wait)
         self.continuing_s = 0.0  # when the latest of them began
         self._continues = False  # the utterance in progress began as a continuation
+        self.speculation: Speculation | None = None  # asked early, not yet settled by a close
+        self._may_speculate = False  # the utterance in progress may still be asked early
         self._brain_switches = 0  # brain switches asked for (an older one finishing is dropped)
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
@@ -466,14 +510,21 @@ class CascadeLoop:
                     self._tell("speech_started", event.t)
                 cfg = self.config
                 self._continues = False
-                if cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s:
+                joins = (
+                    cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s
+                )
+                self._may_speculate = not joins
+                if joins:
                     self._continues = await self._continuation()
             elif event.kind == "pause":
                 self._backchannel()
             elif event.kind == "barge_in":
                 await self._barge_in(event, played if played is not None else 0.0)
+            elif event.kind == "words":
+                self._speculate(event)
             elif event.kind == "segment" and event.segment is not None:
                 self.last_closed_s = event.t
+                self._may_speculate = False
                 self.hearing += 1
                 continues, self._continues = self._continues, False
                 self._spawn(self._hear(event, continues))
@@ -507,26 +558,29 @@ class CascadeLoop:
             and (reply.muted or not reply.acted)
         )
 
-    def _mute(self, reply: Reply) -> None:
-        """Keep ``reply`` silent: its voice jobs and tools wait for :meth:`_unmute`."""
+    def _mute(self, reply: Reply, announce: bool = True) -> None:
+        """Keep ``reply`` silent: its voice jobs, tools and the body's cues wait for
+        :meth:`_unmute` (``announce``: logged and printed as the person going on)."""
         if reply.muted:
             return
         reply.muted = True
         reply.free.clear()
-        self._event("muted", turn=reply.id, text=reply.input.words)
-        print(f"  (the person goes on: the reply to {reply.input.words!r} waits)", flush=True)
+        if announce:
+            self._event("muted", turn=reply.id, text=reply.input.words)
+            print(f"  (the person goes on: the reply to {reply.input.words!r} waits)", flush=True)
 
-    def _unmute(self, reply: Reply | None, why: str) -> None:
-        """Let ``reply`` speak and act: its waiting jobs go to the voice in order."""
+    def _unmute(self, reply: Reply | None, why: str, announce: bool = True) -> None:
+        """Let ``reply`` speak and act: what it waited to do is done in order."""
         if reply is None or not reply.muted:
             return
         reply.muted = False
-        jobs, reply.waiting = reply.waiting, []
-        for job in jobs:
-            self.speech.say(job)
+        actions, reply.waiting = reply.waiting, []
+        for action in actions:
+            action()
         reply.free.set()
-        self._event("resumed", turn=reply.id, jobs=len(jobs), why=why)
-        print(f"  ({why}: the reply to {reply.input.words!r} goes on)", flush=True)
+        if announce:
+            self._event("resumed", turn=reply.id, jobs=len(actions), why=why)
+            print(f"  ({why}: the reply to {reply.input.words!r} goes on)", flush=True)
 
     def _resume(self, why: str) -> None:
         """The reply in flight goes on once no continuation is waiting to be read."""
@@ -534,12 +588,24 @@ class CascadeLoop:
         if self.continuing == 0 and current is not None and not current.finished.is_set():
             self._unmute(current, why)
 
-    def _say(self, reply: Reply, job: SpeechJob) -> None:
-        """A voice job of ``reply``: to the voice, or kept while the reply is silent."""
-        if reply.muted:
-            reply.waiting.append(job)
-        else:
+    def _say(self, reply: Reply, job: SpeechJob, part: Part | None = None) -> None:
+        """A voice job of ``reply`` (``part``: what it says, told to the observers as it goes
+        to the voice): to the voice, or kept while the reply is silent."""
+
+        def send() -> None:
             self.speech.say(job)
+            if part is not None:
+                self._tell("part_queued", reply.id, job.index, part)
+
+        self._when_free(reply, send)
+
+    @staticmethod
+    def _when_free(reply: Reply, action: Callable[[], None]) -> None:
+        """Do ``action`` of ``reply`` now, or once it is let go while it is silent."""
+        if reply.muted:
+            reply.waiting.append(action)
+        else:
+            action()
 
     def _hold(self, item: Input) -> None:
         held = self.held
@@ -584,6 +650,110 @@ class CascadeLoop:
         reply = self.replies.get(self.last_turn)
         return " ".join(speakable(s) for s in list(reply.sentences)) if reply is not None else ""
 
+    def _on_words(self, event: EarEvent) -> None:
+        """An early read landed (the transcriber's thread): in line with the mic's moments."""
+        if self._loop is not None:
+            with contextlib.suppress(RuntimeError):  # the loop has ended
+                self._loop.call_soon_threadsafe(self._ears_queue.put_nowait, (event, None))
+
+    def _speculate(self, event: EarEvent) -> None:
+        """The early read of the pause in progress landed: with ``brain.speculative`` on, the
+        brain is asked now when the words look like a whole turn and nothing else is in flight
+        (at most once an utterance)."""
+        b = self.config.brain
+        text = (event.text or "").strip()
+        if not (b.speculative and self._may_speculate and self.conversation is not None):
+            return
+        if event.early is None or event.segment is None:
+            return
+        if self.ears.two_gates and self.ears.judge is not None and event.verdict != "complete":
+            return
+        if is_hallucination(text) or len(words_of(text)) < b.speculative_min_words:
+            return
+        if self.people is not None and self.people.on:
+            return  # who spoke is named at the close
+        busy = self.current is not None or self.held is not None or self.speculation is not None
+        if busy or self.hold_next or self.continuing or self.hearing or not self.inputs.empty():
+            return
+        self._may_speculate = False
+        self._spawn(self._ask_early(event, text))
+
+    async def _ask_early(self, event: EarEvent, text: str) -> None:
+        """The turn of the early words, asked before the close and kept silent: the tag line
+        from the read's audio, the baseline left for the close."""
+        assert event.early is not None and event.segment is not None
+        async with self._order:  # before the close's read, which waits for it
+            tagger = self.tagger if self.config.prosody_tags else None
+            prosody: Prosody | None = None
+            if tagger is not None:
+                loop = asyncio.get_running_loop()
+                prosody = await loop.run_in_executor(self._praat, tagger.measure, event.segment.pcm)
+            conversation = self.conversation
+            if conversation is None:
+                return
+            tag = tagger.line(prosody, text, keep=False) if tagger and prosody else ""
+            said = f"{tag} {text}" if tag else text
+            item = Input("person", said, Timeline(event.segment.ended_s), text, tag,
+                         is_goodbye(text))  # fmt: skip
+            now = self.clock()
+            spec = item.speculation = Speculation(event.early, item, prosody, now)
+            self.speculation = spec
+            conversation.speculative.asked += 1
+            self._event("speculative", state="asked", text=text, verdict=event.verdict,
+                        after_ms=round((now - event.segment.ended_s) * 1000))  # fmt: skip
+            self.inputs.put_nowait(item)
+
+    async def _settle(self, early: concurrent.futures.Future[str] | None) -> Speculation | None:
+        """The turn asked early on this utterance: the one asked on the read that closed it
+        (kept or not once its tag line is known), None when there is none; one asked on an
+        earlier read of it is dropped now (the person went on after it)."""
+        spec = self.speculation
+        if spec is None or spec.state != "asked":
+            return None
+        if spec.read is early:
+            return spec
+        await self._drop_speculation(spec, "the person went on")
+        return None
+
+    def _keep(self, spec: Speculation, closed: Timeline, eot: dict[str, Any] | None) -> None:
+        """The close brought the words the brain was asked on: its reply goes on, its turn
+        counted from the close's zero with the close's stamps."""
+        spec.state = "kept"
+        self.speculation = None
+        spec.input.timeline.take(closed)
+        spec.input.eot = eot
+        if self.conversation is not None:
+            self.conversation.speculative.kept += 1
+        head_ms = round((closed.marks["closed"] - spec.asked_s) * 1000)
+        turn = spec.reply.id if spec.reply else None
+        self._event("speculative", state="kept", turn=turn, head_ms=head_ms)
+        if spec.reply is not None:
+            self._unmute(spec.reply, "the turn closed", announce=False)
+
+    async def _drop_speculation(self, spec: Speculation, why: str) -> None:
+        """The turn asked early answers words the close did not bring: dropped (its call is
+        billed), the close's words asked anew."""
+        self._given_up(spec, why)
+        reply = spec.reply
+        if reply is not None and not reply.finished.is_set():
+            await self._drop(reply, "speculative")
+
+    def _given_up(self, spec: Speculation, why: str) -> None:
+        """A turn asked early counted as dropped and settled."""
+        spec.state = "dropped"
+        if self.speculation is spec:
+            self.speculation = None
+        if self.conversation is not None:
+            self.conversation.speculative.dropped += 1
+        reply = spec.reply
+        self._event("speculative", state="dropped", turn=reply.id if reply else None, why=why)
+
+    @staticmethod
+    def _unsettled(reply: Reply) -> bool:
+        """``reply`` was asked early and its utterance has not closed yet."""
+        spec = reply.input.speculation
+        return spec is not None and spec.state == "asked"
+
     async def _hear(self, event: EarEvent, continues: bool = False) -> None:
         assert event.segment is not None
         try:
@@ -604,6 +774,7 @@ class CascadeLoop:
         a noise line is dropped, words become the next turn (or join the one in flight).
         ``continues``: it began as a continuation, so a silent reply waits for its words."""
         loop = asyncio.get_running_loop()
+        spec = await self._settle(early)
         timeline = Timeline(segment.ended_s)
         timeline.mark("closed", closed_s)
         if early is not None and not early.cancelled():
@@ -612,9 +783,10 @@ class CascadeLoop:
             early = None
             reading = loop.run_in_executor(self._whisper, self.transcriber.transcribe, segment.pcm)
         tagger = self.tagger if self.config.prosody_tags else None
+        measured = spec.prosody if spec is not None else None  # the same audio's
         measuring = (
             loop.run_in_executor(self._praat, tagger.measure, segment.pcm)
-            if tagger is not None
+            if tagger is not None and measured is None
             else None
         )
         people = self.people if self.people is not None and self.people.on else None
@@ -622,7 +794,7 @@ class CascadeLoop:
         if people is not None and self.conversation is not None:
             who = loop.run_in_executor(self._people, people.measure, segment.pcm, segment.ended_s)
         text = (await reading).strip()
-        prosody: Prosody | None = await measuring if measuring is not None else None
+        prosody: Prosody | None = await measuring if measuring is not None else measured
         read_s = self.clock()
         noise = not text or is_hallucination(text)
         if continues:
@@ -657,6 +829,8 @@ class CascadeLoop:
         )  # fmt: skip
         self._tell("speech_ended", heard_of(segment, text, noise, voice_db))
         if noise:
+            if spec is not None:
+                await self._drop_speculation(spec, "only noise")
             self.hold_next = False
             self._release()
             self._resume("only noise followed")  # never cancelled, never asked again
@@ -684,8 +858,18 @@ class CascadeLoop:
             print(f"  (stop heard during a drive: {answer})", flush=True)
         self.heard_since_drive = True
         said, words, fragments = (f"{tag} {text}" if tag else text), text, 1
+        if spec is not None:
+            if said == spec.input.text:
+                self._keep(spec, timeline, eot)
+                return
+            await self._drop_speculation(spec, "the tag line changed")
         current = self.current
-        if current is not None and not current.audio and (current.muted or not current.acted):
+        if (
+            current is not None
+            and not current.finished.is_set()
+            and not current.audio
+            and (current.muted or not current.acted)
+        ):
             # the person went on before the robot said or did anything: one turn of both (a
             # silent reply's tool call is still waiting: it never runs)
             await self._drop(current, "merged")
@@ -718,6 +902,9 @@ class CascadeLoop:
     async def _conduct(self) -> None:
         while True:
             item = await self.inputs.get()
+            spec = item.speculation
+            if spec is not None and spec.state == "dropped":
+                continue  # asked early on words the close did not bring: never begun
             if self.conversation is None and not self.open(b""):
                 continue  # closed meanwhile (a drive's report, a turn heard at the close)
             if item.kind == "robot":
@@ -727,10 +914,15 @@ class CascadeLoop:
             self.last_turn += 1
             reply = Reply(self.last_turn, item, brain=self.brain_name, voice=self.voice_name)
             self.replies[reply.id] = reply
-            if self.continuing and item.kind == "person":
+            if spec is not None:
+                spec.reply = reply
+            if spec is not None and spec.state == "asked":
+                self._mute(reply, announce=False)  # the utterance is still open: it waits
+            elif self.continuing and item.kind == "person":
                 self._mute(reply)  # the person is still going on: it waits for their words
             self.current = reply
-            self.events.emit("thinking")
+            if not self._unsettled(reply):
+                self.events.emit("thinking")
             reply.task = asyncio.create_task(self._reply(reply), name=f"reply-{reply.id}")
             await reply.finished.wait()
             self.current = None
@@ -755,6 +947,16 @@ class CascadeLoop:
             raise
         except Exception as error:
             reply.error = f"{type(error).__name__}: {error}"[:300]
+            spec = reply.input.speculation
+            if spec is not None and spec.state == "asked":  # nothing said: the close asks anew
+                print(f"  !! brain, asked early: {reply.error}", flush=True)
+                self._given_up(spec, "the brain failed")
+                reply.outcome = "speculative"
+                self.speech.cut(reply.id)
+                self._tell("reply_cut", reply.id)
+                self.brain.abandon()
+                self._finish(reply)
+                return
             reply.outcome = "error"
             print(f"  !! brain: {reply.error}", flush=True)
             self.brain.abandon()
@@ -788,8 +990,7 @@ class CascadeLoop:
                     continue  # a style for the sentences after this one, nothing to say
                 index = len(reply.parts)
                 reply.parts.append((sentence, part.text))
-                self._say(reply, SpeechJob(reply.id, index, part.text, style=reply.style))
-                self._tell("part_queued", reply.id, index, part)
+                self._say(reply, SpeechJob(reply.id, index, part.text, style=reply.style), part)
             markers = [m.raw for part in parsed.parts for m in part.markers]
             if parsed.dropped:
                 print(f"  (markers dropped, they name nothing: {' '.join(parsed.dropped)})",
@@ -801,7 +1002,7 @@ class CascadeLoop:
         elif isinstance(event, ToolUse):
             if event.name in SLOW_TOOLS and not reply.sentences and not reply.filled:
                 reply.filled = True  # nothing said yet: the wait is announced locally
-                self._tell("moment", SLOW_TOOL)
+                self._when_free(reply, lambda: self._tell("moment", SLOW_TOOL))
                 if self.config.tool_filler:
                     filler = SpeechJob(reply.id, -1, self.config.tool_filler, "backchannel")
                     self._say(reply, filler)
@@ -879,7 +1080,7 @@ class CascadeLoop:
         try:
             self._record(reply)
         finally:
-            if reply.input.kind == "person" and reply.outcome != "merged":
+            if reply.input.kind == "person" and reply.outcome not in UNANSWERED:
                 self.person_turns += 1
             reply.finished.set()
 
@@ -927,8 +1128,16 @@ class CascadeLoop:
             row["merged"] = reply.input.fragments
         if reply.played is not None:
             row["heard"] = {"sentences": reply.played.sentences, "partial": reply.played.partial}
+        spec = reply.input.speculation
+        if spec is not None:  # when the brain was asked, after the person stopped
+            row["speculative"] = {"asked_ms": round((spec.asked_s - timeline.stopped) * 1000)}
+        conversation = self.conversation
         self.ears.echo_peak_db = -120.0
-        if reply.outcome != "merged":
+        if reply.outcome == "speculative":
+            if conversation is not None:
+                conversation.speculative.wasted_usd += u.usd
+            print(f"  (asked early, dropped: {u.usd * 100:.4f} US cents)", flush=True)
+        elif reply.outcome != "merged":
             if row["reply"]:
                 print(f"pepin> {row['reply']}", flush=True)
             eot_cell = f" | merged {reply.input.fragments}" if reply.input.fragments > 1 else ""
@@ -937,13 +1146,16 @@ class CascadeLoop:
                 eot_cell += f" | eot {eot['closed_by']} p {p}, saved {eot['saved_ms']:.0f} ms"
                 if "verdict" in eot:
                     eot_cell += f", words {eot['verdict']} ({eot['why']})"
+            closed_ms = row["ms"]["closed"]
+            if "speculative" in row and closed_ms is not None:
+                head_ms = closed_ms - row["speculative"]["asked_ms"]
+                eot_cell += f" | asked early, {head_ms} ms before the cut"
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
                 f" | {voice_cell(reply)}" + eot_cell,
                 flush=True,
             )
-        conversation = self.conversation
         if conversation is not None:
             conversation.turns.append(row)
             conversation.log.event("turn", self.clock(), **row)
@@ -1057,9 +1269,12 @@ class CascadeLoop:
         self.conversation = None
         now = self.clock()
         u = conversation.usage
+        self.speculation, self._may_speculate = None, False
         person = [
-            t for t in conversation.turns if t["kind"] == "person" and t["outcome"] != "merged"
-        ]  # a merged fragment is part of the turn after it
+            t
+            for t in conversation.turns
+            if t["kind"] == "person" and t["outcome"] not in UNANSWERED
+        ]  # a merged fragment is part of the turn after it, a dropped early one answered none
         summary = {
             "sid": conversation.sid,
             "t": round(conversation.t_open_wall, 3),
@@ -1076,6 +1291,9 @@ class CascadeLoop:
             "usd_est": round(conversation.usd, 6),
             "cad_est": round(conversation.usd * self.config.usd_to_cad, 6),
         }
+        early = conversation.speculative
+        if early.asked:
+            summary["speculative"] = {**vars(early), "wasted_usd": round(early.wasted_usd, 6)}
         conversation.log.event("close", now, reason=reason, usd_est=round(conversation.usd, 6))
         conversation.log.close(summary)
         self.last_log = conversation.log
@@ -1085,9 +1303,15 @@ class CascadeLoop:
             ledger = self.paid_ledger
         if ledger is not None:
             ledger.record(conversation.sid, conversation.t_open_wall, conversation.usd, closed=True)
+        asked = (
+            f"; asked early {early.asked}: {early.kept} kept, {early.dropped} dropped"
+            f" ({early.wasted_usd * 100:.3f} US cents)"
+            if early.asked
+            else ""
+        )
         print(
             f"  conversation closed ({reason}): {len(person)} turns, ~{conversation.usd * 100:.3f}"
-            f" US cents (estimate); log {conversation.log.dir}",
+            f" US cents (estimate){asked}; log {conversation.log.dir}",
             flush=True,
         )
         self.events.emit("idle")
@@ -1118,7 +1342,9 @@ class CascadeLoop:
             if conversation is None:
                 continue
             speaking = self.player.playback() == "reply"
-            busy = self.current is not None or not self.inputs.empty() or self.hearing > 0
+            current = self.current
+            answering = current is not None and not self._unsettled(current)  # not still asked
+            busy = answering or not self.inputs.empty() or self.hearing > 0
             if (
                 self.held is not None
                 and not self.ears.gate.talking

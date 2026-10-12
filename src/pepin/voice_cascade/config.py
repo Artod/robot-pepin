@@ -118,6 +118,10 @@ class BrainConfig:
     keep_warm_s: float = 270.0  # 0: never refreshed while idle
     max_tool_rounds: int = 4
     timeout_s: float = 20.0
+    # the brain asked at the early read of a pause, before the close (the voice waits for it)
+    speculative: bool = False
+    speculative_min_words: int = 2  # fewer words never ask early ("да" alone)
+    first_sentence_words: int = 0  # the persona's first-sentence limit (0: the persona's own)
 
 
 @dataclass(frozen=True)
@@ -362,6 +366,8 @@ class CascadeConfig:
             raise ValueError(f"brain.effort: one of {', '.join(EFFORTS)} or null")
         if b.max_tokens < 16 or b.max_tool_rounds < 0:
             raise ValueError("brain.max_tokens >= 16 and brain.max_tool_rounds >= 0")
+        if b.speculative_min_words < 1 or b.first_sentence_words < 0:
+            raise ValueError("brain.speculative_min_words >= 1 and brain.first_sentence_words >= 0")
         self.check_voice(self.voice)
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
@@ -517,6 +523,9 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         keep_warm_s=float(merged.get("keep_warm_s", d.keep_warm_s)),
         max_tool_rounds=int(merged.get("max_tool_rounds", d.max_tool_rounds)),
         timeout_s=float(merged.get("timeout_s", d.timeout_s)),
+        speculative=bool(merged.get("speculative", d.speculative)),
+        speculative_min_words=int(merged.get("speculative_min_words", d.speculative_min_words)),
+        first_sentence_words=int(merged.get("first_sentence_words", d.first_sentence_words)),
     )
 
 

@@ -31,6 +31,7 @@ from pepin.voice_cascade.brain import (
 )
 from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
+    CUT,
     FOLLOW_UP,
     Emit,
     FirstToken,
@@ -40,6 +41,7 @@ from pepin.voice_cascade.stages import (
     ToolExecutor,
     ToolUse,
     Usage,
+    text_tokens,
 )
 from pepin.voice_cascade.text import SentenceSplitter
 
@@ -100,6 +102,16 @@ def chat_usage(usage: Any, price: ModelPrice, stop: str | None, ms: int) -> Usag
     return Usage(fresh, cached, 0, out, usd, stop, ms)
 
 
+def chat_cut(usage: Any, chars: int, last_prompt: int, price: ModelPrice, ms: int) -> Usage:
+    """A call cut mid-stream, priced as an estimate: its own usage when a chunk carried it,
+    else the last call's prompt as fresh input and the streamed text as output."""
+    if usage is not None:
+        return chat_usage(usage, price, CUT, ms)
+    out = text_tokens(chars)
+    usd = (last_prompt * price.input + out * price.output) / 1e6
+    return Usage(last_prompt, 0, 0, out, usd, CUT, ms)
+
+
 class ChatBrain:
     """:class:`pepin.voice_cascade.stages.Brain` on Chat Completions (``openai`` SDK, async,
     streaming); the endpoint and the key's variable come from the preset."""
@@ -137,6 +149,7 @@ class ChatBrain:
         self._rounds: list[list[Message]] = []  # each: the assistant message, then its results
         self._said: list[Sentence] = []
         self._acted = False
+        self.last_prompt = 0  # the last call's input tokens (a call cut early is billed so)
 
     # -- the request -----------------------------------------------------------------------
 
@@ -240,12 +253,18 @@ class ChatBrain:
                         if part.function is not None:
                             slot["name"] += part.function.name or ""
                             slot["args"] += part.function.arguments or ""
+            except asyncio.CancelledError:
+                ms = round((self.clock() - t0) * 1000)
+                emit(chat_cut(usage, sum(map(len, words)), self.last_prompt, self.price, ms))
+                raise
             finally:
                 await stream.close()
             rest = splitter.flush()
             if rest:
                 say(rest)
-            emit(chat_usage(usage, self.price, stop, round((self.clock() - t0) * 1000)))
+            priced = chat_usage(usage, self.price, stop, round((self.clock() - t0) * 1000))
+            self.last_prompt = priced.input + priced.cache_read
+            emit(priced)
             spoken = "".join(words).strip()
             if not calls:
                 if spoken:

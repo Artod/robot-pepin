@@ -12,6 +12,7 @@ from typing import Any
 # (key, short name in the line, what it is)
 STAGES = (
     ("closed", "cut", "the ears closed the utterance (the end-of-turn silence)"),
+    # a turn asked at the early read (brain.speculative): stamped when the close confirmed them
     ("transcript", "text", "Whisper's words (and the tag line) ready"),
     ("first_token", "token", "the brain's first text"),
     ("first_sentence", "sent", "the brain's first whole sentence"),
@@ -41,6 +42,16 @@ class Timeline:
         """Stamp ``stage`` at ``t`` unless it is stamped already (the first time wins)."""
         with self._lock:
             self.marks.setdefault(stage, t)
+
+    def take(self, other: Timeline) -> None:
+        """``other``'s zero, and its stamps where this one has none (a turn asked before its
+        utterance closed takes the close's)."""
+        with other._lock:
+            stopped, marks = other.stopped, dict(other.marks)
+        with self._lock:
+            self.stopped = stopped
+            for stage, t in marks.items():
+                self.marks.setdefault(stage, t)
 
     def has(self, stage: str) -> bool:
         """Whether ``stage`` is stamped."""
