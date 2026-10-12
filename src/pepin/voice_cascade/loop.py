@@ -92,6 +92,7 @@ from pepin.voice_cascade.stages import (
 from pepin.voice_cascade.text import speakable
 from pepin.voice_cascade.timeline import Timeline
 from pepin.voice_cascade.turn import TurnWorker
+from pepin.voice_cascade.turn_text import TextJudge
 from pepin.voice_live.audio import Resampler
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.events import Events, State
@@ -231,6 +232,7 @@ class CascadeLoop:
         flags: Sequence[LiveFlag] = (),
         vocabulary: Vocabulary = EMPTY,
         people: SpeakerId | None = None,
+        judge: TextJudge | None = None,
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
@@ -238,7 +240,8 @@ class CascadeLoop:
         ``observers`` hear the conversation's moments, ``flags`` are switched by name;
         ``vocabulary``: the intents and faces a marker may name (any other bare name is a
         voice style, a spelled-out unknown one is dropped); ``people``: who said each
-        utterance, named in the tag line while its switch is on."""
+        utterance, named in the tag line while its switch is on; ``judge``: two-gates' reader
+        of the early words (:mod:`pepin.voice_cascade.turn_text`)."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         self.brain, self.speech = brain, speech
@@ -255,7 +258,7 @@ class CascadeLoop:
                 own_text=self._own_text,
                 played=player.playout.level_between,
             )
-        self.ears = Ears(config, player.playback, turn, early, detector)
+        self.ears = Ears(config, player.playback, turn, early, detector, judge)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
         self.replies: dict[int, Reply] = {}
@@ -927,6 +930,8 @@ class CascadeLoop:
             if eot is not None:
                 p = "-" if eot["p"] is None else f"{eot['p']:.2f}"
                 eot_cell += f" | eot {eot['closed_by']} p {p}, saved {eot['saved_ms']:.0f} ms"
+                if "verdict" in eot:
+                    eot_cell += f", words {eot['verdict']} ({eot['why']})"
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
@@ -1337,12 +1342,18 @@ def heard_of(segment: Segment, text: str, noise: bool) -> Heard:
 
 
 def eot_of(event: EarEvent) -> dict[str, Any] | None:
-    """The end-of-turn model's verdict carried by a segment event (None without a model)."""
+    """The end-of-turn model's verdict carried by a segment event (None without a model); with
+    two-gates also the verdict on the words, why and the judge's ms."""
     if event.closed_by is None:
         return None
-    return {
+    eot: dict[str, Any] = {
         "closed_by": event.closed_by,
         "p": None if event.p is None else round(event.p, 3),
         "model_ms": None if event.model_ms is None else round(event.model_ms, 1),
         "saved_ms": None if event.saved_ms is None else round(event.saved_ms),
     }
+    if event.verdict is not None:
+        eot["verdict"] = event.verdict
+        eot["why"] = event.verdict_why
+        eot["text_ms"] = None if event.text_ms is None else round(event.text_ms, 1)
+    return eot
