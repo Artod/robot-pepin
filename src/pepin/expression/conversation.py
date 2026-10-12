@@ -15,7 +15,7 @@ and ``data/voice/control.json``'s ``{"flags": {"gestures": false}}`` (written by
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 from pepin.expression.markers import Part
 
@@ -27,12 +27,20 @@ SLOW_TOOL = "slow_tool"  # a moment: a slow tool runs before the reply says a wo
 @dataclass(frozen=True)
 class Heard:
     """An utterance the ears closed: when it began and ended (laptop monotonic seconds), the
-    words Whisper read, and whether they were only noise."""
+    words Whisper read, whether they were only noise, its loudest frame (dBFS, None when not
+    measured) and whether it calls the robot by name."""
 
     start_s: float
     end_s: float
     text: str = ""
     noise: bool = False
+    peak_db: float | None = None
+    named: bool = False
+
+    @property
+    def words(self) -> bool:
+        """Whether the transcriber read words in it (not noise, not empty)."""
+        return not self.noise and bool(self.text.strip())
 
     @property
     def duration_s(self) -> float:
@@ -82,6 +90,16 @@ class ConversationObserver(Protocol):
 
     def closed(self, reason: str) -> None:
         """The conversation closed (idle, a goodbye, end_conversation, a cap, the run's end)."""
+        ...
+
+
+class EventSink(Protocol):
+    """One line of the conversation's events.jsonl from a body part's own thread: what happened,
+    when (the loop's monotonic clock; the log puts it on the conversation's clock) and the
+    details."""
+
+    def __call__(self, kind: str, now: float, /, **fields: Any) -> None:
+        """Write the line (never raises into the caller's way: a lost line is only a lost line)."""
         ...
 
 

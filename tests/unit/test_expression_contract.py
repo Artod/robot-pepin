@@ -61,7 +61,9 @@ def test_the_joints_are_the_self_filters_joints() -> None:
     assert tuple(arm["joints"]["pose_deg"]) == JOINTS
 
 
-def test_both_features_ship_off_and_the_doa_unmeasured() -> None:
+def test_both_features_ship_off_and_the_doa_measured_at_four_places() -> None:
     config = json.loads((CONFIG / "expression.json").read_text())
     assert config["flags"][GESTURES] is False and config["flags"][SPEAKER_GAZE] is False
-    assert config["speaker"]["doa"]["front_deg"] is None
+    doa = config["speaker"]["doa"]
+    assert set(doa["readings"]) == {"front", "left", "behind", "right"}
+    assert doa["front_deg"] == doa["readings"]["front"] and doa["measured"].startswith("MEASURED")

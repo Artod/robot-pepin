@@ -3,8 +3,10 @@
 The XVF3800 reads its direction about ten times a second on the board's clock and flags the
 readings it takes for speech (:class:`pepin.audio_link.DoaReading`). An utterance's bearing is
 the circular mean of the speech-flagged readings of its last ``window_s``, turned into the cart's
-frame by :class:`pepin.expression.speaker.DoaMap`: ``sign * (deg - front_deg)``, wrapped to
--180..180, positive to the left of the cart's nose, as the neck's pan counts.
+frame by :class:`pepin.expression.speaker.DoaMap`, positive to the left of the cart's nose, as
+the neck's pan counts: piecewise-linear between the array's four calibration readings (front,
+left, behind, right are 0, +90, 180, -90 exactly; an angle between two of them is interpolated),
+or ``sign * (deg - front_deg)`` wrapped to -180..180 when only the front is known.
 
 The ears stamp an utterance with the laptop's clock, the array with the board's: the newest
 reading stands for "now" on the board (it is at most a tenth of a second old), so an utterance
@@ -12,7 +14,11 @@ that ended ``now - end_s`` ago ended that long before it. (Taking the window bac
 reading itself would land after the utterance once Whisper has taken its 0.3-1 s to read it.)
 
 :func:`fit_doa_map` is the calibration: the readings of a voice in front of, left of, behind and
-right of the cart give ``front_deg`` and ``sign``, checked by the four being a quarter turn apart.
+right of the cart give ``front_deg``, ``sign`` and the three other quarters. The array sits off the
+cart's centre (at its front-left), so the four are not a quarter turn apart (2026-10-12: front 170,
+left 106, behind 343, right 278, misses of +0, -26, +7, -18 deg against an offset and a sign); the
+piecewise map absorbs that, and a reading is refused only when it is nearer another quarter than
+its own.
 """
 
 from __future__ import annotations
@@ -26,7 +32,8 @@ from pepin.audio_signal import circular_mean_deg
 from pepin.expression.conversation import Heard
 from pepin.expression.speaker import DoaMap, DoaSource
 
-QUARTER_TOL_DEG = 15.0  # the four calibration readings must be 90 deg apart within this
+QUARTER_TOL_DEG = 45.0  # a calibration reading further than this off its quarter is nearer the next
+QUARTERS_DEG = (0.0, 90.0, 180.0, 270.0, 360.0)  # front, left, behind, right, front again
 
 
 def wrap_deg(deg: float) -> float:
@@ -38,8 +45,23 @@ def wrap_deg(deg: float) -> float:
 
 
 def bearing_deg(doa_deg: float, doa_map: DoaMap) -> float:
-    """The array's angle as a bearing in the cart's frame (degrees, + left)."""
-    return wrap_deg(doa_map.sign * (doa_deg - doa_map.front_deg))
+    """The array's angle as a bearing in the cart's frame (degrees, + left): interpolated
+    between the quarters when they are measured, else the front's offset and the sign."""
+    if doa_map.quarters is None:
+        return wrap_deg(doa_map.sign * (doa_deg - doa_map.front_deg))
+    swept = [0.0, *(_swept(q, doa_map) for q in doa_map.quarters), 360.0]
+    angle = _swept(doa_deg, doa_map)
+    for k in range(4):
+        low, high = swept[k], swept[k + 1]
+        if angle <= high:
+            part = (angle - low) / (high - low)
+            return wrap_deg(QUARTERS_DEG[k] + part * (QUARTERS_DEG[k + 1] - QUARTERS_DEG[k]))
+    return 0.0  # not reached: the last quarter ends at 360
+
+
+def _swept(doa_deg: float, doa_map: DoaMap) -> float:
+    """How far the array's angle has swept from the front toward the cart's left, 0..360."""
+    return (doa_map.sign * (doa_deg - doa_map.front_deg)) % 360.0
 
 
 @dataclass(frozen=True)
@@ -96,8 +118,9 @@ def utterance_readings(
 
 @dataclass(frozen=True)
 class Calibration:
-    """The map the four readings give, how far each sits from its quarter turn, and why it is
-    refused (None when it holds)."""
+    """The map the four readings give (the quarters interpolated), how far each reading sits
+    from its quarter turn under the front's offset and sign alone (what the interpolation
+    absorbs), and why it is refused (None when it holds)."""
 
     doa_map: DoaMap
     misses_deg: tuple[float, float, float, float]
@@ -107,28 +130,39 @@ class Calibration:
         """One line for the calibration's output."""
         m = self.doa_map
         misses = ", ".join(f"{v:+.0f}" for v in self.misses_deg)
-        head = f"front_deg {m.front_deg:.0f}, sign {m.sign:+d} (quarter-turn misses {misses} deg)"
+        head = f"front_deg {m.front_deg:.0f}, sign {m.sign:+d}"
+        if m.quarters is not None:
+            left, back, right = m.quarters
+            head += f", left {left:.0f}, behind {back:.0f}, right {right:.0f}"
+        head += f" (quarter-turn misses {misses} deg, interpolated away)"
         return head if self.refusal is None else f"{head}: REFUSED, {self.refusal}"
 
 
 def fit_doa_map(
     front: float, left: float, back: float, right: float, tol_deg: float = QUARTER_TOL_DEG
 ) -> Calibration:
-    """``front_deg`` and ``sign`` from the array's readings of a voice in front of, left of,
-    behind and right of the cart: the sign is the one that puts the left a quarter turn left of
-    the front; refused unless every reading is within ``tol_deg`` of its quarter turn."""
+    """The map from the array's readings of a voice in front of, left of, behind and right of
+    the cart: the sign puts the left a quarter turn left of the front, and the four readings
+    are the quarters the map interpolates between; refused when a reading is further than
+    ``tol_deg`` (at most 45) from its quarter turn, or the four are not in turn round the
+    circle."""
     toward_left = wrap_deg(left - front)
     sign = 1 if toward_left > 0 else -1
-    doa_map = DoaMap(front % 360.0, sign)
+    offset = DoaMap(front % 360.0, sign)
     expected = (0.0, 90.0, 180.0, -90.0)
     misses: list[float] = []
     for reading, want in zip((front, left, back, right), expected, strict=True):
-        misses.append(wrap_deg(bearing_deg(reading, doa_map) - want))
+        misses.append(wrap_deg(bearing_deg(reading, offset) - want))
+    doa_map = DoaMap(offset.front_deg, sign, (left % 360.0, back % 360.0, right % 360.0))
+    swept = [_swept(q, doa_map) for q in (left, back, right)]
     worst = max(abs(m) for m in misses)
     refusal = None
-    if worst > tol_deg:
+    if worst > min(tol_deg, QUARTER_TOL_DEG):
         refusal = (
-            f"a reading sits {worst:.0f} deg off its quarter turn (more than {tol_deg:.0f}):"
-            " measure again, the voice 1.5 m away and the room quiet"
+            f"a reading sits {worst:.0f} deg off its quarter turn (more than"
+            f" {min(tol_deg, QUARTER_TOL_DEG):.0f}): measure again, the voice 1.5 m away and the"
+            " room quiet"
         )
+    elif not 0.0 < swept[0] < swept[1] < swept[2] < 360.0:
+        refusal = "the four readings are not in turn round the circle: measure again"
     return Calibration(doa_map, (misses[0], misses[1], misses[2], misses[3]), refusal)

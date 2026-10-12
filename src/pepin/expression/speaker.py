@@ -3,8 +3,11 @@ door as the speaker gaze uses it, and the seams for choosing whom to look at.
 
 Angles follow the neck (:class:`pepin.gaze.Aim`): pan positive to the left of the cart's nose,
 tilt positive below level. The microphone array sits on the cart, not on the head, so its
-direction of arrival is a bearing in the cart's frame once :class:`DoaMap` (two numbers measured
-on the robot) has turned it: ``bearing = sign * (doa_deg - front_deg)``, wrapped to -180..180.
+direction of arrival is a bearing in the cart's frame once :class:`DoaMap` (measured on the robot)
+has turned it: with the array's readings of a voice left of, behind and right of the cart, the
+bearing is interpolated between the four quarter turns (an array off the cart's centre reads
+them unevenly); with the front alone, ``bearing = sign * (doa_deg - front_deg)``, wrapped to
+-180..180.
 A face's bearing comes from the head camera's left eye through its lens
 (:meth:`pepin.face_sensor.geometry.Lens.bearing_deg`), relative to where the head pointed when
 the frame was taken, so a face only counts in a frame taken while the head stood still.
@@ -32,11 +35,13 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class DoaMap:
-    """The array's angle that points along the cart's x axis, and whether the array's angle
-    grows toward the cart's left (+1) or right (-1); both measured on the robot."""
+    """The array's angle that points along the cart's x axis, whether the array's angle grows
+    toward the cart's left (+1) or right (-1), and, when measured, its angles of a voice left
+    of, behind and right of the cart (``quarters``: the map then interpolates between them)."""
 
     front_deg: float
     sign: int
+    quarters: tuple[float, float, float] | None = None
 
 
 class DoaSource(Protocol):
@@ -141,6 +146,19 @@ class TargetPolicy(Protocol):
     def choose(self, voice: float | None, frame: FaceFrame | None, head: Aim) -> Aim | None:
         """The aim to hold, None to keep the current one."""
         ...
+
+
+@dataclass(frozen=True)
+class Target:
+    """A person the speaker gaze looked at: where their face was (the cart's frame: pan the
+    bearing, + left; tilt + down), its last sighting (the box, when the finder keeps the
+    detection) and when (the laptop's clock). The seam for more than one interlocutor: when
+    a remembered person speaks again the head goes back to their place before a frame
+    confirms them."""
+
+    aim: Aim
+    face: FaceSighting | None
+    seen_s: float
 
 
 @dataclass(frozen=True)

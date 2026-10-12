@@ -5,12 +5,14 @@ the cart in FRONT of it, then on its LEFT, BEHIND it and on its RIGHT, and at ea
 phrase three times (half a second of voice or more each, a pause between). Each utterance's
 direction is the circular mean of the array's speech-flagged readings while it lasted; a place's
 reading is the circular mean of its utterances (their spread is printed). The four readings give
-``front_deg`` (the FRONT reading) and ``sign`` (+1 when the LEFT reads a quarter turn above it),
-refused unless all four sit within 15 deg of their quarter turns
+``front_deg`` (the FRONT reading), ``sign`` (+1 when the LEFT reads a quarter turn above it) and
+the quarters the speaker gaze interpolates between (the array sits off the cart's centre, so they
+are not 90 deg apart), refused when a reading is nearer another quarter than its own
 (:func:`pepin.expression.doa.fit_doa_map`). A chime on this Mac marks each place's end.
 
-``--write`` puts the two numbers into config/expression.json's ``speaker.doa`` with the date and
-the four readings; ``--readings F L B R`` fits four numbers read some other way (no audio).
+``--write`` puts the four readings, the front and the sign into config/expression.json's
+``speaker.doa`` with the date; ``--readings F L B R`` fits four numbers read some other way (no
+audio).
 
     uv run python ros/tools/doa_calibrate.py               # listen, print the fit
     uv run python ros/tools/doa_calibrate.py --write       # ...and write it
@@ -121,11 +123,14 @@ def listen(args: argparse.Namespace) -> list[float]:
 
 
 def write(fit: Calibration, readings: list[float], path: Path = CONFIG) -> None:
-    """``speaker.doa`` of config/expression.json set to the fit, with the date and readings."""
+    """``speaker.doa`` of config/expression.json set to the fit: the front, the sign and the
+    four readings the map interpolates between, with the date."""
     data = json.loads(path.read_text())
     doa = data["speaker"]["doa"]
     doa["front_deg"] = round(fit.doa_map.front_deg, 1)
     doa["sign"] = fit.doa_map.sign
+    places = ("front", "left", "behind", "right")
+    doa["readings"] = {p: round(v % 360.0, 1) for p, v in zip(places, readings, strict=True)}
     f, left, b, r = (round(v) for v in readings)
     doa["measured"] = (
         f"MEASURED {time.strftime('%Y-%m-%d')} (ros/tools/doa_calibrate.py): front {f}, left"

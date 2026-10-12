@@ -595,6 +595,8 @@ def main() -> int:
     )
     loop.paid_ledger = ledger
     holder.append(loop)
+    if gaze is not None:
+        gaze.journal = loop.record  # the gaze's decisions in each conversation's events.jsonl
     b = config.brain
     print(
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"

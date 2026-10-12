@@ -13,19 +13,11 @@
     "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. char_s: seconds per spoken character while a part's audio is still being made (Player.heard's estimate). late_s: a clip whose time has passed by at most this is sent at once, a later one is dropped and logged (a stroke shifted 0.5 s still looks natural on a word; the first part of a reply plays as soon as it is made, so its preparations are late by their length). poll_s: how often the engine looks at the player's clock while a clip waits for its word."
   },
   "layers": {
-    "fade_s": {
-      "arm": 0.35,
-      "head": 0.35,
-      "face": 0.1,
-      "body": 0.35
-    },
+    "fade_s": {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35},
     "idle_resume_s": 2.0,
     "idle_after_speech_s": 5.0,
     "finish_s": 1.0,
-    "finish": [
-      "greeting",
-      "farewell"
-    ],
+    "finish": ["greeting", "farewell"],
     "face_hold_s": 2.0,
     "seed": null,
     "note": "fade_s: per part, how long a layer change eases (the face in 0.1 s, the body in 0.35 s: Disney's bipedal character); the arm's is the board's own way to rest at its caps. The person starting to speak fades the gesture layer of every part, even while the robot is silent, but a gesture of finish (a greeting, a farewell) already past its stroke and ending within finish_s plays out. idle_resume_s: quiet on a part after a gesture before its idle layer plays again; idle_after_speech_s: no idle motion this soon after anyone spoke. face_hold_s: how long a {face:NAME} marker's expression holds. seed: null draws a fresh seed for each performance (logged with it); a number makes every performance repeat (the bench)."
@@ -35,13 +27,9 @@
     "per_reply": 2,
     "per_minute": 6,
     "arm_per_minute": 3,
-    "intent_per_minute": {
-      "laugh": 1
-    },
+    "intent_per_minute": {"laugh": 1},
     "laughter": "(?:х[аеи][- ]?){2,}|ахах|хих|haha",
-    "laughter_waives": [
-      "laugh"
-    ],
+    "laughter_waives": ["laugh"],
     "laughter_s": 30.0,
     "note": "What the brain's markers and the robot's moments may play (a tool or scripts/gesture.py, which a person asked for, is never capped); a marker over a cap is dropped and logged. per_part: gestures in one voice part (a sentence, or a clause a style cut); per_reply, per_minute: of all gestures; arm_per_minute: gestures with the arm (over it the rest of the gesture plays without the arm); intent_per_minute: an intent's own; a composition's cooldown_s (config/animation.json) between two of its own. The person's laugh (laughter, a regex on what Whisper read, within laughter_s) waives the caps of laughter_waives. From expressive_motion.md: a person telling a story makes ~4 gestures a minute; no study gives an annoyance threshold: these are starting knobs."
   },
@@ -74,28 +62,39 @@
     "doa": {
       "front_deg": 170.0,
       "sign": -1,
+      "readings": {"front": 170.0, "left": 106.0, "behind": 343.0, "right": 278.0},
       "window_s": 1.0,
       "min_speech": 2,
-      "note": "The XVF3800 sits on the cart's front, not on the head. front_deg: the array's angle (0..359, 0 toward its USB-C side) of a voice straight ahead of the cart; sign: +1 when that angle grows toward the cart's left, -1 toward its right. Both null until measured (ros/tools/doa_calibrate.py --write: one phrase three times each at 1.5 m in front, left, behind and right; it writes the two numbers with the date, and refuses four readings that are not 90 +- 15 deg apart); null orients by faces alone (the head tilts to seek_tilt_deg where it points and looks for a face). window_s: the speech-flagged readings of the utterance's last window_s (the utterance's end mapped onto the board's clock by the newest reading) are averaged (circular mean) into its bearing; fewer than min_speech of them (about 10 a second arrive) and the voice has no bearing.",
-      "measured": "MEASURED 2026-10-12 (ros/tools/doa_calibrate.py): front 170, left 106, behind 343, right 278 deg; quarter-turn misses +0, -26, +7, -18"
+      "measured": "MEASURED 2026-10-12 (ros/tools/doa_calibrate.py): front 170, left 106, behind 343, right 278 deg; quarter-turn misses +0, -26, +7, -18",
+      "note": "The XVF3800 sits on the cart's front-left (where the left arm would be), not on the head. readings: the array's angle (0..359, 0 toward its USB-C side) of a voice 1.5 m in front of, left of, behind and right of the cart; the bearing is interpolated between them (front, left, behind, right are 0, +90, 180, -90 deg exactly), which absorbs the off-centre array's uneven quarters. front_deg and sign (+1 when the angle grows toward the cart's left, -1 toward its right) alone turn the angle by an offset when the four are not all known. ros/tools/doa_calibrate.py --write measures and writes all of it (one phrase three times at each place; it refuses a reading nearer another quarter than its own); front_deg and sign null and no readings: the gaze orients by faces alone (the head tilts to seek_tilt_deg where it points and looks for a face). window_s: the speech-flagged readings of the utterance's last window_s (the utterance's end mapped onto the board's clock by the newest reading) are averaged (circular mean) into its bearing; fewer than min_speech of them (about 10 a second arrive) and the voice has no bearing."
     },
     "comfort_pan_deg": 60.0,
     "in_frame_deg": 25.0,
     "seek_tilt_deg": -5.0,
+    "seek_sweep_deg": 10.0,
     "seek_frames": 3,
     "seek_every_s": 0.4,
-    "track_every_s": 1.0,
+    "seek_min_face_px": 28.0,
+    "track_min_face_px": 40.0,
+    "track_hz": 3.0,
+    "lead_max_deg": 10.0,
     "match_deg": 20.0,
     "refine_deg": 2.0,
     "deadband_deg": 6.0,
     "saccade_over_deg": 15.0,
-    "doa_jump_deg": 30.0,
+    "reaim_deg": 35.0,
+    "verify_s": 0.7,
+    "reaim_votes": 2,
+    "face_lost_s": 2.0,
+    "doa_min_speech": 4,
+    "doa_min_dbfs": -28.0,
+    "remember_targets": 3,
     "ttl_s": 6.0,
     "renew_s": 2.0,
     "aim_wait_s": 2.0,
     "smile": "smile",
     "smile_hold_s": 2.0,
     "smile_unseen": false,
-    "note": "comfort_pan_deg: the head alone turns this far; past it the wheels turn the rest (parts.body), and the head goes to its reach when they may not. in_frame_deg: a voice this close to where the head points is in the picture already: no pan, only the tilt to seek_tilt_deg and a frame. seek_tilt_deg: the tilt the head turns to before a face is found (+ down; level-ish for a face at 1-2 m; home's 23.8 deg down would leave a standing face out of the 59 deg tall picture). seek_frames, seek_every_s: frames taken at that interval after the turn before giving up on a face (the head then stays on the voice and keeps one frame every track_every_s). track_every_s: one frame this often while the conversation lasts, the head stands still, is the speaker's and carries no gesture (a breath does not count). match_deg: a face within this of the voice's bearing is the speaker's; with none, the face nearest the frame's centre, the widest on a tie. refine_deg: after a turn, a face further than this off the frame's centre is centred (G3 wants it within 5 deg). deadband_deg: while tracking, a face this close to the frame's centre moves nothing. saccade_over_deg: a correction larger than this is a saccade, a smaller one the arbiter's slow speed (slow_deg_s, 20). doa_jump_deg: an utterance whose voice is this far from the person held turns the head to it again (the array names the loudest voice; one overlapping the robot's own speech is ignored). ttl_s, renew_s: the speaker's look lives ttl_s and is renewed every renew_s, so the head goes home within ttl_s of the cascade's end; a renewal that finds the look gone (a look the person asked for took the head) asks again, queued behind it. aim_wait_s: how long an aim waits for the arbiter's answer before it is taken as queued. smile, smile_hold_s: the face's expression (source expression, through the head server) when a face is first found in a conversation, once, and for how long; smile_unseen: smile also when no face is found (off: a smile at nobody)."
+    "note": "comfort_pan_deg: the head alone turns this far; past it the wheels turn the rest (parts.body), and the head goes to its reach when they may not. in_frame_deg: a voice this close to where the head points is in the picture already: no pan, only the tilt to seek_tilt_deg and a frame. seek_tilt_deg: the tilt the head turns to before a face is found (+ down; level-ish for a face at 1-2 m; home's 23.8 deg down would leave a standing face out of the 59 deg tall picture); seek_sweep_deg: after the frames at seek_tilt_deg the head tilts this much higher (a standing face far away) and seeks again before giving up (0: no sweep). seek_frames, seek_every_s: frames taken at that interval at each tilt of a seek (after a wake, the robot's name, or a voice when no face is held); the head then stays on the voice at seek_tilt_deg. seek_min_face_px, track_min_face_px: faces from seek_min_face_px wide count while seeking and near the person held (a 0.15 m face is ~40 px at 2 m, ~26 px at 3 m; config/face_sensor.json); elsewhere in the frame only faces of track_min_face_px or more, so a small false face is not followed; a face under track_min_face_px is aimed at but not smiled at. track_hz: frames a second while a person is held, the head stands still, is the speaker's and carries no gesture (a breath does not count): each a snapshot (~45 ms, network wait) and a detection (~7 ms, 2.7 ms of CPU), on the gaze's own thread; at 3 Hz a still person costs 180 state reads and 30 renewals a minute at the arbiter's door, a walking one up to 180 aims instead of the renewals. lead_max_deg: a moving face is aimed where it will be at the next frame (its speed over the last two sightings, pan only), at most this far ahead. match_deg: a face within this of the voice's bearing (or of the person held) is the speaker's; with none, the face nearest the frame's centre, the widest on a tie; people remembered within it of each other are one. refine_deg: after a turn, a face further than this off the frame's centre is centred (G3 wants it within 5 deg). deadband_deg: while tracking, a face this close to the frame's centre moves nothing. saccade_over_deg: a correction larger than this is a saccade, a smaller one the arbiter's slow speed (slow_deg_s, 20). reaim_deg: an utterance with words this far off the person held is someone else speaking: the head looks there at once (at a remembered person's place within reaim_deg of the voice, else at the bearing); while a face is held the look is a check (one frame at the tilt, one seek_sweep_deg higher) that returns to that face when nobody is found within verify_s of its first frame. reaim_votes: sounds without words (noise, nothing read) never move the head alone; this many in a row from about one place (within reaim_deg) make a look there. face_lost_s: a face unseen in the frames this long is lost: the head stays, the person is remembered, and the next voice from elsewhere turns the head for good. doa_min_speech, doa_min_dbfs: an utterance with fewer of the array's speech-flagged readings in its window, or a peak level under this, gives no bearing to move the head by (2026-10-12: a -31 dBFS question read -76 deg off a face at +25; the louder ones were -6 to -18 dBFS); the robot's name moves it all the same. remember_targets: how many people looked at before are kept (their face's place, last box and time) to go back to when they speak again (the seam for two interlocutors). ttl_s, renew_s: the speaker's look lives ttl_s and is renewed every renew_s, so the head goes home within ttl_s of the cascade's end; a renewal that finds the look gone (a look the person asked for took the head) asks again, queued behind it. aim_wait_s: how long an aim waits for the arbiter's answer before it is taken as queued. smile, smile_hold_s: the face's expression (source expression, through the head server) when a clear face (track_min_face_px or more) is first found in a conversation, once, and for how long; smile_unseen: smile also when no face is found (off: a smile at nobody). An utterance overlapping the robot's own speech moves nothing (the array names the loudest voice: the robot's)."
   }
 }
