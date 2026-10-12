@@ -110,7 +110,9 @@ def verdict(
         if abs(ms) > MAX_OFFSET_MS:
             fails.append(f"clock {ms:+.1f} ms > {MAX_OFFSET_MS:.0f}")
         elif ref != "laptop":
+            # two clocks set over the internet drift tens of ms apart: a FAIL, not a footnote
             clock = f"board-{ref} {ms:+.1f} ms (chrony: the laptop is not the reference)"
+            fails.append("clock: the board does not follow the laptop (ros/time.sh point)")
     line = f"{clock}; p50 ms: " + ", ".join(parts)
     return (not fails, ("; ".join(fails) + "; " + line) if fails else line)
 

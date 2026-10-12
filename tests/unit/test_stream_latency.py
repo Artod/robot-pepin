@@ -77,7 +77,10 @@ def test_the_clock_fails_over_its_bound_and_when_chrony_did_not_answer() -> None
     assert not passed and line.startswith("clock unknown; board-laptop unknown")
 
 
-def test_a_board_on_the_pool_says_its_offset_is_not_against_the_laptop() -> None:
+def test_a_board_on_the_pool_fails_the_time_check() -> None:
+    # two clocks each set over the internet drift tens of ms apart (2026-10-12: 41-54 ms after DHCP
+    # moved the Mac): not the laptop as the reference is a FAIL that names the fix
     passed, line = sl.verdict(HEALTHY, (1.2, "162.159.200.1"))
-    assert passed
-    assert line.startswith("board-162.159.200.1 +1.2 ms (chrony: the laptop is not the reference)")
+    assert not passed
+    assert "clock: the board does not follow the laptop (ros/time.sh point)" in line
+    assert "board-162.159.200.1 +1.2 ms (chrony: the laptop is not the reference)" in line

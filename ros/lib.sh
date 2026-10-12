@@ -124,7 +124,8 @@ pepin_laptop_ip() {  # <board ip> -> this Mac's address on the interface that re
 pepin_timeserver_up() {
     [ "$PEPIN_TIME_SOURCE" = laptop ] || return 0
     if docker ps --format '{{.Names}}' | grep -qx "$PEPIN_TIMESERVER"; then
-        echo "laptop time server already up ($PEPIN_TIMESERVER); left alone"; return 0
+        echo "laptop time server already up ($PEPIN_TIMESERVER); left alone"
+        pepin_board_follows_laptop; return 0
     fi
     if ! docker image inspect "$PEPIN_TIMESERVER_IMAGE" >/dev/null 2>&1; then
         docker build -q -t "$PEPIN_TIMESERVER_IMAGE" "$PEPIN_ROS_DIR/chrony" >/dev/null || {
@@ -142,6 +143,21 @@ pepin_timeserver_up() {
         return 0
     }
     echo "laptop time server up: $PEPIN_TIMESERVER serves this Docker VM's clock on udp/123"
+    pepin_board_follows_laptop
+}
+# The board learns the laptop's address from the laptop (ros/time.sh point). DHCP moved the Mac
+# on 2026-10-11 and the board quietly followed the internet pool for a day (41-54 ms off): the
+# laptop re-points it at every stack start when its chrony sources lack this laptop's address.
+pepin_board_follows_laptop() {
+    [ "$PEPIN_TIME_SOURCE" = laptop ] || return 0
+    local ip sources
+    local board="${PEPIN_HOST:-10.0.0.187}"
+    ip="$(pepin_laptop_ip "$board" 2>/dev/null)"
+    [ -n "$ip" ] || return 0
+    sources="$(ssh -o ConnectTimeout=3 -o BatchMode=yes "root@$board" chronyc -n sources 2>/dev/null)" || return 0
+    if printf '%s' "$sources" | grep -q " $ip "; then return 0; fi
+    echo "board time: its chrony lacks this laptop ($ip); pointing it (ros/time.sh point)"
+    "$PEPIN_ROS_DIR/time.sh" point >/dev/null 2>&1 || echo "board time: ros/time.sh point failed; check ros/time.sh status"
 }
 # What a node on the laptop is told: reach the laptop's router by container name, and listen on
 # the container's own address rather than on its loopback.
