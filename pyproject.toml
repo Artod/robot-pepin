@@ -22,6 +22,7 @@ dev = [
 ]
 macos = [
     "pygame>=2.6.1",
+    "pyobjc-framework-vision>=12.2.2",
     "rumps>=0.4.0",
 ]
 # The depth network on the laptop's GPU (pepin.depth_service, ros/depth_host.sh): torch comes
