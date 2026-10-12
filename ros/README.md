@@ -640,7 +640,9 @@ curl -L -o models/voice/voxceleb_resnet34_LM.onnx \
   https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx
 cp scratch/face_1008/cache/insightface/models/buffalo_l/w600k_r50.onnx models/face/buffalo_l/
 uv run python scripts/voice_cascade.py switch --flag people=on     # off as shipped; live
-sqlite3 data/people/people.db 'select name, kind, datetime(created_at, "unixepoch") from people'
+uv run python scripts/people.py list                               # who is known, samples
+uv run python scripts/people.py forget Саша                        # name, face, voice: gone
+uv run python scripts/people.py forget-guests --yes                # after a party
 ```
 
 Without the robot's camera (`--fake-robot`, a bench) it names by voice alone. Thresholds and

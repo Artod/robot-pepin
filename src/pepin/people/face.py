@@ -10,8 +10,8 @@ neither blurred nor too dark or bright (:mod:`pepin.face_sensor.quality`).
 
 The identity net (ArcFace alone, :class:`pepin.face_sensor.backends.ArcFace`) is loaded on
 demand by :class:`IdentityNet` and let go by :meth:`IdentityNet.unload`; MEASURED (2026-10-12,
-scratch/people_1011/REPORT.md): 0.1 s to load with a warm CoreML cache, +340 MB resident,
-1.7 ms a face on CoreML.
+scratch/people_1011/face_identity.py): 0.1 s to load with a warm CoreML cache (2.4 s the first
+time), +340 MB resident, 1.7 ms a face on CoreML.
 """
 
 from __future__ import annotations

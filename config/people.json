@@ -1,5 +1,5 @@
 {
-  "_note": "Person recognition (pepin.people): who said each utterance, by face and voice, against the people the robot has met; and the two tools that name a new person (remember_person) and forget one (forget_person). Embeddings and names stay on this Mac (store). Switching the feature on re-reads this file. MEASURED numbers are scratch/people_1011/REPORT.md's (2026-10-12).",
+  "_note": "Person recognition (pepin.people): who said each utterance, by face and voice, against the people the robot has met; and the two tools that name a new person (remember_person) and forget one (forget_person). Embeddings and names stay on this Mac (store). Switching the feature on re-reads this file. MEASURED numbers: scratch/people_1011/ (each script's docstring holds its answer, 2026-10-12).",
   "flags": {
     "people": false,
     "note": "The feature's switch at the cascade's start; while it runs: scripts/voice_cascade.py switch --flag people=on. Off: no snapshot, no embedding, the tag line is the prosody one with prosody.speaker as before, and the two tools answer that recognition is off."

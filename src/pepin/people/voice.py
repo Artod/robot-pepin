@@ -13,9 +13,13 @@ samples at int16 scale, no dither) with the utterance's mean removed (:func:`fba
 numpy twin of ``torchaudio.compliance.kaldi.fbank``); its output a 256-float vector, compared
 by cosine.
 
-MEASURED on this Mac (scratch/people_1011/REPORT.md): see the voice section there for the
-cosines on Artem's utterances, the robot's own voice, TTS voices and LibriSpeech speakers, and
-the milliseconds per utterance.
+MEASURED on this Mac (2026-10-12, scratch/people_1011/voice_cosines.py, voice_artem.py,
+fbank_check.py): :func:`fbank` equals kaldi-native-fbank to 1e-4 (embedding cosine 1.000000);
+10/19/37 ms for 1/2/4 s of speech on 2 CPU threads, +43 MB loaded. Artem through the robot's
+array is far less self-consistent than clean read speech (utterance to utterance p50 0.35 in a
+conversation, against 0.82 for LibriSpeech speakers); against a centroid of 5 of his utterances
+of another day, 0.40 accepts 71 % of his utterances of at least 1 s and 1.1 % of 55 other
+voices'.
 """
 
 from __future__ import annotations

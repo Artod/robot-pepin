@@ -134,6 +134,7 @@ files = [
     "scripts/gesture.py",
     "scripts/barge_in_eval.py",
     "scripts/face_sensor.py",
+    "scripts/people.py",
     "apps/macos",
 ]
 strict = true

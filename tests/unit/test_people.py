@@ -259,8 +259,11 @@ def test_a_stranger_s_utterances_join_one_track_and_another_starts_a_new_one() -
     t2 = session.attribute(Observation(3.0, voice=v2), new)
     assert t1 is t1b and t2 is not t1 and len(t1.voice) == 2
     assert session.to_bind() is t2
-    assert session.attribute(Observation(4.0), fuse(None, None)) is None  # nothing to tell by
-    assert session.to_bind() is None
+    # a short "Саша" with no face: nothing to tell by, so the latest speaker goes on
+    assert session.attribute(Observation(4.0), fuse(None, None)) is None
+    assert session.to_bind() is t2
+    session.attribute(Observation(5.0, voice=v1), fuse(None, reading("match", "artem")))
+    assert session.to_bind() is None  # a known person spoke last
 
 
 def test_a_sure_verdict_learns_the_agreeing_modality_and_the_missing_one() -> None:
@@ -386,6 +389,7 @@ def test_nobody_new_means_no_binding() -> None:
     rig.people.opened(None)  # type: ignore[arg-type]
     assert not rig.people.remember("Саша").ok  # nobody spoke, nothing in view
     rig.hear(2, 400.0, 600.0)
+    assert rig.hear(None).head == ""  # "Саша", short, looking away: names nobody
     assert rig.people.remember("Саша").ok  # the speaker's track, not the face beside
     rig.people.closed("idle")
     rig.people.opened(None)  # type: ignore[arg-type]

@@ -93,8 +93,10 @@ class Session:
 
     def attribute(self, obs: Observation, verdict: Verdict) -> Track | None:
         """Put the utterance on its speaker's track (a new one when needed); None when it
-        names nobody and carries nothing to tell a stranger by."""
-        self.latest_obs = obs
+        names nobody and carries nothing to tell a stranger by (a short "Саша" with no face in
+        view): the latest speaker is then taken to go on, and the latest view stands."""
+        if obs.face is not None or obs.others:
+            self.latest_obs = obs
         track: Track | None
         if verdict.person is not None:
             track = next((t for t in self.tracks if t.person == verdict.person), None)
@@ -102,7 +104,6 @@ class Session:
                 track = self._new(verdict.person)
         else:
             if not obs.evidence:
-                self.latest = None
                 return None
             strangers = [t for t in self.tracks if t.person is None]
             scored = [(t.resembles(obs, self.knobs), t) for t in strangers]
