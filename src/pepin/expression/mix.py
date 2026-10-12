@@ -115,6 +115,7 @@ def stretched(clip: Clip, factor: float) -> Clip:
         tracks,
         clip.events,
         clip.layer,
+        clip.loop,
     )
 
 

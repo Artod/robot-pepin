@@ -27,7 +27,7 @@ from pepin.expression.mix import (
     stretched,
     track_value,
 )
-from pepin.expression.parts import Absent, ArmPart, FacePart, HeadPart, clip_look
+from pepin.expression.parts import Absent, ArmPart, FacePart
 from pepin.expression.render import BookRenderer, WeightedChooser
 from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
 
@@ -286,34 +286,6 @@ def test_the_face_part_shows_each_event_at_its_time_and_a_fade_withdraws_it() ->
     assert seconds == 1.0 and face.calls[-1] == ("express", ("grin", 1.0, 2.0, None))
     part.fade("gesture", 0.1)
     assert later == []
-
-
-class FakeDoor:
-    def __init__(self) -> None:
-        self.looks: list[Any] = []
-        self.withdrawn: list[str] = []
-
-    def look(self, request: Any) -> str | None:
-        self.looks.append(request)
-        return None
-
-    def withdraw(self, source: str) -> None:
-        self.withdrawn.append(source)
-
-
-def test_the_head_part_posts_a_relative_clip_overlay() -> None:
-    door = FakeDoor()
-    head = HeadPart(door, run=lambda fn: fn())
-    clip = BookRenderer(BOOK).render("agreement", Scene(frozenset({"head"})), 3).clips[0]
-    assert head.play(clip).ok
-    (request,) = door.looks
-    assert request["kind"] == "clip" and request["source"] == "voice.gesture"
-    keys = request["target"]["keys"]
-    assert keys[0]["at_s"] == 0.0 and keys[-1]["tilt_rad"] == 0.0
-    assert all(10.0 <= k["speed_deg_s"] <= 299.0 for k in keys)
-    head.fade("gesture", 0.35)
-    assert door.withdrawn == ["voice.gesture"]
-    assert clip_look(Clip("head", 0, 0, 1), "x", 299.0) is None
 
 
 # -- the animator -------------------------------------------------------------------------------

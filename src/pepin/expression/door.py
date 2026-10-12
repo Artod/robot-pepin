@@ -1,19 +1,23 @@
-"""The arbiter's door as the speaker gaze uses it (:class:`pepin.expression.speaker.GazeDoor`).
+"""The arbiter's door as expression uses it: the speaker gaze's (:class:`SpeakerDoor`, its
+:class:`pepin.expression.speaker.GazeDoor`) and the head gestures' (:class:`OverlayDoor`, the
+:class:`pepin.expression.parts.HeadDoor`).
 
-Every call is one HTTP exchange on :mod:`pepin.gaze_link` from the speaker gaze's thread. An aim
+Every call is one HTTP exchange on :mod:`pepin.gaze_link` from its owner's worker thread. An aim
 is answered when the head has settled there; one queued behind a better look (a ``look`` the
 person asked for) would only be answered when that look ends, so the wait is cut at
 ``aim_wait_s`` and the aim is taken as queued: the request lives on in the arbiter, renewed like
-any. A door that does not answer is a refusal in words, never an exception.
+any. A finite overlay is answered when it ends and a refusal at once, so its wait is cut at
+``answer_wait_s``: no answer by then means it plays. A door that does not answer is a refusal in
+words, never an exception.
 """
 
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
-from typing import Any
+from collections.abc import Callable, Mapping, Sequence
+from typing import Any, Protocol
 
-from pepin.expression.head import BAND, SPEAKER
+from pepin.expression.head import BAND, SPEAKER, ClipLook
 from pepin.expression.speaker import GazeAnswer, HeadView
 from pepin.gaze import HOME, Aim, Speed
 from pepin.gaze_link import GAZE_URL, GazeClient
@@ -81,6 +85,87 @@ class SpeakerDoor:
             return view_of(self.client.state())
         except (OSError, ValueError):
             return None
+
+
+class OverlayClient(Protocol):
+    """One source's overlay calls (:class:`pepin.gaze_link.GazeClient`'s)."""
+
+    def clip(
+        self,
+        keys: Sequence[Mapping[str, float]],
+        *,
+        ttl_s: float,
+        band: int = ...,
+        loop: bool = ...,
+        idle: bool = ...,
+        timeout_s: float | None = ...,
+    ) -> dict[str, Any]:
+        """``POST /look`` of a clip; the answer, ``OSError`` without a door."""
+        ...
+
+    def release(self, fade_s: float = ...) -> int:
+        """``POST /release``; how many went."""
+        ...
+
+
+class OverlayDoor:
+    """:class:`pepin.expression.parts.HeadDoor` over the door's JSON: one client per source (a
+    gesture's, the idle layer's), each overlay in the expression band."""
+
+    def __init__(
+        self,
+        url: str = GAZE_URL,
+        *,
+        timeout_s: float = 1.0,
+        answer_wait_s: float = 0.2,
+        client: Callable[[str], OverlayClient] | None = None,
+    ) -> None:
+        """The door at ``url``; ``answer_wait_s``: how long a look waits for a refusal (one
+        comes in milliseconds; a playing overlay answers only when it ends)."""
+        self._client = client or (lambda source: GazeClient(source, url, timeout_s))
+        self._clients: dict[str, OverlayClient] = {}
+        self.answer_wait_s = answer_wait_s
+        self.calls = 0
+
+    def look(self, request: ClipLook) -> str | None:
+        """Start the overlay: None when it plays, the refusal in words otherwise."""
+        target = request["target"]
+        keys = [
+            {"at_s": k["at_s"], "pan_rad": k["pan_rad"], "tilt_rad": k["tilt_rad"],
+             "speed_deg_s": k["speed_deg_s"]}
+            for k in target["keys"]
+        ]  # fmt: skip
+        self.calls += 1
+        try:
+            answer = self.client(request["source"]).clip(
+                keys,
+                ttl_s=request["ttl_s"],
+                band=request["band"],
+                loop=target.get("loop", False),
+                idle=target.get("idle", False),
+                timeout_s=self.answer_wait_s,
+            )
+        except TimeoutError:
+            return None  # no refusal in time: it plays, and is answered when it ends
+        except (OSError, ValueError) as exc:
+            return f"{AWAY}: {exc}"
+        if answer.get("status") == "denied":
+            return str(answer.get("reason") or "denied")
+        return None
+
+    def withdraw(self, source: str, fade_s: float) -> None:
+        """``source``'s overlay released over ``fade_s`` (nothing when the door is away)."""
+        self.calls += 1
+        try:
+            self.client(source).release(fade_s)
+        except (OSError, ValueError):
+            return
+
+    def client(self, source: str) -> OverlayClient:
+        """``source``'s client, made the first time."""
+        if source not in self._clients:
+            self._clients[source] = self._client(source)
+        return self._clients[source]
 
 
 def answer_of(data: Mapping[str, Any]) -> GazeAnswer:

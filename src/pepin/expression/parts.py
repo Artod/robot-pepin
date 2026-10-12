@@ -7,11 +7,12 @@
   limits or the caps is refused here with the reason, never clamped (the board would refuse it
   too). Fading the gesture layer is ``arm_rest``.
 * :class:`FacePart`: a clip's events as timed expressions of the head server's face.
-* :class:`HeadPart`: a clip's offsets as a relative ``clip`` look of the gaze arbiter
-  (:mod:`pepin.expression.head`), posted on a thread of its own (the door answers when the
-  overlay ends). The arbiter's overlay is not built yet: until it is, the cascade gives the
-  engine an :class:`Absent` head and the head steps of a gesture are left out.
-* :class:`Absent`: a part that cannot play, with the reason (the wheels, the head tonight).
+* :class:`HeadPart`: a clip's keyframes as a relative ``clip`` overlay of the gaze arbiter
+  (:mod:`pepin.expression.head`, :func:`clip_look`) on top of whatever holds the head (the
+  speaker gaze's look on the person, or home), posted through the arbiter's door
+  (:class:`pepin.expression.door.OverlayDoor`) on a thread of its own; fading a layer is that
+  layer's source released over the fade.
+* :class:`Absent`: a part that cannot play, with the reason (the wheels).
 """
 
 from __future__ import annotations
@@ -19,22 +20,21 @@ from __future__ import annotations
 import itertools
 import logging
 import math
+import queue
 import threading
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Protocol
 
 from pepin.arm_motion import ArmMotion
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.executors import FaceChannel, Outcome
-from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook
+from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
 from pepin.expression.mix import check_knots, sample, track_value
 from pepin.expression.trajectory import JOINTS, ArmLink, Knot, Trajectory
+from pepin.neck import NeckMotion
 
 logger = logging.getLogger(__name__)
-
-HEAD_SPEED_HEADROOM = 1.5  # a head key's speed ceiling over the speed its clip asks
-HEAD_MIN_SPEED_DEG_S = 10.0
-HEAD_MAX_SPEED_DEG_S = 299.0  # config/neck.json's motion.max_speed_deg_s
 
 
 class ArmPart:
@@ -197,19 +197,73 @@ def _timer(seconds: float, fn: Callable[[], None]) -> Callable[[], None]:
 
 class HeadDoor(Protocol):
     """The gaze arbiter's door for head overlays (``POST /look`` of a ``clip``, ``POST
-    /release``): built with the arbiter's overlay, faked meanwhile."""
+    /release``): :class:`pepin.expression.door.OverlayDoor` over HTTP, a fake in tests."""
 
     def look(self, request: ClipLook) -> str | None:
-        """Play the overlay; blocks until it ends. None when it played, else why not."""
+        """Start the overlay: None when it plays (or played), else why it was refused; a door
+        that does not answer is a refusal in words, never an exception."""
         ...
 
-    def withdraw(self, source: str) -> None:
-        """End the overlay of ``source`` now; the head goes back to its holder."""
+    def withdraw(self, source: str, fade_s: float) -> None:
+        """End ``source``'s overlay now: the head back on its holder's aim over ``fade_s``."""
         ...
+
+
+@dataclass(frozen=True)
+class NeckLimits:
+    """The neck's profile (config/neck.json's ``motion``): the top speed, the pan's ramp and
+    the tilt's own, gentler one (a sharp tilt rocks the mast). A head key's speed ceiling is
+    the one that carries each axis to its keyframe in the time it has, at that axis's ramp."""
+
+    max_speed_deg_s: float = 299.0
+    pan_acc_deg_s2: float = 2232.0
+    tilt_acc_deg_s2: float = 600.0
+
+    @classmethod
+    def of(cls, motion: NeckMotion) -> NeckLimits:
+        """The limits a :class:`pepin.neck.NeckMotion` puts on every move (the base server's
+        own rule: the tilt's ramp never above the pan's)."""
+        acc = motion.max_acc_deg_s2
+        return cls(motion.max_speed_deg_s, acc, min(motion.tilt_max_acc_deg_s2, acc))
+
+
+class Serial:
+    """Calls run one after another on a daemon thread of their own (started by the first), so
+    a door's calls keep their order and never hold up the caller."""
+
+    def __init__(self, name: str) -> None:
+        """``name``: the thread's."""
+        self.name = name
+        self._calls: queue.SimpleQueue[Callable[[], None]] = queue.SimpleQueue()
+        self._thread: threading.Thread | None = None
+        self._lock = threading.Lock()
+
+    def __call__(self, fn: Callable[[], None]) -> None:
+        """Run ``fn`` after every call posted before it."""
+        with self._lock:
+            if self._thread is None:
+                self._thread = threading.Thread(target=self._run, name=self.name, daemon=True)
+                self._thread.start()
+        self._calls.put(fn)
+
+    def _run(self) -> None:
+        while True:
+            fn = self._calls.get()
+            try:
+                fn()
+            except Exception:
+                logger.exception("%s: a call broke", self.name)
+
+
+Answered = Callable[[ClipLook, str | None], None]
 
 
 class HeadPart:
-    """The head as relative overlays through the gaze arbiter (:mod:`pepin.expression.head`)."""
+    """The head as relative overlays through the gaze arbiter (:mod:`pepin.expression.head`): a
+    gesture's clip as source ``voice.gesture``, the idle layer's as ``voice.idle`` (marked
+    ``idle``: it gives way to any other overlay; ``loop`` when its atom loops); fading a layer
+    releases its source over the fade, so the head eases back onto the person. A refusal is
+    logged once (the same one again is only counted) and the clip dropped: never retried."""
 
     part: PartName = "head"
 
@@ -218,16 +272,23 @@ class HeadPart:
         door: HeadDoor,
         *,
         latency_s: float = 0.1,
-        max_speed_deg_s: float = HEAD_MAX_SPEED_DEG_S,
+        limits: NeckLimits | None = None,
+        fade_s: float = 0.35,
         run: Callable[[Callable[[], None]], None] | None = None,
+        on_answer: Answered | None = None,
     ) -> None:
-        """``run(fn)`` runs a blocking door call off the caller's thread (a daemon thread by
-        default; a test runs it inline)."""
+        """``fade_s``: how long :meth:`rest` eases the head back (config/expression.json's
+        ``layers.fade_s.head``); ``run(fn)`` runs a door call off the caller's thread (one
+        :class:`Serial` thread by default, so a release never overtakes the look before it; a
+        test runs it inline); ``on_answer(request, refusal)`` hears every answer."""
         self.door = door
         self._latency_s = latency_s
-        self.max_speed_deg_s = max_speed_deg_s
-        self.run = run or _thread
-        self.answers: list[str | None] = []
+        self.limits = limits if limits is not None else NeckLimits()
+        self.fade_s = fade_s
+        self.run = run or Serial("head-door")
+        self.on_answer = on_answer
+        self.refused = 0
+        self._logged: str | None = None  # the refusal logged last
 
     @property
     def latency_s(self) -> float:
@@ -239,77 +300,135 @@ class HeadPart:
         return None
 
     def play(self, clip: Clip) -> Outcome:
-        """Post the clip's keys as an overlay, on a thread of its own."""
-        request = clip_look(
-            clip, GESTURE if clip.layer != "idle" else IDLE_LOOK, self.max_speed_deg_s
-        )
+        """Post the clip's keys as an overlay (off this thread)."""
+        source = IDLE_LOOK if clip.layer == "idle" else GESTURE
+        request = clip_look(clip, source, self.limits)
         if request is None:
-            return Outcome(False, "the clip has no head track")
-
-        def post() -> None:
-            answer = self.door.look(request)
-            self.answers.append(answer)
-            if answer is not None:
-                logger.info("head overlay refused: %s", answer)
-
-        self.run(post)
+            return Outcome(False, "the clip moves no head")
+        self.run(lambda: self._post(request))
         return Outcome(True, seconds=clip.duration_s)
 
     def fade(self, layer: Layer, seconds: float) -> None:
-        """The overlay withdrawn: the head back on its holder's aim."""
+        """The layer's overlay released: the head back on its holder's aim over ``seconds``."""
         source = IDLE_LOOK if layer == "idle" else GESTURE
-        self.run(lambda: self.door.withdraw(source))
+        self.run(lambda: self.door.withdraw(source, seconds))
 
     def rest(self) -> None:
-        """Both overlays withdrawn."""
+        """Both overlays released over :attr:`fade_s` (a drive, the conversation's end)."""
 
         def withdraw() -> None:
-            self.door.withdraw(GESTURE)
-            self.door.withdraw(IDLE_LOOK)
+            self.door.withdraw(GESTURE, self.fade_s)
+            self.door.withdraw(IDLE_LOOK, self.fade_s)
 
         self.run(withdraw)
 
+    def _post(self, request: ClipLook) -> None:
+        refusal = self.door.look(request)
+        if self.on_answer is not None:
+            try:
+                self.on_answer(request, refusal)
+            except Exception:
+                logger.exception("head part: the answer's listener broke")
+        if refusal is None:
+            self._logged = None
+            return
+        self.refused += 1
+        if refusal != self._logged:
+            logger.warning("head overlay refused, dropped: %s", refusal)
+            self._logged = refusal
 
-def _thread(fn: Callable[[], None]) -> None:
-    threading.Thread(target=fn, name="head-door", daemon=True).start()
+
+HEAD_MIN_SPEED_DEG_S = 1.0  # a key's least ceiling (a speed of 0 would be the servo's top)
+HEAD_DOFS = ("pan_deg", "tilt_deg")
+SAME_DEG = 1e-6  # a keyframe this close to the one before it is a hold, not a move
 
 
-def clip_look(clip: Clip, source: str, max_speed_deg_s: float) -> ClipLook | None:
-    """A head clip's pan and tilt offsets (degrees) as the arbiter's overlay: one key at every
-    key time of either track, in radians, each with the speed ceiling of the move into it
-    (the move's own speed with headroom, within the neck's), the last back at zero."""
+def keyframes(clip: Clip) -> list[tuple[float, float, float]]:
+    """A head clip as ``(seconds, pan_deg, tilt_deg)`` at every key time of its tracks, each
+    axis the sum of its tracks there (a merged clip's steps are offsets: they add up)."""
+    tracks = [t for t in clip.tracks if t.dof in HEAD_DOFS]
+    times = sorted({t for track in tracks for t in track.times})
 
-    tracks = {t.dof: t for t in clip.tracks if t.dof in ("pan_deg", "tilt_deg")}
-    if not tracks:
+    def axis(dof: str, t: float) -> float:
+        return sum(track_value(track, t) for track in tracks if track.dof == dof)
+
+    return [(t, axis("pan_deg", t), axis("tilt_deg", t)) for t in times]
+
+
+def move_speed(travel_deg: float, seconds: float, acc_deg_s2: float) -> float:
+    """The profile speed that takes one joint ``travel_deg`` from rest to rest in ``seconds`` at
+    a ramp of ``acc_deg_s2`` (a trapezoid that ends on time); a move that cannot end on time at
+    that ramp (:func:`needed_acc` above it) gets the triangle's peak, the fastest it can go."""
+    d = abs(travel_deg)
+    if d == 0.0:
+        return 0.0
+    reach = acc_deg_s2 * seconds
+    disc = reach * reach - 4.0 * acc_deg_s2 * d
+    if seconds <= 0.0 or disc < 0.0:
+        return math.sqrt(acc_deg_s2 * d)
+    return (reach - math.sqrt(disc)) / 2.0
+
+
+def needed_acc(travel_deg: float, seconds: float) -> float:
+    """The least ramp (deg/s^2) that takes a joint ``travel_deg`` from rest to rest in
+    ``seconds``: speeding up half the way and braking the other half, 4 d / T^2."""
+    return math.inf if seconds <= 0.0 else 4.0 * abs(travel_deg) / (seconds * seconds)
+
+
+def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> ClipLook | None:
+    """A head clip as the arbiter's overlay (offsets in radians from the holder's aim, pan +
+    left, tilt + down), None when it moves nothing.
+
+    The clip's keyframes say where the head IS at their times; the arbiter writes each key at
+    its time and the head then moves there. So each keyframe is a key written at the keyframe
+    before it, with the speed ceiling that ends the move on the keyframe's time (each axis at
+    its own ramp, :func:`move_speed`; the larger ceiling of the two, within the neck's top
+    speed): a nod's stroke lands on its word, not a move later. A keyframe where the head
+    already is (a hold) writes nothing. The clip starts on the holder's aim (the book's head
+    atoms start and end on it). A looping clip closes its period with its first key again
+    (the arbiter's rule for a loop); the idle layer's clip is marked ``idle``."""
+    limits = limits if limits is not None else NeckLimits()
+    frames = keyframes(clip)
+    if not frames:
         return None
-    times = sorted({t for track in tracks.values() for t in track.times})
+    start, pan0, tilt0 = frames[0]
+    t0 = start
     keys: list[ClipKey] = []
-    before = (0.0, 0.0, 0.0)
-    for t in times:
-        pan = track_value(tracks["pan_deg"], t) if "pan_deg" in tracks else 0.0
-        tilt = track_value(tracks["tilt_deg"], t) if "tilt_deg" in tracks else 0.0
-        dt = t - before[0]
-        travel = max(abs(pan - before[1]), abs(tilt - before[2]))
-        speed = HEAD_SPEED_HEADROOM * travel / dt if dt > 0 else max_speed_deg_s
+    for t, pan, tilt in frames[1:]:
+        if abs(pan - pan0) < SAME_DEG and abs(tilt - tilt0) < SAME_DEG:
+            t0 = t
+            continue
+        speed = max(
+            move_speed(pan - pan0, t - t0, limits.pan_acc_deg_s2),
+            move_speed(tilt - tilt0, t - t0, limits.tilt_acc_deg_s2),
+        )
         keys.append({
-            "at_s": t,
+            "at_s": round(t0 - start, 4),
             "pan_rad": math.radians(pan),
             "tilt_rad": math.radians(tilt),
-            "speed_deg_s": min(max_speed_deg_s, max(HEAD_MIN_SPEED_DEG_S, speed)),
+            "speed_deg_s": round(min(limits.max_speed_deg_s, max(HEAD_MIN_SPEED_DEG_S, speed)), 2),
         })  # fmt: skip
-        before = (t, pan, tilt)
+        t0, pan0, tilt0 = t, pan, tilt
+    if not keys:
+        return None
+    target: ClipTarget = {"keys": keys}
+    if clip.loop:
+        keys.append({**keys[0], "at_s": round(frames[-1][0] - start, 4)})
+        target["loop"] = True
+    if clip.layer == "idle":
+        target["idle"] = True
     return {
         "source": source,
         "kind": "clip",
         "band": BAND,
         "ttl_s": clip.duration_s + 1.0,
-        "target": {"keys": keys},
+        "target": target,
     }
 
 
 class Absent:
-    """A part that cannot play now, and why (the wheels; the head until the arbiter's overlay
-    lands): never ready, every clip refused, so a gesture plays without it."""
+    """A part that cannot play now, and why (the wheels): never ready, every clip refused, so a
+    gesture plays without it."""
 
     def __init__(self, part: PartName, why: str) -> None:
         """``why`` is what every refusal says."""

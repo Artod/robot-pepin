@@ -12,6 +12,7 @@ from pepin.audio_link import DoaReading
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.conversation import Heard
 from pepin.expression.executors import Outcome, WheelMove, WheelReport
+from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
 from pepin.expression.speaker import FaceFrame, GazeAnswer, HeadView
 from pepin.expression.trajectory import ArmAnswer, ArmStatus, Trajectory
@@ -206,6 +207,28 @@ class FakeGazeDoor:
 
 
 @dataclass
+class FakeHeadDoor:
+    """The arbiter's door for head overlays: every overlay plays, unless the next of
+    ``refusals`` (a reason, or None for one that plays) is scripted."""
+
+    refusals: deque[str | None] = field(default_factory=deque)
+    calls: list[Call] = field(default_factory=list)
+
+    def look(self, request: ClipLook) -> str | None:
+        """Recorded; plays, unless a refusal is scripted."""
+        self.calls.append(("look", (request,)))
+        return self.refusals.popleft() if self.refusals else None
+
+    def withdraw(self, source: str, fade_s: float) -> None:
+        """Recorded."""
+        self.calls.append(("withdraw", (source, fade_s)))
+
+    def looks(self) -> list[ClipLook]:
+        """The overlays asked for, in order."""
+        return [args[0] for name, args in self.calls if name == "look"]
+
+
+@dataclass
 class FakeFaceFinder:
     """Frames in the order scripted; None once they run out."""
 
@@ -253,8 +276,10 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
     def _conforms() -> None:
         from pepin.audio_link import AudioClient
         from pepin.expression.conversation import ConversationObserver, LiveFlag
+        from pepin.expression.door import OverlayDoor
         from pepin.expression.executors import Executor, FaceChannel, NoBody, NoWheels, Wheels
         from pepin.expression.markers import Playout
+        from pepin.expression.parts import HeadDoor
         from pepin.expression.speaker import DoaSource, FaceFinder, GazeDoor
         from pepin.expression.trajectory import ArmLink
         from pepin.head_link import HeadClient
@@ -269,4 +294,5 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         finder: FaceFinder = FakeFaceFinder()
         doa: list[DoaSource] = [FakeDoa(), AudioClient("board")]
         wheels: list[Wheels] = [FakeWheels(), NoWheels()]
-        del playout, observer, flag, parts, faces, arm, door, finder, doa, wheels
+        heads: list[HeadDoor] = [FakeHeadDoor(), OverlayDoor()]
+        del playout, observer, flag, parts, faces, arm, door, finder, doa, wheels, heads
