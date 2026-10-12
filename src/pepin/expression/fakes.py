@@ -21,7 +21,14 @@ from pepin.expression.conversation import Heard
 from pepin.expression.executors import Outcome, WheelMove, WheelReport, WheelsDone, WheelsMoved
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
-from pepin.expression.speaker import FaceFrame, GazeAnswer, HeadView
+from pepin.expression.speaker import (
+    BodySighting,
+    Ease,
+    FaceFrame,
+    FaceSighting,
+    GazeAnswer,
+    HeadView,
+)
 from pepin.expression.trajectory import ArmAnswer, ArmStatus, Trajectory
 from pepin.gaze import Aim, Speed
 from pepin.kinematics import Twist
@@ -198,9 +205,9 @@ class FakeGazeDoor:
     refusals: deque[GazeAnswer] = field(default_factory=deque)
     calls: list[Call] = field(default_factory=list)
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float) -> GazeAnswer:
+    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
         """Recorded; done, unless a refusal is scripted."""
-        self.calls.append(("aim", (aim, speed, ttl_s)))
+        self.calls.append(("aim", (aim, speed, ttl_s, ease)))
         if self.refusals:
             return self.refusals.popleft()
         return GazeAnswer("done", head=aim)
@@ -252,6 +259,55 @@ class FakeFaceFinder:
         """The next scripted frame."""
         self.looks += 1
         return self.frames.popleft() if self.frames else None
+
+
+@dataclass
+class FakePerson:
+    """Someone in the room for :class:`FakeScene`, in the cart's frame (degrees): their face's
+    bearing and tilt (+ down), its width (0: the face is not seen, turned away), whether their
+    body is seen, where a body detector puts their head (default: the face's place) and who."""
+
+    pan_deg: float
+    tilt_deg: float = 3.0
+    face_px: float = 60.0
+    body: bool = False
+    head_pan_deg: float | None = None
+    head_tilt_deg: float | None = None
+    who: str | None = None
+
+
+@dataclass
+class FakeScene:
+    """The head camera over :class:`FakePerson` s: a look sees each face and body within
+    ``half_pan_deg`` and ``half_tilt_deg`` of where ``door``'s state says the head points (move
+    the people between looks to make them walk)."""
+
+    door: Any
+    people: list[FakePerson] = field(default_factory=list)
+    half_pan_deg: float = 30.0
+    half_tilt_deg: float = 25.0
+    looks: int = 0
+
+    def look(self) -> FaceFrame | None:
+        """The faces and bodies in view now."""
+        self.looks += 1
+        view = self.door.state()
+        if view is None or view.head is None:
+            return None
+        head_pan, head_tilt = math.degrees(view.head.pan_rad), math.degrees(view.head.tilt_rad)
+        faces, bodies = [], []
+        for p in self.people:
+            pan = (p.pan_deg - head_pan + 180.0) % 360.0 - 180.0
+            tilt = p.tilt_deg - head_tilt
+            if abs(pan) > self.half_pan_deg or abs(tilt) > self.half_tilt_deg:
+                continue
+            if p.face_px > 0.0:
+                faces.append(FaceSighting(pan, tilt, p.face_px, 0.8, p.who))
+            if p.body:
+                hpan = (p.pan_deg if p.head_pan_deg is None else p.head_pan_deg) - head_pan
+                htilt = (p.tilt_deg if p.head_tilt_deg is None else p.head_tilt_deg) - head_tilt
+                bodies.append(BodySighting(pan, 12.0, hpan, htilt, 40.0, 0.7))
+        return FaceFrame(0.0, tuple(faces), bodies=tuple(bodies))
 
 
 @dataclass
@@ -495,7 +551,7 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         faces: list[FaceChannel] = [FakeFace(), HeadClient("board", source="voice")]
         arm: ArmLink = FakeArmLink()
         door: GazeDoor = FakeGazeDoor()
-        finder: FaceFinder = FakeFaceFinder()
+        finder: list[FaceFinder] = [FakeFaceFinder(), FakeScene(FakeGazeDoor())]
         doa: list[DoaSource] = [FakeDoa(), AudioClient("board")]
         wheels: list[Wheels] = [FakeWheels(), NoWheels(), executor]
         heads: list[HeadDoor] = [FakeHeadDoor(), OverlayDoor()]

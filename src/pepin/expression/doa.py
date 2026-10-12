@@ -13,6 +13,13 @@ reading stands for "now" on the board (it is at most a tenth of a second old), s
 that ended ``now - end_s`` ago ended that long before it. (Taking the window back from the newest
 reading itself would land after the utterance once Whisper has taken its 0.3-1 s to read it.)
 
+The robot's own voice is in the array while it speaks (the array names the loudest voice): a
+reading stamped within one of the robot's speaking spans, or ``ECHO_S`` after one, is the
+robot's and never the person's (:func:`robot_readings`). An utterance that overlaps a reply keeps
+its clean part (:func:`utterance_voice`: the last ``window_s`` of its clean readings), and the
+live stream is the clean speech of the last moments (:func:`recent_voice`): what the head
+follows while a person speaks and no face is seen.
+
 :func:`fit_doa_map` is the calibration: the readings of a voice in front of, left of, behind and
 right of the cart give ``front_deg``, ``sign`` and the three other quarters. The array sits off the
 cart's centre (at its front-left), so the four are not a quarter turn apart (2026-10-12: front 170,
@@ -25,13 +32,14 @@ from __future__ import annotations
 
 import math
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pepin.audio_link import DoaReading
 from pepin.audio_signal import circular_mean_deg
 from pepin.expression.conversation import Heard
 from pepin.expression.speaker import DoaMap, DoaSource
 
+ECHO_S = 0.3  # the robot's voice rings this long in the room after its span ends
 QUARTER_TOL_DEG = 45.0  # a calibration reading further than this off its quarter is nearer the next
 QUARTERS_DEG = (0.0, 90.0, 180.0, 270.0, 360.0)  # front, left, behind, right, front again
 
@@ -74,6 +82,7 @@ class VoiceBearing:
     bearing_rad: float | None
     readings: int
     speech: int
+    robot: int = 0  # speech readings dropped as the robot's own voice
 
     def text(self) -> str:
         """``voice at 135 deg = +42 deg (8 readings, 6 speech)`` for a log line."""
@@ -100,6 +109,85 @@ def voice_of(
     if mean is not None and doa_map is not None:
         bearing = math.radians(bearing_deg(mean, doa_map))
     return VoiceBearing(mean, bearing, len(readings), len(speech))
+
+
+Span = tuple[float, float | None]  # the robot speaking from .. to (laptop clock; None: still)
+
+
+def board_offset(doa: DoaSource, now: float) -> float | None:
+    """The board's clock less the laptop's, by the newest reading (it stands for ``now``)."""
+    latest = doa.latest_doa()
+    return None if latest is None else latest.stamp_s - now
+
+
+def robot_readings(
+    readings: Sequence[DoaReading], spans: Sequence[Span], offset: float, echo_s: float = ECHO_S
+) -> list[bool]:
+    """Which of ``readings`` fall in the robot's speaking ``spans`` (laptop clock, mapped onto
+    the board's by ``offset``) or ``echo_s`` after one: the robot's voice, not the person's."""
+    board = [
+        (start + offset, math.inf if end is None else end + offset + echo_s) for start, end in spans
+    ]
+    return [any(a <= r.stamp_s <= b for a, b in board) for r in readings]
+
+
+@dataclass(frozen=True)
+class UtteranceDoa:
+    """An utterance's readings as the gaze logs them: every reading from its start to its end
+    (board clock), which were the robot's, and its bearing from the clean ones."""
+
+    readings: tuple[DoaReading, ...]
+    robot: tuple[bool, ...]
+    voice: VoiceBearing
+
+
+def utterance_voice(
+    doa: DoaSource,
+    heard: Heard,
+    now: float,
+    *,
+    window_s: float,
+    doa_map: DoaMap | None,
+    min_speech: int,
+    spans: Sequence[Span] = (),
+) -> UtteranceDoa:
+    """``heard``'s bearing from its clean readings: the robot's own voice cut out, the last
+    ``window_s`` of what is left (the last ``window_s`` of the utterance when nothing was cut),
+    with every reading of the utterance for the log."""
+    offset = board_offset(doa, now)
+    if offset is None:
+        return UtteranceDoa((), (), VoiceBearing(None, None, 0, 0))
+    start, end = heard.start_s + offset, heard.end_s + offset
+    every = doa.doa_between(start, end)
+    mask = robot_readings(every, spans, offset)
+    clean = [r for r, mine in zip(every, mask, strict=True) if not mine]
+    if len(clean) == len(every):
+        window = [r for r in every if r.stamp_s >= end - min(window_s, max(heard.duration_s, 0.0))]
+    else:
+        last = clean[-1].stamp_s if clean else end
+        window = [r for r in clean if r.stamp_s >= last - window_s]
+    voice = voice_of(window, doa_map, min_speech)
+    dropped = sum(1 for r, mine in zip(every, mask, strict=True) if mine and r.speech)
+    return UtteranceDoa(tuple(every), tuple(mask), replace(voice, robot=dropped))
+
+
+def recent_voice(
+    doa: DoaSource,
+    now: float,
+    *,
+    window_s: float,
+    doa_map: DoaMap | None,
+    min_speech: int,
+    spans: Sequence[Span] = (),
+) -> VoiceBearing:
+    """The live voice: the clean speech readings of the last ``window_s`` up to the newest."""
+    latest = doa.latest_doa()
+    if latest is None:
+        return VoiceBearing(None, None, 0, 0)
+    every = doa.doa_between(latest.stamp_s - window_s, latest.stamp_s)
+    mask = robot_readings(every, spans, latest.stamp_s - now)
+    clean = [r for r, mine in zip(every, mask, strict=True) if not mine]
+    return voice_of(clean, doa_map, min_speech)
 
 
 def utterance_readings(

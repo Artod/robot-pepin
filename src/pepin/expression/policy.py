@@ -1,120 +1,63 @@
-"""Whom to look at: the voice that woke the robot, then whoever the array hears instead.
+"""Whom the head looks at: the person speaking, among the people tracked
+(:mod:`pepin.expression.tracks`).
 
-The array's direction of arrival names the loudest voice of an utterance, so a new speaker is an
-utterance whose bearing is ``doa_jump_deg`` or more from the person the head holds. In a frame,
-the speaker's face is the one within ``match_deg`` of the voice's bearing, nearest to it; with no
-such face (or no bearing: the map unmeasured, the robot's own voice), the face nearest the
-frame's centre, the widest on a tie. A face narrower than ``min_px`` counts only while the gaze
-seeks someone or near the person held (within ``match_deg``), and never one narrower than
-``near_min_px``: a far face is found where the voice is, a small false one elsewhere is not
-followed.
+The gaze ENGAGES one track and serves it until someone else speaks. An utterance is first judged
+as a stimulus (:func:`doubt`): a sound without words, one with fewer than ``doa_min_speech`` of the
+array's speech-flagged readings or a peak under ``doa_min_dbfs`` never moves the head (2026-10-12:
+every bearing at -16 dBFS or louder was within 14 deg of the face; at -20..-22 dBFS three of four
+missed by 28-76 deg); the robot's name moves it whatever its level. Then its track decides
+(:func:`decide`), as in Pepper's basic awareness:
 
-The seams for later: :class:`Addressee` names whom the conversation addresses ("look at NAME", two
-interlocutors), and a face the finder knows (:attr:`FaceSighting.who`) with that name is taken
-before any other.
+* the track engaged speaks: stay (the head follows its voice only while nobody sees it);
+* the robot's name: engage the speaker and seek them, never returning;
+* a track seen before (a face or a body placed it): engage it at once, its remembered place;
+* a voice with no one seen there while someone seen is engaged: a CHECK (look, one frame, back
+  when nobody is there: the SemiEngaged mode);
+* a voice with nobody engaged (or nobody ever seen): engage it and seek.
 """
 
 from __future__ import annotations
 
-import math
-from collections.abc import Sequence
-from typing import Protocol
+from dataclasses import dataclass
+from typing import Literal
 
-from pepin.expression.speaker import FaceFrame, FaceSighting, Target
-from pepin.gaze import Aim
+from pepin.expression.conversation import Heard
+from pepin.expression.doa import VoiceBearing
+from pepin.expression.tracks import Track, face_aim
 
+__all__ = ["Act", "Decision", "decide", "doubt", "face_aim"]
 
-class Addressee(Protocol):
-    """Whom the conversation looks at by name (LATER: the brain's "look at NAME", the second of
-    two interlocutors); None for whoever speaks."""
-
-    def wanted(self) -> str | None:
-        """The name to look at, None for the speaker."""
-        ...
+Act = Literal["stay", "switch", "check", "seek"]
 
 
-class SpeakerPolicy:
-    """:class:`pepin.expression.speaker.TargetPolicy` for one speaker at a time."""
+@dataclass(frozen=True)
+class Decision:
+    """What an utterance does to the gaze, and why in words."""
 
-    def __init__(
-        self,
-        *,
-        match_deg: float,
-        doa_jump_deg: float,
-        addressee: Addressee | None = None,
-        min_px: float = 0.0,
-        near_min_px: float = 0.0,
-    ) -> None:
-        """The face-to-voice match and the jump that makes a new speaker, in degrees; the face
-        widths (pixels) that count anywhere and while seeking or near the person held."""
-        self.match_rad = math.radians(match_deg)
-        self.jump_rad = math.radians(doa_jump_deg)
-        self.addressee = addressee
-        self.min_px, self.near_min_px = min_px, near_min_px
-
-    def choose(self, voice: float | None, frame: FaceFrame | None, head: Aim) -> Aim | None:
-        """The aim that centres the chosen face of ``frame`` (taken with the head at ``head``),
-        None when it has none."""
-        face = self.pick(voice, frame, head)
-        if face is None:
-            return None
-        return face_aim(head, face)
-
-    def pick(
-        self, voice: float | None, frame: FaceFrame | None, head: Aim, *, seeking: bool = False
-    ) -> FaceSighting | None:
-        """The speaker's face among those wide enough (``seeking``: any of ``near_min_px``,
-        else ``min_px`` and ``near_min_px`` near the voice): the addressee's by name, else the
-        one nearest the voice within ``match_deg``, else the one nearest the centre (widest on a
-        tie)."""
-        if frame is None or not frame.faces:
-            return None
-
-        def miss(face: FaceSighting) -> float:
-            if voice is None:
-                return math.inf
-            return abs(_wrap(face_aim(head, face).pan_rad - voice))
-
-        faces = [
-            f
-            for f in frame.faces
-            if f.width_px >= self.min_px
-            or (f.width_px >= self.near_min_px and (seeking or miss(f) <= self.match_rad))
-        ]
-        if not faces:
-            return None
-        name = self.addressee.wanted() if self.addressee is not None else None
-        named = [f for f in faces if name is not None and f.who == name]
-        if named:
-            return max(named, key=lambda f: f.width_px)
-        near = [f for f in faces if miss(f) <= self.match_rad]
-        if near:
-            return min(near, key=lambda f: (miss(f), -f.width_px))
-        return min(faces, key=lambda f: (abs(f.pan_deg), -f.width_px))
-
-    def recall(
-        self, targets: Sequence[Target], heard: float, *, within_rad: float
-    ) -> Target | None:
-        """The remembered person nearest the voice heard at bearing ``heard`` (radians), when
-        within ``within_rad`` of it; None for a new place."""
-        near = [t for t in targets if abs(_wrap(t.aim.pan_rad - heard)) <= within_rad]
-        return min(near, key=lambda t: abs(_wrap(t.aim.pan_rad - heard)), default=None)
-
-    def new_speaker(self, held: float | None, heard: float | None) -> bool:
-        """Whether an utterance heard at bearing ``heard`` comes from someone other than the
-        person held at ``held`` (radians, + left)."""
-        if heard is None:
-            return False
-        if held is None:
-            return True
-        return abs(_wrap(heard - held)) > self.jump_rad
+    act: Act
+    why: str
 
 
-def face_aim(head: Aim, face: FaceSighting) -> Aim:
-    """The aim that puts ``face``, seen with the head at ``head``, on the optical axis."""
-    pan, tilt = math.radians(face.pan_deg), math.radians(face.tilt_deg)
-    return Aim(head.pan_rad + pan, head.tilt_rad + tilt)
+def doubt(heard: Heard, voice: VoiceBearing, *, min_speech: int, min_dbfs: float) -> str | None:
+    """Why an utterance is no speaker to turn to (no words, too few speech readings, too
+    quiet); None when it is one."""
+    if not heard.words:
+        return "no words"
+    if voice.speech < min_speech:
+        return f"{voice.speech} speech readings, under {min_speech}"
+    if heard.peak_db is not None and heard.peak_db < min_dbfs:
+        return f"quiet, peak {heard.peak_db:.1f} dBFS under {min_dbfs:.0f}"
+    return None
 
 
-def _wrap(rad: float) -> float:
-    return math.atan2(math.sin(rad), math.cos(rad))
+def decide(engaged: Track | None, speaker: Track, *, named: bool) -> Decision:
+    """What the speaker's utterance does, given the track engaged now."""
+    if engaged is not None and speaker.id == engaged.id:
+        return Decision("stay", "the person engaged")
+    if named:
+        return Decision("seek", "the robot's name")
+    if speaker.seen_s is not None:
+        return Decision("switch", "a person seen there")
+    if engaged is not None and engaged.seen_s is not None:
+        return Decision("check", "a voice elsewhere")
+    return Decision("seek", "a voice")

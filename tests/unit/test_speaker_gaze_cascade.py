@@ -81,7 +81,7 @@ def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets
     (answer,) = answers_to(tmp_path, asked[0])
     assert answer["state"] == "applied" and answer["on"] is True and gaze.on
     first = door.aims()[0][0]
-    assert first.pan_rad == 0.0 and first.tilt_rad == pytest.approx(math.radians(-5.0))
+    assert first.pan_rad == 0.0 and first.tilt_rad == pytest.approx(math.radians(3.0))
     assert face_channel.calls[0][1][0] == "smile"
     assert door.count("release") == 1 and machine.phase == "idle", "the run's end let it go"
     opened = [

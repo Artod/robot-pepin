@@ -18,7 +18,7 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from pepin.expression.head import BAND, SPEAKER, ClipLook
-from pepin.expression.speaker import GazeAnswer, HeadView
+from pepin.expression.speaker import Ease, GazeAnswer, HeadView
 from pepin.gaze import HOME, Aim, Speed
 from pepin.gaze_link import GAZE_URL, GazeClient
 
@@ -43,9 +43,10 @@ class SpeakerDoor:
         self.aim_wait_s = aim_wait_s
         self.calls = 0  # every exchange, for the report line's calls per minute
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float) -> GazeAnswer:
-        """Hold the head at ``aim`` (an ``angles`` look held for its TTL, no depth frames)."""
-        request = {
+    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
+        """Hold the head at ``aim`` (an ``angles`` look held for its TTL, no depth frames), on
+        ``ease``'s speed and ramp when given (an arbiter that predates them moves at ``speed``)."""
+        request: dict[str, Any] = {
             "kind": "angles",
             "band": BAND,
             "target": {"pan_rad": aim.pan_rad, "tilt_rad": aim.tilt_rad},
@@ -54,6 +55,9 @@ class SpeakerDoor:
             "ttl_s": ttl_s,
             "speed": speed,
         }
+        if ease is not None:
+            request["speed_deg_s"] = ease.speed_deg_s
+            request["acc_deg_s2"] = ease.acc_deg_s2
         self.calls += 1
         try:
             return answer_of(self.client.look(request, self.aim_wait_s))

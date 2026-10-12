@@ -1,4 +1,5 @@
-"""How to face a bearing: the head alone within its comfortable pan, the wheels for the rest.
+"""How to face a bearing: the head alone within its comfortable pan, the wheels for the rest;
+and where a seek looks when nobody is seen at the bearing (:func:`sweep`).
 
 A person within ``comfort_pan_deg`` (60) of the cart's nose is faced by the head alone. Past it
 the wheels turn the rest in place, at most ``max_turn_deg`` (30) per request, and the head looks
@@ -47,6 +48,17 @@ def split(
     excess = abs(bearing_rad) - comfort_rad
     body = math.copysign(min(excess, max_turn_rad), bearing_rad) if excess > 0.0 else 0.0
     return GazePlan(body, Aim(bearing_rad - body, tilt_rad))
+
+
+def sweep(pan_rad: float, tilt_rad: float, *, span_rad: float) -> list[Aim]:
+    """A seek's stops around a bearing at one tilt: ``span_rad`` outward (away from the cart's
+    nose) first, then as far inward. Outward first because the array read a voice nearer the nose
+    than the face in all three misses logged on 2026-10-12 (-15 for -43.5, -11 for -18, -4 for
+    -15 deg)."""
+    if span_rad <= 0.0:
+        return []
+    side = 1.0 if pan_rad >= 0.0 else -1.0
+    return [Aim(pan_rad + side * span_rad, tilt_rad), Aim(pan_rad - side * span_rad, tilt_rad)]
 
 
 def head_after(bearing_rad: float, turned_rad: float, tilt_rad: float, reach: Reach) -> Aim:
