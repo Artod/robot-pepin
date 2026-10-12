@@ -25,11 +25,13 @@
     },
     "head": {
       "latency_s": 0.1,
-      "note": "latency_s: the door's HTTP, the arbiter's step and the neck_target hop."
+      "fade_s": 0.35,
+      "note": "latency_s: the door's HTTP, the arbiter's step and the neck_target hop. fade_s: a head overlay let go (POST /release's fade_s) returns to the holder's aim over this long, overriding layers.fade_s for the head (0.3-0.35 s for body parts in the animation literature)."
     },
     "face": {
       "latency_s": 0.05,
-      "note": "latency_s: the head server's hop; its 280 ms tween (config/face.json timing) starts after it."
+      "fade_s": 0.1,
+      "note": "latency_s: the head server's hop; its 280 ms tween (config/face.json timing) starts after it. fade_s: a face changes in about 0.1 s, faster than a body part; overrides layers.fade_s for the face."
     },
     "body": {
       "max_turn_deg": 30.0,
@@ -38,7 +40,8 @@
       "attempts": 3,
       "backoff_m": 0.03,
       "max_backoff_m": 0.06,
-      "note": "The wheels' expressive motions on the board's measured-motion path, never Nav2, only while the goal server says navigating false: a turn in place of at most max_turn_deg per request in steps of step_deg, a rock of at most max_rock_m. A stalled wheel or a blocked arc (lidar, ToF) backs the cart off backoff_m and the turn is tried again, at most attempts times and max_backoff_m of backing in all; then it gives up and the head looks as far as it reaches."
+      "fade_s": 0.35,
+      "note": "fade_s: overrides layers.fade_s for the wheels. The wheels' expressive motions on the board's measured-motion path, never Nav2, only while the goal server says navigating false: a turn in place of at most max_turn_deg per request in steps of step_deg, a rock of at most max_rock_m. A stalled wheel or a blocked arc (lidar, ToF) backs the cart off backoff_m and the turn is tried again, at most attempts times and max_backoff_m of backing in all; then it gives up and the head looks as far as it reaches."
     }
   },
   "speaker": {
@@ -46,7 +49,8 @@
       "front_deg": null,
       "sign": null,
       "window_s": 1.0,
-      "note": "The XVF3800 sits on the cart's front, not on the head. front_deg: the array's angle (0..359, 0 toward its USB-C side) of a voice straight ahead of the cart; sign: +1 when that angle grows toward the cart's left, -1 toward its right. Both null until measured (scratch/audio/doa_turn.py at the front, left, back and right); null orients by faces alone. window_s: the speech-flagged readings of the utterance's last window_s are averaged (circular mean) into its bearing."
+      "min_speech": 2,
+      "note": "The XVF3800 sits on the cart's front, not on the head. front_deg: the array's angle (0..359, 0 toward its USB-C side) of a voice straight ahead of the cart; sign: +1 when that angle grows toward the cart's left, -1 toward its right. Both null until measured (scratch/audio/doa_turn.py --calibrate: one phrase three times each at 1.5 m in front, left, behind and right; it prints the two numbers and refuses four readings that are not 90 +- 15 deg apart); null orients by faces alone (the head tilts to seek_tilt_deg where it points and looks for a face). window_s: the speech-flagged readings of the utterance's last window_s (the utterance's end mapped onto the board's clock by the newest reading) are averaged (circular mean) into its bearing; fewer than min_speech of them (about 10 a second arrive) and the voice has no bearing."
     },
     "comfort_pan_deg": 60.0,
     "in_frame_deg": 25.0,
@@ -55,13 +59,16 @@
     "seek_every_s": 0.4,
     "track_every_s": 1.0,
     "match_deg": 20.0,
+    "refine_deg": 2.0,
     "deadband_deg": 6.0,
     "saccade_over_deg": 15.0,
     "doa_jump_deg": 30.0,
     "ttl_s": 6.0,
     "renew_s": 2.0,
+    "aim_wait_s": 2.0,
     "smile": "smile",
     "smile_hold_s": 2.0,
-    "note": "comfort_pan_deg: the head alone turns this far; past it the wheels turn the rest (parts.body), and the head goes to its reach when they may not. in_frame_deg: a voice this close to where the head points is in the picture already: no turn, only a frame. seek_tilt_deg: the tilt the head turns to before a face is found (+ down; level-ish for a face at 1-2 m). seek_frames, seek_every_s: frames taken at that interval after the turn before giving up on a face (the head then stays on the voice). track_every_s: one frame this often while the conversation lasts and the head stands still. match_deg: a face within this of the voice's bearing is the speaker's. deadband_deg: a face this close to the frame's centre moves nothing. saccade_over_deg: a correction larger than this is a saccade, a smaller one the arbiter's slow speed. doa_jump_deg: the voice this far from the aim for a whole utterance turns the head to it again. ttl_s, renew_s: the speaker's look lives ttl_s and is renewed every renew_s, so the head goes home within ttl_s of the cascade's end. smile, smile_hold_s: the face's expression when a face is first found, and for how long."
+    "smile_unseen": false,
+    "note": "comfort_pan_deg: the head alone turns this far; past it the wheels turn the rest (parts.body), and the head goes to its reach when they may not. in_frame_deg: a voice this close to where the head points is in the picture already: no pan, only the tilt to seek_tilt_deg and a frame. seek_tilt_deg: the tilt the head turns to before a face is found (+ down; level-ish for a face at 1-2 m; home's 23.8 deg down would leave a standing face out of the 59 deg tall picture). seek_frames, seek_every_s: frames taken at that interval after the turn before giving up on a face (the head then stays on the voice and keeps one frame every track_every_s). track_every_s: one frame this often while the conversation lasts, the head stands still, is the speaker's and carries no gesture (a breath does not count). match_deg: a face within this of the voice's bearing is the speaker's; with none, the face nearest the frame's centre, the widest on a tie. refine_deg: after a turn, a face further than this off the frame's centre is centred (G3 wants it within 5 deg). deadband_deg: while tracking, a face this close to the frame's centre moves nothing. saccade_over_deg: a correction larger than this is a saccade, a smaller one the arbiter's slow speed (slow_deg_s, 20). doa_jump_deg: an utterance whose voice is this far from the person held turns the head to it again (the array names the loudest voice; one overlapping the robot's own speech is ignored). ttl_s, renew_s: the speaker's look lives ttl_s and is renewed every renew_s, so the head goes home within ttl_s of the cascade's end; a renewal that finds the look gone (a look the person asked for took the head) asks again, queued behind it. aim_wait_s: how long an aim waits for the arbiter's answer before it is taken as queued. smile, smile_hold_s: the face's expression (source expression, through the head server) when a face is first found in a conversation, once, and for how long; smile_unseen: smile also when no face is found (off: a smile at nobody)."
   }
 }
