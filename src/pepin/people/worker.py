@@ -207,7 +207,10 @@ class People:
         speaker: tuple[Shot, Vector] | None = None
         others: tuple[Vector, ...] = ()
         if faces is not None:
-            looked, speaker, others = faces.result()
+            try:
+                looked, speaker, others = faces.result()
+            except Exception:  # the camera or the net failed: the voice still counts
+                logger.exception("person recognition could not look at the speaker")
         face: Vector | None = None
         face_px, face_gate, face_strong = 0.0, "", False
         if speaker is not None:

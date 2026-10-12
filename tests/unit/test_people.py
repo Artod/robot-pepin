@@ -243,6 +243,7 @@ def test_the_identity_net_loads_once_on_demand_and_lets_go() -> None:
     net.embed(shot)
     assert net.loaded and len(made) == 1 and net.name == "fake-face"
     assert net.unload() and not net.loaded and not net.unload()
+    assert net.name == "fake-face" and not net.loaded  # the name is kept, no load for it
     net.embed(shot)
     assert len(made) == 2
 

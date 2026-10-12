@@ -112,6 +112,7 @@ class IdentityNet:
         """``load`` builds the net (0.1 s warm; seconds the first time)."""
         self._load, self._clock = load, clock
         self._net: Embedder | None = None
+        self._name: str | None = None
         self._lock = threading.Lock()
         self.loads = 0
         self.last_used = -1e9
@@ -123,8 +124,8 @@ class IdentityNet:
 
     @property
     def name(self) -> str:
-        """The net's model name (loads it)."""
-        return self._get().name
+        """The net's model name (loads it the first time only)."""
+        return self._name if self._name is not None else self._get().name
 
     def warm(self) -> None:
         """Load it now."""
@@ -148,6 +149,7 @@ class IdentityNet:
             if self._net is None:
                 t0 = time.perf_counter()
                 self._net = self._load()
+                self._name = self._net.name
                 self.loads += 1
                 logger.info("identity net loaded in %.2f s", time.perf_counter() - t0)
             return self._net
