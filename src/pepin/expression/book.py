@@ -1,6 +1,6 @@
 """config/animation.json read into a :class:`pepin.expression.animation.Book`, checked whole.
 
-The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, note),
+The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, loop, note),
 ``compositions`` (name -> cooldown_s, variants of steps, note), ``poses`` (name -> joint ->
 degrees, taught by hand with ``scripts/gesture.py teach``), ``idle`` (the idle layers) and
 ``moments`` (a moment of the robot -> a composition). A parameter is a number or ``[lo, hi]``;
@@ -173,6 +173,7 @@ def _atom(name: str, body: Mapping[str, Any]) -> Atom:
         str(body.get("note", "")),
         mirror,
         bool(body.get("callable", True)),
+        bool(body.get("loop", False)),
     )
 
 

@@ -606,8 +606,14 @@ clip on the word by the player's clock, and plays it through each part's one own
 the laptop sends a whole trajectory (`arm_trajectory`) and the base server plays it on its tick,
 then rests and lets go of the torque by itself (`pepin.arm_driver`, `config/arm.json` `motion`:
 caps, limits, rest pose, torque limit). The face: the head server, source `expression`. The head:
-waits for the gaze arbiter's `clip` overlay (left out of every gesture until it lands). The
-wheels: none yet. The person starting to speak fades the gestures; a drive or the end of the
+the gaze arbiter's `clip` overlay on whatever holds it (the person, when the speaker gaze is on;
+home otherwise), source `voice.gesture` (`voice.idle` for the idle layer's fidget, which gives
+way to any gesture): each keyframe of the clip is written one move early with the speed ceiling
+that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/s², pan 2232),
+and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
+so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
+the gesture plays without its head. The wheels: none yet. The person starting to speak fades
+the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
 conversation sends every part to rest; markers are capped (`config/expression.json` `caps`).
 
 ```bash

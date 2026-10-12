@@ -29,8 +29,11 @@ person asks for takes the head from the conversation.
   ``POST /release`` with ``fade_s`` (the head's of config/expression.json's ``layers.fade_s``)
   takes it back over that long.
 
-On the door a clip is a :class:`ClipLook`, answered when it ends or is refused (a loop at once);
-:class:`pepin.gaze_link.GazeClient` sends it.
+On the door a clip is a :class:`ClipLook`, answered when it ends or is refused (a loop at once):
+:func:`pepin.expression.parts.clip_look` makes it from a rendered clip (each key written one move
+before its keyframe, at the speed that lands it on time), :class:`pepin.expression.parts.HeadPart`
+plays it, and :class:`pepin.expression.door.OverlayDoor` sends it with each source's
+:class:`pepin.gaze_link.GazeClient`.
 """
 
 from __future__ import annotations

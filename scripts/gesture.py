@@ -13,8 +13,9 @@ at a chosen speed and seed, teach a pose by hand.
 ``play`` renders the intent from config/animation.json (seed and variant printed, so a run is
 replayed with them), stretches its arm clip by 1/speed, checks it against config/arm.json's
 limits and caps scaled by the speed, and sends it to the base server, which plays it by itself
-and rests; the face's expressions go to the head server (source ``expression``); head steps
-wait for the gaze arbiter's overlay and are only printed. Ctrl-C during a play sends a halt.
+and rests; the face's expressions go to the head server (source ``expression``); the head's
+clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds the head
+(``--no-head`` leaves it out). Ctrl-C during a play sends a halt and releases the overlay.
 ``--dry-run`` prints the plan and sends nothing. ``teach`` reads the arm while its torque is off
 (move it by hand first) and writes the six angles as ``poses.NAME`` of config/animation.json.
 The board is ``PEPIN_HOST`` (or --host).
@@ -24,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 import time
@@ -35,14 +37,19 @@ from pepin.audio_link import board_host
 from pepin.expression.animation import Clip, Scene, Track
 from pepin.expression.arm_link import ArmClient
 from pepin.expression.book import book_from, load_book, with_rest
+from pepin.expression.door import OverlayDoor
+from pepin.expression.head import GESTURE, ClipLook
 from pepin.expression.mix import stretched
-from pepin.expression.parts import ArmPart
+from pepin.expression.parts import ArmPart, NeckLimits, clip_look
 from pepin.expression.render import BookRenderer
 from pepin.expression.trajectory import JOINTS, Trajectory
+from pepin.neck import NeckConfig
 
 REPO = Path(__file__).resolve().parents[1]
 BOOK = REPO / "config" / "animation.json"
 ARM = REPO / "config" / "arm.json"
+NECK = REPO / "config" / "neck.json"
+HEAD_FADE_S = 0.35  # config/expression.json's layers.fade_s.head
 POSES = re.compile(r'^  "poses": \{\n.*?^  \},\n', re.MULTILINE | re.DOTALL)
 DONE = ("done", "refused", "preempted", "halted")
 
@@ -111,7 +118,9 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
     print(f"{args.name}: seed {seed}, variant {performance.variant}"
           f" (replay: --seed {seed} --variant {performance.variant})")  # fmt: skip
     part = ArmPart(_NoLink(), motion, speed_scale=args.speed, knot_hz=args.knot_hz)
+    limits = NeckLimits.of(NeckConfig.from_json(NECK).motion)
     trajectory: Trajectory | None = None
+    overlay: ClipLook | None = None
     clips = [stretched(c, 1.0 / args.speed) if c.part == "arm" else c for c in performance.clips]
     start = min(c.offset_s for c in clips)
     for clip in clips:
@@ -128,6 +137,10 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         elif clip.part == "face":
             shown = [f"{e.name} for {e.hold_s or 2.0:.1f} s" for e in clip.events]
             print(f"  face at +{at:.2f} s: {', '.join(shown)}")
+        elif clip.part == "head":
+            overlay = None if args.no_head else clip_look(clip, GESTURE, limits)
+            plan = "left out (--no-head)" if args.no_head else _overlay(overlay)
+            print(f"  head at +{at:.2f} s: {plan}")
         else:
             print(f"  {clip.part} at +{at:.2f} s for {clip.duration_s:.1f} s: not played (no"
                   f" {clip.part} executor yet)")  # fmt: skip
@@ -139,6 +152,7 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
 
         face = HeadClient(args.host, source="expression").start()
     client = connect(args.host) if trajectory is not None else None
+    door = OverlayDoor() if overlay is not None else None
     try:
         began = time.monotonic()
         for clip in sorted(clips, key=lambda c: c.offset_s):
@@ -153,11 +167,17 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
             elif clip.part == "face" and face is not None:
                 for event in clip.events:
                     face.express(event.name, hold_s=event.hold_s or 2.0)
+            elif clip.part == "head" and door is not None and overlay is not None:
+                refusal = door.look(overlay)
+                print(f"  gaze arbiter: {'playing' if refusal is None else 'refused: ' + refusal}")
         if client is not None and trajectory is not None:
             end = client.wait_answer(trajectory.id, DONE, trajectory.knots[-1].t_s + 15.0)
             print(f"  board: {end.status if end else 'no answer'}"
                   f"{': ' + end.reason if end and end.reason else ''}")  # fmt: skip
     except KeyboardInterrupt:
+        if door is not None:
+            door.withdraw(GESTURE, HEAD_FADE_S)
+            print("\nthe head's overlay released")
         if client is not None:
             client.halt()
             print("\nhalt sent: the arm holds where it is, then rests by itself")
@@ -168,6 +188,20 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         if face is not None:
             face.close()
     return 0
+
+
+def _overlay(look: ClipLook | None) -> str:
+    """A head overlay in one line: its keys, its furthest offsets and its fastest key."""
+    if look is None:
+        return "no head motion"
+    keys = look["target"]["keys"]
+    pan = max(abs(k["pan_rad"]) for k in keys)
+    tilt = max(abs(k["tilt_rad"]) for k in keys)
+    fastest = max(k["speed_deg_s"] for k in keys)
+    return (
+        f"{len(keys)} keys over the holder's aim, pan up to {math.degrees(pan):.1f} deg, tilt"
+        f" up to {math.degrees(tilt):.1f} deg, fastest key {fastest:.0f} deg/s"
+    )
 
 
 def _peak(trajectory: Trajectory, motion: ArmMotion) -> str:
@@ -295,6 +329,7 @@ def main() -> int:
     p.add_argument("--variant", type=int, help="force a variant (with --seed: a replay)")
     p.add_argument("--knot-hz", type=float, default=25.0, help="knots a second at speed 1")
     p.add_argument("--no-face", action="store_true", help="leave the face alone")
+    p.add_argument("--no-head", action="store_true", help="leave the head alone")
     p.add_argument("--dry-run", action="store_true", help="print the plan, send nothing")
     n = sub.add_parser("nudge", help="one joint some degrees from rest and back, slowly")
     n.add_argument("joint", help=", ".join(JOINTS))

@@ -6,16 +6,16 @@
   "atoms": {
     "head_nod": {
       "part": "head", "mode": "additive", "stroke": 0.5,
-      "params": {"amp_deg": [3.0, 6.0], "lift_deg": [0.5, 1.5], "period_s": [0.35, 0.5], "repeats": 1},
-      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.15, "tilt_deg": "-$lift_deg"}, {"at": 0.5, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
-      "note": "down first with a 1 deg lift before it; the mast rings at 5.3 Hz after sharp tilts: tilt cycles stay under 2.5 Hz (period over 0.4 s at 3-6 deg)"
+      "params": {"amp_deg": [3.0, 6.0], "period_s": [0.4, 0.5], "repeats": 1},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.5, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "down and back up, at most 2.5 Hz: the gaze arbiter refuses a tilt that turns back sooner than 0.2 s (clip_max_hz 2.5; the mast rings at 5.3 Hz), and the tilt's 600 deg/s^2 ramp needs 0.2 s for a 6 deg stroke (4 d / T^2), so a 0.4 s cycle at 6 deg is both limits at once; no counter-lift before the stroke: a 1 deg lift in 0.06 s is a turn the arbiter refuses whatever its size"
     },
     "head_shake": {
       "part": "head", "mode": "additive", "stroke": 0.25,
-      "params": {"amp_deg": [4.0, 9.0], "period_s": [0.35, 0.45], "repeats": [1, 2]},
+      "params": {"amp_deg": [4.0, 8.0], "period_s": [0.5, 0.6], "repeats": [1, 2]},
       "keys": [{"at": 0.0, "pan_deg": 0.0}, {"at": 0.25, "pan_deg": "$amp_deg"}, {"at": 0.75, "pan_deg": "-$amp_deg"}, {"at": 1.0, "pan_deg": 0.0}],
       "mirror": ["pan_deg"],
-      "note": "no: either side first"
+      "note": "no: either side first; the pan's first quarter cycle needs 4 d / T^2 within its 2232 deg/s^2 ramp (config/neck.json): 8 deg in 0.125 s"
     },
     "head_back": {
       "part": "head", "mode": "additive", "stroke": 0.3,
@@ -44,10 +44,10 @@
       "note": "the stand-in for a head tilt (the neck has no roll)"
     },
     "recoil": {
-      "part": "head", "mode": "additive", "stroke": 0.15,
-      "params": {"amp_deg": [6.0, 10.0], "period_s": [0.9, 1.2]},
-      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.15, "tilt_deg": "-$amp_deg"}, {"at": 0.6, "tilt_deg": "-$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
-      "note": "a quick lift of the head (surprise), held, settled slowly"
+      "part": "head", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [5.0, 8.0], "period_s": [1.0, 1.3]},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "tilt_deg": "-$amp_deg"}, {"at": 0.6, "tilt_deg": "-$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "a quick lift of the head (surprise), held, settled slowly; as quick as the tilt's 600 deg/s^2 ramp allows: 8 deg in 0.25 s"
     },
     "head_drift": {
       "part": "head", "mode": "additive", "stroke": 0.3, "callable": false,
@@ -57,10 +57,10 @@
       "note": "the idle layer's fidget: a small slow look aside and back"
     },
     "breath": {
-      "part": "head", "mode": "additive", "stroke": 0.25, "callable": false,
+      "part": "head", "mode": "additive", "stroke": 0.25, "callable": false, "loop": true,
       "params": {"amp_deg": 0.6, "period_s": 4.0, "repeats": 3},
       "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "tilt_deg": "-$amp_deg"}, {"at": 0.75, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
-      "note": "+-0.6 deg at 0.25 Hz (config/face.json's breathe_hz); not in the idle layer while a head overlay blinds the speaker gaze's frames"
+      "note": "+-0.6 deg at 0.25 Hz (config/face.json's breathe_hz), a looped overlay (loop: the arbiter repeats it until released or lapsed); within the arbiter's clip_still_deg (1 deg) it never blinds the head; not in the idle list below"
     },
     "body_turn": {
       "part": "body", "mode": "additive", "stroke": 0.6,
@@ -141,10 +141,10 @@
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.3, -0.2], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
-          {"atom": "head_back", "p": 0.8, "params": {"amp_deg": [3.0, 5.0]}},
+          {"atom": "head_back", "p": 0.8, "params": {"amp_deg": [3.0, 5.0], "period_s": [1.0, 1.2]}},
           {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [3.4, 3.8]}},
           {"atom": "arm_wave", "at_s": [0.6, 0.9], "p": 0.7, "params": {"repeats": 2}},
-          {"atom": "head_nod", "at_s": [0.6, 0.9], "p": 0.5, "params": {"amp_deg": [2.0, 4.0]}}
+          {"atom": "head_nod", "at_s": [1.1, 1.3], "p": 0.5, "params": {"amp_deg": [2.0, 4.0]}}
         ]},
         {"weight": 1.0, "steps": [
           {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
@@ -176,7 +176,7 @@
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": ["grin", "happy"], "hold_s": [2.0, 3.0]}},
           {"atom": "head_back", "params": {"amp_deg": [6.0, 12.0], "period_s": [1.2, 1.6]}},
-          {"atom": "head_nod", "at_s": [1.4, 1.7], "p": 0.5, "params": {"amp_deg": [2.0, 3.0], "lift_deg": 0.5, "period_s": [0.45, 0.5], "repeats": [2, 3]}},
+          {"atom": "head_nod", "at_s": [1.4, 1.7], "p": 0.5, "params": {"amp_deg": [2.0, 3.0], "period_s": [0.45, 0.5], "repeats": [2, 3]}},
           {"atom": "gripper_click", "at_s": [0.3, 0.6], "p": 0.2, "params": {"repeats": [1, 2]}}
         ]},
         {"weight": 1.0, "steps": [
@@ -188,13 +188,18 @@
     },
     "doubt": {
       "cooldown_s": 15.0,
-      "note": "hmm: a skewed mouth, the wrist so-so, the head down a little and aside",
+      "note": "hmm: a skewed mouth, the wrist so-so, the head cocked (or down a little and aside)",
       "variants": [
-        {"steps": [
+        {"weight": 2.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.3], "p": 0.6},
+          {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}}
+        ]},
+        {"weight": 1.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
           {"atom": "wrist_turn", "at_s": [0.0, 0.3], "p": 0.6},
           {"atom": "head_drop", "p": 0.5, "params": {"amp_deg": [2.0, 3.0]}},
-          {"atom": "head_glance", "at_s": [0.2, 0.4], "p": 0.5, "params": {"side_deg": [6.0, 10.0], "up_deg": [0.0, 2.0]}}
+          {"atom": "head_glance", "at_s": [0.2, 0.4], "p": 0.5, "params": {"side_deg": [6.0, 10.0], "up_deg": 0.0}}
         ]}
       ]
     },
@@ -247,7 +252,7 @@
       "note": "no: a shake or two, a flat mouth, the wrist so-so now and then",
       "variants": [
         {"steps": [
-          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 9.0]}},
+          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 8.0]}},
           {"atom": "face", "p": 0.7, "params": {"name": "flat", "hold_s": [1.5, 2.0]}},
           {"atom": "wrist_turn", "at_s": [0.2, 0.4], "p": 0.2}
         ]}
@@ -260,7 +265,7 @@
         {"steps": [
           {"atom": "arm_flourish", "at_s": [-0.1, 0.1], "p": 0.7},
           {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
-          {"atom": "head_glance", "p": 0.5, "params": {"side_deg": [4.0, 6.0], "up_deg": [0.0, 1.0]}},
+          {"atom": "head_glance", "p": 0.5, "params": {"side_deg": [4.0, 6.0], "up_deg": 0.0}},
           {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}}
         ]}
       ]
@@ -280,10 +285,14 @@
     },
     "sympathy": {
       "cooldown_s": 20.0,
-      "note": "small and slow: the head down, a worried mouth, no arm",
+      "note": "small and slow: the head down (or cocked), a worried mouth, no arm",
       "variants": [
-        {"steps": [
+        {"weight": 2.0, "steps": [
           {"atom": "head_drop", "params": {"amp_deg": [4.0, 6.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "head_cock", "params": {"pan_deg": [5.0, 7.0], "tilt_deg": [3.0, 4.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}}
         ]}
       ]

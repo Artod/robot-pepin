@@ -57,7 +57,7 @@ from pepin.expression.conversation import GESTURES, Heard
 from pepin.expression.executors import Executor, Outcome
 from pepin.expression.markers import Cue, Part, Playout, cues, sync_s
 from pepin.expression.mix import stretched
-from pepin.expression.parts import ArmPart
+from pepin.expression.parts import ArmPart, HeadPart
 from pepin.expression.render import BookRenderer, WeightedChooser
 
 logger = logging.getLogger(__name__)
@@ -199,7 +199,7 @@ class GestureEngine:
         self.seeds = seeds or random.Random()
         self.book, self.config = load()
         self.renderer = BookRenderer(self.book, WeightedChooser())
-        self._apply_speed()
+        self._apply_knobs()
         self._on = on
         self._lock = threading.RLock()
         self._wake = threading.Condition(self._lock)
@@ -245,7 +245,7 @@ class GestureEngine:
             with self._lock:  # the engine's thread holds it for a whole step
                 self.book, self.config = book, config
                 self.renderer = BookRenderer(book, self.renderer.chooser)
-                self._apply_speed()
+                self._apply_knobs()
                 self._on = True
                 self._idle_next.clear()
                 self._wake.notify()
@@ -711,8 +711,12 @@ class GestureEngine:
             self._send(Waiting(performance, clip, "idle"), now, None)
         return wait
 
-    def _apply_speed(self) -> None:
-        """The arm's part checks against the speed scale its clips are stretched by."""
+    def _apply_knobs(self) -> None:
+        """The arm's part checks against the speed scale its clips are stretched by; the head's
+        rest eases back over the head's fade."""
         arm = self.parts.get("arm")
         if isinstance(arm, ArmPart):
             arm.speed_scale = self.config.arm_speed_scale
+        head = self.parts.get("head")
+        if isinstance(head, HeadPart):
+            head.fade_s = self.config.fade_s.get("head", head.fade_s)

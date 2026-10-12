@@ -70,7 +70,8 @@ class Atom:
     """A parametrised motion primitive of one part (config/animation.json's ``atoms``);
     ``mirror`` names the degrees of freedom whose values change sign when a rendering draws
     the mirror image (a glance left or right), ``callable`` False keeps it out of every
-    composition the brain may name (the idle layer's own)."""
+    composition the brain may name (the idle layer's own), ``loop`` marks the idle layer's
+    clip of it as repeating on its part's owner until withdrawn (the breath)."""
 
     name: str
     part: PartName
@@ -81,6 +82,7 @@ class Atom:
     note: str = ""
     mirror: tuple[str, ...] = ()
     callable: bool = True
+    loop: bool = False
 
 
 @dataclass(frozen=True)
@@ -162,7 +164,8 @@ class Event:
 class Clip:
     """What one part plays of a performance: its tracks and events, when it starts relative to
     the performance's sync point (negative: before the word), where its stroke and its end are
-    (seconds from its start), and the layer it plays on."""
+    (seconds from its start), the layer it plays on, and whether its owner repeats it until
+    withdrawn (``loop``: an idle atom's, :attr:`Atom.loop`)."""
 
     part: PartName
     offset_s: float
@@ -171,6 +174,7 @@ class Clip:
     tracks: tuple[Track, ...] = ()
     events: tuple[Event, ...] = ()
     layer: Layer = "gesture"
+    loop: bool = False
 
 
 @dataclass(frozen=True)

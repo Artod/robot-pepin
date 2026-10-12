@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import random
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from pepin.expression.animation import (
     HOLD,
@@ -99,10 +99,27 @@ class BookRenderer:
         return Performance(intent, seed, index, clips, cue)
 
     def render_atom(self, name: str, seed: int, layer: Layer = "idle") -> Clip:
-        """One atom alone, its parameters drawn from its own ranges (the idle layer's)."""
+        """One atom alone, its parameters drawn from its own ranges (the idle layer's); a
+        looping atom's clip is marked to repeat on its owner."""
         drawn = self._draw(Step(name), random.Random(seed))
+        return self._alone(drawn, layer)
+
+    def atom_clip(
+        self,
+        name: str,
+        params: Mapping[str, float],
+        *,
+        mirrored: bool = False,
+        layer: Layer = "gesture",
+    ) -> Clip:
+        """One atom alone at the given parameters (every one of its own, the reserved ones
+        included when it has them), mirrored or not: the extremes the authoring checks play."""
+        atom = self.book.atoms[name]
+        return self._alone(Drawn(Step(name), atom, True, 0.0, params, {}, mirrored), layer)
+
+    def _alone(self, drawn: Drawn, layer: Layer) -> Clip:
         (clip,) = merge([self._unroll(drawn)], layer)
-        return clip
+        return replace(clip, loop=drawn.atom.loop)
 
     def _draw(self, step: Step, rng: random.Random) -> Drawn:
         atom = self.book.atoms[step.atom]
