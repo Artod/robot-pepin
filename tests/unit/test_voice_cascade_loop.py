@@ -21,6 +21,7 @@ from pepin.audio_link import FRAME_SAMPLES, RATE
 from pepin.expression.conversation import GESTURES, SLOW_TOOL, Heard
 from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.expression.markers import EMPTY, Vocabulary
+from pepin.perception.source import VisionSource
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.config import BrainConfig, CascadeConfig, FillerBook, VoiceConfig
@@ -98,6 +99,8 @@ class Rig:
         people: Any = None,
         clock: Callable[[], float] = time.monotonic,
         clips: bool = False,
+        knobs: Sequence[Any] = (),
+        cells: Sequence[Callable[[], str]] = (),
         **config: Any,
     ) -> None:
         """``clips``: the voice makes the fillers' clips before the scenario (the only way a
@@ -138,6 +141,8 @@ class Rig:
             vocabulary=vocabulary,
             people=people,
             clock=clock,
+            knobs=knobs,
+            cells=cells,
         )
         self.stop = threading.Event()
         self.speech.start()
@@ -532,6 +537,54 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
     ]  # fmt: skip
     assert observer.calls[-1] == ("closed", ("stopped",))
+
+
+def test_a_knob_switches_live_and_each_turn_line_ends_with_the_cells(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """``vision.source`` set through the control file is applied at once and answered as a knob;
+    an unknown knob and a value the knob does not take are answered failed; the turn's line
+    carries the vision cell, and a cell that breaks is left out."""
+    board = Switchboard(
+        ControlFile(tmp_path),
+        configure=lambda brain, voice: CascadeConfig(),
+        build_brain=lambda config, name: BrainSetup(
+            ScriptedBrain(), config, name, set(), set(), paid=False
+        ),
+        build_voice=lambda v: ToneVoice(rate=RATE),
+        brain="first",
+        voice="first-voice",
+    )
+    source = VisionSource()
+
+    def broken() -> str:
+        raise RuntimeError("no cell")
+
+    rig = Rig(tmp_path, ["Пепин, что видишь?"], [["Вижу стол."]], switchboard=board,
+              knobs=[source], cells=[lambda: "vision 20.0 in", broken])  # fmt: skip
+    asked: list[str] = []
+
+    async def scenario(rig: Rig) -> None:
+        good = write_request(tmp_path, None, None, knobs={"vision.source": "snapshot", "x": "1"})
+        asked.append(good.id)
+        await until(lambda: len(answers_to(tmp_path, good.id)) == 2)
+        bad = write_request(tmp_path, None, None, knobs={"vision.source": "gpu"})
+        asked.append(bad.id)
+        await until(lambda: len(answers_to(tmp_path, bad.id)) == 1)
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert source.value == "snapshot"
+    answers = {r["name"]: r for r in answers_to(tmp_path, asked[0])}
+    assert answers["vision.source"]["state"] == "applied"
+    assert answers["vision.source"]["what"] == "knob"
+    assert answers["vision.source"]["value"] == "snapshot"
+    assert answers["x"]["state"] == "failed" and "vision.source" in answers["x"]["error"]
+    (refused,) = answers_to(tmp_path, asked[1])
+    assert refused["state"] == "failed" and "service, snapshot" in refused["error"]
+    lines = [line for line in capsys.readouterr().out.splitlines() if line.startswith("  [")]
+    assert lines and lines[-1].endswith(" | vision 20.0 in")
 
 
 class SkewClock:

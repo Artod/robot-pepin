@@ -82,7 +82,7 @@ from pepin.tools.registry import Result, fail, ok, progress_to, render
 from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
 from pepin.voice_cascade.brain import END_CONVERSATION
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
-from pepin.voice_cascade.control import FLAG, Request, Switchboard
+from pepin.voice_cascade.control import FLAG, KNOB, LiveKnob, Request, Switchboard
 from pepin.voice_cascade.ears import EarEvent, Ears
 from pepin.voice_cascade.fillers import Context, FillerEngine, again_due, thinking_due
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
@@ -288,11 +288,14 @@ class CascadeLoop:
         vocabulary: Vocabulary = EMPTY,
         people: SpeakerId | None = None,
         judge: TextJudge | None = None,
+        knobs: Sequence[LiveKnob] = (),
+        cells: Sequence[Callable[[], str]] = (),
     ) -> None:
         """``tools`` runs a registry tool by name; ``allowed`` names those the brain may call,
         ``moving`` those that drive; ``ledger`` None spends nothing worth recording (a fake
         brain); ``switchboard``: the brain and the voice may be switched while it runs;
-        ``observers`` hear the conversation's moments, ``flags`` are switched by name;
+        ``observers`` hear the conversation's moments, ``flags`` and ``knobs`` are switched by
+        name; ``cells``: more cells for each turn's line, read from memory (the vision cell);
         ``vocabulary``: the intents and faces a marker may name (any other bare name is a
         voice style, a spelled-out unknown one is dropped); ``people``: who said each
         utterance, named in the tag line while its switch is on; ``judge``: two-gates' reader
@@ -356,6 +359,8 @@ class CascadeLoop:
         self._log_resampler: tuple[int, int, Resampler] | None = None
         self.observers: list[ConversationObserver] = list(observers)
         self.flags: dict[str, LiveFlag] = {flag.flag: flag for flag in flags}
+        self.knobs: dict[str, LiveKnob] = {knob.knob: knob for knob in knobs}
+        self.cells = list(cells)
         self.vocabulary = vocabulary
         self.people = people
         self._people = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people")
@@ -1248,7 +1253,7 @@ class CascadeLoop:
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
-                f" | {voice_cell(reply)}" + eot_cell,
+                f" | {voice_cell(reply)}" + eot_cell + self._cells(),
                 flush=True,
             )
         if conversation is not None:
@@ -1342,7 +1347,8 @@ class CascadeLoop:
                   brain=self.brain_name, voice=self.voice_name,
                   flags={"barge_in": cfg.barge_in, "backchannel": cfg.backchannel,
                          "prosody_tags": cfg.prosody_tags,
-                         **{name: flag.on for name, flag in self.flags.items()}})  # fmt: skip
+                         **{name: flag.on for name, flag in self.flags.items()}},
+                  knobs={name: knob.value for name, knob in self.knobs.items()})  # fmt: skip
         if self.ledger is not None:
             self.ledger.record(sid, wall, 0.0)
         print(
@@ -1484,7 +1490,8 @@ class CascadeLoop:
         asked = (("brain", request.brain), ("voice", request.voice),
                  ("transcriber", request.transcriber),
                  *((f"flag {name}", "on" if on else "off")
-                   for name, on in request.flags.items()))  # fmt: skip
+                   for name, on in request.flags.items()),
+                 *((f"knob {name}", value) for name, value in request.knobs.items()))  # fmt: skip
         print("  (switch asked: " + ", ".join(f"{k} {v}" for k, v in asked if v) + ")", flush=True)
         if request.brain:
             self._spawn(self._switch_brain(request.id, request.brain))
@@ -1494,6 +1501,31 @@ class CascadeLoop:
             self.switchboard.switch_transcriber(request.id, request.transcriber)
         for name, on in request.flags.items():
             self._switch_flag(request.id, name, on)
+        for name, value in request.knobs.items():
+            self._switch_knob(request.id, name, value)
+
+    def _switch_knob(self, request: str, name: str, value: str) -> None:
+        """A live knob set (on the event loop: it applies at its next use); answered for
+        ``request``."""
+        board = self.switchboard
+        assert board is not None
+        knob = self.knobs.get(name)
+        why: str | None
+        if knob is None:
+            why = f"no such knob ({', '.join(self.knobs) or 'none in this run'})"
+        else:
+            try:
+                why = knob.set(value)
+            except Exception as error:  # a knob that breaks switching is reported, not fatal
+                logger.exception("knob %s: the switch broke", name)
+                why = f"{type(error).__name__}: {error}"[:300]
+        if why is not None:
+            board.answer(request, KNOB, name, "failed", value=value, error=why)
+            print(f"  !! knob {name}={value}: {why}", flush=True)
+            return
+        self._event("switch", knob=name, value=value)
+        board.answer(request, KNOB, name, "applied", value=value)
+        print(f"  (knob {name}: {value})", flush=True)
 
     def _switch_flag(self, request: str, name: str, on: bool) -> None:
         """A feature turned on or off (on the event loop: a flag switches at once, its own
@@ -1631,6 +1663,17 @@ class CascadeLoop:
         conversation = self.conversation
         if conversation is not None:
             conversation.log.event(kind, self.clock(), **fields)
+
+    def _cells(self) -> str:
+        """The extra cells of a turn's line (`` | vision ...``), each read from memory; a cell
+        that raises is left out."""
+        out = ""
+        for cell in self.cells:
+            try:
+                out += f" | {cell()}"
+            except Exception:  # a status line never stops a turn
+                logger.exception("a status cell broke")
+        return out
 
     def _tell(self, moment: str, *args: Any) -> None:
         """Every observer hears ``moment`` (a method of ConversationObserver) with ``args``;

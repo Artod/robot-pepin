@@ -3,8 +3,9 @@
 The tools hold no truth of their own (``.claude/research/brain/CONTRACTS.md``): where the robot
 is and the places are the goal server's (TCP 3337, :mod:`pepin.goal_link`), the head is the gaze
 arbiter's (HTTP 3339 on this Mac, :mod:`pepin.gaze_link`), what is where is ``world``'s (HTTP
-8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the camera's
-(ustreamer, HTTP 8080).
+8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the one camera
+channel's (the perception service, HTTP 8792 on this Mac, fed by camera_stream), or ustreamer's
+(HTTP 8080 on the board) while the live ``vision.source`` says snapshot.
 Each client here speaks one of them and nothing else; none of them can send the wheels a twist.
 
 Every Protocol is what a tool relies on, so a fake stands in for a service in the tests
@@ -30,12 +31,16 @@ import wave
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pepin import goal_link
 from pepin.gaze_link import GAZE_PORT, ask
 from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
+
+if TYPE_CHECKING:
+    from pepin.perception.client import Perception
+    from pepin.perception.source import VisionSource
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +52,7 @@ GAZE_URL = f"http://127.0.0.1:{GAZE_PORT}"  # the gaze arbiter's door, beside Na
 # the answer is waited a little longer than that.
 LOOK_ANSWER_S = 15.0
 HTTP_TIMEOUT_S = 3.0
+MOVING_PHASES = ("saccade", "returning")  # the arbiter's phases of a head on its way
 
 
 class ServiceDownError(ToolError):
@@ -131,10 +137,14 @@ class GoalServerLink:
 @dataclass(frozen=True)
 class HeadPose:
     """Where the head points: ``pan_deg`` left of the nose (+) or right (-), ``tilt_deg`` below
-    level (+) or above it (-)."""
+    level (+) or above it (-); when the arbiter said, whether it is moving now and from which
+    moment (the board's clock) its pictures are still (its ``blind_until``: settled plus one
+    frame period)."""
 
     pan_deg: float
     tilt_deg: float
+    moving: bool = field(default=False, compare=False)
+    still_from: float | None = field(default=None, compare=False)
 
     def as_dict(self) -> dict[str, float]:
         """The pose as a tool's payload, rounded to a tenth of a degree."""
@@ -243,12 +253,16 @@ class GazeNeck:
         return HeadPose(0.0, self.cfg.reference.pitch_deg)
 
     def pose(self) -> HeadPose:
-        """The encoders' newest reading, as the arbiter heard it, in degrees."""
+        """The encoders' newest reading, as the arbiter heard it, in degrees, with its phase
+        (a saccade or a return is a move) and ``blind_until`` (still from then on)."""
         state = self._ask("/state", None, HTTP_TIMEOUT_S)
         pan, tilt = state.get("pan_rad"), state.get("tilt_rad")
         if pan is None or tilt is None:
             raise ToolError("the neck's encoders have not been heard (is the board's neck up?)")
-        return HeadPose(_deg(float(pan)), _deg(float(tilt)))
+        until = state.get("blind_until")
+        still_from = float(until) if isinstance(until, (int, float)) else None
+        moving = state.get("phase") in MOVING_PHASES
+        return HeadPose(_deg(float(pan)), _deg(float(tilt)), moving, still_from)
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
         """A look at those angles, held for the person band's TTL; an axis left None stays
@@ -401,13 +415,88 @@ def _fetch(
 class Camera(Protocol):
     """The head camera: one picture on demand."""
 
-    def snapshot(self) -> Image:
-        """The newest frame as a JPEG: for a stereo head, the left eye, upright."""
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The newest frame as a JPEG: for a stereo head, the left eye, upright. A camera that
+        keeps frames already taken (the perception service's ring) gives the newest one exposed
+        at ``not_before`` (the board's clock: the head still from then on) or later, waiting up
+        to ``wait_s`` for one; one that takes its picture now may ignore both."""
         ...
 
     def health(self) -> dict[str, Any]:
         """Whether the camera streams, and at what rate."""
         ...
+
+
+class ServiceCamera:
+    """:class:`Camera` over the perception service's ring (:mod:`pepin.perception`): the JPEG
+    camera_stream sent of its rectified left eye, the same bytes and frame number the gaze's
+    and person recognition's records came from, from the loopback (< 1 ms); never a snapshot of
+    its own. The service down is an error that names it and how to start it."""
+
+    HINT = (
+        "Start it with ros/models.sh start perception (it is fed by camera_stream in"
+        " pepin-vslam, flag perception_feed). For today ustreamer's snapshots serve instead:"
+        " scripts/voice_cascade.py switch --knob vision.source=snapshot in the running voice,"
+        " or perception.source snapshot in config/models.json for a process started after"
+    )
+
+    def __init__(self, service: Perception) -> None:
+        """The service's client."""
+        self.service = service
+
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The newest frame exposed at ``not_before`` or later, waited for up to ``wait_s``,
+        else the newest there is (marked not still)."""
+        frame = self.service.still(not_before, wait_s)
+        if frame is None:
+            raise self._down()
+        return Image(
+            frame.data,
+            "image/jpeg",
+            frame.width,
+            frame.height,
+            frame={"seq": frame.seq, "still": frame.still, "optics": frame.optics},
+        )
+
+    def health(self) -> dict[str, Any]:
+        """The service's frames: whether they come, their rate, the eye's size."""
+        h = self.service.health()
+        if h is None:
+            raise self._down()
+        frames = h.get("frames", {})
+        idle = frames.get("idle_s")
+        return {
+            "online": idle is not None and float(idle) < 2.0,
+            "fps": frames.get("per_s"),
+            "source": f"perception service ({self.service.url})",
+        }
+
+    def _down(self) -> ServiceDownError:
+        why = getattr(self.service, "last_error", "") or "no answer"
+        if not getattr(self.service, "down", False) and self.service.health() is not None:
+            why = "it has no frame: camera_stream is not feeding it"
+        return ServiceDownError("perception service", self.service.url, why, self.HINT)
+
+
+class SwitchedCamera:
+    """:class:`Camera` that asks the live ``vision.source`` at every picture: the perception
+    service's ring, or ustreamer's snapshot (the path before it)."""
+
+    def __init__(self, source: VisionSource, service: Camera, snapshot: Camera) -> None:
+        self.source, self.service, self.snapshot_camera = source, service, snapshot
+
+    @property
+    def current(self) -> Camera:
+        """The camera the switch names now."""
+        return self.service if self.source.service else self.snapshot_camera
+
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The current camera's picture."""
+        return self.current.snapshot(not_before, wait_s)
+
+    def health(self) -> dict[str, Any]:
+        """The current camera's health."""
+        return self.current.health()
 
 
 class UstreamerCamera:
@@ -424,8 +513,9 @@ class UstreamerCamera:
         self.base = f"http://{host}:{port}"
         self.timeout_s = timeout_s
 
-    def snapshot(self) -> Image:
-        """``GET /snapshot``, cut to one eye when the head is a stereo rig."""
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """``GET /snapshot``, cut to one eye when the head is a stereo rig (taken now: the
+        stamp and the wait are not needed)."""
         data = _fetch(
             urllib.request.Request(self.base + "/snapshot"),
             self.timeout_s,

@@ -13,6 +13,7 @@ import os
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
 from pepin import goal_link
 from pepin.expression.executors import Animator
@@ -34,17 +35,24 @@ from pepin.tools.clients import (
     GoalServerLink,
     HeadFace,
     Neck,
+    ServiceCamera,
     Speech,
+    SwitchedCamera,
     UstreamerCamera,
     World,
     WorldHttp,
 )
 from pepin.tools.registry import ToolError
 
+if TYPE_CHECKING:
+    from pepin.perception.client import Perception
+    from pepin.perception.source import VisionSource
+
 logger = logging.getLogger(__name__)
 
 BOARD_HOST = "10.0.0.187"  # the board, as the ros/*.sh scripts default it
 DRIVE_TIMEOUT_S = 240.0  # a drive that has not ended by then is cancelled: nobody queues motions
+STILL_WAIT_S = 0.3  # see's wait for the first still frame (config/models.json perception)
 
 
 @dataclass(frozen=True)
@@ -95,19 +103,43 @@ class Robot:
     drive_timeout_s: float = DRIVE_TIMEOUT_S
     animator: Animator | None = None  # the gesture engine, where one runs (the voice cascade)
     people: PeopleDoor | None = None  # person recognition, where it runs (the voice cascade)
+    still_wait_s: float = STILL_WAIT_S  # see: the longest wait for the first still frame
 
     @classmethod
-    def connect(cls, endpoints: Endpoints | None = None) -> Robot:
-        """The real clients at ``endpoints`` (:meth:`Endpoints.from_env` when None)."""
+    def connect(
+        cls,
+        endpoints: Endpoints | None = None,
+        *,
+        vision: VisionSource | None = None,
+        perception: Perception | None = None,
+    ) -> Robot:
+        """The real clients at ``endpoints`` (:meth:`Endpoints.from_env` when None). The
+        picture is the perception service's (``perception``, else a client of config/
+        models.json's) while ``vision`` (the live ``vision.source``; else its start value)
+        says service, ustreamer's snapshot otherwise."""
+        from pepin.perception.client import PerceptionClient
+        from pepin.perception.config import PerceptionConfig
+        from pepin.perception.source import VisionSource
+
         where = endpoints or Endpoints.from_env()
+        try:
+            channel = PerceptionConfig.load()
+        except (OSError, ValueError) as error:
+            logger.warning("config/models.json perception: %s; its defaults", error)
+            channel = PerceptionConfig()
+        source = vision if vision is not None else VisionSource(channel.source)
+        service = perception if perception is not None else PerceptionClient(channel.url)
         return cls(
             goals=GoalServerLink(where.goal_host, where.goal_port),
             neck=GazeNeck(where.gaze_url),
             world=WorldHttp(where.world_url),
-            camera=UstreamerCamera(where.board, where.camera_port),
+            camera=SwitchedCamera(
+                source, ServiceCamera(service), UstreamerCamera(where.board, where.camera_port)
+            ),
             speech=BoardSpeech(where.board, where.audio_port),
             face=HeadFace(where.board, where.head_port),
             body=BaseBody(where.board, where.base_port),
+            still_wait_s=channel.see_wait_s,
         )
 
     def halt(self) -> str:

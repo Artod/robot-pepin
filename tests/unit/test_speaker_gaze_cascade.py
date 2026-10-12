@@ -124,7 +124,7 @@ class StampedFinder:
 
     times: list[float] = field(default_factory=list)
 
-    def look(self) -> FaceFrame | None:
+    def look(self, not_before: float | None = None) -> FaceFrame | None:
         self.times.append(time.monotonic())
         return frame(face(0.0))
 

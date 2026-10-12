@@ -27,6 +27,13 @@ about a second, a voice once its model has loaded, a transcriber between utteran
     uv run python scripts/voice_cascade.py switch --transcriber whispercpp
     uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
     uv run python scripts/voice_cascade.py switch --flag people=on     # config/people.json
+    uv run python scripts/voice_cascade.py switch --knob vision.source=snapshot  # models.json
+
+The pictures (the speaker gaze's faces, person recognition, ``see``) come from the perception
+service on this Mac (``ros/models.sh start perception``, fed by camera_stream); the voice process
+holds none. ``vision.source=snapshot`` goes back to ustreamer's snapshots decoded here, for a
+day the service is broken. Each turn's line ends with the vision cell (frames in and detected a
+second, the detector's ms, the faces and people in the newest record).
 
 The other speech-to-text engines (pepin.voice_cascade.stt: gigaam, parakeet, canary, voxtral)
 need their runtime once, ``uv sync --group stt-<engine>`` (several --group flags add several),
@@ -63,10 +70,15 @@ from typing import Any
 
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
-from pepin.expression.finder import SnapshotFinder, board_finder
+from pepin.expression.finder import SwitchedFinder, robot_finder
 from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
 from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
 from pepin.people.worker import robot_people
+from pepin.perception.client import HealthWatch, PerceptionClient
+from pepin.perception.config import PerceptionConfig
+from pepin.perception.source import KNOB as VISION_KNOB
+from pepin.perception.source import SOURCES as VISION_SOURCES
+from pepin.perception.source import VisionSource
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.bench import ReplayMic, utterances
@@ -80,6 +92,7 @@ from pepin.voice_cascade.config import (
 from pepin.voice_cascade.control import (
     DONE_STATES,
     FLAG,
+    KNOB,
     ControlFile,
     Switchboard,
     answers_to,
@@ -162,6 +175,25 @@ def parse_flags(items: list[str], known: set[str]) -> dict[str, bool]:
             raise ValueError(f"--flag {name!r}: one of {', '.join(sorted(known))}")
         flags[name] = wanted
     return flags
+
+
+KNOBS: dict[str, tuple[str, ...]] = {VISION_KNOB: VISION_SOURCES}  # live knobs, their values
+
+
+def parse_knobs(items: list[str], known: dict[str, tuple[str, ...]]) -> dict[str, str]:
+    """``["vision.source=snapshot"]`` as ``{name: value}``; ``ValueError`` naming an item that
+    is not ``NAME=VALUE``, a knob the loop does not carry or a value it does not take."""
+    knobs: dict[str, str] = {}
+    for item in items:
+        name, _, value = item.partition("=")
+        if not name or not value:
+            raise ValueError(f"--knob {item!r}: NAME=VALUE")
+        if name not in known:
+            raise ValueError(f"--knob {name!r}: one of {', '.join(sorted(known))}")
+        if value not in known[name]:
+            raise ValueError(f"--knob {name}: {value!r} is not one of {', '.join(known[name])}")
+        knobs[name] = value
+    return knobs
 
 
 def expression_flags() -> set[str]:
@@ -301,14 +333,20 @@ def switch(argv: list[str]) -> int:
         help="a feature's switch, live: gestures, speaker_gaze (config/expression.json),"
         " people (config/people.json)",
     )  # fmt: skip
+    ap.add_argument(
+        "--knob", action="append", default=[], metavar="NAME=VALUE",
+        help="a live knob: vision.source=service|snapshot (the pictures: the perception"
+        " service, or ustreamer's snapshots decoded here)",
+    )  # fmt: skip
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
     ap.add_argument("--wait-s", type=float, default=SWITCH_WAIT_S)
     args = ap.parse_args(argv)
-    if not (args.brain or args.voice or args.transcriber or args.flag):
-        ap.error("--brain, --voice, --transcriber, --flag, or several")
+    if not (args.brain or args.voice or args.transcriber or args.flag or args.knob):
+        ap.error("--brain, --voice, --transcriber, --flag, --knob, or several")
     try:
         flags = parse_flags(args.flag, expression_flags())
+        knobs = parse_knobs(args.knob, KNOBS)
     except ValueError as error:
         print(error)
         return 2
@@ -326,14 +364,18 @@ def switch(argv: list[str]) -> int:
     if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
         print(f"transcriber {args.transcriber!r}: {', '.join(TRANSCRIBER_ENGINES)} or engine:model")
         return 2
-    request = write_request(args.logs, args.brain, args.voice, args.transcriber, flags)
+    request = write_request(args.logs, args.brain, args.voice, args.transcriber, flags, knobs)
     print(
         f"asked ({request.id}): brain {args.brain}, voice {args.voice},"
-        f" transcriber {args.transcriber}, flags {flags or None}",
+        f" transcriber {args.transcriber}, flags {flags or None}, knobs {knobs or None}",
         flush=True,
     )
     asked = (("brain", args.brain), ("voice", args.voice), ("transcriber", args.transcriber))
-    parts = {what for what, name in asked if name} | {f"{FLAG} {name}" for name in flags}
+    parts = (
+        {what for what, name in asked if name}
+        | {f"{FLAG} {name}" for name in flags}
+        | {f"{KNOB} {name}" for name in knobs}
+    )
     deadline = time.monotonic() + args.wait_s
     shown = 0
     failed = False
@@ -344,7 +386,7 @@ def switch(argv: list[str]) -> int:
             print(f"  {row['what']} {row['name']}: {row['state']} {json.dumps(extra)}", flush=True)
         shown = len(rows)
         done = {
-            f"{FLAG} {row['name']}" if row["what"] == FLAG else row["what"]
+            f"{row['what']} {row['name']}" if row["what"] in (FLAG, KNOB) else row["what"]
             for row in rows
             if row["state"] in DONE_STATES
         }
@@ -439,6 +481,15 @@ def main() -> int:
 
     bench = args.bench is not None
     fake_drive_s = args.fake_robot if args.fake_robot is not None else 5.0 if bench else None
+    # The one camera channel: the perception service's client and the live vision.source,
+    # shared by the gaze's finder, person recognition and see.
+    try:
+        channel = PerceptionConfig.load()
+    except (OSError, ValueError) as error:
+        print(f"config/models.json perception: {error}; its defaults")
+        channel = PerceptionConfig()
+    vision = VisionSource(channel.source)
+    perception = PerceptionClient(channel.url)
     if fake_drive_s is not None:
         clock = WallClock()
         step_s = max(0.0, fake_drive_s - FAKE_ACCEPT_S) / 3  # accepted, 2 reports, done
@@ -446,7 +497,7 @@ def main() -> int:
         robot = fake_robot(clock=clock, goals=goals, camera=FakeCamera(jpeg=fake_view_jpeg()))
         print(f"FAKE ROBOT: nothing moves; a drive takes {fake_drive_s:.1f} s", flush=True)
     else:
-        robot = Robot.connect()
+        robot = Robot.connect(vision=vision, perception=perception)
 
     def run_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return TOOLS.call(name, arguments, robot)
@@ -547,14 +598,17 @@ def main() -> int:
     else:
         mic = link or BoardLink(args.host)
     gaze: SpeakerGazeWorker | None = None
-    finder: SnapshotFinder | None = None
+    finder: SwitchedFinder | None = None
+    watch: HealthWatch | None = None
     on_robot = isinstance(mic, BoardLink) and fake_drive_s is None
     if on_robot:  # one face finder for the speaker gaze and person recognition
-        try:
-            finder = board_finder(args.host)  # config reads only: the detector loads on warm()
-        except (OSError, ValueError, KeyError) as exc:
-            print(f"no face finder ({exc}): the gaze turns to the voice, people by voice only")
-    people = robot_people(finder)  # voices only without the robot's camera
+        # The perception service's records, or (vision.source snapshot) the snapshot finder,
+        # built and loaded only when that switch is turned.
+        finder = robot_finder(args.host, vision, perception, wait_s=channel.look_wait_s)
+        watch = HealthWatch(perception).start()  # the vision cell, read from memory
+    people = robot_people(  # voices only without the robot's camera
+        finder, service=perception if on_robot else None, source=vision
+    )
     robot.people = people  # the remember_person / forget_person tools' door
     # The wheels' one owner for the gaze's turn and the gestures' body (no I/O until a motion;
     # each moves only behind its own flag); the guard stops them when the person speaks.
@@ -610,6 +664,8 @@ def main() -> int:
         vocabulary=body.vocabulary,
         people=people,
         judge=judge,
+        knobs=[vision],
+        cells=[watch.cell] if watch is not None else [],
     )
     loop.paid_ledger = ledger
     holder.append(loop)
@@ -622,9 +678,11 @@ def main() -> int:
         f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
         f" {config.prosody_tags}, turn_model {config.turn_model}, speculative {b.speculative},"
         f" first sentence {b.first_sentence_words or 'as the persona says'}, gestures"
-        f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'}. Logs:"
+        f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'},"
+        f" vision.source {vision.value}"
+        f"{f' ({watch.cell()})' if watch is not None else ''}. Logs:"
         f" {args.logs}; switch: scripts/voice_cascade.py switch --brain NAME --voice NAME"
-        " --flag gestures=on",
+        " --flag gestures=on --knob vision.source=snapshot",
         flush=True,
     )
     try:
@@ -639,6 +697,8 @@ def main() -> int:
         if wheels is not None:
             wheels.close()
         people.close()
+        if watch is not None:
+            watch.close()
         speech.close()
         if turn is not None:
             turn.close()

@@ -80,6 +80,9 @@ class Image:
     mime: str = "image/jpeg"
     width: int = 0
     height: int = 0
+    # Where it came from (the perception ring's frame number, whether it was still), for the
+    # payload beside it; empty for a picture with no such facts.
+    frame: dict[str, Any] = field(default_factory=dict, hash=False, compare=False)
 
     def describe(self) -> str:
         """What stands in the result's text for the picture that travels beside it."""
