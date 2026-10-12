@@ -5,6 +5,7 @@
   (``buffalo_l``: SCRFD-10GF and ResNet50 ArcFace; weights non-commercial).
 * :class:`Scrfd`: the pack's SCRFD alone (the speaker gaze's finder, :mod:`pepin.expression.
   finder`): ~170 MB in the process against 550-800 MB for the pack opened with identity off.
+* :class:`ArcFace`: the pack's ArcFace alone (person recognition, :mod:`pepin.people.face`).
 * :class:`EmotiEffOnnx`: EmotiEffLib's ``enet_b0_8_va_mtl`` (8 AffectNet classes plus valence and
   arousal) run straight through onnxruntime with the library's own preprocessing (224 px, RGB,
   ImageNet mean and std). The library's recognizer is not used because it reads weights only from
@@ -105,17 +106,9 @@ class InsightFace:
 
     def embed(self, image: Image, face: Detection) -> Vector:
         """The unit-length ArcFace embedding of ``face``, aligned on its landmarks."""
-        from insightface.utils import face_align
-
         if self._recognizer is None:
             raise RuntimeError("identity is off: the recognizer was not loaded")
-        with warnings.catch_warnings():
-            # scikit-image 0.26 deprecates the estimate() InsightFace's alignment calls.
-            warnings.simplefilter("ignore", FutureWarning)
-            crop = face_align.norm_crop(
-                image, landmark=np.asarray(face.kps, dtype=np.float32), image_size=112
-            )
-        return unit(self._recognizer.get_feat(crop))
+        return aligned_embedding(self._recognizer, image, face)
 
 
 class Scrfd:
@@ -158,6 +151,43 @@ class Scrfd:
             kps = tuple((float(x), float(y)) for x, y in kpss[i]) if kpss is not None else ()
             faces.append(Detection((x0, y0, x1, y1), score, kps))
         return faces
+
+
+def aligned_embedding(recognizer: Any, image: Image, face: Detection) -> Vector:
+    """ArcFace's unit-length embedding of ``face``: the 112 px crop aligned on its five
+    landmarks (InsightFace's ``norm_crop``), through ``recognizer`` (an ``ArcFaceONNX``)."""
+    from insightface.utils import face_align
+
+    with warnings.catch_warnings():
+        # scikit-image 0.26 deprecates the estimate() InsightFace's alignment calls.
+        warnings.simplefilter("ignore", FutureWarning)
+        crop = face_align.norm_crop(
+            image, landmark=np.asarray(face.kps, dtype=np.float32), image_size=112
+        )
+    return unit(recognizer.get_feat(crop))
+
+
+class ArcFace:
+    """A pack's ArcFace alone (its ``w600k_r50.onnx``, 174 MB on disk): identity for a process
+    that finds faces with :class:`Scrfd`, without the pack's other networks; implements
+    Embedder. Embeddings equal those of :class:`InsightFace` on the same pack."""
+
+    def __init__(self, path: Path, *, device: str, cache: Path) -> None:
+        """Load the recognition network at ``path``."""
+        from insightface import model_zoo
+
+        require(path, "the ArcFace identity network")
+        names, options = providers(device, cache)
+        self._model: Any = model_zoo.get_model(str(path), providers=names, provider_options=options)
+        self._model.prepare(0 if names[0] == COREML else -1)
+        self.name = path.stem
+        self.providers = names
+
+    def embed(self, image: Image, face: Detection) -> Vector:
+        """The unit-length embedding of ``face``, aligned on its landmarks."""
+        if len(face.kps) < 5:
+            raise ValueError("a face without its five landmarks cannot be aligned")
+        return aligned_embedding(self._model, image, face)
 
 
 class EmotiEffOnnx:
