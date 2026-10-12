@@ -562,6 +562,30 @@ base server that moves the neck only at rest has them refused during a drive. At
 every request but the operator's is let go, and a head found more than `drive_home_tol_deg` off
 home (a jog, a hand) is sent home.
 
+**The overlay and the release** (the voice's expression, `pepin.expression`). The speaker gaze
+holds the head on the person as an ordinary `angles` look of the idle band (`voice.speaker`,
+TTL 6 s renewed every 2 s). A head gesture is an OVERLAY on top of it: `POST /look` of kind
+`clip`, keyed offsets `{at_s, pan_rad, tilt_rad, speed_deg_s}` added to whatever holds the head
+(home when nothing does), each key written at its time with its own speed ceiling
+(`neck_target`'s `speed_deg_s`). The holder keeps its status, TTL and aim, and the head goes back
+to it when the overlay ends — a nod or a thinking glance never loses the person. One plays at a
+time: a newer one replaces it, an `idle` one (breathing) gives way to any other; a `loop`
+repeats until released or lapsed (the breath: one looped clip, renewed) and is answered at once,
+a finite one when it ends. Refused whole, never clamped: over a better band, during a drive, on
+a `neck_goto` base server, past the reach, past `clip_max_deg` (30) off the holder, or with a
+tilt turning back faster than `clip_max_hz` (2.5 Hz; the mast rings at 5.3 Hz, and the board
+caps the tilt's ramp at 600 deg/s² on every move). An overlay within `clip_still_deg` (1°)
+writes without starting a move, so the head is not blind for a breath; any larger one blinds it
+while it moves, as any write. `POST /release {"source", "fade_s"}` is a source's word to let go
+of everything it asked: its looks go (the head falls to the next request or home) and its
+overlay returns to the holder over `fade_s`. `GET /state` names the overlay playing;
+`pepin.gaze_link.GazeClient` is one source's client for all of it.
+
+```bash
+curl -s 127.0.0.1:3339/state | python3 -m json.tool          # holder, overlay, blind interval
+curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the speaker gaze lets go
+```
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
@@ -781,6 +805,9 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `glance_dwell_s` | number 0..3 | 0.6 | above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s; the reverse glance takes the head from the path look at once, even mid-swing, and with reverse_hold_s it is cut at the first forward command (0: no glance, the reverse look waits for a path look to arrive, as before 2026-10-05) |
 | `gaze` | `return_deg_s` | number 0..300 | 0.0 | after a drive the head goes home at this speed, with neck_target; 0: a saccade at the board's top speed. 45 (2026-10-05 to 2026-10-06) made the way home gentle but cost 0.4 s of blind time per drive on eleven tapes, the only thing the speed changes (gaze_ahead headspeed.py); Artem 2026-10-07: fast |
 | `gaze` | `gate_dark_patience_s` | number 0..30 | 1.5 | a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL |
+| `gaze` | `clip_max_deg` | number 0..90 | 30.0 | a head overlay (kind clip: a gesture's keys added to the holder's aim) with any key further than this off the holder's aim, on either axis, is refused whole (never clamped); 30 lets a glance aside (10-25 deg) through, the gestures themselves keep nearer (a nod 3-10) |
+| `gaze` | `clip_max_hz` | number 0..10 | 2.5 | an overlay whose tilt turns back sooner than half a period of this rate after its last turn is refused: the mast rings at 5.3 Hz after sharp tilts (config/neck.json's tilt_max_acc_deg_s2 note), so tilt oscillations stay under 2.5 Hz; the board's tilt ramp (600 deg/s^2) caps every move's acceleration on its own. 0: no check |
+| `gaze` | `clip_still_deg` | number 0..5 | 1.0 | an overlay whose keys all stay within this of the holder's aim (a breath, +-0.6 deg at 0.25 Hz) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. The settle tolerance's 1 deg |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |

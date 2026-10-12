@@ -11,21 +11,32 @@ person asks for takes the head from the conversation.
   its own next aim. A request that took the head from it ends it (the arbiter's rule), and the
   speaker gaze asks again when its renewal finds nothing to renew.
 * A head gesture, source :data:`GESTURE` (or :data:`IDLE_LOOK` for the idle layer), is a
-  :class:`HeadClip` OVERLAY (``kind`` ``"clip"``): keyed offsets added to the aim of whatever
-  holds the head (home when nothing does), each key written at its time at its own speed. An
-  overlay takes nothing from the holder, which keeps its status, its TTL and its aim; when the
-  overlay ends the head is written back to the holder's aim. It plays only over a holder of its
-  band or none (never over the person's look, a sensor check or a drive), one at a time (a newer
-  overlay replaces the one playing), and the head is blind while it plays. A key past the reach
-  refuses the whole overlay (the arbiter never clamps): the gesture then plays without its head.
+  :class:`HeadClip` OVERLAY (``kind`` ``"clip"``, :class:`pepin.gaze.Overlay`): keyed offsets
+  added to the aim of whatever holds the head (home when nothing does), each key written at its
+  time at its own speed. An overlay takes nothing from the holder, which keeps its status, its
+  TTL and its aim; when the overlay ends the head is written back to the holder's aim, so a
+  thinking glance pulls the head off the person and brings it back without the speaker gaze
+  losing them. It plays only over a holder of its band or none (never over the person's look, a
+  sensor check or a drive), one at a time: a newer overlay replaces the one playing, except that
+  an ``idle`` one (breathing, a fidget) gives way to any other and never replaces one. A ``loop``
+  repeats its keys (its last key closes the period and equals its first) until released or its
+  TTL lapses, renewed like any request: the idle layer's continuous breath is one looped clip.
+  The head is blind while an overlay's moves run, as for any write, except for an overlay whose
+  offsets all stay within the arbiter's ``clip_still_deg`` (a breath): that one moves the head
+  without blinding it. Refused whole, never clamped: a key past the reach or ``clip_max_deg``,
+  a tilt reversing faster than ``clip_max_hz`` (2.5 Hz: the mast rings at 5.3 Hz; the board's
+  tilt ramp caps every move at 600 deg/s^2 by itself); the gesture then plays without its head.
+  ``POST /release`` with ``fade_s`` (config/expression.json's ``parts.head.fade_s``) takes it
+  back over that long.
 
-On the door a clip is a :class:`ClipLook`, answered when it ends or is refused.
+On the door a clip is a :class:`ClipLook`, answered when it ends or is refused (a loop at once);
+:class:`pepin.gaze_link.GazeClient` sends it.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 
 from pepin.gaze import IDLE
 
@@ -65,9 +76,12 @@ class ClipKey(TypedDict):
 
 
 class ClipTarget(TypedDict):
-    """The ``target`` of a clip look: its keys."""
+    """The ``target`` of a clip look: its keys, whether they repeat, whether it is the idle
+    layer's (it gives way to any other overlay)."""
 
     keys: list[ClipKey]
+    loop: NotRequired[bool]
+    idle: NotRequired[bool]
 
 
 class ClipLook(TypedDict):

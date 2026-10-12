@@ -9,9 +9,20 @@ encoders, ``neck_goto``/``neck_home`` (one move at a time, at rest) to an older 
 itself from those lines (:class:`pepin.gaze.EitherHead`).
 
 THE DOORS. The behaviour tree's AskGaze node calls ``/gaze/stall_look`` (std_srvs/Trigger) when
-the controller has failed; the LLM tools POST requests to :data:`pepin.gaze_link.GAZE_PORT` on
-this Mac's loopback (``/look``, ``/renew``, ``/state``). Path gaze and reverse gaze are this
-node's own requests while a drive runs.
+the controller has failed; the LLM tools and the voice's expression POST requests to
+:data:`pepin.gaze_link.GAZE_PORT` on this Mac's loopback (``/look``, ``/renew``, ``/release``,
+``/state``). Path gaze and reverse gaze are this node's own requests while a drive runs.
+
+THE OVERLAY (``/look`` of kind ``clip``, :class:`pepin.gaze.Overlay`): a head gesture's keyed
+offsets added to whatever holds the head (the speaker gaze's ``voice.speaker`` look, or home),
+each key written at its time with its own speed ceiling (``neck_target``'s ``speed_deg_s``); the
+holder keeps its status, TTL and aim, and the head goes back to it at the end. Bounded by
+``clip_max_deg``, ``clip_max_hz`` and the reach (refused whole, never clamped), refused over a
+better band, during a drive and on a base server without ``neck_target``; an ``idle`` overlay
+(breathing) gives way to any other, a ``loop`` repeats until released or lapsed and is answered
+at once (a finite one when it ends), and one within ``clip_still_deg`` does not blind the head.
+``/release`` {source, fade_s} is a source's word to let go of everything it asked, its overlay
+going back to the holder over ``fade_s``.
 
 THE ONE GATE. ``/gaze/state`` (std_msgs/String, JSON; 10 Hz and on every change) carries the
 phase (home, still, saccade, returning), ``since`` (when that phase began: a move at the write
@@ -202,6 +213,7 @@ TF_WAIT_S = 0.2
 COLUMN_WAIT_S = 1.0  # one /fusion/column answer
 SCAN_MAX_AGE_S = 2.0  # a scan or a fan older than this explains no cell
 ANSWER_SLACK_S = 2.0  # a door waits for a request's TTL plus the move timeout plus this
+OVERLAY_DRIVE_REFUSAL = "no head overlay during a drive: the wheels turn"
 EXECUTOR_THREADS = 4  # the stall look blocks one while the subscriptions keep coming
 
 FLAGS = FlagSet(
@@ -322,7 +334,7 @@ class Gaze(Node):
                 return_deg_s=lambda: float(self._switches["return_deg_s"]),
             ),
         )
-        self._arbiter = Arbiter(self._head, home_aim(self._cfg), self._settings())
+        self._arbiter = Arbiter(self._head, home_aim(self._cfg), self._settings(), self._reach)
         self._tf = TfLookup(self, on_failure=self._on_tf_failure)
         self._inputs_lock = threading.Lock()
         self._inputs = _Inputs()
@@ -446,6 +458,9 @@ class Gaze(Node):
                 k("ttl_idle_s"),
             ),
             dark_patience_s=k("gate_dark_patience_s"),
+            clip_max_deg=k("clip_max_deg"),
+            clip_max_hz=k("clip_max_hz"),
+            clip_still_deg=k("clip_still_deg"),
         )
 
     def _path_law(self) -> PathGazeLaw:
@@ -886,10 +901,13 @@ class Gaze(Node):
 
     def _driving_refusal(self, look: Look) -> str | None:
         """Why a person's or a sensor's look cannot move the head during a drive: only on a base
-        server that moves the neck at rest alone."""
+        server that moves the neck at rest alone. An overlay never plays during a drive."""
+        moving = self._driving or self._head.wheels_moving
+        if look.kind == "clip" and moving:
+            return OVERLAY_DRIVE_REFUSAL
         if self._head.moves_while_driving or look.band < PERSON:
             return None
-        if self._driving or self._head.wheels_moving:
+        if moving:
             return DRIVE_REFUSAL
         return None
 
@@ -1129,6 +1147,7 @@ class Gaze(Node):
                 {
                     ("POST", "/look"): self._door_look,
                     ("POST", "/renew"): self._door_renew,
+                    ("POST", "/release"): self._door_release,
                     ("GET", "/state"): self._door_state,
                 },
             ).start()
@@ -1137,18 +1156,34 @@ class Gaze(Node):
             return None
 
     def _door_look(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /look``: a request, answered when it ends."""
+        """``POST /look``: a request, answered when it ends; a looped overlay (it ends only when
+        released or lapsed) is answered at once, granted or denied."""
         look = look_from_json(body, self._arbiter.settings, self._cfg, self._to_base)
         if isinstance(look, str):
             return {"status": "denied", "reason": look, "source": body.get("source", "")}
         why = self._driving_refusal(look)
         if why is not None:
             return Outcome(look.id, look.source, "denied", reason=why).as_dict()
+        if look.overlay is not None and look.overlay.loop:
+            return self._arbiter.submit(look, self._now()).as_dict()
         return self._ask(look).as_dict()
 
     def _door_renew(self, body: dict[str, Any]) -> dict[str, Any]:
-        """``POST /renew``: restart the TTL of a source's requests."""
+        """``POST /renew``: restart the TTL of a source's requests (its overlay's too)."""
         return {"renewed": self._arbiter.renew(str(body.get("source", "")), self._now())}
+
+    def _door_release(self, body: dict[str, Any]) -> dict[str, Any]:
+        """``POST /release`` {source, fade_s}: the source's word to let the head go now, every
+        request of it and its overlay (the head back on the holder's aim over ``fade_s``)."""
+        source = str(body.get("source", "")).strip()
+        if not source:
+            return {"released": 0, "error": "a release names its source"}
+        try:
+            fade_s = max(float(body.get("fade_s") or 0.0), 0.0)
+        except (TypeError, ValueError):
+            return {"released": 0, "error": f"fade_s {body.get('fade_s')!r} is not a number"}
+        gone = self._arbiter.withdraw(source, self._now(), "its source's release", fade_s)
+        return {"released": gone}
 
     def _door_state(self, _body: dict[str, Any]) -> dict[str, Any]:
         """``GET /state``: the state, the live requests, the driver and whether a drive runs."""
@@ -1157,6 +1192,18 @@ class Gaze(Node):
             {"source": r.source, "band": r.band, "kind": r.kind, "id": r.id}
             for r in self._arbiter.pending()
         ]
+        overlay = self._arbiter.overlay()
+        state["overlay"] = (
+            None
+            if overlay is None or overlay.overlay is None
+            else {
+                "source": overlay.source,
+                "id": overlay.id,
+                "band": overlay.band,
+                "loop": overlay.overlay.loop,
+                "idle": overlay.overlay.idle,
+            }
+        )
         state["driver"] = "neck_target" if self._head.speaks_target else "neck_goto"
         state["driving"] = self._driving
         state["reach"] = {
@@ -1184,12 +1231,14 @@ class Gaze(Node):
         link = "connected" if self._link.connected else "DOWN"
         stalls = ", ".join(f"{word} {n}" for word, n in sorted(self._stalls.items())) or "none"
         dark = f" of which dark, no frames {c['dark']}" if c["dark"] else ""
+        overlays = f", overlays {c['overlays']}" if c["overlays"] else ""
         self.get_logger().info(
             f"gaze: driver {'neck_target' if self._head.speaks_target else 'neck_goto'}"
             f" (base server {link}), phase {state.phase}"
             f"{' ' + state.source if state.source else ''}, driving {self._driving};"
             f" requests {c['requests']} (done {c['done']}, denied {c['denied']}, preempted"
-            f" {c['preempted']}, expired {c['expired']}{dark}); writes {c['writes']}, settled"
+            f" {c['preempted']}, expired {c['expired']}{dark}{overlays});"
+            f" writes {c['writes']}, settled"
             f" {c['settled']}, refused {c['refused']}, timeouts {c['timeouts']};"
             f" {self._looks.text()}; stall looks: {stalls}; last: {self._last_stall}"
             f"{f'; {self._tf_misses} TF misses' if self._tf_misses else ''};"
