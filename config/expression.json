@@ -54,9 +54,9 @@
     "note": "Where the speaker gaze's face detector (SCRFD, det_10g) runs: compute_units is CoreML's CPUAndNeuralEngine (the CPU and the Neural Engine, never the GPU, where the voice's Qwen3-TTS runs: on 2026-10-12 the voice's first chunk took 230-400 ms with the detector free to use the GPU against 100-150 ms without the gaze), ALL (CoreML chooses, the GPU included: as before), CPUAndGPU, or CPU (onnxruntime's own CPU provider); a network CoreML refuses runs on the CPU, said once in the log."
   },
   "wheels": {
-    "max_turn_deg": 30.0,
+    "max_turn_deg": 0.0,
     "step_deg": 10.0,
-    "max_rock_m": 0.02,
+    "max_rock_m": 0.0,
     "attempts": 3,
     "backoff_m": 0.03,
     "max_backoff_m": 0.06,

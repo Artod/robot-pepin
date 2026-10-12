@@ -130,7 +130,9 @@ UNASKED_DRIVE = (
 END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
 # tools that take a while: the robot says its filler when the brain calls one before a word
-SLOW_TOOLS = frozenset(("see", "look", "look_around", "find", "recall", "map_tree"))
+SLOW_TOOLS = frozenset(
+    ("see", "look", "look_around", "find", "recall", "map_tree", "remember_person", "forget_person")
+)
 BACKCHANNEL_GAP_S = 2.0  # one "мм" per this long at most, however many pauses
 # a held utterance (or a reply kept silent) waits this long after the person stopped without
 # an utterance to read
