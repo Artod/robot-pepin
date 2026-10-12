@@ -1,6 +1,7 @@
 """The whole cascade over fakes: the name gate, a turn's timeline and logs, the person going on
-before the robot answered, a barge-in cut to what was heard, and a drive acknowledged when it
-starts and reported when it ends."""
+before the robot answered, a barge-in cut to what was heard, a drive acknowledged when it
+starts and reported when it ends, and the brain asked at the early read (kept by the close,
+dropped when the person goes on, billed either way)."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -21,14 +22,14 @@ from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.expression.markers import EMPTY, Vocabulary
 from pepin.tools import TOOLS
 from pepin.tools.fakes import FakeGoalServer, WallClock, fake_robot
-from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
+from pepin.voice_cascade.config import BrainConfig, CascadeConfig, VoiceConfig
 from pepin.voice_cascade.control import ControlFile, Switchboard, answers_to, write_request
 from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import Speaker
+from pepin.voice_cascade.stages import CUT, Speaker
 from pepin.voice_live.events import Events
 from pepin.voice_live.sources import FrameSink
 
@@ -716,3 +717,144 @@ def test_what_a_conversation_spent_reaches_the_ledger_whatever_brain_closes_it(
     rig.speech.close()
     assert ledger.today_usd() == pytest.approx(0.002)
     assert len((tmp_path / "ledger.jsonl").read_text().splitlines()) == 1
+
+
+# -- the brain asked at the early read (brain.speculative) ------------------------------------
+
+EARLY = BrainConfig(speculative=True)
+WINDOW_S = 0.3  # ears.continuation_s here: an utterance after it is a turn of its own
+
+
+async def opened(rig: Rig) -> None:
+    """The name said and answered, and the continuation window over."""
+    await rig.say(utterance())
+    await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+    await asyncio.sleep(WINDOW_S)
+
+
+def events_of(tmp_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The conversation's events and its summary."""
+    day = next(tmp_path.iterdir())
+    (conversation,) = day.glob("cascade_*/")
+    events = [json.loads(line) for line in (conversation / "events.jsonl").open()]
+    return events, json.loads((conversation / "summary.json").read_text())
+
+
+def test_asked_early_the_reply_waits_for_the_close_and_goes_on_with_the_same_words(
+    tmp_path: Path,
+) -> None:
+    observer = RecordingObserver()
+    rig = Rig(
+        tmp_path,
+        ["Пепин, привет", "как у тебя дела"],
+        observers=[observer],
+        brain=EARLY,
+        continuation_s=WINDOW_S,
+    )
+
+    async def scenario(rig: Rig) -> None:
+        await opened(rig)
+        await rig.say(quiet(0.2) + tone(0.4) + quiet(0.2))  # read in the pause, not yet closed
+        reply = lambda: rig.loop.current  # noqa: E731
+        await until(lambda: reply() is not None and reply().input.timeline.has("first_token"))
+        assert rig.voice.spoken == ["Ты сказал: Пепин, привет"]  # nothing said before the close
+        await rig.say(quiet(0.5))
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["Пепин, привет", "как у тебя дела"]  # asked once, not again
+    assert rig.brain.outcomes == ["committed", "committed"]
+    first, second = rig.loop.turns
+    assert "speculative" not in first  # the name is read before a conversation is open
+    ms = second["ms"]
+    assert second["speculative"]["asked_ms"] < ms["closed"]
+    assert ms["first_token"] < ms["closed"] <= ms["tts_first_audio"]
+    assert rig.voice.spoken[-1] == "Ты сказал: как у тебя дела"
+    calls = observer.calls
+    ended = max(i for i, (name, _) in enumerate(calls) if name == "speech_ended")
+    queued = [i for i, (name, args) in enumerate(calls) if name == "part_queued" and args[0] == 2]
+    assert queued and min(queued) > ended  # the body hears the part once the voice has it
+    events, summary = events_of(tmp_path)
+    states = [e["state"] for e in events if e["event"] == "speculative"]
+    assert states == ["asked", "kept"]
+    assert summary["speculative"] == {"asked": 1, "kept": 1, "dropped": 0, "wasted_usd": 0.0}
+
+
+def test_asked_early_then_dropped_when_the_person_goes_on_and_asked_again_with_all_words(
+    tmp_path: Path,
+) -> None:
+    from pepin.voice_live.budget import Ledger
+    from pepin.voice_live.config import LiveConfig
+
+    texts = ["Пепин, привет", "какой сегодня день", "какой сегодня день недели?"]
+    rig = Rig(tmp_path, texts, brain_delay_s=0.3, brain=EARLY, continuation_s=WINDOW_S)
+    ledger = Ledger(tmp_path / "ledger.jsonl", LiveConfig())
+    rig.loop.paid_ledger = ledger  # the fake brain's normal calls are free, a cut one is not
+
+    async def scenario(rig: Rig) -> None:
+        await opened(rig)
+        await rig.say(quiet(0.2) + tone(0.4) + quiet(0.25))  # a pause mid-sentence: asked
+        await until(lambda: rig.loop.current is not None)
+        await rig.say(tone(0.4) + quiet(0.7))  # the rest: the same utterance goes on
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == texts
+    assert rig.brain.outcomes == ["committed", "abandoned", "committed"]
+    assert [t["outcome"] for t in rig.loop.turns] == ["committed", "speculative", "committed"]
+    dropped = rig.loop.turns[1]
+    assert dropped["usage"]["stop"] == CUT and dropped["usage"]["usd"] > 0
+    assert rig.voice.spoken == ["Ты сказал: Пепин, привет", "Ты сказал: какой сегодня день недели?"]
+    events, summary = events_of(tmp_path)
+    (why,) = [e["why"] for e in events if e["event"] == "speculative" and e["state"] == "dropped"]
+    assert why == "the person went on"
+    assert summary["turns"] == 2
+    early = summary["speculative"]
+    assert (early["asked"], early["kept"], early["dropped"]) == (1, 0, 1)
+    assert early["wasted_usd"] == pytest.approx(dropped["usage"]["usd"])
+    assert ledger.today_usd() == pytest.approx(dropped["usage"]["usd"])  # the ledger has it
+
+
+def test_a_brain_failing_before_the_close_is_asked_again_and_says_no_error_line(
+    tmp_path: Path,
+) -> None:
+    rig = Rig(tmp_path, ["Пепин, привет", "как у тебя дела"], brain=EARLY, continuation_s=WINDOW_S)
+    asked: list[str] = []
+    turn = rig.brain.turn
+
+    async def flaky(text: str, tools: Any, emit: Any) -> None:
+        asked.append(text)
+        if len(asked) == 2:
+            raise RuntimeError("the API is down")
+        await turn(text, tools, emit)
+
+    rig.brain.turn = flaky  # type: ignore[method-assign]
+
+    async def scenario(rig: Rig) -> None:
+        await opened(rig)
+        await rig.say(quiet(0.2) + tone(0.4) + quiet(0.2))
+        await until(lambda: len(asked) == 2 and rig.loop.current is None)
+        await rig.say(quiet(0.5))
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert asked == ["Пепин, привет", "как у тебя дела", "как у тебя дела"]
+    assert rig.voice.spoken == ["Ты сказал: Пепин, привет", "Ты сказал: как у тебя дела"]
+    assert [t["outcome"] for t in rig.loop.turns] == ["committed", "speculative", "committed"]
+    _, summary = events_of(tmp_path)
+    assert (summary["speculative"]["kept"], summary["speculative"]["dropped"]) == (0, 1)
+
+
+def test_one_word_is_never_asked_early(tmp_path: Path) -> None:
+    rig = Rig(tmp_path, ["Пепин, привет", "да"], brain=EARLY, continuation_s=WINDOW_S)
+
+    async def scenario(rig: Rig) -> None:
+        await opened(rig)
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.brain.heard == ["Пепин, привет", "да"]
+    events, summary = events_of(tmp_path)
+    assert not [e for e in events if e["event"] == "speculative"]
+    assert "speculative" not in summary and all("speculative" not in t for t in rig.loop.turns)

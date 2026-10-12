@@ -151,10 +151,10 @@ def test_build_judge_falls_back_to_the_rules(monkeypatch: pytest.MonkeyPatch) ->
 
 class Reader:
     """The transcriber's early read: the texts in order, done at once (or held for
-    :meth:`land`)."""
+    :meth:`land`; ``running``: already on the transcriber, so a drop cannot cancel it)."""
 
-    def __init__(self, texts: list[str], hold: bool = False) -> None:
-        self.texts, self.hold = texts, hold
+    def __init__(self, texts: list[str], hold: bool = False, running: bool = False) -> None:
+        self.texts, self.hold, self.running = texts, hold, running
         self.asked = 0
         self.held: list[tuple[concurrent.futures.Future[str], str]] = []
 
@@ -162,6 +162,8 @@ class Reader:
         text = self.texts[min(self.asked, len(self.texts) - 1)]
         self.asked += 1
         future: concurrent.futures.Future[str] = concurrent.futures.Future()
+        if self.running:
+            future.set_running_or_notify_cancel()
         if self.hold:
             self.held.append((future, text))
         else:
@@ -290,6 +292,45 @@ def test_a_continuation_is_judged_after_the_words_it_continues() -> None:
     ears = Ears(config, lambda: "silent", None, reader, judge=recorder)
     closes(ears, SPEECH + quiet(1.6) + tone(0.6) + quiet(1.2))
     assert recorder.texts == ["Как у тебя", "дела."]
+
+
+def told(
+    texts: list[str],
+    frames: list[bytes],
+    *,
+    two_gates: bool = True,
+    at: dict[int, object] | None = None,
+) -> tuple[list[EarEvent], list[tuple[float, EarEvent]]]:
+    """The ``words`` events the ears tell (two-gates or the silence rule) and the closes."""
+    config = CascadeConfig().with_changes(
+        turn_model="two-gates" if two_gates else None, silence_s=0.4, early_s=0.15
+    )
+    heard: list[EarEvent] = []
+    reader = Reader(texts, hold=at is not None, running=True)
+    ears = Ears(config, lambda: "silent", None, reader, judge=RulesJudge(), words=heard.append)
+    landing = {i: reader.land for i in at} if at else None
+    return heard, closes(ears, frames, at=landing)
+
+
+def test_the_early_words_are_told_with_their_verdict_and_the_audio_so_far() -> None:
+    heard, ((_, segment),) = told(["Как у тебя дела?"], SPEECH + quiet(1.2))
+    (words,) = heard
+    assert words.kind == "words" and words.text == "Как у тебя дела?"
+    assert (words.verdict, words.verdict_why) == ("complete", segment.verdict_why)
+    assert words.t == pytest.approx(END + 0.15, abs=0.03)
+    assert words.segment is not None and words.segment.ended_s == pytest.approx(END, abs=0.03)
+    assert words.early is segment.early  # the read that closed the utterance
+    heard, _ = told(["Как у тебя дела?"], SPEECH + quiet(1.2), two_gates=False)
+    assert [(w.text, w.verdict) for w in heard] == [("Как у тебя дела?", None)]
+
+
+def test_a_read_landing_after_the_voice_came_back_is_never_told() -> None:
+    frames = SPEECH + quiet(0.2) + tone(0.6) + quiet(1.2)
+    back = round((0.5 + 1.0 + 0.2 + 0.3) / FRAME_S)  # in the second tone: the first read lands
+    end = round((0.5 + 1.0 + 0.2 + 0.6 + 0.3) / FRAME_S)  # 0.3 s into the last pause
+    heard, closed = told(["Как у тебя.", "Как у тебя дела, и"], frames, at={back: 0, end: 0})
+    assert [(w.text, w.verdict) for w in heard] == [("Как у тебя дела, и", "incomplete")]
+    assert len(closed) == 1 and heard[0].early is closed[0][1].early
 
 
 def test_without_a_judge_two_gates_is_the_fixed_silence() -> None:

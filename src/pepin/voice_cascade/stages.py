@@ -48,14 +48,16 @@ class Tagger(Protocol):
         """The numbers of one utterance (16 kHz s16le mono)."""
         ...
 
-    def line(self, prosody: Prosody, text: str) -> str:
+    def line(self, prosody: Prosody, text: str, keep: bool = True) -> str:
         """``[Артём: тише и медленнее обычного]`` against the running baseline, or "" when
-        there is nothing to say yet; the utterance joins the baseline."""
+        there is nothing to say yet; the utterance joins the baseline unless ``keep`` is False
+        (a line written before the utterance closed)."""
         ...
 
-    def describe(self, prosody: Prosody, text: str, key: str) -> str:
+    def describe(self, prosody: Prosody, text: str, key: str, keep: bool = True) -> str:
         """The words alone (``тише и медленнее обычного``) against ``key``'s own baseline (a
-        recognised person's), "" while there is nothing to say; the utterance joins it."""
+        recognised person's), "" while there is nothing to say; the utterance joins it unless
+        ``keep`` is False."""
         ...
 
 

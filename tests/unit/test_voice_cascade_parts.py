@@ -99,6 +99,20 @@ def test_an_override_without_a_value_and_values_out_of_range_are_refused() -> No
         CascadeConfig.load(CONFIG, ["brain.model=claude-unknown"])
 
 
+def test_the_reply_knobs_read_off_and_switch_for_one_run_with_any_preset() -> None:
+    b = CascadeConfig.load(CONFIG).brain
+    assert (b.speculative, b.speculative_min_words, b.first_sentence_words) == (False, 2, 0)
+    sonnet = CascadeConfig.load(
+        CONFIG,
+        ["brain.preset=sonnet", "brain.speculative=true", "brain.first_sentence_words=6"],
+    ).brain
+    assert sonnet.model == "claude-sonnet-5-5" and sonnet.speculative
+    assert sonnet.first_sentence_words == 6
+    for bad in ("brain.speculative_min_words=0", "brain.first_sentence_words=-1"):
+        with pytest.raises(ValueError, match="speculative_min_words"):
+            CascadeConfig.load(CONFIG, [bad])
+
+
 def test_the_file_parses_as_json_with_a_note_per_section() -> None:
     data = json.loads(CONFIG.read_text())
     for section, body in data.items():
@@ -144,6 +158,19 @@ def test_a_timeline_counts_from_the_moment_the_person_stopped() -> None:
     assert ms["closed"] == 500 and ms["transcript"] == 760 and ms["speaker_end"] is None
     assert line.steps()["whisper"] == 260 and line.steps()["tts"] is None
     assert line.line().startswith("cut 500 | text 760 | token -")
+
+
+def test_a_turn_asked_before_the_close_takes_the_close_s_zero_and_stamps() -> None:
+    asked = Timeline(9.9)  # the end of the speech as the early read saw it
+    asked.mark("first_token", 10.3)  # before the close
+    close = Timeline(10.0)
+    close.mark("closed", 10.4)
+    close.mark("transcript", 10.41)
+    close.mark("first_token", 11.0)  # never: the turn's own stamp stays
+    asked.take(close)
+    ms = asked.ms()
+    assert (ms["closed"], ms["transcript"], ms["first_token"]) == (400, 410, 300)
+    assert asked.steps()["brain_ttft"] == -110  # the first token was there before the words
 
 
 def test_percentiles_and_the_report() -> None:
@@ -330,6 +357,19 @@ def test_the_tag_line_waits_for_a_baseline_then_describes_without_naming_a_feeli
     assert [tagger.line(tagger.measure(b""), text) for _ in range(3)] == ["", "", ""]
     assert tagger.line(tagger.measure(b""), text) == "[Артём: голос как обычно]"
     assert tagger.line(tagger.measure(b""), text) == "[Артём: тише обычного]"
+
+
+def test_a_line_written_before_the_close_leaves_the_baseline_alone() -> None:
+    tagger = ProsodyTagger(ProsodyConfig(min_baseline=2))
+    text = "как у тебя дела сегодня"
+    for level in (60.0, 62.0, 61.0):
+        tagger.line(Prosody(2.0, level, 7.0, 6.0), text)
+    quiet = Prosody(2.0, 50.0, 7.0, 6.0)
+    before = {name: list(seen) for name, seen in tagger.baseline().items()}
+    guess = tagger.line(quiet, text, keep=False)
+    assert guess == "[Артём: тише обычного]" and tagger.count == 3
+    assert {name: list(seen) for name, seen in tagger.baseline().items()} == before
+    assert tagger.line(quiet, text) == guess and tagger.count == 4  # the close: same, joined
 
 
 def test_slower_and_flatter_and_a_model_label() -> None:

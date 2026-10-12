@@ -5,7 +5,8 @@ row per session so combinations can be set side by side: the person's turns, tim
 first sound (p50 / p90, counted from the person's last loud frame, the closing silence included),
 the stage medians (Whisper, the brain's first token, the first sentence, the TTS's first chunk),
 the turns that called a tool and their first token, the barge-ins, and the price per reply (the
-brain's calls and a paid voice's sentences).
+brain's calls and a paid voice's sentences). With brain.speculative on, the row ends with the
+calls asked before the close: asked/kept/dropped and the cents the dropped ones cost.
 
     uv run python scripts/cascade_stats.py data/voice/20261011 [data/voice/20261010 ...]
     uv run python scripts/cascade_stats.py data/voice/20261011/cascade_141459 -v  # every turn
@@ -47,14 +48,20 @@ def _events(directory: Path) -> list[dict[str, Any]]:
     return rows
 
 
+UNANSWERED = ("merged", "speculative")  # dropped for the turn after it: no turn of their own
+
+
 def session_row(directory: Path) -> dict[str, Any] | None:
     """One session's numbers, or None when it has no person turns. A merged fragment is part
-    of the turn after it; the cost is everything the session paid: every model call (the
-    robot's own reports and the fragments included) and every sentence of a paid voice."""
+    of the turn after it, a reply asked early on words the close did not bring answered none;
+    the cost is everything the session paid: every model call (the robot's own reports, the
+    fragments and the dropped early calls included) and every sentence of a paid voice."""
     events = _events(directory)
     rows = [e for e in events if e.get("event") == "turn"]
     turns = [
-        e for e in rows if e.get("kind", "person") == "person" and e.get("outcome") != "merged"
+        e
+        for e in rows
+        if e.get("kind", "person") == "person" and e.get("outcome") not in UNANSWERED
     ]
     if not turns:
         return None
@@ -85,6 +92,8 @@ def session_row(directory: Path) -> dict[str, Any] | None:
         for k in ("input", "cache_read", "cache_write")
     )
     whisper = [w for e in heard if (w := e.get("whisper_ms")) is not None and w > 20]
+    early = [e for e in events if e.get("event") == "speculative"]
+    dropped = [t for t in rows if t.get("outcome") == "speculative"]
     return {
         "session": directory.name.replace("cascade_", ""),
         "day": directory.parent.name,
@@ -106,6 +115,12 @@ def session_row(directory: Path) -> dict[str, Any] | None:
         "cents_per_reply": 100 * usd / len(turns),
         "cents_total": 100 * usd,
         "cache_share": cache_read / inputs if inputs else None,
+        "early": (
+            sum(e.get("state") == "asked" for e in early),
+            sum(e.get("state") == "kept" for e in early),
+            sum(e.get("state") == "dropped" for e in early),
+            100 * sum(float((t.get("usage") or {}).get("usd") or 0.0) for t in dropped),
+        ),
         "turn_events": turns,
     }
 
@@ -130,7 +145,15 @@ def format_row(row: dict[str, Any]) -> str:
         f" | {row['tool_turns']:>5} {_fmt(row['tool_sound_p50'], 6)}"
         f" | {row['barge_ins']:>5} {row['interrupted']:>3}"
         f" | {row['cents_per_reply']:>7.2f} {row['cents_total']:>5.1f} {cache}"
+        + _early_cell(row["early"])
     )
+
+
+def _early_cell(early: tuple[int, int, int, float]) -> str:
+    """`` | early 12/9/3 0.84c``: calls asked before the close, kept, dropped, the dropped
+    ones' cents ("" when none was asked)."""
+    asked, kept, dropped, cents = early
+    return f" | early {asked}/{kept}/{dropped} {cents:.2f}c" if asked else ""
 
 
 def turn_lines(row: dict[str, Any]) -> list[str]:

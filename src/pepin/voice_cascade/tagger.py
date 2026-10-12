@@ -171,24 +171,29 @@ class ProsodyTagger:
         sd = max(statistics.pstdev(seen), MIN_SD[name])
         return (value - statistics.fmean(seen)) / sd
 
-    def line(self, prosody: Prosody, text: str) -> str:
-        """The tag line, then the utterance joins the baseline."""
-        body = self.describe(prosody, text)
+    def line(self, prosody: Prosody, text: str, keep: bool = True) -> str:
+        """The tag line, then the utterance joins the baseline (``keep`` False: it does not, a
+        line written before the utterance closed)."""
+        body = self.describe(prosody, text, keep=keep)
         who = self.config.speaker or "голос"
         return f"[{who}: {body}]" if body else ""
 
-    def describe(self, prosody: Prosody, text: str, key: str = DEFAULT_KEY) -> str:
+    def describe(
+        self, prosody: Prosody, text: str, key: str = DEFAULT_KEY, keep: bool = True
+    ) -> str:
         """How the utterance was said against ``key``'s own baseline, in words ("" while the
-        baseline is too short or nothing was measured); then it joins that baseline."""
+        baseline is too short or nothing was measured); then it joins that baseline (``keep``
+        False: it does not)."""
         if prosody.loudness_db <= -100 or not text.strip():
             return ""
         values = self.features(prosody, text)
         scores = {name: self.z(name, value, key) for name, value in values.items()}
-        baseline = self.baseline(key)
-        for name, value in values.items():
-            if math.isfinite(value):
-                baseline[name].append(value)
-        self.count += 1
+        if keep:
+            baseline = self.baseline(key)
+            for name, value in values.items():
+                if math.isfinite(value):
+                    baseline[name].append(value)
+            self.count += 1
         if all(score is None for score in scores.values()):
             return ""
         limit = self.config.z

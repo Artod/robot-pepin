@@ -93,7 +93,7 @@ from pepin.voice_cascade.engines import (
     brain_key,
     build_brain,
 )
-from pepin.voice_cascade.loop import CascadeLoop, Mic
+from pepin.voice_cascade.loop import UNANSWERED, CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
 from pepin.voice_cascade.stages import Tagger, Transcriber
@@ -602,7 +602,8 @@ def main() -> int:
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
         f" {b.cache}), voice {config.voice.name} ({config.voice.model}), wake {config.wake};"
         f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
-        f" {config.prosody_tags}, turn_model {config.turn_model}, gestures"
+        f" {config.prosody_tags}, turn_model {config.turn_model}, speculative {b.speculative},"
+        f" first sentence {b.first_sentence_words or 'as the persona says'}, gestures"
         f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'}. Logs:"
         f" {args.logs}; switch: scripts/voice_cascade.py switch --brain NAME --voice NAME"
         " --flag gestures=on",
@@ -629,7 +630,7 @@ def main() -> int:
             close = getattr(closable, "close", None)
             if close is not None:
                 close()
-    person = [t for t in loop.turns if t["kind"] == "person" and t["outcome"] != "merged"]
+    person = [t for t in loop.turns if t["kind"] == "person" and t["outcome"] not in UNANSWERED]
     if person:
         print("\n" + "\n".join(report(person)), flush=True)
         ears = loop.ears

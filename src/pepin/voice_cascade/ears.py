@@ -25,6 +25,11 @@ thread: words complete and the sound agreeing (``turn.acoustic``: the pause itse
 Turn's p >= ``turn.threshold``) close the utterance at ``turn.early_close_s`` of quiet, words
 unfinished hold it open to ``turn.incomplete_s``, anything else closes it at ``silence_s``. The
 segment event carries what closed it (``both``, ``silence`` or ``wait``), the verdict and why.
+
+With a listener for the early words (``words``), each early read that lands while its pause is
+still the one in progress is told as a ``words`` event, on the transcriber's thread (after
+two-gates' verdict): the utterance so far, its words and the verdict. A pause the person talked
+through tells nothing; the read that closes the utterance is the segment's ``early``.
 """
 
 from __future__ import annotations
@@ -43,7 +48,7 @@ from pepin.voice_cascade.turn import TurnAnswer, TurnWorker
 from pepin.voice_cascade.turn_text import Acoustic, Deadline, Judgement, TextJudge, two_gates
 from pepin.voice_live.wake import Segment, Segmenter, rms_db
 
-EarKind = Literal["start", "pause", "segment", "barge_in"]
+EarKind = Literal["start", "pause", "segment", "barge_in", "words"]
 EarlyReader = Callable[[bytes], "concurrent.futures.Future[str]"]  # Whisper, started early
 FRAME_S = FRAME_SAMPLES / RATE
 SILENT_FRAME = b"\x00\x00" * FRAME_SAMPLES
@@ -57,7 +62,11 @@ class EarEvent:
     model: what closed it (``model`` or ``silence``; two-gates: ``both``, ``silence`` or
     ``wait``), the model's p for its last pause, the model's milliseconds and the time saved
     against the fixed silence (negative: waited longer), and two-gates' verdict on the words of
-    its last pause with the reason and the judge's milliseconds."""
+    its last pause with the reason and the judge's milliseconds. ``words``: an early read
+    landed in the pause in progress; ``t`` is the frame it was started on, ``segment`` the
+    utterance so far (``ended_s``: its last loud frame), ``early`` the read, ``text`` its words
+    (alone, never joined to an utterance it continues) and the verdict when two-gates judged
+    them."""
 
     kind: EarKind
     t: float
@@ -73,6 +82,7 @@ class EarEvent:
     verdict: str | None = None  # two-gates: complete, incomplete or unsure (None: not read)
     verdict_why: str | None = None
     text_ms: float | None = None
+    text: str | None = None  # words: the early read's words
 
 
 class TurnSegmenter(Segmenter):
@@ -116,17 +126,20 @@ class Ears:
         early: EarlyReader | None = None,
         detector: BargeInDetector | None = None,
         judge: TextJudge | None = None,
+        words: Callable[[EarEvent], None] | None = None,
     ) -> None:
         """``playback`` says what the speaker is doing now (the player's); ``turn`` is the
         end-of-turn model's worker (None: the fixed silence alone); ``early`` starts Whisper on
         the utterance so far (None: Whisper waits for the close); ``detector`` decides a
         barge-in (None: the level threshold of the config); ``judge`` reads the early words
-        for two-gates (None: no verdict, so the fixed silence)."""
+        for two-gates (None: no verdict, so the fixed silence); ``words`` hears each early read
+        of the pause in progress as it lands (on the transcriber's thread)."""
         self.config = config
         self.playback = playback
         self.turn = turn
         self.early = early
         self.judge = judge
+        self.words = words
         self.two_gates = config.turn_model == TWO_GATES
         self._early: concurrent.futures.Future[str] | None = None
         self._reads = 0  # early reads started (each names its pause)
@@ -260,7 +273,7 @@ class Ears:
             self._frames += 1
             self._quiet = 0 if loud else self._quiet + 1
             self._ask()
-            self._read_early()
+            self._read_early(t)
             quiet_s = self._quiet * FRAME_S
             spoken_s = (self._frames - self._quiet) * FRAME_S
             if not self._quiet:
@@ -295,7 +308,7 @@ class Ears:
             self._drop_early()  # an utterance too short for a segment, or none at all
         return events
 
-    def _read_early(self) -> None:
+    def _read_early(self, t: float) -> None:
         """At ``transcriber.early_s`` into a pause, start Whisper on the utterance so far (once
         a pause); a voiced frame drops it: the words are not finished."""
         if self.early is None:
@@ -306,29 +319,44 @@ class Ears:
             self.early_asked += 1
             self._reads += 1
             self._reading = self._reads
-            self._early = self.early(self.gate.audio())
-            if self.two_gates and self.judge is not None:
-                callback = self._judging(self._reads, self.judge, self._carry)
+            pcm = self.gate.audio()
+            so_far = Segment(pcm, t - self._quiet * FRAME_S)
+            self._early = self.early(pcm)
+            judge = self.judge if self.two_gates else None
+            if judge is not None or self.words is not None:
+                callback = self._judging(self._reads, judge, self._carry, t, so_far)
                 self._early.add_done_callback(callback)
 
     def _judging(
         self,
         read: int,
-        judge: TextJudge,
+        judge: TextJudge | None,
         carry: concurrent.futures.Future[str] | None,
+        t: float,
+        so_far: Segment,
     ) -> Callable[[concurrent.futures.Future[str]], None]:
         """The callback that judges early read ``read``'s words where they land (the
         transcriber's thread; at once if they are already there), after the words of the
-        utterance it continues (``carry``, when they are read)."""
+        utterance it continues (``carry``, when they are read), then tells them as a
+        ``words`` event while their pause is still the one in progress."""
 
         def judged(future: concurrent.futures.Future[str]) -> None:
             if future.cancelled() or future.exception() is not None:
                 return
-            text = future.result()
+            text = alone = future.result()
             read_before = carry is not None and carry.done() and not carry.cancelled()
             if carry is not None and read_before and carry.exception() is None:
                 text = f"{carry.result()} {text}".strip()
-            self._judged = (read, judge.judge(text))
+            verdict = judge.judge(text) if judge is not None else None
+            if verdict is not None:
+                self._judged = (read, verdict)
+            if self.words is not None and self._reading == read:
+                self.words(
+                    EarEvent("words", t, so_far, early=future, text=alone,
+                             verdict=verdict.verdict if verdict else None,
+                             verdict_why=verdict.why if verdict else None,
+                             text_ms=verdict.ms if verdict else None)
+                )  # fmt: skip
 
         return judged
 
