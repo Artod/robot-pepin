@@ -25,6 +25,7 @@ about a second, a voice once its model has loaded, a transcriber between utteran
     uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
     uv run python scripts/voice_cascade.py switch --transcriber whispercpp
     uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
+    uv run python scripts/voice_cascade.py switch --flag people=on     # config/people.json
 
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
@@ -56,7 +57,9 @@ from typing import Any
 
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
+from pepin.expression.finder import SnapshotFinder, board_finder
 from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
+from pepin.people.worker import robot_people
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.bench import ReplayMic, utterances
@@ -247,7 +250,8 @@ def switch(argv: list[str]) -> int:
     ap.add_argument("--transcriber", help="mlx, whispercpp or engine:model (whispercpp:large-v3)")
     ap.add_argument(
         "--flag", action="append", default=[], metavar="NAME=on|off",
-        help="a feature of config/expression.json's flags (gestures, speaker_gaze), live",
+        help="a feature's switch, live: gestures, speaker_gaze (config/expression.json),"
+        " people (config/people.json)",
     )  # fmt: skip
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
@@ -489,8 +493,18 @@ def main() -> int:
     else:
         mic = link or BoardLink(args.host)
     gaze: SpeakerGazeWorker | None = None
-    if isinstance(mic, BoardLink) and fake_drive_s is None:  # the robot, its array, its head
-        gaze = robot_gaze(args.host, mic)
+    finder: SnapshotFinder | None = None
+    on_robot = isinstance(mic, BoardLink) and fake_drive_s is None
+    if on_robot:  # one face finder for the speaker gaze and person recognition
+        try:
+            finder = board_finder(args.host)  # config reads only: the detector loads on warm()
+        except (OSError, ValueError, KeyError) as exc:
+            print(f"no face finder ({exc}): the gaze turns to the voice, people by voice only")
+    people = robot_people(finder)  # voices only without the robot's camera
+    robot.people = people  # the remember_person / forget_person tools' door
+    if on_robot:  # the robot, its array, its head
+        assert isinstance(mic, BoardLink)
+        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face)
 
     body = Body.build(
         args.host,
@@ -527,9 +541,10 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
-        observers=[body.engine] + ([gaze] if gaze is not None else []),
-        flags=[body.engine] + ([gaze] if gaze is not None else []),
+        observers=[body.engine, people] + ([gaze] if gaze is not None else []),
+        flags=[body.engine, people] + ([gaze] if gaze is not None else []),
         vocabulary=body.vocabulary,
+        people=people,
     )
     loop.paid_ledger = ledger
     holder.append(loop)
@@ -539,8 +554,9 @@ def main() -> int:
         f" {b.cache}), voice {config.voice.name} ({config.voice.model}), wake {config.wake};"
         f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
         f" {config.prosody_tags}, turn_model {config.turn_model}, gestures"
-        f" {'on' if body.engine.on else 'off'}. Logs: {args.logs}; switch:"
-        " scripts/voice_cascade.py switch --brain NAME --voice NAME --flag gestures=on",
+        f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'}. Logs:"
+        f" {args.logs}; switch: scripts/voice_cascade.py switch --brain NAME --voice NAME"
+        " --flag gestures=on",
         flush=True,
     )
     try:
@@ -552,6 +568,7 @@ def main() -> int:
     finally:
         if gaze is not None:
             gaze.close()  # the head let go before the links close
+        people.close()
         speech.close()
         if turn is not None:
             turn.close()

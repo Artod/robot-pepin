@@ -622,6 +622,30 @@ A board without `config/arm.json` in `/opt/pepin/config` never reads or writes t
 cue line says the stream second it was planned for, the one it went at and how late; the
 board's `accepted`/`done` come back as `arm` lines with the laptop's time.
 
+## People: who is speaking
+
+Person recognition (`pepin.people`, in the voice cascade, flag `people`, off as shipped) names
+the speaker of each utterance in front of the words the brain reads (`[говорит: Саша]`,
+`[говорит: похоже, Саша]`, `[говорит: кто-то новый]`; the prosody words follow, measured against
+that person's own baseline) from the voice (WeSpeaker ResNet34-LM, an utterance of at least 1 s)
+and the face (ArcFace alone on the speaker gaze's tracked face, else on the dominant face of a
+fresh snapshot). A new person is named by the brain's `remember_person(name)` (the stranger who
+spoke last, or the one new face in view when someone introduces them) and deleted by
+`forget_person(name)`. The store is `data/people/people.db` on this Mac (names and embeddings,
+nothing else, never uploaded). Weights, once per checkout (models/ is gitignored):
+
+```bash
+mkdir -p models/voice models/face/buffalo_l
+curl -L -o models/voice/voxceleb_resnet34_LM.onnx \
+  https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx
+cp scratch/face_1008/cache/insightface/models/buffalo_l/w600k_r50.onnx models/face/buffalo_l/
+uv run python scripts/voice_cascade.py switch --flag people=on     # off as shipped; live
+sqlite3 data/people/people.db 'select name, kind, datetime(created_at, "unixepoch") from people'
+```
+
+Without the robot's camera (`--fake-robot`, a bench) it names by voice alone. Thresholds and
+the reasons for them: `config/people.json`.
+
 ## Camera grid A/B (2026-09-24)
 
 An alternative to the `/depth_marks` fan, shipped off: `depth_fusion`'s `grid_out` publishes the
