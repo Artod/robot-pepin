@@ -1018,6 +1018,9 @@ class WheelsGuard:
     def part_queued(self, turn: int, index: int, part: Any) -> None:
         """Nothing."""
 
+    def voice_started(self, turn: int) -> None:
+        """Nothing."""
+
     def part_spoken(self, turn: int, index: int) -> None:
         """Nothing."""
 
