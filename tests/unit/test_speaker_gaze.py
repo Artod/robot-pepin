@@ -46,6 +46,8 @@ REPO = Path(__file__).resolve().parents[2]
 REACH = Reach.of(NeckConfig.from_json(REPO / "config/neck.json"))
 BOARD = 5000.0  # the board's clock runs this far ahead of the laptop's in these tests
 MAP = DoaMap(front_deg=180.0, sign=1)  # the array reads 180 straight ahead, growing leftward
+# The rules run at 3 Hz (their times were worked out at it); the rate's own tests at the shipped 10.
+RULES = SpeakerSettings(doa_map=MAP, track_hz=3.0)
 SEEK_TILT = math.radians(-5.0)
 HOME_AIM = Aim(0.0, math.radians(23.8))
 
@@ -294,7 +296,7 @@ def rig(
     said: list[str] = []
     wheels = wheels if wheels is not None else NoWheels()
     machine = SpeakerGaze(
-        settings if settings is not None else SpeakerSettings(doa_map=MAP),
+        settings if settings is not None else RULES,
         door=door,
         doa=doa,
         finder=faces if finder else None,
@@ -381,7 +383,7 @@ def test_the_face_picked_as_the_speaker_s_is_told_to_the_listener() -> None:
 
 
 def test_a_smile_without_a_face_when_asked_for() -> None:
-    settings = SpeakerSettings(doa_map=MAP, seek_frames=1, seek_sweep_deg=0.0, smile_unseen=True)
+    settings = replace(RULES, seek_frames=1, seek_sweep_deg=0.0, smile_unseen=True)
     r = rig(settings=settings, frames=[None])
     wake(r, 240)
     r.machine.tick(1.6)
@@ -389,7 +391,7 @@ def test_a_smile_without_a_face_when_asked_for() -> None:
 
 
 def test_past_the_comfort_the_wheels_turn_the_rest_and_the_stub_leaves_it_to_the_head() -> None:
-    turning = rig(settings=SpeakerSettings(doa_map=MAP, reaim_deg=20.0), wheels=FakeWheels())
+    turning = rig(settings=replace(RULES, reaim_deg=20.0), wheels=FakeWheels())
     wake(turning, 280)  # 100 deg left
     (move,) = [c[1][0] for c in turning.wheels.calls]
     assert move == WheelMove(turn_deg=pytest.approx(30.0))
@@ -411,7 +413,7 @@ def test_a_voice_already_in_the_picture_and_an_unmeasured_map_only_tilt_the_head
     near.door.view = view(head=Aim(rad(50), rad(23.8)))
     wake(near, 240)  # 60 deg: 10 deg from where the head points
     assert near.door.aims()[0][0] == approx_aim(50, SEEK_TILT)
-    blind = rig(settings=SpeakerSettings(doa_map=None))
+    blind = rig(settings=replace(RULES, doa_map=None))
     wake(blind, 240)
     assert blind.door.aims()[0][0] == Aim(0.0, SEEK_TILT) and "unmeasured" in blind.said[0]
 
@@ -529,20 +531,50 @@ def test_no_finder_holds_the_voice_without_frames() -> None:
     assert r.machine.tick(1.6) == pytest.approx(3.6), "the renewals go on"
 
 
-def test_a_minute_of_tracking_costs_180_frames_and_210_calls_to_the_door() -> None:
-    """The budget at 3 Hz: three frames a second (one state read before each), a renewal every
-    2 s, no aim while the person stands still (a walking person: an aim per frame at most, each
-    one a renewal too, so 360 calls a minute)."""
-    r = tracking([frame(face(1.0)) for _ in range(200)])
-    before = dict(r.machine.counts)
-    run(r, until=61.6 + 1e-6, start=1.6)
-    spent = {k: r.machine.counts[k] - before.get(k, 0) for k in ("frames", "states", "renewals")}
-    assert spent == {"frames": 180, "states": 180, "renewals": 30}
-    assert r.machine.counts["aims"] == before["aims"], "still: nothing re-aimed"
+class Walker:
+    """The finder seeing one person at ``pan(t)`` (cart frame, degrees) from wherever the door
+    says the head points; ``t`` is set before each tick."""
+
+    def __init__(self, door: Door, pan: Callable[[float], float]) -> None:
+        self.door, self.pan, self.t, self.looks = door, pan, 0.0, 0
+
+    def look(self) -> FaceFrame | None:
+        self.looks += 1
+        head = self.door.view.head if self.door.view is not None else None
+        held = math.degrees(head.pan_rad) if head is not None else 0.0
+        return frame(face(self.pan(self.t) - held))
+
+
+def minute(pan: Callable[[float], float]) -> dict[str, int]:
+    """A minute of tracking at the shipped rate, the person at ``pan(t)``: what it cost."""
+    r = rig(settings=SpeakerSettings(doa_map=MAP))
+    walker = Walker(r.door, pan)
+    r.machine.finder = walker
+    wake(r, 240)  # the face at +60
+    walker.t = 1.6
+    now = r.machine.tick(1.6)  # found: tracking from here
+    keys = ("frames", "states", "renewals", "aims")
+    before = {k: r.machine.counts[k] for k in keys}
+    while now is not None and now <= 61.6 + 1e-6:
+        walker.t = now
+        now = r.machine.tick(now)
+    assert r.machine.phase == "track"
+    return {k: r.machine.counts[k] - before[k] for k in keys}
+
+
+def test_a_minute_of_tracking_at_10_hz_costs_600_state_reads_and_30_renewals() -> None:
+    """The budget at the shipped 10 Hz: one state read before each frame, a renewal every 2 s,
+    no aim while the person stands still; walking across at 15 deg/s (a person at 1.5 m and
+    0.4 m/s) the head is re-aimed past the dead band about every 0.4 s, each aim a renewal too."""
+    still = minute(lambda t: 60.0)
+    assert still == {"frames": 600, "states": 600, "renewals": 30, "aims": 0}
+    walking = minute(lambda t: 60.0 - 15.0 * ((t - 1.6) % 8.0))  # +60 to -60, again
+    assert walking["frames"] == 600 and 120 <= walking["aims"] <= 180
+    assert walking["renewals"] < still["renewals"]
 
 
 # ---- whoever speaks: look, verify, return ----------
-TODAY_SETTINGS = SpeakerSettings(doa_map=TODAY.doa_map)
+TODAY_SETTINGS = replace(RULES, doa_map=TODAY.doa_map)
 
 
 @dataclass(frozen=True, eq=False)
@@ -746,15 +778,15 @@ def test_a_voice_from_behind_turns_the_head_as_far_as_it_reaches() -> None:
 
 def test_a_walking_face_is_led_by_its_speed_and_the_lead_is_capped() -> None:
     """He walks left at 15 deg/s (5 deg a frame at 3 Hz): from the second sighting the head aims
-    where he will be at the next frame, 5 deg ahead of where he was seen; at 60 deg/s the lead
-    stops at lead_max_deg."""
+    where he will be lead_s (0.3 s) later, 4.5 deg ahead of where he was seen; at 60 deg/s the
+    lead stops at lead_max_deg; sightings over half a second apart give no speed."""
     leads: list[dict[str, Any]] = []
     r = tracking([frame(face(5.0))])
     r.machine.events = lambda kind, now, **f: leads.append(f) if kind == "gaze_reaim" else None
     r.machine.tick(1.6 + 1 / 3)
     aim, speed = r.door.aims()[-1]
-    assert aim.pan_rad == pytest.approx(rad(70)) and speed == "slow"
-    assert leads[-1]["lead_deg"] == 5.0
+    assert aim.pan_rad == pytest.approx(rad(69.5)) and speed == "slow"
+    assert leads[-1]["lead_deg"] == 4.5
     fast = tracking([frame(face(20.0))])
     fast.machine.tick(1.6 + 1 / 3)
     aim, speed = fast.door.aims()[-1]
@@ -875,19 +907,115 @@ def test_the_observer_hooks_return_at_once_while_the_gaze_waits_on_the_door() ->
     worker.close()
 
 
+# ---- the voice first ----------
+def speaking_rig() -> Rig:
+    """Tracking at the shipped rates: Artem at +60, a frame every 0.1 s."""
+    r = rig(settings=SpeakerSettings(doa_map=MAP), frames=[frame(face(0.0)) for _ in range(100)])
+    wake(r, 240)
+    r.machine.tick(1.6)
+    assert r.machine.phase == "track" and r.machine.next_frame == pytest.approx(1.7)
+    return r
+
+
+def test_no_frame_from_a_reply_s_first_part_until_its_first_chunk_then_one_a_second() -> None:
+    """The voice's first chunk shares the Mac with the gaze: from the first part queued until
+    the first audio no frame is taken (renewals go on); then frames come once a second while the
+    robot speaks, and ten a second again the moment it stops."""
+    r = speaking_rig()
+    r.machine.speaking(True, 1.65)
+    looks = r.finder.looks
+    assert r.machine.tick(1.7) == pytest.approx(3.6), "nothing due but the renewal"
+    for t in (1.8, 2.0, 2.5):
+        r.machine.tick(t)
+    assert r.finder.looks == looks and r.machine.voice_hold
+    r.machine.voiced(2.55)
+    assert r.machine.tick(2.55) == pytest.approx(3.55)
+    assert r.finder.looks == looks + 1, "the frame that waited, at once"
+    for t in (2.65, 3.0, 3.5):
+        r.machine.tick(t)
+    assert r.finder.looks == looks + 1, "one a second while the robot speaks"
+    r.machine.tick(3.55)
+    r.machine.tick(3.6)
+    assert r.finder.looks == looks + 2 and r.door.count("renew") >= 1
+    r.machine.speaking(False, 3.7)
+    assert r.machine.next_frame == pytest.approx(3.8), "listening: ten a second at once"
+    r.machine.speaking(True, 5.0)
+    assert r.machine.voice_hold
+    r.machine.speaking(False, 5.5)
+    assert not r.machine.voice_hold, "a reply cut before its first chunk ends the hold"
+    assert r.machine.counts["voice_holds"] == 2
+
+
+def test_the_hold_is_a_switch_and_the_robot_s_later_parts_hold_nothing() -> None:
+    r = speaking_rig()
+    r.machine.configure(replace(r.machine.settings, hold_for_voice=False))
+    r.machine.speaking(True, 1.65)
+    looks = r.finder.looks
+    r.machine.tick(1.75)
+    assert r.finder.looks == looks + 1 and not r.machine.voice_hold
+    on = speaking_rig()
+    on.machine.speaking(True, 1.65)
+    on.machine.voiced(1.66)
+    on.machine.speaking(True, 1.8)  # the reply's second part
+    assert not on.machine.voice_hold
+
+
+def test_an_aim_under_aim_min_deg_from_the_last_one_is_never_written() -> None:
+    """With the dead band set under it, a correction of 0.8 deg writes nothing and one of
+    1.5 deg an aim; at the shipped 6 deg dead band the floor never binds."""
+    settings = replace(RULES, deadband_deg=0.5, aim_min_deg=1.0)
+    r = rig(settings=settings, frames=[frame(face(0.0)), frame(face(0.8)), frame(face(1.5))])
+    wake(r, 240)
+    r.machine.tick(1.6)
+    aims = len(r.door.aims())
+    r.machine.tick(2.6)
+    assert len(r.door.aims()) == aims
+    r.machine.tick(3.6)
+    assert len(r.door.aims()) == aims + 1
+
+
+def test_the_detector_runs_on_the_neural_engine_as_shipped(tmp_path: Path) -> None:
+    """config/expression.json's finder.compute_units: CPUAndNeuralEngine (never the GPU the
+    voice uses), CoreML's NeuralNetwork model (the Neural Engine refuses the ML Program) and a
+    quiet onnxruntime pool."""
+    from pepin.expression.finder import finder_device
+    from pepin.face_sensor.backends import COREML, providers, session_options
+
+    assert finder_device(REPO / "config/expression.json") == "ane"
+    path = tmp_path / "expression.json"
+    path.write_text('{"finder": {"compute_units": "ALL"}}')
+    assert finder_device(path) == "coreml"
+    path.write_text("{}")
+    assert finder_device(path) == "ane"
+    path.write_text('{"finder": {"compute_units": "GPU"}}')
+    with pytest.raises(ValueError, match="compute_units"):
+        finder_device(path)
+    names, options = providers("ane", tmp_path / "cache")
+    if names[0] == COREML:
+        assert options[0]["MLComputeUnits"] == "CPUAndNeuralEngine"
+        assert options[0]["ModelFormat"] == "NeuralNetwork"
+    assert session_options("ane").intra_op_num_threads == 1
+    assert session_options("coreml") is None
+
+
 # ---- the knobs and the switch ----------
 def test_the_shipped_knobs_load_off_and_measured_on_the_four_readings() -> None:
     settings = SpeakerSettings.load(REPO / "config/expression.json")
     assert settings.doa_map == TODAY.doa_map and settings.ttl_s == 6.0 and settings.renew_s == 2.0
     assert settings.body.max_turn_deg == 30.0 and settings.min_speech == 2
     assert settings.refine_deg == 2.0 and settings.smile_unseen is False
-    assert (settings.track_hz, settings.lead_max_deg, settings.seek_sweep_deg) == (3.0, 10.0, 10.0)
+    assert (settings.track_hz, settings.lead_max_deg, settings.seek_sweep_deg) == (10.0, 10.0, 10.0)
+    assert (settings.track_speaking_hz, settings.hold_for_voice) == (1.0, True)
+    assert (settings.lead_s, settings.aim_min_deg) == (0.3, 1.0)
+    assert settings == replace(SpeakerSettings(), doa_map=settings.doa_map, body=settings.body)
     assert (settings.reaim_deg, settings.verify_s, settings.reaim_votes) == (35.0, 0.7, 2)
     assert (settings.face_lost_s, settings.doa_min_speech, settings.doa_min_dbfs) == (2.0, 4, -28.0)
     assert (settings.seek_min_face_px, settings.track_min_face_px) == (28.0, 40.0)
     assert settings.remember_targets == 3
     assert flag_default(REPO / "config/expression.json") is False
-    for bad in ({"track_hz": 0}, {"reaim_votes": 0}, {"lead_max_deg": -1}):
+    bad_knobs = ({"track_hz": 0}, {"reaim_votes": 0}, {"lead_max_deg": -1},
+                 {"track_speaking_hz": 0})  # fmt: skip
+    for bad in bad_knobs:
         with pytest.raises(ValueError, match="speaker"):
             SpeakerSettings.from_config({"speaker": bad})
     measured = SpeakerSettings.from_config({"speaker": {"doa": {"front_deg": 400, "sign": -1}}})

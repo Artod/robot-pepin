@@ -407,8 +407,12 @@ class CascadeLoop:
             conversation.log.voice.write(self._at_log_rate(pcm, conversation.log.voice.rate))
         reply = self.replies.get(job.turn)
         if reply is not None and job.kind == "reply":
+            first = not reply.audio
             reply.audio = True
             reply.input.timeline.mark("tts_first_audio", t)
+            if first and self.observers and self._loop is not None:
+                with contextlib.suppress(RuntimeError):  # the loop has ended
+                    self._loop.call_soon_threadsafe(self._tell, "voice_started", job.turn)
 
     def _at_log_rate(self, pcm: bytes, rate: int) -> bytes:
         """A voice chunk at the rate the conversation's out.wav was opened with (a voice

@@ -588,9 +588,11 @@ curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the 
 
 **The speaker gaze** (`pepin.expression.tracker`, in the voice cascade, flag `speaker_gaze`, off as
 shipped): on the robot's name the head turns to the voice (the array's direction of arrival),
-takes a snapshot, finds the face (SCRFD alone; a far one from 28 px, and 10 deg higher before
-giving up), centres it, smiles once at a clear face, and follows the person at three frames a
-second, leading a walking one; whoever speaks with words from elsewhere is looked at at once,
+takes a snapshot, finds the face (SCRFD alone, on the CPU and the Neural Engine, never the GPU the
+voice uses: `finder.compute_units`; a far one from 28 px, and 10 deg higher before giving up),
+centres it, smiles once at a clear face, and follows the person at ten frames a second while it
+listens and one while it speaks, none while the voice makes a reply's first chunk, leading a
+walking one; whoever speaks with words from elsewhere is looked at at once,
 and a look that finds nobody returns to the face it left within 0.7 s. Quiet utterances, few
 speech readings and sounds without words never move the head alone; the robot's name always
 does. At the close the look is released and the head goes home. Every decision is a `gaze_*`

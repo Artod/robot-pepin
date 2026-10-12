@@ -59,6 +59,10 @@ class RecordingObserver:
         """Recorded."""
         self.calls.append(("part_queued", (turn, index, part)))
 
+    def voice_started(self, turn: int) -> None:
+        """Recorded."""
+        self.calls.append(("voice_started", (turn,)))
+
     def part_spoken(self, turn: int, index: int) -> None:
         """Recorded."""
         self.calls.append(("part_spoken", (turn, index)))

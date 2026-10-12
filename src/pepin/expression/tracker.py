@@ -9,10 +9,12 @@ then follows whoever speaks while the conversation lasts::
       seek --a face--> refine onto it, smile once (a face of track_min_face_px or more) --> track
       seek --no face--> voice (back at seek_tilt_deg, stays on the voice, no smile)
       voice --a face--> refine, smile --> track
-      track: track_hz frames while the head stands still, is ours and carries no gesture; a face
-             off the centre by more than deadband_deg is re-aimed where it will be at the next
-             frame (constant velocity over the last two sightings, at most lead_max_deg ahead;
-             slow up to saccade_over_deg, else a saccade)
+      track: track_hz frames while the person speaks or is silent, track_speaking_hz while the
+             robot speaks, only while the head stands still, is ours and carries no gesture; a
+             face off the centre by more than deadband_deg is re-aimed where it will be lead_s
+             later (constant velocity over the last two sightings, at most lead_max_deg ahead;
+             slow up to saccade_over_deg, else a saccade); an aim under aim_min_deg from the last
+             one is never written (the look is renewed every renew_s instead)
       track --no face in frames for face_lost_s--> voice (the head stays where it is)
       drive(True) --> paused (the arbiter let the head go at the drive's start)
       drive(False) --> the next utterance with words orients again
@@ -32,6 +34,12 @@ Who speaks now is looked at: look, verify, return. Each utterance is judged by i
   none and the head goes back to the face it left. With no face held it is a full seek;
 * the robot's name in an utterance always turns the head to it (a full seek, the head staying on
   the voice when no face is found), the gates aside.
+
+The voice comes first: from a reply's first part going to the voice until its first audio
+chunk is with the player (``hold_for_voice``), no frame is taken and nothing is detected, so the
+voice's first chunk never waits on the detector; the detector itself runs on the CPU and the
+Neural Engine, never the GPU the voice uses (config/expression.json ``finder.compute_units``,
+:mod:`pepin.expression.finder`).
 
 Each person looked at is remembered (``remember_targets`` of them: the face's place, its last
 box, when): the seam for two interlocutors, and the way back after a check that found nobody.
@@ -109,6 +117,7 @@ FACE_SOURCE = "expression"  # the face's expressions of the body layer, at the h
 BLIND_RETRY_S = 0.1  # a frame refused for a blind head is tried again this soon
 SPOKE_KEPT = 8  # the robot's latest speaking spans kept to judge an utterance by
 TEXT_KEPT = 40  # an utterance's words kept in its event, to pair it with the loop's "heard"
+LEAD_WINDOW_S = 0.5  # two sightings further apart than this give no speed to lead by
 Report = Callable[[str], None]
 FaceListener = Callable[[FaceFrame, FaceSighting], None]  # a frame and the speaker's face in it
 
@@ -134,12 +143,16 @@ class SpeakerSettings:
     seek_every_s: float = 0.4
     seek_min_face_px: float = 28.0
     track_min_face_px: float = 40.0
-    track_hz: float = 3.0
+    track_hz: float = 10.0
+    track_speaking_hz: float = 1.0
+    hold_for_voice: bool = True
+    lead_s: float = 0.3
     lead_max_deg: float = 10.0
     match_deg: float = 20.0
     refine_deg: float = 2.0
     deadband_deg: float = 6.0
     saccade_over_deg: float = 15.0
+    aim_min_deg: float = 1.0
     reaim_deg: float = 35.0
     verify_s: float = 0.7
     reaim_votes: int = 2
@@ -157,8 +170,13 @@ class SpeakerSettings:
 
     @property
     def track_every_s(self) -> float:
-        """The time between tracking frames."""
+        """The time between tracking frames while the robot listens."""
         return 1.0 / self.track_hz
+
+    @property
+    def speaking_every_s(self) -> float:
+        """The time between tracking frames while the robot speaks."""
+        return 1.0 / self.track_speaking_hz
 
     @classmethod
     def from_config(cls, data: Mapping[str, Any]) -> SpeakerSettings:
@@ -202,6 +220,8 @@ class SpeakerSettings:
             raise ValueError("speaker: reaim_votes >= 1, remember_targets and verify_s >= 0")
         if self.lead_max_deg < 0 or self.face_lost_s < 0 or self.seek_sweep_deg < 0:
             raise ValueError("speaker: lead_max_deg, face_lost_s and seek_sweep_deg >= 0")
+        if self.track_speaking_hz <= 0 or self.lead_s < 0 or self.aim_min_deg < 0:
+            raise ValueError("speaker: track_speaking_hz > 0, lead_s and aim_min_deg >= 0")
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> SpeakerSettings:
@@ -289,6 +309,7 @@ class SpeakerGaze:
         self.next_renew: float | None = None
         self.smiled = False
         self.reorient = False  # the next utterance turns the head (after a drive, a switch)
+        self.voice_hold = False  # a reply's first chunk is being synthesised: no frames
         self.spoke: list[tuple[float, float | None]] = []  # the robot's speaking spans
         self.wake: Heard | None = None  # the cascade tells it once more as heard: not twice
         self.counts: Counter[str] = Counter()
@@ -363,12 +384,25 @@ class SpeakerGaze:
         self._look_toward(bearing, now, "a voice elsewhere", check=self.phase == "track")
 
     def speaking(self, on: bool, now: float) -> None:
-        """The robot's voice starts (a part queued) or stops (a reply done or cut)."""
+        """The robot's voice starts (a reply's part queued: frames wait for its first chunk,
+        then come at the speaking rate) or stops (a reply done or cut: the listening rate at
+        once)."""
         open_span = bool(self.spoke) and self.spoke[-1][1] is None
         if on and not open_span:
             self.spoke = [*self.spoke[-(SPOKE_KEPT - 1) :], (now, None)]
+            if self.settings.hold_for_voice and self.phase != "idle":
+                self.voice_hold = True
+                self.counts["voice_holds"] += 1
         elif not on and open_span:
             self.spoke[-1] = (self.spoke[-1][0], now)
+            self.voice_hold = False
+            soon = now + self.settings.track_every_s
+            if self.next_frame is not None and self.next_frame > soon:
+                self.next_frame = soon
+
+    def voiced(self, now: float) -> None:
+        """The reply's first chunk is with the player: frames resume."""
+        self.voice_hold = False
 
     def drive(self, active: bool, now: float) -> None:
         """A drive started (the arbiter let the head go) or ended (the next utterance orients)."""
@@ -387,6 +421,7 @@ class SpeakerGaze:
     def stop(self, now: float, why: str) -> None:
         """Let the head go now (the switch off, the conversation's end)."""
         held = self.phase != "idle" or self.aim is not None
+        self.voice_hold = False
         self.phase, self.aim, self.next_frame, self.next_renew = "idle", None, None, None
         self.voice, self.target, self.targets = None, None, []
         self._forget_track()
@@ -424,9 +459,10 @@ class SpeakerGaze:
             return self.next_renew
         if self.next_renew is not None and now >= self.next_renew:
             self._renew(now)
-        if self.next_frame is not None and now >= self.next_frame:
+        if self.next_frame is not None and now >= self.next_frame and not self.voice_hold:
             self._frame(now)
-        due = [t for t in (self.next_renew, self.next_frame) if t is not None]
+        frame = None if self.voice_hold else self.next_frame  # the voice's moment ends a hold
+        due = [t for t in (self.next_renew, frame) if t is not None]
         return min(due) if due else None
 
     # ---- the voice -----------------------------------------------------------------------------
@@ -621,7 +657,9 @@ class SpeakerGaze:
             if self.next_frame is not None and self.next_frame <= now:
                 s = self.settings
                 if self.phase != "seek":
-                    self.next_frame = now + s.track_every_s
+                    self.next_frame = now + (
+                        s.speaking_every_s if self._robot_speaking() else s.track_every_s
+                    )
                 else:  # a check's next frame as soon as the head is still again
                     self.next_frame = now + (BLIND_RETRY_S if self.verifying else s.seek_every_s)
 
@@ -664,7 +702,7 @@ class SpeakerGaze:
         lead = self._lead(seen.pan_rad, now) if tracking else 0.0
         target = self.reach.clamp(Aim(seen.pan_rad + lead, seen.tilt_rad))
         off = target.off(self.aim if self.aim is not None else view.head)
-        band = s.deadband_deg if tracking else s.refine_deg
+        band = max(s.deadband_deg if tracking else s.refine_deg, s.aim_min_deg)
         if off > math.radians(band):
             speed: Speed = "slow" if off <= math.radians(s.saccade_over_deg) else "saccade"
             why = "the face moved" if tracking else "onto the face"
@@ -701,18 +739,22 @@ class SpeakerGaze:
             self._smile()
 
     def _lead(self, pan: float, now: float) -> float:
-        """How far a moving face will have gone by the next frame (radians of pan): constant
-        velocity over the last two sightings, at most ``lead_max_deg``; 0 without a sighting in
-        the last two and a half frame periods."""
+        """How far a moving face will have gone ``lead_s`` from now (radians of pan): constant
+        velocity over the last two sightings, at most ``lead_max_deg``; 0 when they are more
+        than ``LEAD_WINDOW_S`` apart."""
         s = self.settings
         if self.seen is None:
             return 0.0
         then, before = self.seen
         dt = now - then
-        if dt <= 0.0 or dt > 2.5 * s.track_every_s:
+        if dt <= 0.0 or dt > LEAD_WINDOW_S:
             return 0.0
         cap = math.radians(s.lead_max_deg)
-        return max(-cap, min(cap, _wrap(pan - before) / dt * s.track_every_s))
+        return max(-cap, min(cap, _wrap(pan - before) / dt * s.lead_s))
+
+    def _robot_speaking(self) -> bool:
+        """Whether a span of the robot's speech is open."""
+        return bool(self.spoke) and self.spoke[-1][1] is None
 
     def _missed(self, now: float, *, looked: bool) -> None:
         """A frame without the speaker's face (``looked``: one was taken): a seek tilts higher,
@@ -756,7 +798,7 @@ class SpeakerGaze:
         self.phase = "voice"
         self._note("gaze_lost", now, "no face: the head stays on the voice", what="seek")
         tilt = math.radians(s.seek_tilt_deg)
-        if self.aim is not None and abs(self.aim.tilt_rad - tilt) > 1e-9:
+        if self.aim is not None and abs(self.aim.tilt_rad - tilt) > math.radians(s.aim_min_deg):
             self._hold(self.reach.clamp(Aim(self.aim.pan_rad, tilt)), "saccade", now, "seek tilt")
         if s.smile_unseen:
             self._smile()
@@ -936,6 +978,10 @@ class SpeakerGazeWorker:
         """The robot speaks."""
         self._post("speaking", True)
 
+    def voice_started(self, turn: int) -> None:
+        """The voice's first chunk is out: frames may resume."""
+        self._post("voiced", turn)
+
     def part_spoken(self, turn: int, index: int) -> None:
         """Nothing."""
 
@@ -1010,6 +1056,7 @@ class SpeakerGazeWorker:
             "opened": lambda m: m.opened(args[0], now),
             "heard": lambda m: m.heard(args[0], now),
             "speaking": lambda m: m.speaking(args[0], at),
+            "voiced": lambda m: m.voiced(now),
             "drive": lambda m: m.drive(args[0], now),
             "closed": lambda m: m.closed(args[0], now),
         }

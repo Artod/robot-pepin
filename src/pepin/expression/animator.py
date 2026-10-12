@@ -299,6 +299,9 @@ class GestureEngine:
         """A part went to the voice: its markers rendered and waiting for their words."""
         self._post(lambda: self._part_queued(turn, index, part))
 
+    def voice_started(self, turn: int) -> None:
+        """Nothing: the parts carry their own marks."""
+
     def part_spoken(self, turn: int, index: int) -> None:
         """All of that part's audio is with the player: its length is known."""
         self._post(lambda: self._part_spoken(turn, index))

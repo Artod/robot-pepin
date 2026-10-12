@@ -67,6 +67,11 @@ class ConversationObserver(Protocol):
         """Part ``index`` of reply ``turn`` went to the voice, its markers with it."""
         ...
 
+    def voice_started(self, turn: int) -> None:
+        """Reply ``turn``'s first audio is with the player: the voice has synthesised its first
+        chunk (work that shares the GPU with it waits for this)."""
+        ...
+
     def part_spoken(self, turn: int, index: int) -> None:
         """The voice has fed all of that part's audio to the player: its mark is final."""
         ...
