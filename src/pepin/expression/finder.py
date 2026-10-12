@@ -143,6 +143,7 @@ class SnapshotFinder:
         self.snapshots, self._load, self.lens, self.min_score = snapshots, load, lens, min_score
         self._detector: Detector | None = None
         self._lock = threading.Lock()
+        self._looking = threading.Lock()
         self.timing = Timing()
 
     def warm(self) -> None:
@@ -150,7 +151,13 @@ class SnapshotFinder:
         self._model()
 
     def look(self) -> FaceFrame | None:
-        """The faces in a fresh picture; None when no picture came."""
+        """The faces in a fresh picture (each with its detection, the frame with the picture);
+        None when no picture came. One look at a time: the speaker gaze and person recognition
+        share the finder."""
+        with self._looking:
+            return self._look()
+
+    def _look(self) -> FaceFrame | None:
         t0 = time.perf_counter()
         picture = self.snapshots.grab()
         t1 = time.perf_counter()
@@ -169,8 +176,12 @@ class SnapshotFinder:
             if det.score < self.min_score:
                 continue
             pan, tilt = lens.bearing_deg(*det.centre)
-            faces.append(FaceSighting(pan, tilt, det.width, det.score, yaw_deg=head_yaw_deg(det)))
-        return FaceFrame(picture.stamp, tuple(faces))
+            faces.append(
+                FaceSighting(
+                    pan, tilt, det.width, det.score, yaw_deg=head_yaw_deg(det), detection=det
+                )
+            )
+        return FaceFrame(picture.stamp, tuple(faces), image=picture.image)
 
     def _model(self) -> Detector:
         with self._lock:

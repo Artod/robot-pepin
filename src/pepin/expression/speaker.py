@@ -17,11 +17,17 @@ the head as far as it reaches when they may not.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Protocol
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Protocol
 
 from pepin.audio_link import DoaReading
 from pepin.gaze import Aim, Speed
+
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
+    from pepin.face_sensor.models import Detection
 
 
 @dataclass(frozen=True)
@@ -49,9 +55,10 @@ class DoaSource(Protocol):
 @dataclass(frozen=True)
 class FaceSighting:
     """One face in a frame: its bearing from the optical axis in degrees (pan + left, tilt +
-    down), its box width in pixels, the detector's score, who it is when the finder knows, and
-    how far the head is turned from the camera (degrees, from the detector's five points; 0
-    faces the robot) when the finder reads it."""
+    down), its box width in pixels, the detector's score, who it is when the finder knows, how
+    far the head is turned from the camera (degrees, from the detector's five points; 0 faces
+    the robot) when the finder reads it, and the detection itself (box and five points: what
+    person recognition aligns the face on) when the finder keeps it."""
 
     pan_deg: float
     tilt_deg: float
@@ -59,14 +66,17 @@ class FaceSighting:
     score: float
     who: str | None = None
     yaw_deg: float | None = None
+    detection: Detection | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
 class FaceFrame:
-    """The faces of one frame and its capture time (the camera's own stamp)."""
+    """The faces of one frame, its capture time (the camera's own stamp) and, when the finder
+    keeps it, the picture (BGR) the faces were found in."""
 
     stamp: float
     faces: tuple[FaceSighting, ...]
+    image: NDArray[np.uint8] | None = field(default=None, compare=False, repr=False)
 
 
 class FaceFinder(Protocol):
