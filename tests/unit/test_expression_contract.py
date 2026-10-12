@@ -6,7 +6,7 @@ from pathlib import Path
 
 from pepin.expression.animation import Clip
 from pepin.expression.conversation import GESTURES, SPEAKER_GAZE
-from pepin.expression.executors import NO_BODY, NoBody, NoWheels, WheelMove
+from pepin.expression.executors import NO_BODY, NoBody, NoWheels, WheelMove, WheelReport
 from pepin.expression.fakes import FakeExecutor, FakeFlag, FakeGazeDoor, FakePlayout
 from pepin.expression.markers import CLAUSE_END, MARKER, NAME, SPELLED
 from pepin.expression.trajectory import JOINTS
@@ -39,7 +39,9 @@ def test_the_wheels_stubs_refuse_with_the_reason() -> None:
     body = NoBody()
     assert body.ready() == NO_BODY
     assert not body.play(Clip("body", 0.0, 0.0, 1.0)).ok
-    report = NoWheels().move(WheelMove(turn_deg=20.0))
+    reports: list[WheelReport] = []
+    NoWheels().start(WheelMove(turn_deg=20.0), reports.append)
+    (report,) = reports
     assert not report.done and report.why == NO_BODY and report.turned_deg == 0.0
 
 

@@ -10,16 +10,18 @@ One :class:`Executor` per body part turns a rendered clip into requests to that 
   head; fading it withdraws the request and the head falls back to its holder;
 * ``face``: the clip's events as the head server's timed expressions (:class:`FaceChannel`);
 * ``body``: small motions of the wheels while standing, through :class:`Wheels`
-  (:class:`NoBody` and :class:`NoWheels` today).
+  (:class:`pepin.expression.wheels.WheelsExecutor`; :class:`NoBody` and :class:`NoWheels` where
+  there is no robot).
 
 THE WHEELS never drive for expression, and never through Nav2: a turn in place of at most
-``max_turn_deg`` per request (30) or a rock of at most ``max_rock_m`` (0.02), on the board's
-measured-motion path (``ros/tools/move.py``'s: velocity commands judged by the odometry's swept
-heading and travel, the lidar's cone, a time cap per leg, the base server's deadman behind it),
-and only while the goal server's ``where`` says ``"navigating": false``. A turn goes in steps
-of ``step_deg``; when the wheels stall or the lidar or the ToF says the arc is blocked, the cart
-backs off ``backoff_m`` and turns again, at most ``attempts`` times and ``max_backoff_m`` of
-backing in all, and then gives up: the speaker gaze then looks as far as the head reaches.
+``max_turn_deg`` per request (30) or a rock of at most ``max_rock_m`` (0.02), by the measured
+motions' method (``ros/tools/move.py``'s: velocity commands judged by the odometry's swept
+heading and travel, the lidar, a time cap per leg, the base server's deadman behind it), only
+while the goal server says ``"navigating": false``. When the wheels stall or the lidar says the
+arc is blocked, the cart backs off ``backoff_m`` and turns again, at most ``attempts`` times and
+``max_backoff_m`` of backing in all, and then gives up: the speaker gaze then looks as far as
+the head reaches. Every call to the wheels returns at once: a motion runs on the wheels' own
+thread and answers through a callback, so nothing the voice waits on ever waits on the wheels.
 
 The :class:`Animator` is the one place a gesture is asked for: the cascade's cues, the
 ``gesture`` tool and the laptop's command line all go through it.
@@ -27,12 +29,13 @@ The :class:`Animator` is the one place a gesture is asked for: the cascade's cue
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 from pepin.expression.animation import Clip, Layer, PartName, Performance
 
-NO_BODY = "the wheels make no expressive motion: their executor is not built"
+NO_BODY = "the wheels make no expressive motion here: no robot"
 
 
 @dataclass(frozen=True)
@@ -122,36 +125,51 @@ class WheelMove:
 @dataclass(frozen=True)
 class WheelReport:
     """How a wheel motion ended: whether it did all it was asked, the heading it turned, the
-    distance it backed off, the attempts it took, and why it stopped short."""
+    distance it backed off, the attempts it took, why it stopped short, and whether a halt cut
+    it (the person spoke, a drive began: worth finishing later)."""
 
     done: bool
     turned_deg: float = 0.0
     backed_m: float = 0.0
     attempts: int = 0
     why: str = ""
+    cut: bool = False
+
+
+WheelsDone = Callable[[WheelReport], None]  # a motion's end, told on any thread: never block it
+WheelsMoved = Callable[[float], None]  # a turn's heading so far (degrees), every step_deg
 
 
 class Wheels(Protocol):
-    """The measured-motion path for expression (the board's), with the bounded retry above."""
+    """The wheels' expressive motions with the bounded retry above. Every call returns at once:
+    the motion runs on the wheels' own thread; ``done`` hears its end (possibly before
+    :meth:`start` returns, for a request refused outright) and ``moved`` its progress, both on a
+    thread that is not the caller's, so each only hands the word to its owner's thread."""
 
-    def move(self, request: WheelMove) -> WheelReport:
-        """Run ``request`` to its end or give up (blocks: a worker thread calls it); refused
-        outright while a drive runs or past the knobs' ranges."""
+    def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
+        """Run ``request``: it replaces the motion running (that one answers ``cut``)."""
+        ...
+
+    def halt(self, why: str) -> None:
+        """Stop the motion running now and drop what waits (never blocks: the stop is one
+        non-blocking line to the base)."""
         ...
 
 
 class NoWheels:
-    """The wheels while their expression path is not built: every motion refused."""
+    """No wheels to move for expression (no robot): every motion refused."""
 
-    def move(self, request: WheelMove) -> WheelReport:
-        """Refused."""
-        return WheelReport(False, why=NO_BODY)
+    def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
+        """Refused, answered at once."""
+        done(WheelReport(False, why=NO_BODY))
+
+    def halt(self, why: str) -> None:
+        """Nothing moves."""
 
 
 class NoBody:
-    """The wheels' executor while no wheel motion for expression exists: never ready, every
-    clip refused, so a gesture plays without its body steps and the speaker gaze turns only the
-    head."""
+    """The body where there are no wheels to move (no robot): never ready, every clip refused,
+    so a gesture plays without its body steps."""
 
     part: PartName = "body"
     latency_s: float = 0.0

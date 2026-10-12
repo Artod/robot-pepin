@@ -4,19 +4,28 @@ own."""
 
 from __future__ import annotations
 
+import math
+import threading
 from collections import deque
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
+
 from pepin.audio_link import DoaReading
+from pepin.base_link import BaseState, StateListener
 from pepin.expression.animation import Clip, Layer, PartName
+from pepin.expression.clearance import View
 from pepin.expression.conversation import Heard
-from pepin.expression.executors import Outcome, WheelMove, WheelReport
+from pepin.expression.executors import Outcome, WheelMove, WheelReport, WheelsDone, WheelsMoved
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
 from pepin.expression.speaker import FaceFrame, GazeAnswer, HeadView
 from pepin.expression.trajectory import ArmAnswer, ArmStatus, Trajectory
 from pepin.gaze import Aim, Speed
+from pepin.kinematics import Twist
+from pepin.odometry import Pose2D
 
 Call = tuple[str, tuple[Any, ...]]
 
@@ -262,23 +271,212 @@ class FakeDoa:
 
 @dataclass
 class FakeWheels:
-    """Wheel motions answered with the next scripted report, done in full once they run out."""
+    """Wheel motions recorded and left running: a test moves them on (:meth:`move_on`) and ends
+    them (:meth:`finish`) when it wants, so a caller is seen to return before any of it."""
 
-    reports: deque[WheelReport] = field(default_factory=deque)
     calls: list[Call] = field(default_factory=list)
+    running: list[tuple[WheelMove, WheelsDone, WheelsMoved | None]] = field(default_factory=list)
 
-    def move(self, request: WheelMove) -> WheelReport:
-        """Recorded; as scripted."""
-        self.calls.append(("move", (request,)))
-        if self.reports:
-            return self.reports.popleft()
-        return WheelReport(True, turned_deg=request.turn_deg, attempts=1)
+    def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
+        """Recorded; it runs until :meth:`finish`."""
+        self.calls.append(("start", (request,)))
+        self.running.append((request, done, moved))
+
+    def halt(self, why: str) -> None:
+        """Recorded (the running motion ends when the test finishes it)."""
+        self.calls.append(("halt", (why,)))
+
+    def move_on(self, deg: float) -> None:
+        """The newest motion has turned ``deg`` so far."""
+        _, _, moved = self.running[-1]
+        if moved is not None:
+            moved(deg)
+
+    def finish(self, report: WheelReport | None = None) -> None:
+        """The newest motion ends (in full unless ``report`` says otherwise)."""
+        request, done, _ = self.running.pop()
+        done(report if report is not None else WheelReport(True, request.turn_deg, attempts=1))
+
+
+class FakeClock:
+    """A clock that moves only when told."""
+
+    def __init__(self, now: float = 100.0) -> None:
+        """Starts at ``now``."""
+        self.now = now
+
+    def __call__(self) -> float:
+        """The time."""
+        return self.now
+
+
+class FakeBase:
+    """The board's base server as the wheels drive it (:class:`pepin.expression.wheels.BaseLink`),
+    on a :class:`FakeClock`: a command lands ``lag_s`` after it is sent, the wheels' odometry
+    integrates the twist applied (none of a stalled axis), a state line goes out every 20 ms to
+    the listener, and the board's 0.5 s deadman stops a twist nobody renews. Tests script things
+    at times (:meth:`at`): someone else's stop, a stall, the arm starting."""
+
+    TRACK_M = 0.544
+
+    def __init__(self, clock: FakeClock, *, lag_s: float = 0.04, line_s: float = 0.02) -> None:
+        """At the origin, standing, armed off, its first line already out."""
+        self.clock, self.lag_s, self.line_s = clock, lag_s, line_s
+        self.pose = Pose2D(0.0, 0.0, 0.0)
+        self.applied = Twist(0.0, 0.0)
+        self.arriving: deque[tuple[float, Twist, str]] = deque()
+        self.listener: StateListener | None = None
+        self.sent: list[tuple[float, str, Twist]] = []  # (time, twist|stop, twist) as sent
+        self.stalled_turns = False
+        self.stalled_drives = False
+        self.drop_ours = False  # our lines lost on the way (the WiFi)
+        self.deadman = False
+        self.bus_ok = True
+        self.arm_phase: str | None = None
+        self.travel = (0.0, 0.0)  # the wheels' travel in the last line
+        self.silent = False  # the base server says nothing (no line at all)
+        self.events: list[tuple[float, Callable[[FakeBase], None]]] = []
+        self.lines: list[tuple[float, BaseState]] = []  # every line, with its time
+        self._foreign: tuple[Twist, bool] | None = None
+        self._last_cmd = clock()
+        self._line: BaseState | None = None
+        self._line_at = clock()
+        self.line()
+
+    def attach(self, listener: StateListener) -> FakeBase:
+        """The link the wheels open: ``listener`` hears every line."""
+        self.listener = listener
+        return self
+
+    def at(self, t: float, action: Callable[[FakeBase], None]) -> None:
+        """Do ``action`` when the clock reaches ``t``."""
+        self.events.append((t, action))
+
+    def set_twist(self, twist: Twist) -> None:
+        """One twist line, landing ``lag_s`` later."""
+        self.sent.append((self.clock(), "twist", twist))
+        if not self.drop_ours:
+            self.arriving.append((self.clock() + self.lag_s, twist, "ours"))
+
+    def stop(self) -> None:
+        """One stop line."""
+        self.sent.append((self.clock(), "stop", Twist(0.0, 0.0)))
+        if not self.drop_ours:
+            self.arriving.append((self.clock() + self.lag_s, Twist(0.0, 0.0), "ours"))
+
+    def foreign(self, twist: Twist, *, keep: bool = False) -> None:
+        """Someone else's command, applied now and after this step's own arrivals, so a line
+        shows it (the red button's one stop: a zero twist); ``keep``: a driver that goes on
+        commanding (Nav2, the teleop) every step."""
+        self.applied, self._last_cmd, self.deadman = twist, self.clock(), False
+        self._foreign = (twist, keep)
+
+    def state(self, now: float | None = None) -> BaseState | None:
+        """The newest line, aged."""
+        if self._line is None:
+            return None
+        now = self.clock() if now is None else now
+        return replace(self._line, age_s=now - self._line_at)
+
+    def advance(self, seconds: float) -> None:
+        """Let ``seconds`` pass: commands land, scripted events fire, the cart moves."""
+        end = self.clock.now + seconds
+        while self.clock.now < end - 1e-12:
+            step = min(self.line_s, end - self.clock.now)
+            self.clock.now += step
+            now = self.clock.now
+            for t, action in [e for e in self.events if e[0] <= now]:
+                self.events.remove((t, action))
+                action(self)
+            while self.arriving and self.arriving[0][0] <= now:
+                _, twist, _ = self.arriving.popleft()
+                self.applied, self._last_cmd, self.deadman = twist, now, False
+            if self._foreign is not None:
+                twist, keep = self._foreign
+                self.applied, self._last_cmd, self.deadman = twist, now, False
+                self._foreign = self._foreign if keep else None
+            moving = abs(self.applied.linear) > 0 or abs(self.applied.angular) > 0
+            if moving and now - self._last_cmd > 0.5:
+                self.applied, self.deadman = Twist(0.0, 0.0), True
+            v = 0.0 if self.stalled_drives else self.applied.linear
+            w = 0.0 if self.stalled_turns else self.applied.angular
+            theta = self.pose.theta + w * step
+            self.pose = Pose2D(
+                self.pose.x + v * math.cos(theta) * step,
+                self.pose.y + v * math.sin(theta) * step,
+                theta,
+            )
+            half = w * self.TRACK_M / 2.0
+            self.travel = ((v - half) * step, (v + half) * step)
+            self.line()
+
+    def line(self) -> None:
+        """One state line now, the fields as they stand (none while ``silent``)."""
+        if self.silent:
+            self._line = None
+            return
+        a = self.applied
+        moving = abs(a.linear) > 0 or abs(a.angular) > 0
+        self._line = BaseState(self.pose, self.travel[0], self.travel[1], a.linear, a.angular,
+                               moving, True, self.deadman, self.bus_ok, 1.0, self.clock(), 0.0,
+                               arm_phase=self.arm_phase)  # fmt: skip
+        self._line_at = self.clock()
+        self.lines.append((self._line_at, self._line))
+        if self.listener is not None:
+            self.listener(self._line, self.clock())
+
+    def pause(self, event: threading.Event, seconds: float) -> None:
+        """:class:`pepin.expression.wheels.WheelsExecutor`'s pause on this clock: time passes
+        unless the event is already set."""
+        if not event.is_set():
+            self.advance(seconds)
+
+    def twists(self) -> list[Twist]:
+        """Every twist sent (stops as zero twists)."""
+        return [twist for _, _, twist in self.sent]
+
+
+@dataclass
+class FakeView:
+    """The goal server's word (:class:`pepin.expression.clearance.Surroundings`), always fresh
+    on the base's clock: whether Nav2 navigates, the scan's age, and fixed points of the room
+    (world frame) seen from where the fake base's cart stands; ``why`` for a goal server away;
+    ``cancelled_at`` the base clock's time of its last cancel (ros/stop.sh)."""
+
+    base: FakeBase
+    navigating: bool | None = False
+    scan_age_s: float | None = 0.05
+    world: list[tuple[float, float]] = field(default_factory=list)
+    why: str = ""
+    silent: bool = False  # never answers
+    cancelled_at: float | None = None
+    watched: list[bool] = field(default_factory=list)
+
+    def watch(self, on: bool) -> None:
+        """Recorded."""
+        self.watched.append(on)
+
+    def latest(self) -> View | None:
+        """A fresh view, the room's points in the cart's frame now."""
+        if self.silent:
+            return None
+        p = self.base.pose
+        c, s = math.cos(-p.theta), math.sin(-p.theta)
+        points = [
+            (c * (x - p.x) - s * (y - p.y), s * (x - p.x) + c * (y - p.y)) for x, y in self.world
+        ]
+        array = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        now = self.base.clock()
+        cancel = None if self.cancelled_at is None else now - self.cancelled_at
+        return View(now, self.navigating, self.scan_age_s, array, self.why, cancel)
 
 
 if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisfy their seams
 
     def _conforms() -> None:
         from pepin.audio_link import AudioClient
+        from pepin.base_link import BaseClient
+        from pepin.expression.clearance import GoalServerView, Surroundings
         from pepin.expression.conversation import ConversationObserver, LiveFlag
         from pepin.expression.door import OverlayDoor
         from pepin.expression.executors import Executor, FaceChannel, NoBody, NoWheels, Wheels
@@ -286,17 +484,22 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         from pepin.expression.parts import HeadDoor
         from pepin.expression.speaker import DoaSource, FaceFinder, GazeDoor
         from pepin.expression.trajectory import ArmLink
+        from pepin.expression.wheels import BaseLink, WheelsExecutor, WheelsGuard
         from pepin.head_link import HeadClient
 
         playout: Playout = FakePlayout()
-        observer: ConversationObserver = RecordingObserver()
+        executor = WheelsExecutor(lambda listener: FakeBase(FakeClock()), GoalServerView())
+        observers: list[ConversationObserver] = [RecordingObserver(), WheelsGuard(executor)]
         flag: LiveFlag = FakeFlag("gestures")
-        parts: list[Executor] = [FakeExecutor("arm"), NoBody()]
+        parts: list[Executor] = [FakeExecutor("arm"), NoBody(), executor]
         faces: list[FaceChannel] = [FakeFace(), HeadClient("board", source="voice")]
         arm: ArmLink = FakeArmLink()
         door: GazeDoor = FakeGazeDoor()
         finder: FaceFinder = FakeFaceFinder()
         doa: list[DoaSource] = [FakeDoa(), AudioClient("board")]
-        wheels: list[Wheels] = [FakeWheels(), NoWheels()]
+        wheels: list[Wheels] = [FakeWheels(), NoWheels(), executor]
         heads: list[HeadDoor] = [FakeHeadDoor(), OverlayDoor()]
-        del playout, observer, flag, parts, faces, arm, door, finder, doa, wheels, heads
+        bases: list[BaseLink] = [FakeBase(FakeClock()), BaseClient("board")]
+        views: list[Surroundings] = [FakeView(FakeBase(FakeClock())), GoalServerView()]
+        del playout, observers, flag, parts, faces, arm, door, finder, doa, wheels, heads
+        del bases, views

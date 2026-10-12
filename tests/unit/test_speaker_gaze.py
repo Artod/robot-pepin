@@ -151,39 +151,64 @@ def test_the_head_alone_within_its_comfort_and_the_wheels_for_the_rest() -> None
 
 
 class Steps:
-    """The wheels' steps: each turn answered from ``blocked`` (a stall short of the step)."""
+    """The wheels' attempts: each turn answered from ``blocked`` (a stall short of the turn),
+    ``stopped`` ends one for good; a back-off answered from ``backs`` (its blocked reason)."""
 
-    def __init__(self, blocked: list[float] | None = None) -> None:
+    def __init__(
+        self,
+        blocked: list[float] | None = None,
+        stopped: str = "",
+        backs: list[str] | None = None,
+    ) -> None:
         self.blocked = deque(blocked or [])
+        self.stopped = stopped
+        self.backs = deque(backs or [])
         self.calls: list[tuple[str, float]] = []
 
     def turn(self, deg: float) -> Step:
         self.calls.append(("turn", deg))
+        if self.stopped:
+            return Step(math.copysign(2.0, deg), stopped=self.stopped, cut=True)
         if self.blocked:
             return Step(math.copysign(self.blocked.popleft(), deg), blocked="stalled")
         return Step(deg)
 
-    def back_off(self, metres: float) -> float:
+    def back_off(self, metres: float) -> Step:
         self.calls.append(("back", metres))
-        return metres
+        blocked = self.backs.popleft() if self.backs else ""
+        return Step(0.0 if blocked else metres, blocked=blocked)
 
 
-def test_a_turn_goes_in_steps_backs_off_on_a_stall_and_gives_up_within_its_bounds() -> None:
+def test_a_turn_goes_in_one_go_backs_off_on_a_stall_and_gives_up_within_its_bounds() -> None:
     steps = Steps()
     done = BoundedTurn(steps).move(WheelMove(turn_deg=25.0))
     assert done.done and done.turned_deg == pytest.approx(25.0) and done.attempts == 1
-    assert steps.calls == [("turn", 10.0), ("turn", 10.0), ("turn", 5.0)]
+    assert steps.calls == [("turn", 25.0)], "one continuous turn, its steps are checkpoints"
     steps = Steps(blocked=[4.0])
     retried = BoundedTurn(steps).move(WheelMove(turn_deg=-20.0))
     assert retried.done and retried.backed_m == pytest.approx(0.03) and retried.attempts == 2
+    assert steps.calls == [("turn", -20.0), ("back", 0.03), ("turn", -16.0)]
     steps = Steps(blocked=[1.0, 1.0, 1.0, 1.0])
     given_up = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
     assert not given_up.done and given_up.attempts == 3 and given_up.turned_deg == 3.0
     assert given_up.backed_m == pytest.approx(0.06) and given_up.why == "gave up: stalled"
+    assert [c for c in steps.calls if c[0] == "back"] == [("back", 0.03), ("back", 0.03)]
     assert "past 30" in BoundedTurn(Steps()).move(WheelMove(turn_deg=35.0)).why
     assert "rock" in BoundedTurn(Steps()).move(WheelMove(rock_m=0.01, rocks=2)).why
     tight = BoundedTurn(Steps(blocked=[1.0, 1.0]), BodyLimits(attempts=5, max_backoff_m=0.03))
     assert tight.move(WheelMove(turn_deg=10.0)).backed_m == pytest.approx(0.03)
+
+
+def test_a_stopped_turn_never_backs_off_and_a_blocked_back_off_gives_up() -> None:
+    """A halt, someone else's stop, a drive: final (no back-off after the red button)."""
+    steps = Steps(stopped="halted: the person speaks")
+    cut = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
+    assert not cut.done and cut.cut and cut.why == "halted: the person speaks"
+    assert steps.calls == [("turn", 20.0)] and cut.turned_deg == 2.0
+    steps = Steps(blocked=[1.0], backs=["the back-off is blocked: a return behind"])
+    stuck = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
+    assert not stuck.done and stuck.why == "gave up: the back-off is blocked: a return behind"
+    assert stuck.attempts == 1 and stuck.backed_m == 0.0
 
 
 # ---- whom to look at ----------
@@ -390,22 +415,69 @@ def test_a_smile_without_a_face_when_asked_for() -> None:
     assert r.machine.phase == "voice" and len(r.face.calls) == 1
 
 
-def test_past_the_comfort_the_wheels_turn_the_rest_and_the_stub_leaves_it_to_the_head() -> None:
-    turning = rig(settings=replace(RULES, reaim_deg=20.0), wheels=FakeWheels())
-    wake(turning, 280)  # 100 deg left
-    (move,) = [c[1][0] for c in turning.wheels.calls]
-    assert move == WheelMove(turn_deg=pytest.approx(30.0))
-    assert turning.door.aims()[0][0].pan_rad == pytest.approx(rad(70))
+def test_past_the_comfort_the_head_goes_first_the_wheels_turn_the_rest_and_the_head_recentres() -> (
+    None
+):
+    """A call from 100 deg left: the head is there at once, the wheels are only started (the
+    wake returns before they move), every step they report re-centres the head on the person,
+    their end once more; no frame is taken while the body turns."""
+    turning = rig(settings=replace(RULES, reaim_deg=20.0), wheels=FakeWheels(),
+                  frames=[frame(face(0.0))])  # fmt: skip
+    wake(turning, 280)
+    (start,) = turning.wheels.calls
+    assert start == ("start", (WheelMove(turn_deg=pytest.approx(30.0)),))
+    (first, speed) = turning.door.aims()[0]
+    assert first.pan_rad == pytest.approx(rad(100)) and speed == "saccade", "the head first"
+    assert turning.machine.turning is not None and turning.machine.phase == "seek"
+    assert turning.machine.tick(1.6) is not None and turning.finder.looks == 0, "no frame yet"
+    turning.wheels.move_on(10.0)
+    turning.machine.tick(1.8)
+    assert turning.door.aims()[-1][0].pan_rad == pytest.approx(rad(90))
+    assert turning.door.aims()[-1][1] == "slow" and turning.finder.looks == 0
+    turning.wheels.finish()
+    turning.machine.tick(2.4)
+    recentred = [a.pan_rad for a, _ in turning.door.aims()]
+    assert recentred[:3] == pytest.approx([rad(100), rad(90), rad(70)])
     assert turning.machine.voice == pytest.approx(rad(70)), "the person moved with the cart"
-    turning.machine.heard(Heard(0.0, 1.2, "Пепин"), 1.7)  # the cascade tells the wake again
-    assert len(turning.door.aims()) == 1, "its readings are from before the turn: ignored"
+    assert turning.machine.turning is None and turning.finder.looks == 1, "the frame after"
+    turning.machine.heard(Heard(0.0, 1.2, "Пепин"), 2.5)  # the cascade tells the wake again
+    assert turning.wheels.calls == [start], "its readings are from before the turn: ignored"
+
+
+def test_wheels_that_turn_less_leave_the_head_at_its_reach_and_a_cut_turn_is_finished_later() -> (
+    None
+):
     stub = rig()
     wake(stub, 280)
+    stub.machine.tick(1.6)  # NoWheels answered at once; the answer is taken on the next tick
     assert stub.door.aims()[0][0].pan_rad == pytest.approx(rad(100)), "NoWheels: the head alone"
-    assert "the wheels turned +0 of +30 deg" in stub.said[1]
+    assert len(stub.door.aims()) == 1 and "the wheels turned +0 of +30 deg" in stub.said[1]
     behind = rig()
     wake(behind, 0)  # straight behind: past the neck's reach
     assert behind.door.aims()[0][0].pan_rad == pytest.approx(REACH.pan[1])
+    cut = rig(wheels=FakeWheels())
+    wake(cut, 280)
+    cut.wheels.finish(WheelReport(False, 12.0, why="halted: the person speaks", cut=True))
+    cut.machine.tick(1.7)
+    assert cut.door.aims()[-1][0].pan_rad == pytest.approx(rad(88)) and cut.machine.reorient
+    assert "turned +12 of +30 deg (halted: the person speaks)" in cut.said[-1]
+    cut.doa.readings += speech(268, 3.0, 4.0)  # he goes on talking from where he stands
+    cut.machine.heard(Heard(3.0, 4.0, "ну что"), 4.2)
+    assert [c[0] for c in cut.wheels.calls] == ["start", "start"], "the rest of the turn"
+
+
+def test_a_drive_and_the_close_let_the_wheels_go_and_their_late_word_is_ignored() -> None:
+    r = rig(wheels=FakeWheels())
+    wake(r, 280)
+    r.machine.drive(True, 2.0)
+    assert r.wheels.calls[-1] == ("halt", ("a drive starts",)) and r.machine.turning is None
+    r.wheels.finish(WheelReport(False, 5.0, why="halted: a drive starts", cut=True))
+    r.machine.tick(2.1)
+    assert len(r.door.aims()) == 1, "a turn let go: its end moves nothing"
+    again = rig(wheels=FakeWheels())
+    wake(again, 280)
+    again.machine.closed("idle", 3.0)
+    assert again.wheels.calls[-1][0] == "halt" and again.door.count("release") == 1
 
 
 def test_a_voice_already_in_the_picture_and_an_unmeasured_map_only_tilt_the_head_up() -> None:
@@ -654,8 +726,9 @@ def test_a_second_speaker_is_looked_at_at_once_and_the_first_one_s_place_remembe
     read = utter(r, 100, 3.0, 4.0, "А мне что расскажешь?")  # -80 deg
     look, speed = r.door.aims()[-1]
     assert look == approx_aim(-80, SEEK_TILT) and speed == "saccade" and r.machine.verifying
-    assert "a voice elsewhere" in r.said[-2], "then the wheels' refusal"
-    r.machine.tick(read)  # the check's frame: she is there
+    assert "a voice elsewhere" in r.said[-1], "the wheels' answer comes on the next tick"
+    r.machine.tick(read)  # the wheels' refusal, then the check's frame: she is there
+    assert any("the wheels turned +0 of -20 deg" in line for line in r.said[-3:])
     assert r.machine.phase == "track" and r.machine.voice == pytest.approx(rad(-75))
     assert r.door.aims()[-1][0].pan_rad == pytest.approx(rad(-75))
     assert [t.aim for t in r.machine.targets] == [artem]
@@ -727,7 +800,7 @@ def test_the_robot_s_name_turns_the_head_whatever_the_gates_and_seeks_in_full() 
     r.finder.frames.extend([frame(), frame(face(3.0, width=30.0))])
     read = utter(r, 100, 3.0, 4.0, "Привет, Пепин", peak=-31.0, named=True, flagged=3)
     assert r.door.aims()[-1][0] == approx_aim(-80, SEEK_TILT) and not r.machine.verifying
-    assert "the name" in r.said[-2]
+    assert "the name" in r.said[-1]
     r.machine.tick(read)
     r.machine.tick(read + 0.4)
     assert r.machine.phase == "track" and r.machine.voice == pytest.approx(rad(-77))
@@ -764,6 +837,7 @@ def test_a_voice_from_behind_turns_the_head_as_far_as_it_reaches() -> None:
     behind = rig(settings=TODAY_SETTINGS)
     wake(behind, 357)
     assert behind.door.aims()[0][0].pan_rad == pytest.approx(REACH.pan[1])
+    behind.machine.tick(1.6)  # the stub's refusal is taken on the next tick
     assert "the wheels turned +0 of +30 deg" in behind.said[1]
     r = rig(settings=TODAY_SETTINGS, frames=[frame(face(3.0))])
     wake(r, 82)
@@ -1069,6 +1143,8 @@ def test_the_switch_is_refused_when_the_knobs_cannot_be_read() -> None:
 
 
 def test_a_wheel_report_names_what_the_stub_refuses() -> None:
-    assert NoWheels().move(WheelMove(turn_deg=10.0)) == WheelReport(
-        False, why="the wheels make no expressive motion: their executor is not built"
-    )
+    reports: list[WheelReport] = []
+    NoWheels().start(WheelMove(turn_deg=10.0), reports.append)
+    assert reports == [
+        WheelReport(False, why="the wheels make no expressive motion here: no robot")
+    ]
