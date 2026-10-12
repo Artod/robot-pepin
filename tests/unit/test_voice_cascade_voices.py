@@ -427,7 +427,7 @@ def test_the_transcriber_key_loads_the_engine_and_answers_its_outcome(tmp_path: 
 
     switching = SwitchingTranscriber(
         Engine("mlx"), configured(config), build, wanted_from(control, config),
-        report=lambda line: None, spawn=lambda work: work(),
+        report=lambda line: None, spawn=lambda work: work(), settle_s=0,
     )  # fmt: skip
     board = Switchboard(
         control, configure=lambda b, v: config, build_brain=lambda c, n: None,  # type: ignore[arg-type,return-value]

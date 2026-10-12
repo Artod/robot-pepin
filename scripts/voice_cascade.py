@@ -27,6 +27,11 @@ about a second, a voice once its model has loaded, a transcriber between utteran
     uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
     uv run python scripts/voice_cascade.py switch --flag people=on     # config/people.json
 
+The other speech-to-text engines (pepin.voice_cascade.stt: gigaam, parakeet, canary, voxtral)
+need their runtime once, ``uv sync --group stt-<engine>`` (several --group flags add several),
+and then switch the same way (``--transcriber gigaam``, or engine:model); the loop prints the
+load time and the process's footprint before, with both engines and after the old one closed.
+
 A test with no person and no sound in the flat (phrases spoken by macOS say, the robot's speech
 written to a WAV, the tools on fakes; a drive takes 5 s):
 
@@ -63,7 +68,12 @@ from pepin.people.worker import robot_people
 from pepin.tools import TOOLS, Robot
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.bench import ReplayMic, utterances
-from pepin.voice_cascade.config import CONFIG_FILE, CascadeConfig, voice_preset
+from pepin.voice_cascade.config import (
+    CONFIG_FILE,
+    TRANSCRIBER_ENGINES,
+    CascadeConfig,
+    voice_preset,
+)
 from pepin.voice_cascade.control import (
     DONE_STATES,
     FLAG,
@@ -265,7 +275,10 @@ def switch(argv: list[str]) -> int:
     )
     ap.add_argument("--brain", help="a brain preset, or echo")
     ap.add_argument("--voice", help="a voice preset (or an engine's name: qwen3, gemini, say)")
-    ap.add_argument("--transcriber", help="mlx, whispercpp or engine:model (whispercpp:large-v3)")
+    ap.add_argument(
+        "--transcriber",
+        help=f"{', '.join(TRANSCRIBER_ENGINES)}, or engine:model (whispercpp:large-v3)",
+    )
     ap.add_argument(
         "--flag", action="append", default=[], metavar="NAME=on|off",
         help="a feature's switch, live: gestures, speaker_gaze (config/expression.json),"
@@ -294,7 +307,7 @@ def switch(argv: list[str]) -> int:
             print(error)
             return 2
     if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
-        print(f"transcriber {args.transcriber!r}: mlx, whispercpp or engine:model")
+        print(f"transcriber {args.transcriber!r}: {', '.join(TRANSCRIBER_ENGINES)} or engine:model")
         return 2
     request = write_request(args.logs, args.brain, args.voice, args.transcriber, flags)
     print(

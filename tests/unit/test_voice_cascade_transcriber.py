@@ -103,7 +103,7 @@ def test_the_engine_is_swapped_between_utterances_and_the_old_one_closed() -> No
     lines: list[str] = []
     switch = SwitchingTranscriber(
         first, Choice("mlx", "a"), lambda choice: second, lambda: wanted[0],
-        report=lines.append, spawn=now,
+        report=lines.append, spawn=now, settle_s=0,
     )  # fmt: skip
     switch.poll()
     assert switch.transcribe(b"") == "first" and switch.name == "mlx:a"
@@ -121,8 +121,9 @@ def test_a_swap_waits_for_the_call_in_flight() -> None:
     first, second = Named("first", gate), Named("second")
     want = Choice("whispercpp", "b")
     switch = SwitchingTranscriber(
-        first, Choice("mlx", "a"), lambda choice: second, lambda: want, report=lambda _: None
-    )
+        first, Choice("mlx", "a"), lambda choice: second, lambda: want, report=lambda _: None,
+        settle_s=0,
+    )  # fmt: skip
     heard: list[str] = []
     reader = threading.Thread(target=lambda: heard.append(switch.transcribe(b"")))
     reader.start()
@@ -169,7 +170,7 @@ def test_a_switch_back_while_another_engine_loads_keeps_the_one_in_use() -> None
     outcomes: list[tuple[str, Choice, BaseException | None]] = []
     switch = SwitchingTranscriber(
         first, Choice("mlx", "a"), lambda choice: slow, lambda: wanted[0],
-        report=lambda _: None, spawn=loads.append,
+        report=lambda _: None, spawn=loads.append, settle_s=0,
     )  # fmt: skip
     switch.on_loaded = lambda c, e: outcomes.append(("asked", c, e))
     switch.poll()  # whispercpp starts loading (34 s the first time: CoreML compiles)

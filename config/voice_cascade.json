@@ -30,6 +30,33 @@
       "gpu": false,
       "coreml_units": "ane"
     },
+    "gigaam": {
+      "model": "gigaam-v3-e2e-rnnt",
+      "device": "cpu",
+      "threads": 4,
+      "quantization": null,
+      "note": "GigaAM v3 (Sber, MIT), Russian only, on onnxruntime's CPU (pepin.voice_cascade.stt.gigaam). uv sync --group stt-gigaam. model: gigaam-v3-e2e-rnnt or -e2e-ctc (punctuation and capitals), gigaam-v3-rnnt or -ctc (lower case); quantization int8 halves the memory. 2026-10-12, 3 of Artem's cuts (2.6-4.1 s) on the M5 Pro beside the stack (tests/models): loads in 0.9 s, footprint +0.93 GB (int8 +0.5), 56 ms an utterance with 4 threads (Whisper turbo on the GPU 201 ms, +2.6 GB); closed, onnxruntime keeps ~0.4 GB of freed buffers that the next load reuses"
+    },
+    "parakeet": {
+      "model": "mlx-community/parakeet-tdt-0.6b-v3",
+      "device": "gpu",
+      "dtype": "bfloat16",
+      "note": "NVIDIA Parakeet TDT 0.6B v3 (CC-BY-4.0), 25 European languages, no language input, on the GPU through mlx-audio (pepin.voice_cascade.stt.parakeet). uv sync --group stt-parakeet. dtype: the stored float32 cast once loaded (null keeps float32, 2.5 GB). 2026-10-12, the same 3 cuts: loads in 5.6 s, footprint +1.55 GB, 29 ms an utterance"
+    },
+    "canary": {
+      "model": "nemo-canary-1b-v2",
+      "device": "cpu",
+      "threads": 4,
+      "quantization": "int8",
+      "note": "NVIDIA Canary 1B v2 (CC-BY-4.0), 25 European languages, transcriber.language forced, on onnxruntime's CPU (pepin.voice_cascade.stt.canary). uv sync --group stt-canary. quantization null: the full model, ~4 GB. 2026-10-12, the same 3 cuts: loads in 1.6 s, footprint +2.2 GB, 199 ms an utterance with 4 threads"
+    },
+    "voxtral": {
+      "model": "mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit",
+      "device": "gpu",
+      "dtype": null,
+      "delay_ms": null,
+      "note": "Mistral Voxtral Mini 4B Realtime (Apache-2.0), 13 languages, no language input, on the GPU through mlx-audio (pepin.voice_cascade.stt.voxtral), 3.1 GB of 4-bit weights. uv sync --group stt-voxtral. delay_ms: the transcription delay (null: the model's 480 ms); a whole utterance costs one decoder step per 80 ms of it: 2026-10-12, the same 3 cuts, loads in 7.4 s, footprint +5.0 GB, 1.9 s an utterance (33 ms a step); for the record, not for talking"
+    },
     "language": "ru",
     "initial_prompt": null,
     "early_s": 0.15,

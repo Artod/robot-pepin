@@ -29,8 +29,13 @@ EMOTION_MODELS = ("audeering", "emotion2vec")
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
 BARGE_IN_DETECTORS = ("level", "vad", "words")  # pepin.voice_cascade.barge_in
 WORDS_GATES = ("vad", "level")
-# speech to text: mlx (Whisper on the GPU), whispercpp (the encoder on the Neural Engine)
-TRANSCRIBER_ENGINES = ("mlx", "whispercpp")
+# speech to text: mlx (Whisper on the GPU), whispercpp (the encoder on the Neural Engine) and
+# the engines of pepin.voice_cascade.stt, each with its block and the device(s) it runs on:
+# onnxruntime on the CPU (gigaam, canary) or MLX on the GPU (parakeet, voxtral)
+STT_DEVICES = {"gigaam": ("cpu",), "parakeet": ("gpu",), "canary": ("cpu",), "voxtral": ("gpu",)}
+TRANSCRIBER_ENGINES = ("mlx", "whispercpp", *STT_DEVICES)
+STT_QUANTIZATIONS = (None, "int8")  # onnx-asr's files: the full model or its int8 copy
+STT_DTYPES = (None, "bfloat16", "float16", "float32")  # MLX weights cast once loaded
 COREML_UNITS = ("ane", "all", "gpu", "cpu")  # pepin.voice_live.whisper_cpp
 
 
@@ -58,6 +63,26 @@ DEFAULT_PRICES = {
     # Gemini TTS: text in, audio out (25 audio tokens a second); no cache
     "gemini-3.8-flash-lite-tts": ModelPrice(0.50, 6.00, 0.50, 0.50),
     "gemini-3.8-flash-tts": ModelPrice(0.50, 9.00, 0.50, 0.50),
+}
+
+
+@dataclass(frozen=True)
+class SttConfig:
+    """One engine of :mod:`pepin.voice_cascade.stt`: its model, where it runs, and its knobs."""
+
+    model: str  # an onnx-asr model name (cpu) or a Hugging Face repo of MLX weights (gpu)
+    device: str  # cpu: onnxruntime; gpu: MLX (STT_DEVICES: each engine's)
+    threads: int = 4  # cpu: onnxruntime's intra-op threads
+    quantization: str | None = None  # cpu: onnx-asr's int8 files (None: the full model)
+    dtype: str | None = None  # gpu: the weights cast to this MLX dtype once loaded (None: kept)
+    delay_ms: int | None = None  # voxtral: its transcription delay (None: the model's 480 ms)
+
+
+DEFAULT_STT = {
+    "gigaam": SttConfig("gigaam-v3-e2e-rnnt", "cpu"),
+    "parakeet": SttConfig("mlx-community/parakeet-tdt-0.6b-v3", "gpu", dtype="bfloat16"),
+    "canary": SttConfig("nemo-canary-1b-v2", "cpu", quantization="int8"),
+    "voxtral": SttConfig("mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit", "gpu"),
 }
 
 
@@ -154,6 +179,7 @@ class CascadeConfig:
     whispercpp_threads: int = 4
     whispercpp_gpu: bool = False  # the decoder on Metal instead of the CPU
     whispercpp_units: str = "ane"  # where CoreML runs the encoder
+    stt: Mapping[str, SttConfig] = field(default_factory=lambda: dict(DEFAULT_STT))
     language: str = "ru"
     whisper_prompt: str | None = None
     early_s: float = 0.15
@@ -237,6 +263,7 @@ class CascadeConfig:
             whispercpp_threads=int(cpp.get("threads", d.whispercpp_threads)),
             whispercpp_gpu=bool(cpp.get("gpu", d.whispercpp_gpu)),
             whispercpp_units=str(cpp.get("coreml_units", d.whispercpp_units)),
+            stt={name: stt_config(tr.get(name, {}), base) for name, base in DEFAULT_STT.items()},
             language=str(tr.get("language", d.language)),
             whisper_prompt=tr.get("initial_prompt") or None,
             early_s=float(tr.get("early_s", d.early_s)),
@@ -344,6 +371,22 @@ class CascadeConfig:
                 f"transcriber.whispercpp.coreml_units: one of {', '.join(COREML_UNITS)};"
                 " threads >= 1"
             )
+        for name, stt in self.stt.items():
+            devices = STT_DEVICES[name]
+            if stt.device not in devices or stt.threads < 1 or not stt.model:
+                raise ValueError(
+                    f"transcriber.{name}: a model, device {' or '.join(devices)}, threads >= 1"
+                )
+            bad_delay = stt.delay_ms is not None and stt.delay_ms <= 0
+            if (
+                stt.quantization not in STT_QUANTIZATIONS
+                or stt.dtype not in STT_DTYPES
+                or bad_delay
+            ):
+                raise ValueError(
+                    f"transcriber.{name}: quantization int8 or null, dtype"
+                    f" {', '.join(map(str, STT_DTYPES[1:]))} or null, delay_ms > 0"
+                )
         if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:
             raise ValueError("conversation.idle_close_s > 0 and money.daily_budget_cad > 0")
         if b.model not in self.prices:
@@ -380,6 +423,22 @@ class CascadeConfig:
     def daily_budget_usd(self) -> float:
         """The daily cap in USD, the currency of the prices."""
         return self.daily_budget_cad / self.usd_to_cad
+
+
+def stt_config(section: Mapping[str, Any], base: SttConfig) -> SttConfig:
+    """A ``transcriber.<engine>`` block over that engine's defaults (``null`` clears an
+    optional knob)."""
+    quantization, dtype, delay = (
+        section.get(key, getattr(base, key)) for key in ("quantization", "dtype", "delay_ms")
+    )
+    return SttConfig(
+        model=str(section.get("model", base.model)),
+        device=str(section.get("device", base.device)),
+        threads=int(section.get("threads", base.threads)),
+        quantization=None if quantization is None else str(quantization),
+        dtype=None if dtype is None else str(dtype),
+        delay_ms=None if delay is None else int(delay),
+    )
 
 
 def brain_config(section: Mapping[str, Any]) -> BrainConfig:

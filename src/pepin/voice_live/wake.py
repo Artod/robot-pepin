@@ -267,3 +267,18 @@ class MlxWhisper:
         """The words in ``pcm``."""
         audio = self._np.frombuffer(pcm, dtype=self._np.int16).astype(self._np.float32) / 32768
         return clean_transcript(str(self._transcribe(audio, **self._kwargs).get("text", "")))
+
+    def close(self) -> None:
+        """Free the model: mlx-whisper keeps the last one it loaded (``ModelHolder``), so it is
+        dropped there when it is this repo's, and MLX's buffers kept for reuse go back to the
+        system."""
+        import gc
+
+        import mlx.core as mx
+        from mlx_whisper.transcribe import ModelHolder
+
+        if ModelHolder.model_path == self._kwargs["path_or_hf_repo"]:
+            ModelHolder.model = None
+            ModelHolder.model_path = None
+        gc.collect()
+        mx.clear_cache()
