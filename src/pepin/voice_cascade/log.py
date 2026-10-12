@@ -48,13 +48,17 @@ class CascadeLog:
         self._events = (self.dir / "events.jsonl").open("a")
 
     def event(self, kind: str, now: float, /, **fields: Any) -> None:
-        """One line: what happened, seconds since the conversation opened, the details."""
+        """One line: what happened, seconds since the conversation opened, the details. A line
+        after the close (a body part's thread finishing its last act) is appended all the same."""
         row = {"event": kind, "t": round(now - self.t0, 3), **fields}
         line = json.dumps(row, ensure_ascii=False, default=str) + "\n"
         with self._lock:
             if not self._events.closed:
                 self._events.write(line)
                 self._events.flush()
+                return
+            with (self.dir / "events.jsonl").open("a") as late:
+                late.write(line)
 
     def close(self, summary: dict[str, Any]) -> None:
         """Finish the WAVs; the summary beside the events and in the day's index."""

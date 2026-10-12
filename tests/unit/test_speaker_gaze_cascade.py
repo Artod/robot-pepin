@@ -1,6 +1,7 @@
 """The speaker gaze in the cascade: registered as an observer and as the live flag
-``speaker_gaze``, switched on through the control file, turned by the wake, let go at the close
-(the loop over fakes, the gaze over the fakes of every seam)."""
+``speaker_gaze``, switched on through the control file, turned by the wake, let go at the close,
+its decisions in the conversation's events.jsonl (the loop over fakes, the gaze over the fakes of
+every seam)."""
 
 from __future__ import annotations
 
@@ -60,6 +61,7 @@ def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets
         tmp_path, ["Пепин, привет"], [["Привет."]], switchboard=board, observers=[gaze],
         flags=[gaze],
     )  # fmt: skip
+    gaze.journal = rig.loop.record
     asked: list[str] = []
 
     async def scenario(rig: Rig) -> None:
@@ -85,3 +87,14 @@ def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets
         if '"open"' in line
     ]
     assert opened and opened[0]["flags"][SPEAKER_GAZE] is True
+    (log,) = tmp_path.rglob("events.jsonl")
+    rows = [json.loads(line) for line in log.read_text().splitlines()]
+    gazed = [r for r in rows if r["event"].startswith("gaze_")]
+    kinds = [r["event"] for r in gazed]
+    assert kinds[:3] == ["gaze_wake", "gaze_reaim", "gaze_face"], "the face centred: no refine"
+    assert kinds[-1] == "gaze_release", "the release after the close lands in its log"
+    (heard,) = [r for r in rows if r["event"] == "heard"]
+    woke = gazed[0]
+    assert woke["named"] is True and woke["peak_db"] == heard["voice_peak_db"]
+    assert 0.0 <= woke["t"] - heard["t"] < 1.0, "on the session's clock, beside its utterance"
+    assert gazed[-1]["t"] >= next(r["t"] for r in rows if r["event"] == "close")

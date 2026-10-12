@@ -258,6 +258,7 @@ class CascadeLoop:
         self.ears = Ears(config, player.playback, turn, early, detector)
         self.rng = random.Random(seed)
         self.conversation: Conversation | None = None
+        self.last_log: CascadeLog | None = None  # the conversation that closed last
         self.replies: dict[int, Reply] = {}
         self.current: Reply | None = None
         self.last_turn = 0  # the id of the latest reply (the mic thread cuts up to it)
@@ -1068,6 +1069,7 @@ class CascadeLoop:
         }
         conversation.log.event("close", now, reason=reason, usd_est=round(conversation.usd, 6))
         conversation.log.close(summary)
+        self.last_log = conversation.log
         ledger = self.ledger
         if ledger is None and conversation.usd > 0:
             # spent all the same: a paid brain switched to the echo meanwhile, or a paid voice
@@ -1282,6 +1284,15 @@ class CascadeLoop:
         if reading is None:
             return None
         return {"deg": reading.deg, "speech": reading.speech, "board_s": round(reading.stamp_s, 3)}
+
+    def record(self, kind: str, now: float, /, **fields: Any) -> None:
+        """One event of a body part (the speaker gaze) in the conversation's events.jsonl at
+        ``now`` (this loop's clock): the open conversation's, else the one that closed last (a
+        release that follows its close). Safe from any thread: one locked line write."""
+        conversation = self.conversation
+        log = conversation.log if conversation is not None else self.last_log
+        if log is not None:
+            log.event(kind, now, **fields)
 
     def _event(self, kind: str, **fields: Any) -> None:
         conversation = self.conversation
