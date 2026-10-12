@@ -156,26 +156,28 @@ class Body:
     """The gesture engine of this run (config/expression.json's ``gestures`` switch at the start,
     live through ``switch --flag``), its parts, the marker vocabulary, and what to close."""
 
-    HEAD = "the gaze arbiter's clip overlay is not built yet (the gaze-speaker branch)"
-
     def __init__(self, engine: Any, vocabulary: Any, closers: list[Any]) -> None:
         """Built by :meth:`build`."""
         self.engine, self.vocabulary, self.closers = engine, vocabulary, closers
 
     @classmethod
     def build(cls, host: str, player: Player, *, fake: bool, face: bool, logs: Path) -> Body:
-        """The engine over the real arm and face (``fake``: a fake arm that answers at rest;
-        ``face`` False: a face that only records), every performance and cue logged to
-        ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
+        """The engine over the real arm, head and face (``fake``: a fake arm that answers at
+        rest and a head door that only records; ``face`` False: a face that only records),
+        every performance, cue and answer logged to ``logs/<day>/cascade_gestures.jsonl`` and
+        the notable ones printed."""
         from pepin.arm_motion import load_arm_motion
         from pepin.expression.animation import PartName
         from pepin.expression.animator import GestureEngine, engine_config
         from pepin.expression.arm_link import ArmClient
         from pepin.expression.book import face_names, load_book, vocabulary, with_rest
+        from pepin.expression.door import OverlayDoor
         from pepin.expression.executors import Executor, NoBody
-        from pepin.expression.fakes import FakeArmLink, FakeFace
-        from pepin.expression.parts import Absent, ArmPart, FacePart
+        from pepin.expression.fakes import FakeArmLink, FakeFace, FakeHeadDoor
+        from pepin.expression.head import ClipLook
+        from pepin.expression.parts import ArmPart, FacePart, HeadDoor, HeadPart, NeckLimits
         from pepin.expression.trajectory import ArmLink, ArmStatus
+        from pepin.neck import NeckConfig
         from pepin.voice_cascade.log import append_line, day_dir
 
         def record(kind: str, fields: dict[str, Any]) -> None:
@@ -187,6 +189,12 @@ class Body:
 
         def answered(answer: Any, t: float) -> None:
             record("arm", {"id": answer.id, "status": answer.status, "reason": answer.reason})
+
+        def head_answered(request: ClipLook, refusal: str | None) -> None:
+            target = request["target"]
+            record("head", {"source": request["source"], "keys": len(target["keys"]),
+                            "loop": target.get("loop", False), "ok": refusal is None,
+                            "why": refusal or ""})  # fmt: skip
 
         motion = load_arm_motion()
         knobs = json.loads(config_file("expression.json").read_text())
@@ -204,7 +212,17 @@ class Body:
             link = client
             closers.append(client)
         arm_knobs = knobs.get("parts", {}).get("arm", {})
+        head_knobs = knobs.get("parts", {}).get("head", {})
         face_knobs = knobs.get("parts", {}).get("face", {})
+        door: HeadDoor = FakeHeadDoor() if fake else OverlayDoor()
+        fades = knobs.get("layers", {}).get("fade_s", {})
+        head = HeadPart(
+            door,
+            latency_s=float(head_knobs.get("latency_s", 0.1)),
+            limits=NeckLimits.of(NeckConfig.from_json(config_file("neck.json")).motion),
+            fade_s=float(fades.get("head", 0.35) if isinstance(fades, dict) else fades),
+            on_answer=head_answered,
+        )
         channel: Any = FakeFace()
         if face:
             from pepin.head_link import HeadClient
@@ -221,7 +239,7 @@ class Body:
         parts: dict[PartName, Executor] = {
             "arm": arm,
             "face": FacePart(channel, latency_s=float(face_knobs.get("latency_s", 0.05))),
-            "head": Absent("head", cls.HEAD),
+            "head": head,
             "body": NoBody(),
         }
         on = bool(knobs.get("flags", {}).get("gestures", False))
