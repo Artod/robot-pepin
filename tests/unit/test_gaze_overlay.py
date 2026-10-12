@@ -8,6 +8,7 @@ is passed in, so every rule is a few steps of arithmetic.
 from __future__ import annotations
 
 import math
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,7 @@ class TargetHead:
     def __init__(self) -> None:
         self.writes: list[tuple[Aim | None, bool, float]] = []
         self.ceilings: list[float | None] = []
+        self.ramps: list[float | None] = []
         self.refusal: Refusal | None = None
 
     def blocked(self, now: float) -> Refusal | None:
@@ -68,9 +70,11 @@ class TargetHead:
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         self.writes.append((aim, hold, now))
         self.ceilings.append(speed_deg_s)
+        self.ramps.append(acc_deg_s2)
 
     def take_refusal(self) -> Refusal | None:
         refusal, self.refusal = self.refusal, None
@@ -358,3 +362,36 @@ def test_bad_clips_are_refused_in_words(target: dict[str, Any], why: str) -> Non
         lambda frame, xyz: "unused",
     )
     assert isinstance(answer, str) and why in answer
+
+
+def test_an_eased_look_carries_its_own_speed_and_ramp_to_the_driver() -> None:
+    """The speaker gaze's turn: an angles look with ``speed_deg_s`` and ``acc_deg_s2`` is written
+    with both (neck_target runs the servo's trapezoid at them: an ease in and out); a look
+    without them writes none; a ceiling that is no positive number is refused in words."""
+
+    def unused(frame: str, xyz: dict[str, float]) -> str:
+        return "unused"
+
+    request = {"source": SPEAKER, "kind": "angles", "band": IDLE, "hold": True, "frames": 0,
+               "target": {"pan_rad": 0.5, "tilt_rad": 0.05}, "speed": "saccade"}  # fmt: skip
+    eased = look_from_json({**request, "speed_deg_s": 200, "acc_deg_s2": 650.0}, SETTINGS, CFG,
+                           unused)  # fmt: skip
+    assert isinstance(eased, Look) and (eased.speed_deg_s, eased.acc_deg_s2) == (200.0, 650.0)
+    arb, head, _ = arbiter()
+    arb.submit(eased, 0.0)
+    arb.step(0.0)
+    assert head.writes[-1][0] == Aim(0.5, 0.05)
+    assert (head.ceilings[-1], head.ramps[-1]) == (200.0, 650.0)
+    plain = look_from_json(request, SETTINGS, CFG, unused)
+    assert isinstance(plain, Look) and plain.speed_deg_s is None and plain.acc_deg_s2 is None
+    arb.submit(replace(plain, source="llm.look", band=PERSON, views=(Aim(-0.5, 0.05),)), 1.0)
+    arb.step(1.0)
+    assert (head.ceilings[-1], head.ramps[-1]) == (None, None)
+    for bad, why in (
+        ({"acc_deg_s2": 0}, "above 0"),
+        ({"speed_deg_s": "fast"}, "a number"),
+        ({"acc_deg_s2": float("inf")}, "finite"),
+        ({"speed_deg_s": True}, "a number"),
+    ):
+        answer = look_from_json({**request, **bad}, SETTINGS, CFG, unused)
+        assert isinstance(answer, str) and why in answer, (bad, answer)

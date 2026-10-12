@@ -549,6 +549,9 @@ def test_the_neck_target_driver_renews_its_lease_while_it_holds() -> None:
     assert len(wire.lines) == 2 and wire.lines[-1] == first
     head.write(RIGHT, speed="slow", hold=True, now=0.6)
     assert wire.lines[-1]["speed_deg_s"] == 20.0
+    head.write(RIGHT, speed="saccade", hold=True, now=0.7, speed_deg_s=200.0, acc_deg_s2=650.0)
+    assert (wire.lines[-1]["speed_deg_s"], wire.lines[-1]["acc_deg_s2"]) == (200.0, 650.0)
+    wire.lines.pop()  # an eased look: the board's trapezoid at those ceilings
     head.write(None, speed="saccade", hold=False, now=1.2)
     assert wire.lines[-1]["pan_rad"] == 0.0
     assert wire.lines[-1]["tilt_rad"] == pytest.approx(HOME.tilt_rad)
