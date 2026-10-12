@@ -10,6 +10,7 @@ Each has a fake in :mod:`pepin.voice_cascade.fake`, so the whole loop runs in a 
 
 from __future__ import annotations
 
+import math
 from collections.abc import Awaitable, Callable, Iterator
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
@@ -186,6 +187,16 @@ class Usage:
         )
 
 
+CUT = "cancelled"  # the stop of a call cut mid-stream: its usage is an estimate
+CHARS_PER_TOKEN = 3.0  # streamed Russian text per output token, for a call cut mid-stream
+
+
+def text_tokens(chars: int) -> int:
+    """The output tokens ``chars`` characters of streamed text cost, estimated: a call cut
+    mid-stream never reports its own (its thinking is not seen, so not counted)."""
+    return math.ceil(chars / CHARS_PER_TOKEN)
+
+
 BrainEvent = FirstToken | Sentence | ToolUse | ToolDone | Usage
 FOLLOW_UP = "follow_up"  # a tool result's key: False ends the turn without another model call
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Result]]
@@ -216,7 +227,8 @@ class Brain(Protocol):
     async def turn(self, text: str, tools: ToolExecutor, emit: Emit) -> None:
         """Answer ``text``: sentences, tool calls and usage reported through ``emit`` as they
         happen; tools run through ``tools``. Cancellation leaves the turn open for
-        :meth:`interrupt` or :meth:`abandon`."""
+        :meth:`interrupt` or :meth:`abandon`; a call it cuts mid-stream still reports its
+        usage (stop :data:`CUT`, an estimate), so the ledger sees what was spent."""
         ...
 
     def commit(self) -> None:

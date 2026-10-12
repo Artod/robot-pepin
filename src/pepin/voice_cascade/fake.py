@@ -14,6 +14,7 @@ from typing import Any
 import numpy as np
 
 from pepin.voice_cascade.stages import (
+    CUT,
     FOLLOW_UP,
     Emit,
     FirstToken,
@@ -35,7 +36,8 @@ class ScriptedBrain:
     """:class:`pepin.voice_cascade.stages.Brain` that answers turn ``n`` with ``script[n]``
     (sentences and tool calls in order; a tool call ends a round), or, past the script, with
     ``echo`` of what it heard. ``delay_s`` passes before every step, as a model's stream
-    would take. It keeps every turn's outcome."""
+    would take; a turn cut short still reports its usage, as a real call cut mid-stream. It
+    keeps every turn's outcome."""
 
     script: list[list[Step]] = field(default_factory=list)
     echo: str = "Ты сказал: {text}"
@@ -72,6 +74,14 @@ class ScriptedBrain:
         steps: list[Step] = (
             self.script[n] if n < len(self.script) else [self.echo.format(text=text)]
         )
+        try:
+            await self._steps(n, steps, tools, emit)
+        except asyncio.CancelledError:
+            emit(Usage(input=10, output=len(self._said), usd=1e-5, stop=CUT))
+            raise
+        emit(Usage(input=10, output=5, stop="end_turn"))
+
+    async def _steps(self, n: int, steps: list[Step], tools: ToolExecutor, emit: Emit) -> None:
         first, round_index = True, 0
         for step in steps:
             await asyncio.sleep(self.delay_s)
@@ -92,7 +102,6 @@ class ScriptedBrain:
                 if sentence:
                     self._said.append(sentence)
                     emit(Sentence(sentence, round_index))
-        emit(Usage(input=10, output=5, stop="end_turn"))
 
     def commit(self) -> None:
         """Kept whole."""

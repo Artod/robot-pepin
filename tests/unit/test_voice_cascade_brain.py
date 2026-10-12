@@ -1,5 +1,6 @@
 """The Claude brain over a fake Messages API: the request laid out for the cache, sentences out
-as they end, tools between rounds, the price of each call, and a turn cut to what was heard."""
+as they end, tools between rounds, the price of each call (one cut mid-stream too), and a turn
+cut to what was heard."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -21,6 +22,7 @@ from pepin.voice_cascade.brain import (
 )
 from pepin.voice_cascade.config import DEFAULT_PRICES, BrainConfig
 from pepin.voice_cascade.stages import (
+    CUT,
     BrainEvent,
     FirstToken,
     Played,
@@ -28,6 +30,7 @@ from pepin.voice_cascade.stages import (
     ToolDone,
     ToolUse,
     Usage,
+    text_tokens,
 )
 
 HAIKU = DEFAULT_PRICES["claude-haiku-5-5"]
@@ -51,10 +54,17 @@ def usage(read: int = 100, write: int = 10, fresh: int = 5, out: int = 20) -> Si
 
 
 class FakeStream:
-    """One streamed call: text deltas, a block stop before each tool call, the final message."""
+    """One streamed call: its start (the prompt's usage), text deltas, a block stop before each
+    tool call, the final message. ``opened`` holds the start back, ``gate`` each delta."""
 
-    def __init__(self, deltas: list[str], tools: list[SimpleNamespace], gate: asyncio.Event | None):
-        self.deltas, self.tools, self.gate = deltas, tools, gate
+    def __init__(
+        self,
+        deltas: list[str],
+        tools: list[SimpleNamespace],
+        gate: asyncio.Event | None,
+        opened: asyncio.Event | None = None,
+    ):
+        self.deltas, self.tools, self.gate, self.opened = deltas, tools, gate, opened
         text = "".join(deltas)
         content = ([text_block(text)] if text else []) + tools
         self.message = SimpleNamespace(
@@ -71,6 +81,9 @@ class FakeStream:
         return self._events()
 
     async def _events(self) -> AsyncIterator[SimpleNamespace]:
+        if self.opened is not None:
+            await self.opened.wait()
+        yield SimpleNamespace(type="message_start", message=SimpleNamespace(usage=usage(out=1)))
         for delta in self.deltas:
             yield SimpleNamespace(type="text", text=delta)
             if self.gate is not None:
@@ -89,11 +102,12 @@ class FakeMessages:
         self.requests: list[dict[str, Any]] = []
         self.created: list[dict[str, Any]] = []
         self.gate: asyncio.Event | None = None
+        self.opened: asyncio.Event | None = None
 
     def stream(self, **kwargs: Any) -> FakeStream:
         self.requests.append(kwargs)
         deltas, tools = self.rounds[len(self.requests) - 1]
-        return FakeStream(deltas, tools, self.gate)
+        return FakeStream(deltas, tools, self.gate, self.opened)
 
     async def create(self, **kwargs: Any) -> SimpleNamespace:
         self.created.append(kwargs)
@@ -299,6 +313,57 @@ def test_usage_is_priced_by_kind() -> None:
         usage(read=0, write=1_000_000, fresh=1_000_000, out=1_000_000), HAIKU, None, 0
     )
     assert priced.usd == pytest.approx(HAIKU.cache_write + HAIKU.input + HAIKU.output)
+
+
+def cut_turn(brain: ClaudeBrain, messages: FakeMessages, started: bool) -> list[BrainEvent]:
+    """A turn cancelled in its first text delta (``started``) or before its stream began."""
+    events: list[BrainEvent] = []
+
+    async def scenario() -> None:
+        first = asyncio.Event()
+
+        def emit(event: BrainEvent) -> None:
+            events.append(event)
+            if isinstance(event, FirstToken):
+                first.set()
+
+        async def tools(name: str, args: dict[str, Any]) -> Result:
+            return {"ok": True}
+
+        messages.gate, messages.opened = asyncio.Event(), asyncio.Event()
+        task = asyncio.create_task(brain.turn("расскажи", tools, emit))
+        if started:
+            messages.opened.set()
+            await first.wait()
+        else:
+            await asyncio.sleep(0.01)  # the call is out, its start not back yet
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    return events
+
+
+def test_a_call_cut_mid_stream_still_reports_its_usage() -> None:
+    brain, messages = brain_over([(["Сейчас расскажу", " всё по порядку."], [])])
+    brain.begin(None)
+    events = cut_turn(brain, messages, started=True)
+    (cut,) = [e for e in events if isinstance(e, Usage)]
+    assert cut.stop == CUT
+    assert (cut.cache_read, cut.cache_write, cut.input) == (100, 10, 5)  # its message_start's
+    assert cut.output == text_tokens(len("Сейчас расскажу")) and cut.usd > 0
+    brain.abandon()
+    assert brain.history == []
+
+
+def test_a_call_cut_before_its_start_is_billed_as_the_last_prompt_read() -> None:
+    brain, messages = brain_over([([], [])])
+    brain.begin(None)
+    asyncio.run(brain.prewarm())  # 4000 + 5 input tokens written
+    events = cut_turn(brain, messages, started=False)
+    (cut,) = [e for e in events if isinstance(e, Usage)]
+    assert cut.stop == CUT and (cut.cache_read, cut.output) == (4005, 0)
+    assert cut.usd == pytest.approx(4005 * HAIKU.cache_read / 1e6)
 
 
 def test_the_tools_keep_the_registry_order_and_end_the_conversation() -> None:

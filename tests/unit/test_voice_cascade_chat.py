@@ -1,7 +1,7 @@
 """The OpenAI-compatible brain (Groq) over a fake client: the request, sentences out as they
 stream, tool calls assembled from deltas and answered with tool messages and a picture, a model
-that refuses pictures, a 429 surfaced, compact tool descriptions, and a turn cut to what was
-heard."""
+that refuses pictures, a 429 surfaced, compact tool descriptions, a turn cut to what was
+heard, and a call cut mid-stream still billed."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -18,7 +18,16 @@ from pepin.tools.registry import Image, Result  # noqa: E402
 from pepin.voice_cascade.brain import NOT_AWAITED  # noqa: E402
 from pepin.voice_cascade.chat_brain import NO_PICTURES, ChatBrain, compact  # noqa: E402
 from pepin.voice_cascade.config import DEFAULT_PRICES, BrainConfig  # noqa: E402
-from pepin.voice_cascade.stages import BrainEvent, Played, Sentence, ToolUse, Usage  # noqa: E402
+from pepin.voice_cascade.stages import (  # noqa: E402
+    CUT,
+    BrainEvent,
+    FirstToken,
+    Played,
+    Sentence,
+    ToolUse,
+    Usage,
+    text_tokens,
+)
 
 OSS = DEFAULT_PRICES["openai/gpt-oss-120b"]
 JPEG = b"\xff\xd8\xff\xe0picture\xff\xd9"
@@ -51,6 +60,9 @@ def done(prompt: int = 900, out: int = 10) -> SimpleNamespace:
     return SimpleNamespace(choices=[], usage=usage)
 
 
+HANG = SimpleNamespace()  # a chunk that never comes: the stream waits until cancelled
+
+
 class FakeStream:
     def __init__(self, chunks: list[SimpleNamespace]) -> None:
         self.chunks = chunks
@@ -61,6 +73,8 @@ class FakeStream:
 
     async def _run(self) -> AsyncIterator[SimpleNamespace]:
         for chunk in self.chunks:
+            if chunk is HANG:
+                await asyncio.Event().wait()
             yield chunk
 
     async def close(self) -> None:
@@ -228,3 +242,32 @@ def test_prewarm_opens_the_connection_without_tokens() -> None:
     brain, completions = brain_over([])
     warm = asyncio.run(brain.prewarm())
     assert warm is not None and warm.usd == 0 and completions.requests == []
+
+
+def test_a_call_cut_mid_stream_is_billed_from_the_last_prompt_and_its_text() -> None:
+    brain, _ = brain_over([[text("Да?"), done(900, 2)], [text("Сейчас расскажу"), HANG]])
+    run_turn(brain, "Пепин", {})
+    brain.commit()
+    events: list[BrainEvent] = []
+
+    async def scenario() -> None:
+        first = asyncio.Event()
+
+        def emit(event: BrainEvent) -> None:
+            events.append(event)
+            if isinstance(event, FirstToken):
+                first.set()
+
+        async def tools(name: str, args: dict[str, Any]) -> Result:
+            return {"ok": True}
+
+        task = asyncio.create_task(brain.turn("расскажи", tools, emit))
+        await first.wait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    (cut,) = [e for e in events if isinstance(e, Usage)]
+    assert cut.stop == CUT and cut.input == 900  # no usage chunk came: the last prompt
+    assert cut.output == text_tokens(len("Сейчас расскажу"))
+    assert cut.usd == pytest.approx((900 * OSS.input + cut.output * OSS.output) / 1e6)

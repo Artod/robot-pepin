@@ -1,6 +1,6 @@
 """The Gemini brain over a fake google-genai client: the request, sentences out as they stream,
-function calls answered with JSON and pictures in one turn, the implicit cache priced, and a
-turn cut to what was heard."""
+function calls answered with JSON and pictures in one turn, the implicit cache priced, a turn
+cut to what was heard, and a call cut mid-stream still billed."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -18,6 +18,7 @@ from pepin.voice_cascade.brain import INTERRUPTED  # noqa: E402
 from pepin.voice_cascade.config import DEFAULT_PRICES, BrainConfig  # noqa: E402
 from pepin.voice_cascade.gemini_brain import CALL_FIRST, GeminiBrain, gemini_usage  # noqa: E402
 from pepin.voice_cascade.stages import (  # noqa: E402
+    CUT,
     BrainEvent,
     FirstToken,
     Played,
@@ -25,8 +26,10 @@ from pepin.voice_cascade.stages import (  # noqa: E402
     ToolDone,
     ToolUse,
     Usage,
+    text_tokens,
 )
 
+HANG = SimpleNamespace()  # a chunk that never comes: the stream waits until cancelled
 LITE = DEFAULT_PRICES["gemini-3.5-flash-lite"]
 JPEG = b"\xff\xd8\xff\xe0picture\xff\xd9"
 
@@ -64,6 +67,8 @@ class FakeModels:
 
         async def stream() -> AsyncIterator[SimpleNamespace]:
             for item in chunks:
+                if item is HANG:
+                    await asyncio.Event().wait()
                 yield item
 
         return stream()
@@ -287,3 +292,30 @@ def test_prewarm_without_a_cache_is_one_short_call() -> None:
     warm = asyncio.run(brain.prewarm())
     assert warm is not None and warm.input == 5000
     assert models.requests[0]["config"].max_output_tokens == 16
+
+
+def test_a_call_cut_mid_stream_is_billed_from_its_latest_usage() -> None:
+    said = types.Part(text="Сейчас расскажу")
+    brain, _ = brain_over([[chunk(said, usage=metadata(5000, 4000, 1)), HANG]])
+    events: list[BrainEvent] = []
+
+    async def scenario() -> None:
+        first = asyncio.Event()
+
+        def emit(event: BrainEvent) -> None:
+            events.append(event)
+            if isinstance(event, FirstToken):
+                first.set()
+
+        async def tools(name: str, args: dict[str, Any]) -> Result:
+            return {"ok": True}
+
+        task = asyncio.create_task(brain.turn("расскажи", tools, emit))
+        await first.wait()
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+
+    asyncio.run(scenario())
+    (cut,) = [e for e in events if isinstance(e, Usage)]
+    assert cut.stop == CUT and (cut.input, cut.cache_read) == (1000, 4000)
+    assert cut.output == text_tokens(len("Сейчас расскажу"))  # more than the chunk's 1
