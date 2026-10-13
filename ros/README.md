@@ -732,6 +732,42 @@ the gesture plays without its head. The wheels: below. The person starting to sp
 the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
 conversation sends every part to rest; markers are capped (`config/expression.json` `caps`).
 
+**The alive layer** (`pepin.expression.prosody`, `pepin.expression.listeners`; it rides
+`gestures`, no flag of its own). The prosody listener hears every chunk of a reply as the player
+takes it (one queue append on the voice's thread) and, on its own thread, finds the syllable
+nuclei of the robot's own voice (voiced band-energy peaks), each one's prominence (band level,
+voiced length and pitch, each a z over the voice's statistics: `pulse.voice_stats`) and the
+pitch contour, 1.2-1.3 ms of one core a second of voice. The listeners turn that and the
+conversation's moments into the engine's own requests, under its one priority table. While the
+robot speaks: the melody, the head tilting with the voice's pitch within `pulse.melody_max_deg`
+(0.9°, inside the arbiter's `clip_still_deg`: the camera keeps its frames), on the idle source;
+an accent nod of 2-4° on the first nucleus of a sentence with z >= `pulse.beat_z` (2) or its
+most prominent once the sentence's audio is all in (at most one a sentence, 2 s apart, 12 a
+minute, never with less lead than the nod needs: 0.30 s with the head's latency, since the
+arbiter lets a nod's bottom come 0.2 s after its first move at the earliest; none in a sentence
+that carries the brain's own marker); a lift and cock of the head at a question's last syllable;
+one look away in a reply with 6 s of audio. Between turns: the breath (`moments.breath_deg`, 1°
+at 0.25 Hz) in every free moment of the head while the robot is silent; a thinking glance up,
+down or aside 0.8 s into the brain's wait (p 0.75, never the same way twice, back 0.5-1.3 s into
+the reply); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart, never after
+their question); a small nod after a statement (p 0.3); hello and bye played in the brain's wait
+from the person's own words (after the body's turn toward them); one rock of the cart after a
+`{laugh}` (the laugh never uses the arm then); a smile at the first face. Every discrete head
+move keeps `moments.head_gap_s` (1 s) from the one before. Quiet (`quiet`: a whispering or
+sleepy style, 23:00-08:00, or the person's voice under -30 dBFS): the melody, the breath and the
+face only. Each conversation's events.jsonl gets `pulse` (per sentence: its nuclei's z, the
+accent and why others were skipped), `moment` (each decision, played or why not), `quiet` and,
+at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a minute,
+the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.6 accent
+nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel
+of a content word against 44 % for any syllable, every head clip within the arbiter's rules.
+
+```bash
+uv run python scripts/voice_cascade.py switch --flag gestures=on    # the alive layer with it
+grep -h '"event": "moment"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
+grep -h '"event": "alive"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl   # per conversation
+```
+
 **The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
 `body_rock`, `body_wiggle`, `body_turn`; each behind its own flag, no third). Never Nav2: twist
 lines from this Mac straight to the base server on :3336 (the measured motions' method, without
