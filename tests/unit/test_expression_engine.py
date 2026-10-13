@@ -649,7 +649,11 @@ def test_the_config_file_s_knobs_are_read() -> None:
     config = engine_config(json.loads((CONFIG / "expression.json").read_text()))
     assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
     assert config.arm_speed_scale == 1.0 and config.caps.intent_per_minute == {"laugh": 1}
-    assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (1, 3, 1)
+    assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (
+        1,
+        4,
+        1,
+    )  # four marks a reply since 2026-10-13
     assert config.caps.accents == ("accent",) and config.caps.series == ("count",)
     assert config.finish == ("greeting", "farewell") and config.seed is None
 

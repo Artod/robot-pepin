@@ -166,7 +166,7 @@
     },
     "gripper_click": {
       "part": "arm", "mode": "additive", "stroke": 1.0,
-      "params": {"amp_deg": [28.0, 40.0], "period_s": [1.0, 1.2], "repeats": [2, 2]},
+      "params": {"amp_deg": [22.0, 28.0], "period_s": [1.0, 1.1], "repeats": [2, 2]},
       "keys": [{"at": 0.0, "gripper": 0.0}, {"at": 0.5, "gripper": "$amp_deg"}, {"at": 1.0, "gripper": 0.0}],
       "note": "open and shut (the stroke: shut), a quick clack at ~1.8 Hz: 5-7 deg is what the servos' 2232 deg/s^2 allows at that tempo"
     },
@@ -388,8 +388,8 @@
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "grin"], "hold_s": [3.0, 3.5]}},
           {"atom": "body_rock", "at_s": [-0.6, -0.4]},
-          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.0, 1.4], "period_s": [0.9, 1.1]}},
-          {"atom": "gripper_click", "params": {"repeats": [4, 6]}, "at_s": [-0.3, -0.1]}
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [0.6, 0.9], "period_s": [0.9, 1.1]}},
+          {"atom": "gripper_click", "params": {"repeats": 2}, "at_s": [1.4, 1.8]}
         ]},
         {"floor": true, "steps": [
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
