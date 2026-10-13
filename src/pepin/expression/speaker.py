@@ -17,8 +17,8 @@ head is in it, so a person whose face is not seen (turned away, lying, far) stil
 
 Whom to look at is :mod:`pepin.expression.policy`'s over the people tracked
 (:mod:`pepin.expression.tracks`), and how to turn there is :class:`GazePlan`'s split between the
-head and the wheels: the head alone within its comfortable pan, the wheels for the rest in small
-steps when they may move, and the head as far as it reaches when they may not.
+head and the wheels: the head alone within the forward arc, the body turned toward a person past
+it when the wheels may move, and the head as far as it reaches when they may not.
 """
 
 from __future__ import annotations

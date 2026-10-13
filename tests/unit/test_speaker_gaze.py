@@ -30,7 +30,7 @@ from pepin.expression.doa import (
     voice_of,
     wrap_deg,
 )
-from pepin.expression.executors import NoWheels, WheelMove, WheelReport
+from pepin.expression.executors import Headings, NoWheels, WheelMove, WheelReport
 from pepin.expression.fakes import (
     FakeDoa,
     FakeFace,
@@ -180,16 +180,56 @@ def test_the_off_centre_array_s_four_readings_are_its_quarter_turns_and_between_
     assert bearing_deg(246.0, m) == pytest.approx(-63.3, abs=0.1), "the quiet one: -76 before"
 
 
+def test_each_reading_is_turned_by_the_cart_s_turn_since_its_stamp() -> None:
+    """A voice that stays put while the cart turns 20 deg left reads 40 -> 20 in the cart's
+    frame; less how far the cart has turned since each reading (radians, by its board stamp),
+    every one says 20: the bearing it has now. Across 180 the mean is circular."""
+    readings = [DoaReading(BOARD + k / 10, array(40.0 - 2.0 * k), True) for k in range(11)]
+    turned = lambda stamp: rad(20.0 - 20.0 * (stamp - BOARD))  # noqa: E731
+    plain = voice_of(readings, MAP)
+    assert plain.bearing_rad is not None and deg(plain.bearing_rad) == pytest.approx(30.0, abs=0.6)
+    now = voice_of(readings, MAP, turned=turned)
+    assert now.bearing_rad is not None and deg(now.bearing_rad) == pytest.approx(20.0, abs=0.6)
+    assert now.doa_deg == plain.doa_deg, "the array's own angle logged as read"
+    behind = [DoaReading(BOARD, array(175.0), True), DoaReading(BOARD + 0.1, array(-175.0), True)]
+    back = voice_of(behind, MAP, turned=lambda stamp: 0.0)
+    assert back.bearing_rad is not None and abs(deg(back.bearing_rad)) == pytest.approx(180.0)
+
+
+def test_the_odometry_s_headings_are_kept_unwrapped_and_read_at_any_stamp() -> None:
+    log = Headings(kept_s=1.0)
+    assert log.latest() is None and log.at(5.0) is None
+    log.add(10.0, rad(170.0))
+    log.add(10.1, rad(-170.0))  # past +180: unwrapped to 190
+    log.add(10.05, rad(0.0))  # older than the newest: ignored
+    assert log.latest() == (10.1, pytest.approx(rad(190.0)))
+    assert log.at(10.05) == pytest.approx(rad(180.0)), "interpolated"
+    assert log.at(9.0) == pytest.approx(rad(170.0)) and log.at(11.0) == pytest.approx(rad(190.0))
+    for k in range(1, 60):
+        log.add(10.1 + k / 10, rad(190.0 + k))
+    oldest = log.at(0.0)  # 1 to 2 kept_s before the newest (16.0 s, 249 deg)
+    assert oldest is not None and rad(229.0) <= oldest <= rad(239.0), deg(oldest or 0.0)
+    assert log.at(16.0) == pytest.approx(rad(249.0))
+
+
 # ---- the head and the wheels ----------
-def test_the_head_alone_within_its_comfort_and_the_wheels_for_the_rest() -> None:
-    near = split(rad(45), TILT, comfort_rad=rad(60), max_turn_rad=rad(30))
-    assert near.body_rad == 0.0 and near.head.pan_rad == pytest.approx(rad(45))
-    far = split(rad(80), TILT, comfort_rad=rad(60), max_turn_rad=rad(30))
-    assert far.body_rad == pytest.approx(rad(20)) and far.head.pan_rad == pytest.approx(rad(60))
-    back = split(rad(-150), TILT, comfort_rad=rad(60), max_turn_rad=rad(30))
+def test_the_head_alone_within_the_forward_arc_and_past_it_the_body_turns_toward_the_person() -> (
+    None
+):
+    """The arc's half is 80 deg: within it the head alone; past it the body turns to face the
+    person, a request's worth at most (30), so one just past the edge lands well inside the arc
+    and does not set the body hunting at its edge."""
+    arc = {"half_arc_rad": rad(80), "max_turn_rad": rad(30)}
+    near = split(rad(80), TILT, **arc)
+    assert near.body_rad == 0.0 and near.head.pan_rad == pytest.approx(rad(80))
+    edge = split(rad(82), TILT, **arc)
+    assert edge.body_rad == pytest.approx(rad(30)) and edge.head.pan_rad == pytest.approx(rad(52))
+    back = split(rad(-150), TILT, **arc)
     assert back.body_rad == pytest.approx(rad(-30)) and back.head.pan_rad == pytest.approx(
         rad(-120)
     )
+    wide = split(rad(100), TILT, half_arc_rad=rad(80), max_turn_rad=rad(180))
+    assert wide.body_rad == pytest.approx(rad(100)) and wide.head.pan_rad == pytest.approx(0.0)
     assert head_after(rad(170), 0.0, TILT, REACH).pan_rad == pytest.approx(REACH.pan[1])
 
 
@@ -336,6 +376,28 @@ def test_detections_join_the_nearest_track_and_a_sought_track_takes_the_nearest_
     assert a.head == Aim(rad(-43.5), rad(2.8)), "a body after a fresh face keeps the face's aim"
     known.seen([Sighting(rad(-40), Aim(rad(-41), rad(9)), "body")], 3.0)
     assert a.head == Aim(rad(-41), rad(9)) and a.source == "body"
+
+
+def test_the_tilt_changes_its_source_only_past_the_hysteresis() -> None:
+    """The head nodded between Artem's face and his body box whenever the face came and went in
+    the frames: the tilt now changes source (face to box or back) only past tilt_hold_deg; the
+    pan follows the newest sighting either way, and one source moves its own tilt freely."""
+    known = Tracks(default_tilt_rad=TILT, min_new_px=40.0, tilt_hold_deg=12.0)
+    a = known.heard(rad(30), 0.0)[0]
+    assert a.tilt_source == "voice"
+    known.seen([Sighting(rad(30), Aim(rad(30), rad(-15)), "face", face(0.0))], 0.1)
+    assert a.head.tilt_rad == pytest.approx(rad(-15)) and a.tilt_source == "face", "a voice's"
+    box = Sighting(rad(32), Aim(rad(33), rad(-5)), "body")  # the box's estimate, 10 deg lower
+    known.seen([box], 2.0)
+    assert a.head == Aim(rad(33), rad(-15)) and a.tilt_source == "face", "10 deg: the face's"
+    known.seen([Sighting(rad(31), Aim(rad(31), rad(-17)), "face", face(0.0))], 2.1)
+    assert a.head.tilt_rad == pytest.approx(rad(-17)), "the face itself moves freely"
+    known.seen([Sighting(rad(31), Aim(rad(31), rad(8)), "body")], 4.0)  # he sat down: 25 deg
+    assert a.head.tilt_rad == pytest.approx(rad(8)) and a.tilt_source == "body"
+    known.seen([Sighting(rad(31), Aim(rad(31), rad(1)), "face", face(0.0))], 4.1)
+    assert a.head.tilt_rad == pytest.approx(rad(8)) and a.tilt_source == "body", "7 deg: kept"
+    assert a.source == "face" and a.pan == pytest.approx(rad(31))
+    assert RULES.tilt_hysteresis_deg == 12.0
 
 
 def test_the_speaker_decides_stay_switch_check_or_seek_and_a_stimulus_is_judged_first() -> None:
@@ -512,6 +574,8 @@ def rig(
     said: list[str] = []
     events: list[tuple[str, float, dict[str, Any]]] = []
     wheels = wheels if wheels is not None else NoWheels()
+    if isinstance(wheels, FakeWheels) and wheels.board is None:  # its headings on the board's clock
+        wheels.board = lambda: doa.readings[-1].stamp_s if doa.readings else BOARD
     machine = SpeakerGaze(
         settings if settings is not None else RULES,
         door=door,
@@ -793,49 +857,124 @@ def test_a_face_lost_for_good_fades_to_where_the_voice_was_heard_since() -> None
     assert r.reaims()[-1]["speed"] == "adjust"
 
 
-def test_past_the_comfort_the_head_goes_first_the_wheels_turn_the_rest_and_the_head_recentres() -> (
-    None
-):
-    """A call from 100 deg left: the head is there at once, the wheels are only started (the
-    wake returns before they move), every step they report re-centres the head on the person,
-    their end once more; no frame is taken while the body turns."""
+def test_past_the_arc_the_wheels_start_with_the_head_and_the_head_stays_on_the_person() -> None:
+    """A call from 100 deg left (past the forward arc's 80): the wheels are started before the
+    head's aim is asked (their checks take longer than its turn), neither waits for the other;
+    as the odometry's heading comes round the head re-centres on the person in small steps;
+    no frame is taken while the body turns, and the heading is read meanwhile."""
     r = rig(wheels=FakeWheels())
     artem = r.person(100.0)
     read = r.wake(100.0)
     (start,) = r.wheels.calls
     assert start == ("start", (WheelMove(turn_deg=pytest.approx(30.0)),))
     assert r.aimed()[0] == (100.0, 3.0) and r.machine.turning is not None
-    assert r.machine.tick(read) is not None and r.scene.looks == 0, "no frame yet"
-    r.wheels.move_on(10.0)
-    artem.pan_deg = 90.0  # the room turns the other way in the cart's frame
-    r.machine.tick(read + 0.2)
-    assert r.aimed()[-1] == (90.0, 3.0) and r.reaims()[-1]["speed"] == "adjust"
+    due = r.machine.tick(read)
+    assert due == pytest.approx(read + 0.1) and r.scene.looks == 0, "no frame; the heading read"
+    for k, turned in enumerate((3.0, 6.0, 10.0), start=1):
+        r.wheels.move_on(turned)
+        artem.pan_deg = 100.0 - turned  # the room turns the other way in the cart's frame
+        r.machine.tick(read + 0.1 * k)
+    assert [p for p, _ in r.aimed()] == [100.0, 97.0, 94.0, 90.0], "steps of the heading"
+    assert {f["speed"] for f in r.reaims()[1:]} == {"adjust"}
     r.wheels.finish()
     artem.pan_deg = 70.0
     r.machine.tick(read + 0.8)
-    assert [p for p, _ in r.aimed()[:3]] == [100.0, 90.0, 70.0]
+    assert r.aimed()[-1] == (70.0, 3.0)
     assert r.machine.voice == pytest.approx(rad(70)), "the person moved with the cart"
     assert r.machine.turning is None and r.scene.looks == 1, "the frame after"
+    assert len(r.wheels.calls) == 1, "back within the arc: no second turn"
 
 
-def test_wheels_that_turn_less_leave_the_head_at_its_reach_and_a_cut_turn_is_finished_later() -> (
-    None
-):
+def test_an_utterance_spoken_across_a_turn_gives_the_bearing_the_person_has_now() -> None:
+    """The array turns with the cart: Artem at 100 deg keeps talking while the body turns 30
+    toward him, so the array reads him sweeping 100 -> 70 (the utterance's last second averages
+    ~78). Each reading is turned by the odometry's heading since its own stamp (one board
+    clock): the bearing is 70, his place now, and the voice stays his (no hunting)."""
+    r = rig(wheels=FakeWheels())
+    read = r.wake(100.0)
+    assert r.machine.turning is not None
+    start, end = read + 0.1, read + 2.0
+    for k in range(round((end - start) * 10) + 1):
+        t = start + k / 10
+        yaw = 30.0 * (t - start) / (end - start)
+        r.wheels.turn_to(yaw, BOARD + t)
+        r.doa.readings.append(DoaReading(BOARD + t, array(100.0 - yaw), True))
+    r.doa.readings.append(DoaReading(BOARD + end + 0.1, 30, False))
+    r.machine.heard(Heard(start, end, "я здесь", False, -12.0), end + 0.1)
+    (voice,) = [f for k, _, f in r.events if k == "gaze_voice"]
+    assert voice["bearing_deg"] == pytest.approx(70.0, abs=1.0), voice
+    assert voice["verdict"] == "the person engaged" and voice["track"] == 1
+    assert r.machine.voice == pytest.approx(rad(70.0), abs=rad(0.5)), "the person turned too"
+    rows = [f["readings"] for k, _, f in r.events if k == "gaze_doa"][-1]
+    assert rows[0][3] == pytest.approx(30.0, abs=2.0) and rows[-1][3] == pytest.approx(0.0)
+    unturned = voice_of(utterance_readings(r.doa, Heard(start, end, "я здесь"), end + 0.1, 1.0),
+                        MAP)  # fmt: skip
+    assert unturned.bearing_rad is not None and deg(unturned.bearing_rad) > 75.0, "uncorrected"
+
+
+def test_a_person_far_behind_turns_the_body_again_until_they_are_inside_the_arc() -> None:
+    """Behind at 150 deg: a request's worth (30) at a time, the next asked when the last ends,
+    until the person is within the forward arc (150 -> 120 -> 90 -> 60)."""
+    r = rig(wheels=FakeWheels())
+    read = r.wake(150.0)
+    for k in range(3):
+        assert r.wheels.calls[-1] == ("start", (WheelMove(turn_deg=pytest.approx(30.0)),))
+        r.wheels.finish()
+        r.machine.tick(read + 0.1 * (k + 1))
+    assert len(r.wheels.calls) == 3 and r.machine.turning is None
+    assert r.machine.voice == pytest.approx(rad(60))
+    assert [p for p, _ in r.aimed()[:4]] == [150.0, 120.0, 90.0, 60.0], "the head came round"
+
+
+def test_a_person_tracked_who_walks_past_the_arc_turns_the_body_toward_them() -> None:
+    """One rule, wherever the person's place comes from: Artem tracked at 70 deg walks round to
+    95; the frame that places him past the arc starts the turn, the head already on him."""
+    r = rig(wheels=FakeWheels())
+    artem = r.person(70.0)
+    read = r.wake(70.0)
+    now = r.run(read + 1.0, read)
+    assert r.machine.phase == "track" and r.wheels.calls == [], "within the arc: the head alone"
+
+    def walk(t: float) -> None:
+        artem.pan_deg = min(95.0, 70.0 + 25.0 * (t - now))  # 25 deg/s round to 95
+
+    r.run(now + 2.0, now, move=walk)
+    (start,) = r.wheels.calls
+    assert start[0] == "start" and start[1][0].turn_deg == pytest.approx(30.0)
+    assert r.machine.track is not None and deg(r.machine.track.pan) > 80.0
+
+
+def test_wheels_that_turn_less_leave_the_head_alone_and_wait_for_the_next_utterance() -> None:
+    """A refusal (nothing moved) or a cut turn is asked again at the person's next utterance; a
+    turn that moved the cart and still fell short (stalled, blocked, the back-offs spent) is
+    not asked again for that person in this conversation (no creeping back-offs)."""
     stub = rig()
     read = stub.wake(100.0)
     stub.machine.tick(read)  # NoWheels answered at once; the answer is taken on the next tick
     assert stub.aimed()[0] == (100.0, 3.0) and "the wheels turned +0 of +30 deg" in stub.said[1]
+    assert stub.machine.body_waits, "refused: until the next utterance"
     behind = rig()
     behind.wake(180.0)  # straight behind: past the neck's reach
     assert behind.door.aims()[0][0].pan_rad == pytest.approx(REACH.pan[1])
     cut = rig(wheels=FakeWheels())
     cut.wake(100.0)
-    cut.wheels.finish(WheelReport(False, 12.0, why="halted: the person speaks", cut=True))
+    cut.wheels.finish(WheelReport(False, 12.0, why="superseded by a newer motion", cut=True))
     cut.machine.tick(1.4)
-    assert cut.aimed()[1] == (88.0, 3.0) and cut.machine.reorient, "then the seek goes on"
-    assert "turned +12 of +30 deg (halted: the person speaks)" in cut.said[-1]
+    assert cut.aimed()[1] == (88.0, 3.0) and cut.machine.body_waits, "then the seek goes on"
+    assert "turned +12 of +30 deg (superseded by a newer motion)" in cut.said[-1]
+    cut.machine.tick(1.5)
+    assert len(cut.wheels.calls) == 1, "it waits for the next utterance"
     cut.say(88.0, 3.0, 4.0, "ну что")
+    cut.machine.tick(4.2)
     assert [c[0] for c in cut.wheels.calls] == ["start", "start"], "the rest of the turn"
+    stuck = rig(wheels=FakeWheels())
+    stuck.wake(100.0)
+    blocked = WheelReport(False, 6.0, 0.06, 3, "gave up: the arc is blocked")
+    stuck.wheels.finish(blocked)
+    stuck.machine.tick(1.4)
+    stuck.say(94.0, 3.0, 4.0, "эй")
+    stuck.machine.tick(4.2)
+    assert len(stuck.wheels.calls) == 1, "gave up for this person"
 
 
 def test_a_drive_and_the_close_let_the_wheels_go_and_their_late_word_is_ignored() -> None:
