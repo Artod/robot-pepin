@@ -1,8 +1,8 @@
 """config/animation.json read into a :class:`pepin.expression.animation.Book`, checked whole.
 
 The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, loop, note),
-``compositions`` (name -> cooldown_s, bind, args, family, long, variants of steps with their
-weight, needs and floor, note), ``poses`` (name -> joint ->
+``compositions`` (name -> cooldown_s, bind, args, family, long, callable, variants of steps
+with their weight, needs and floor, note), ``poses`` (name -> joint ->
 degrees and an optional note; taught by hand with ``scripts/gesture.py teach`` or authored
 from the URDF), ``idle`` (the idle layers),
 ``moments`` (a moment of the robot -> a composition), ``aliases`` (another spelling of a
@@ -116,10 +116,12 @@ def with_rest(book: Book, rest: Mapping[str, float]) -> Book:
 
 
 def vocabulary(book: Book, faces: frozenset[str]) -> Vocabulary:
-    """What a marker may name: the book's compositions with the arguments each takes and their
-    other spellings, and the face's expressions."""
-    args = {name: c.args for name, c in book.compositions.items() if c.args}
-    return Vocabulary(frozenset(book.compositions), faces, args, dict(book.aliases))
+    """What a marker may name: the book's callable compositions (the engine's own ensembles
+    are not a marker's) with the arguments each takes and their other spellings, and the
+    face's expressions."""
+    names = intents(book)
+    args = {name: book.compositions[name].args for name in names if book.compositions[name].args}
+    return Vocabulary(frozenset(names), faces, args, dict(book.aliases))
 
 
 def face_names(path: str | Path | None = None) -> frozenset[str]:
@@ -133,8 +135,31 @@ def face_names(path: str | Path | None = None) -> frozenset[str]:
 
 
 def intents(book: Book) -> tuple[str, ...]:
-    """The compositions the brain may name, in the book's order."""
-    return tuple(book.compositions)
+    """The compositions the brain may name, in the book's order (the callable ones)."""
+    return tuple(name for name, c in book.compositions.items() if c.callable)
+
+
+def span(book: Book, intent: str, part: PartName, stretch: float = 1.0) -> tuple[float, float]:
+    """How long before its sync point ``intent``'s steps on ``part`` may start moving it and how
+    long after it they may end, at the widest their ranges allow over every variant, each step
+    played ``stretch`` times slower round its stroke (the engine's speed scales); (0, 0) when no
+    step moves the part (or the book lacks the intent)."""
+    composition = book.compositions.get(intent)
+    if composition is None:
+        return 0.0, 0.0
+    before, after = 0.0, 0.0
+    for variant in composition.variants:
+        for step in variant.steps:
+            atom = book.atoms[step.atom]
+            if atom.part != part:
+                continue
+            ranges = {**atom.params, **step.params}
+            period = ranges[PERIOD].hi
+            repeats = ranges[REPEATS].hi if REPEATS in ranges else 1.0
+            hold = ranges[HOLD].hi if HOLD in ranges else 0.0
+            before = max(before, stretch * atom.stroke * period - step.at_s.lo)
+            after = max(after, step.at_s.hi + stretch * ((repeats - atom.stroke) * period + hold))
+    return before, after
 
 
 def _range(where: str, value: Any) -> Range:
@@ -280,6 +305,7 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
         tuple(str(a) for a in body.get("args", [])),
         None if family is None else str(family),
         bool(body.get("long", False)),
+        bool(body.get("callable", True)),
     )
 
 

@@ -15,7 +15,7 @@ import pytest
 
 from pepin.arm_motion import ArmMotion, ServoRange, arm_motion, load_arm_motion
 from pepin.expression.animation import Book, Clip, Event, Range, Scene, Track
-from pepin.expression.animator import Caps, EngineConfig, GestureEngine, engine_config
+from pepin.expression.animator import EngineConfig, GestureEngine, engine_config
 from pepin.expression.book import book_from, face_names, load_book, vocabulary, with_rest
 from pepin.expression.conversation import Heard
 from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakeFace, FakePlayout
@@ -42,6 +42,9 @@ RESEARCH_NAMES = {
 }  # fmt: skip
 # the brain's co-speech marks (gesticulation DESIGN.md §4.4; test_expression_space.py)
 PRIMITIVES = {"accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer"}
+# the engine's own ensembles, which its listeners ask for by name (never a mark)
+OWN = {"pulse_weak", "pulse_strong", "pulse_peak", "pulse_laugh", "listen_nod", "ack_nod",
+       "arm_sway"}  # fmt: skip
 RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wrist_flex": 30.0,
           "wrist_roll": -54.1, "gripper": -0.4}  # fmt: skip
 
@@ -50,7 +53,8 @@ RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wr
 
 
 def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
-    assert set(BOOK.compositions) == RESEARCH_NAMES | PRIMITIVES
+    assert set(BOOK.compositions) == RESEARCH_NAMES | PRIMITIVES | OWN
+    assert {n for n, c in BOOK.compositions.items() if not c.callable} == OWN
     assert len(BOOK.atoms) >= 19
     assert not BOOK.atoms["breath"].callable and not BOOK.atoms["head_drift"].callable
     assert BOOK.moments["slow_tool"] == "thinking"  # the listeners' moments name compositions too
@@ -142,7 +146,17 @@ def test_a_part_not_ready_and_a_pose_not_taught_are_left_out_the_rest_plays() ->
 
 
 def test_optional_steps_follow_their_odds_and_one_always_plays() -> None:
-    renderer = BookRenderer(BOOK)
+    """The shipped book's steps all play (a variant is one body's ensemble: the dice are
+    between the variants and in the ranges); a step's odds still work for a book that has them."""
+    assert all(st.p == 1.0 for c in BOOK.compositions.values() for v in c.variants
+               for st in v.steps)  # fmt: skip
+    agreement = BOOK.compositions["agreement"]
+    variant = agreement.variants[0]
+    halved = replace(variant, steps=tuple(replace(st, p=0.5) if st.atom == "face" else st
+                                          for st in variant.steps))  # fmt: skip
+    halves = replace(agreement, variants=(halved,))
+    odds = replace(BOOK, compositions={**BOOK.compositions, "agreement": halves})
+    renderer = BookRenderer(odds)
     with_face = sum(
         any(c.part == "face" for c in renderer.render("agreement", EVERYTHING, s).clips)
         for s in range(400)
@@ -160,7 +174,7 @@ def test_the_chooser_never_draws_the_same_variant_twice_running() -> None:
 
 def test_a_stroke_lands_at_its_step_s_time_from_the_sync_point() -> None:
     performance = BookRenderer(BOOK).render("emphasis", EVERYTHING, 5, variant=0)
-    (head,) = performance.clips
+    (head,) = [c for c in performance.clips if c.part == "head"]
     assert -0.15 <= head.offset_s + head.stroke_s <= 0.0  # at_s [-0.15, 0]
     (tilt,) = head.tracks
     peak = tilt.times[tilt.values.index(max(tilt.values))]
@@ -504,6 +518,10 @@ def test_a_cut_reply_drops_its_waiting_clips() -> None:
 def test_the_person_speaking_fades_the_gesture_layer_but_a_greeting_past_its_stroke_ends() -> None:
     rig = Rig(seed=1)
     assert rig.engine.perform("agreement", source="tool").ok
+    for _ in range(150):  # its head comes after the arm's or the cart's way, which start first
+        if rig.engine.scheduler.reservations.holder("head", rig.clock.now) is not None:
+            break
+        rig.tick(0.01)
     rig.engine.speech_started(rig.clock.now)
     rig.engine.step()
     assert ("fade", ("gesture", 0.35)) in rig.parts["head"].calls
@@ -599,30 +617,6 @@ def test_a_laugh_once_a_minute_unless_the_person_laughed() -> None:
     rig.engine.part_queued(3, 0, marked("Ха.", "laugh", 0))
     rig.engine.step()
     assert len(rig.kinds("performance")) == 2
-
-
-def test_a_laugh_heard_in_the_robot_s_words_shares_the_laugh_s_cap_with_the_brain_s_mark(
-) -> None:  # fmt: skip
-    """The listeners' laugh heard counts as the laugh under intent_per_minute: a {laugh} after it
-    within the minute is capped, and so is a second laugh heard; the person's laugh waives it;
-    it never counts against per_minute (it moves no gesture of the brain's)."""
-    rig = Rig(caps=Caps(per_minute=1))
-    assert rig.engine.claim("laugh") is None
-    rig.clock.now += 25.0
-    rig.engine.part_queued(1, 0, marked("Ха.", "laugh", 0))
-    rig.engine.step()
-    assert rig.kinds("capped")[-1]["why"] == "laugh per minute"
-    assert rig.engine.claim("laugh") == "laugh per minute"
-    rig.engine.speech_ended(Heard(0.0, 1.0, "Ха-ха-ха, смешно"))
-    rig.engine.step()
-    assert rig.engine.claim("laugh") is None
-    rig.engine.part_queued(2, 0, marked("Привет.", "greeting", 0))
-    rig.engine.step()
-    assert [r["intent"] for r in rig.kinds("performance")] == ["greeting"]  # per_minute 1 kept
-    rig.clock.now += 61.0
-    assert rig.engine.claim("laugh") is None
-    rig.engine.switch(False)
-    assert rig.engine.claim("laugh") == "gestures are off"
 
 
 def test_off_nothing_moves_and_switching_on_reads_the_book_again() -> None:

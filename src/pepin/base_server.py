@@ -33,14 +33,13 @@ moves answered on arrival; ``neck_jog`` walks the head at a rate for the game-mo
 (:mod:`pepin.teleop`) behind a half-second deadman of its own. The speed, ramp and lease are
 config/neck.json's ``motion`` block, live through ``neck_motion``.
 
-The SO-101 arm (ids 1-6) rides the same read as another group of the same kind
-(:class:`Riders`: back to back while energised, a few times a second at rest), in two parts on
-consecutive ticks beside the neck: no read's replies may outgrow one 64-byte USB packet of the
-bus adapter (``READ_BUDGET_BYTES``). It is played by
-:class:`pepin.arm_driver.ArmDriver` after the neck's step: ``arm_trajectory`` (a whole gesture,
-refused while the wheels are commanded to move; a twist during one sends the arm to rest),
-``arm_rest``, ``arm_halt``, ``arm_read``. Its caps, limits and rest pose are config/arm.json's
-``motion`` block (``--arm-config``).
+The SO-101 arm (ids 1-6) rides the same read as another group of the same kind (:class:`Riders`:
+back to back while energised, a few times a second at rest), in two parts on consecutive ticks
+beside the neck: no read's replies may outgrow one 64-byte USB packet of the bus adapter
+(``READ_BUDGET_BYTES``). It is played by :class:`pepin.arm_driver.ArmDriver` after the neck's step:
+``arm_trajectory`` (a whole gesture, played whatever the wheels do: the two move together, each
+within its own caps), ``arm_rest``, ``arm_halt``, ``arm_read``. Its caps, limits and rest pose are
+config/arm.json's ``motion`` block (``--arm-config``).
 
 Run on the board::
 
@@ -1039,7 +1038,7 @@ class BaseServerCore:
         self._tick_wheels(now)
         self._step_neck(now)
         if self._arm_driver is not None:
-            self._arm_driver.step(now, self.moving)
+            self._arm_driver.step(now)
 
     def take_replies(self) -> list[dict[str, Any]]:
         """Answers that outlived the command that asked for them (a finished neck move, an arm
@@ -1207,15 +1206,12 @@ class BaseServerCore:
             with_suppressed_timeout(self._arm_driver.release)
 
     def _arm_trajectory(self, message: dict[str, Any], now: float) -> dict[str, Any]:
-        """Hand one ``arm_trajectory`` to the arm: refused while the wheels are commanded to
-        move, malformed, or as the driver judges it; ``accepted`` otherwise (its end comes
+        """Hand one ``arm_trajectory`` to the arm: refused malformed or as the driver judges it
+        (its limits and caps), whatever the wheels do; ``accepted`` otherwise (its end comes
         through :meth:`take_replies`)."""
         trajectory_id = str(message.get("id", ""))
         if self._arm_driver is None:
             return answer_line(ArmAnswer(trajectory_id, "refused", "no arm on this base server"))
-        if self.moving:
-            refusal = "the wheels are commanded to move"
-            return answer_line(ArmAnswer(trajectory_id, "refused", refusal))
         try:
             trajectory = trajectory_from(message)
         except ValueError as exc:

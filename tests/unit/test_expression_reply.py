@@ -32,11 +32,19 @@ from pepin.expression.fakes import (
     FakePlaces,
     FakePlayout,
 )
-from pepin.expression.listeners import Alive, alive_knobs
+from pepin.expression.head import IDLE_LOOK
+from pepin.expression.listeners import (
+    ARM_SWAY,
+    LAUGHING,
+    PEAK,
+    STRONG,
+    WEAK,
+    Alive,
+    alive_knobs,
+)
 from pepin.expression.markers import Marker, Part, parse
-from pepin.expression.parts import ArmPart
+from pepin.expression.parts import ArmPart, clip_look
 from pepin.expression.prosody import ProsodyListener
-from pepin.expression.schedule import POSTURE
 from pepin.expression.speaker import Attention
 from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
 
@@ -148,6 +156,10 @@ class Conversation:
             end = start + (a + len(pcm[a : a + n])) / 2 / RATE
             self.engine.audio(VoiceChunk(turn, index, start, end, pcm[a : a + n], RATE, 0.0))
 
+    def accents(self, part: str) -> list[dict[str, Any]]:
+        """The cue rows that went of the accents' ensembles on ``part``."""
+        return [f for intent in ACCENTS for f in self.sent(intent, part)]
+
     def sent(self, intent: str, part: str | None = None) -> list[dict[str, Any]]:
         rows = [f for k, f in self.records if k == "cue" and f["intent"] == intent and f["ok"]]
         return [f for f in rows if part is None or f["part"] == part]
@@ -222,7 +234,9 @@ def test_one_reply_end_to_end_through_the_engine_s_thread_the_listeners_and_the_
     pulses = {(f["turn"], f["index"]): f for k, f in c.events if k == "pulse"}
     assert set(pulses) == {(1, 0), (1, 1)} and all(f["nuclei"] == 3 for f in pulses.values())
     assert pulses[(1, 0)]["accent"] is None and pulses[(1, 0)]["skipped"] == ["a marker's part"]
-    assert pulses[(1, 1)]["accent"]["kind"] == "nod" and len(c.sent("accent", "head")) == 1
+    assert pulses[(1, 1)]["accent"]["kind"] in ("weak", "strong", "peak")
+    assert "head" in pulses[(1, 1)]["accent"]["parts"]
+    assert len([f for i in ACCENTS for f in c.sent(i, "head")]) == 1
     assert len(c.sent("listen_nod", "head")) == 1
     (ladder,) = [f for k, f in c.records if k == "ladder" and f["intent"] == "greeting"]
     landed = {f["part"] for f in c.sent("greeting")}
@@ -335,6 +349,7 @@ def test_a_reply_pointing_at_a_place_and_counting_two_items_through_the_engine_s
 # -- the body alive while the robot speaks: the laugh's rock, the accent's rock, the arm up ------
 
 READY = BOOK.poses["ready"]
+ACCENTS = (WEAK, STRONG, PEAK)  # the pulse's ensembles of an accent, by strength
 
 
 class Spoken:
@@ -394,51 +409,17 @@ def moments(c: Conversation, name: str) -> list[dict[str, Any]]:
     return [f for k, f in c.events if k == "moment" and f["name"] == name]
 
 
-def test_a_reply_whose_words_laugh_rocks_the_cart_without_any_mark(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A laugh spelled out at the start of the words, with no {laugh} of the brain's: the
-    laugh's rock of the cart plays from the part's start (laugh_heard), 1-2 cm, no laugh
-    composition rendered; the next reply's giggle within the minute is held back by the laugh's
-    own cap."""
-    caplog.set_level(logging.ERROR, logger="pepin.expression")
-    c = Conversation(accent_rock_p=0.0)
-    first = Spoken(c, 1, ["Ха-ха-ха, вот это номер!"], [["номер"]], [["вот"]])
-    again = Spoken(c, 2, ["Хи-хи, ну и смешно же."], [["смешно"]])
-    try:
-        c.engine.start()
-        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
-        c.run(0.6, {0.2: lambda: first.text(0), 0.3: lambda: first.start(0)})
-        c.run(first.lengths[0] + 0.5)
-        c.both("reply_done", 1)
-        c.run(2.0, {0.5: lambda: again.text(0), 0.6: lambda: again.start(0)})
-        c.both("reply_done", 2)
-        c.run(0.2)
-    finally:
-        c.engine.close()
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    (rock,) = c.sent("laugh_rock", "body")
-    assert rock["planned"] == pytest.approx(first.begins[0], abs=0.03)  # a tail from its start
-    (clip,) = played(c, "body", "laugh_rock")
-    assert 0.01 <= max(clip.tracks[0].values) <= 0.02 and clip.tracks[0].dof == "x_m"
-    heard = moments(c, "laugh_heard")
-    assert [m["played"] for m in heard] == [True, False]
-    assert heard[1]["why"] == "laugh per minute"
-    assert not [f for k, f in c.records if k == "performance" and f["intent"] == "laugh"]
-    assert not moments(c, "laugh_rock")  # the brain's mark's moment: not this one
-
-
 def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_the_wrist(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Two sentences: TEXT of the first alone moves no arm; TEXT of the second raises the arm to
     the book's ready within half a second of speech and holds it (then: hold) while the reply
-    goes on, sent again before its hold lapses; an accent of the second sentence is a wrist
-    beat from the held pose (wrist_beat_p 1), 15-25 deg; the cart never rocks (the arm is up);
-    every hold sent ends within 1 s of the reply's last sound, and the reply's end rests the
-    arm then."""
+    goes on, sent again before its hold lapses; the second sentence's accent beats the wrist
+    from the held pose (15-25 deg: the book's beats) and keeps the hold, and the cart moves
+    under the raised arm (one body); every hold sent ends within 1 s of the reply's last sound,
+    and the reply's end rests the arm then."""
     caplog.set_level(logging.ERROR, logger="pepin.expression")
-    c = Conversation(wrist_beat_p=1.0, accent_rock_p=1.0)
+    c = Conversation(wrist_beat_p=1.0)
     texts = ["Сегодня утром мы поехали на дачу.", "Там было очень тихо и красиво, правда."]
     reply = Spoken(c, 1, texts, [["утром"], ["красиво"]], [["мы", "дачу"], ["Там", "тихо"]])
     marks: dict[str, float] = {}
@@ -468,28 +449,32 @@ def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_th
     assert up.knots[-1].deg == pytest.approx([READY[j] for j in JOINTS], abs=0.01)
     (moment,) = moments(c, "arm_up")
     assert moment["played"] and moment["sentences"] == 2 and moment["base"] == "rest"
-    (beat,) = played(c, "arm", "wrist_beat")
-    flex = JOINTS.index("wrist_flex")
-    assert beat.knots[0].deg == pytest.approx(up.knots[-1].deg, abs=0.01)  # from the held pose
-    assert 15.0 - 0.01 <= max(k.deg[flex] for k in beat.knots) - READY["wrist_flex"] <= 25.0 + 0.01
+    beats = [tr for intent in ACCENTS for tr in played(c, "arm", intent)]
+    assert beats, "the accent's wrist beat"
+    flex, roll = JOINTS.index("wrist_flex"), JOINTS.index("wrist_roll")
+    for beat in beats:
+        assert beat.knots[0].deg == pytest.approx(up.knots[-1].deg, abs=0.01)  # the held pose
+        lift = max(k.deg[flex] for k in beat.knots) - READY["wrist_flex"]  # the flex beat
+        turn = max(abs(k.deg[roll] - READY["wrist_roll"]) for k in beat.knots)  # or the roll
+        assert 12.0 - 0.01 <= lift <= 24.01 or 8.0 - 0.01 <= turn <= 20.01, (lift, turn)
+        assert beat.then == "hold"
     assert all(tr.then == "hold" for _, tr in sends)
     for t, tr in sends:  # every hold ends within 1 s of the last sound (the board rests it then)
         assert t + 0.06 + tr.knots[-1].t_s + tr.hold_s <= end + 1.0
     assert [r for _, r in rest if r.knots[-1].t_s < 0.1], "the posture sent again, still"
     resting = [t for name, t, _ in c.link.times if name == "rest"]
     assert resting and resting[0] <= end + 1.0
-    assert not c.sent("accent_rock", "body")
-    assert moments(c, "accent_rock")[0]["why"] == "the arm is up for this reply"
+    assert c.accents("body"), "the cart rocks under the raised arm"
 
 
 def test_a_one_sentence_reply_never_raises_the_arm_and_its_strongest_accent_rocks_the_cart(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """One sentence: no arm at all (no posture, no wrist beat without a unit); with
-    accent_rock_p 1 the cart rocks 1 cm once, its stroke on the sentence's strongest accent
-    that is not in its first half second."""
+    """One sentence: no arm at all (no posture, no beat without a unit); its accent (the top
+    of its two stressed words, the first of them) is the reply's strongest: the nod and the
+    cart's 1.2-1.5 cm rock, the rock's stroke on the accent."""
     caplog.set_level(logging.ERROR, logger="pepin.expression")
-    c = Conversation(wrist_beat_p=1.0, accent_rock_p=1.0)
+    c = Conversation(wrist_beat_p=1.0)
     text = "Знаешь, я вчера видел огромного жука прямо на нашей кухне."
     reply = Spoken(c, 1, [text], [["огромного", "кухне"]], [["Знаешь", "вчера", "жука"]])
     try:
@@ -503,15 +488,16 @@ def test_a_one_sentence_reply_never_raises_the_arm_and_its_strongest_accent_rock
         c.engine.close()
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
     assert not c.link.times and not moments(c, "arm_up")
-    (rock,) = moments(c, "accent_rock")
-    assert rock["played"], rock
-    (clip,) = played(c, "body", "accent_rock")
-    assert max(clip.tracks[0].values) == pytest.approx(0.01)
-    (sent,) = c.sent("accent_rock", "body")
+    (pulse,) = [f for k, f in c.events if k == "pulse"]
+    accent = pulse["accent"]
+    assert accent["kind"] == "peak" and accent["parts"] == ["body", "head"], pulse
     first_vowel = reply.begins[0] + vowel_s(text, "огромного", reply.lengths[0])
-    assert rock["s"] == pytest.approx(first_vowel, abs=0.06)  # the first of the strongest two
+    assert accent["s"] == pytest.approx(first_vowel, abs=0.06)
+    (clip,) = played(c, "body", PEAK)
+    assert 0.012 <= max(clip.tracks[0].values) <= 0.015
+    (sent,) = c.sent(PEAK, "body")
     lag, latency = DATA["timing"]["audio_lag_s"], 0.15
-    assert sent["planned"] == pytest.approx(rock["s"] - 0.05 - clip.stroke_s + lag - latency,
+    assert sent["planned"] == pytest.approx(accent["s"] - 0.05 - clip.stroke_s + lag - latency,
                                             abs=0.03)  # fmt: skip
 
 
@@ -527,7 +513,7 @@ def test_the_arm_stays_up_through_a_long_reply_within_the_board_s_three_second_h
     """A board that rests a held arm after 3 s (hold_max_s 3): the posture is sent again within
     it while the reply goes on, so the arm is up from its rise to the reply's last sound, and
     never longer than 1 s past it."""
-    c = Conversation(motion=replace(MOTION, hold_max_s=3.0), accent_rock_p=0.0, wrist_beat_p=0.0)
+    c = Conversation(motion=replace(MOTION, hold_max_s=3.0), wrist_beat_p=0.0)
     texts = ["Вчера мы долго гуляли по парку у реки.", "Там было много уток и даже лебедь.",
              "Потом пошёл дождь, и мы побежали домой."]  # fmt: skip
     reply = Spoken(c, 1, texts, [[], [], []], [["долго", "реки"], ["уток", "лебедь"],
@@ -562,7 +548,7 @@ def test_a_mark_during_the_posture_plans_from_ready_and_the_arm_comes_back_to_re
     """{offer} in the second sentence of a long reply: the arm is up at ready when the mark's
     stroke comes; the offer starts from ready (the unit's base), ends held, and the posture
     takes the arm back to ready after it."""
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
+    c = Conversation(wrist_beat_p=0.0)
     texts = [
         "Я нашёл в шкафу старую добрую книгу.",
         "Вот, возьми, пожалуйста, эту {offer} книгу себе.",
@@ -595,7 +581,7 @@ def test_a_mark_during_the_posture_plans_from_ready_and_the_arm_comes_back_to_re
 
 
 def test_the_person_speaking_rests_the_raised_arm_at_once_and_it_stays_down() -> None:
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
+    c = Conversation(wrist_beat_p=0.0)
     texts = ["Вчера мы долго гуляли по парку у реки.", "Там было много уток и даже лебедь."]
     reply = Spoken(c, 1, texts, [[], []], [["долго"], ["уток"]])
     try:
@@ -615,13 +601,24 @@ def test_the_person_speaking_rests_the_raised_arm_at_once_and_it_stays_down() ->
     assert len(sends(c)) == 1  # no second rise in that reply
 
 
-def test_a_laugh_in_a_later_sentence_rests_the_arm_and_the_cart_rocks() -> None:
-    """The arm is up for a long reply; its third sentence laughs: the arm goes to rest and the
-    cart rocks (the board refuses the wheels while the arm holds), the rock after the rest."""
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
-    texts = ["Вчера мы долго гуляли по парку у реки.", "И там я упал прямо в лужу.",
-             "Ха-ха-ха, вот смеху было!"]  # fmt: skip
-    reply = Spoken(c, 1, texts, [[], [], []], [["долго"], ["лужу"], ["смеху"]])
+# -- one body: every part in the pulse --------------------------------------------------------
+
+
+def test_a_three_sentence_reply_nods_beats_the_raised_arm_and_rocks_the_cart(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Three sentences with an accent each, on the real prosody listener: the head nods, the
+    arm (raised at the second sentence) beats the wrist from the held pose on every accent after
+    it, and the cart rocks, all in the same reply; each accent after the first moves two parts
+    at least (the head where its gap allows: the long reply's look away holds it once; the cart
+    once its last rock has settled)."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation()
+    texts = ["Сегодня утром мы поехали далеко на дачу.",
+             "Там было очень тихо и удивительно красиво.",
+             "А вечером мы долго смотрели на яркие звёзды."]  # fmt: skip
+    reply = Spoken(c, 1, texts, [["утром"], ["удивительно"], ["вечером"]],
+                   [["мы", "дачу"], ["Там", "красиво"], ["долго", "звёзды"]])  # fmt: skip
     try:
         c.engine.start()
         c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
@@ -630,28 +627,87 @@ def test_a_laugh_in_a_later_sentence_rests_the_arm_and_the_cart_rocks() -> None:
         for k in (1, 2):
             c.run(reply.lengths[k - 1] - 0.6)
             c.run(0.1, {0.05: lambda k=k: reply.start(k)})
-        c.run(reply.lengths[2] + 1.0)
+        end = reply.heard_end()
+        c.run(max(0.0, end + 0.1 - c.clock.now))
+        c.both("reply_done", 1)
+        c.run(1.0)
     finally:
         c.engine.close()
-    assert sends(c) and moments(c, "arm_up")[0]["played"]
-    (heard,) = moments(c, "laugh_heard")
-    assert heard["played"]
-    resting = [t for name, t, _ in c.link.times if name == "rest"]
-    assert resting
-    assert len(c.sent("laugh_rock", "body")) == 1
-    faded = [f for k, f in c.records if k == "faded" and f["part"] == "arm"]
-    assert faded[0]["why"] == "the laugh rocks the cart"
-    assert c.parts["arm"].holding() is None  # type: ignore[attr-defined]
-    assert not [f for k, f in c.records if k == "cue" and f["part"] == "body" and not f["ok"]]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    pulses = [f for k, f in c.events if k == "pulse" and f["turn"] == 1]
+    accents = [f["accent"] for f in pulses if f["accent"]]
+    assert len(accents) == 3, pulses
+    assert len(c.accents("head")) >= 2, "the accents nod (where the head's gap allows)"
+    beats = [tr for intent in ACCENTS for tr in played(c, "arm", intent)]
+    assert len(beats) >= 2 and all(tr.then == "hold" for tr in beats), "the raised arm beats"
+    assert c.accents("body"), "the cart rocks in the same reply"
+    assert all(len(a["parts"]) >= 2 for a in accents[1:]), accents  # one body: parts together
+    skipped = [s for f in pulses for s in f["skipped"]]
+    assert all("arm" not in s.split(":")[0] for s in skipped), skipped  # the raised arm beat all
+    assert moments(c, "arm_up")[0]["played"]
 
 
-def test_a_laugh_first_rocks_the_cart_then_the_arm_rises_after_it() -> None:
-    """A laughing first sentence, then two more: the rock plays from the first part's start and
-    the arm, due at the second sentence's TEXT, waits for the cart and rises after the rock."""
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
-    texts = ["Ха-ха-ха, вот это да!", "Ты меня очень сильно насмешил сейчас.",
-             "Расскажи ещё что-нибудь такое, пожалуйста."]  # fmt: skip
-    reply = Spoken(c, 1, texts, [[], [], []], [["это"], ["очень"], ["ещё"]])
+def test_the_voice_laughing_rocks_the_cart_on_its_accents_as_the_wheels_can_follow(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A sentence that opens with ten laughing syllables 0.35 s apart (higher and longer than
+    the voice's own, as the voice laughs; no {laugh}, no text read): the real prosody listener
+    finds them, each is an accent of the laugh, the cart rocks on one as soon as its lead
+    covers the rock's way and on another once that rock has settled (0.4 of the wheels' speed:
+    a laugh's syllables are quicker than the cart); the happy face comes with each rock."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation()
+    text = "Ха-ха-ха-ха-ха-ха-ха-ха-ха-ха, вот это ты меня насмешил!"
+    length = 5.2
+    laugh = [0.4 + 0.35 * k for k in range(10)]
+
+    def start() -> None:
+        c.playout.marks[(1, 0)] = (0.0, length)
+        c.both("part_started", 1, 0, 0.0)
+        spec = [(s, 400.0, 0.12) for s in laugh] + [(4.2, 220.0, 0.075), (4.7, 220.0, 0.075)]
+        c.feed(1, 0, 0.0, vowels(spec, length))
+        c.both("part_spoken", 1, 0)
+        c.playing = True
+
+    try:
+        c.engine.start()
+        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
+        c.run(0.4, {0.1: lambda: c.both("part_queued", 1, 0, Part(text)), 0.2: start})
+        c.run(length + 1.0)
+        c.both("reply_done", 1)
+        c.run(0.3)
+    finally:
+        c.engine.close()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    sounds = moments(c, "laugh_sound")
+    assert len(sounds) >= 8, sounds
+    rocked = [m for m in sounds if "body" in m["parts"]]
+    assert len(rocked) >= 2, sounds
+    assert rocked[1]["s"] - rocked[0]["s"] >= 1.5, "the next once the first has settled"
+    rocks = c.sent(LAUGHING, "body")
+    assert len(rocks) == len(rocked) == len(c.sent(LAUGHING, "face"))
+    lag, latency = DATA["timing"]["audio_lag_s"], 0.15
+    for moment, sent in zip(rocked, rocks, strict=True):  # each rock's stroke on its accent
+        clip = played(c, "body", LAUGHING)[rocks.index(sent)]
+        assert sent["planned"] == pytest.approx(
+            moment["s"] - 0.05 - clip.stroke_s + lag - latency, abs=0.03
+        )
+    assert not [f for k, f in c.records if k == "performance" and f["intent"] == "laugh"]
+
+
+def test_the_raised_arm_breathes_a_slow_wrist_sway_while_nothing_else_moves_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A long reply with no accent: the arm up at ready sways its wrist slowly (the book's
+    arm_sway, 6-10 deg of roll over 2.5-3 s) whenever nothing moves it and its hold outlasts the
+    sway, from the held pose and back to it, the hold kept; never past the reply's end."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation(wrist_beat_p=0.0)
+    texts = ["Вчера мы долго гуляли по большому старому парку у самой реки.",
+             "Там было много уток, лебедей и даже одна очень важная цапля.",
+             "Потом пошёл сильный дождь, и мы быстро побежали домой."]  # fmt: skip
+    reply = Spoken(c, 1, texts, [[], [], []], [["долго", "реки"], ["уток", "цапля"],
+                                               ["дождь", "домой"]])  # fmt: skip
     try:
         c.engine.start()
         c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
@@ -660,11 +716,56 @@ def test_a_laugh_first_rocks_the_cart_then_the_arm_rises_after_it() -> None:
         for k in (1, 2):
             c.run(reply.lengths[k - 1] - 0.6)
             c.run(0.1, {0.05: lambda k=k: reply.start(k)})
-        c.run(reply.lengths[2] + 1.0)
+        end = reply.heard_end()
+        c.run(max(0.0, end + 0.1 - c.clock.now))
+        c.both("reply_done", 1)
+        c.run(1.0)
     finally:
         c.engine.close()
-    (rock,) = c.sent("laugh_rock", "body")
-    (up,) = c.sent(POSTURE, "arm")[:1]
-    assert rock["planned"] == pytest.approx(reply.begins[0], abs=0.03)
-    assert up["planned"] >= rock["planned"] + rock["seconds"]  # after the rock
-    assert not [f for k, f in c.records if k == "cue" and f["part"] == "arm" and not f["ok"]]
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    sways = played(c, "arm", ARM_SWAY)
+    assert sways, "the held arm breathes"
+    roll = JOINTS.index("wrist_roll")
+    ready = [READY[j] for j in JOINTS]
+    for sway in sways:
+        assert sway.knots[0].deg == pytest.approx(ready, abs=0.01)  # from the held pose
+        assert sway.knots[-1].deg == pytest.approx(ready, abs=0.01) and sway.then == "hold"
+        swing = max(abs(k.deg[roll] - READY["wrist_roll"]) for k in sway.knots)
+        assert 6.0 - 0.01 <= swing <= 10.0 + 0.01
+        assert 2.5 - 0.01 <= sway.knots[-1].t_s <= 3.0 + 0.01
+    times = [t for name, t, tr in c.link.times if name == "send" and tr in sways]
+    for t, sway in zip(times, sways, strict=True):
+        assert t + 0.06 + sway.knots[-1].t_s + sway.hold_s <= end + 1.0
+
+
+def test_the_melody_s_keys_come_half_a_second_apart_and_glide(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The voice's pitch as the head's still tilt, on the real prosody listener: its overlays'
+    keys at least melody_key_gap_s (0.5 s) apart, within melody_max_deg (0.9), each written with
+    a speed cap and its own ramp (the glide), within the arbiter's still bound (never blinds)."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation()
+    text = "Мы долго шли по берегу большой и очень тихой реки, и было хорошо."
+    words = ["долго", "берегу", "большой", "очень", "тихой", "реки", "хорошо"]
+    reply = Spoken(c, 1, [text], [words[1::3]], [[w for w in words if w not in words[1::3]]])
+    try:
+        c.engine.start()
+        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
+        c.run(0.5, {0.2: lambda: reply.text(0), 0.3: lambda: reply.start(0)})
+        c.run(reply.lengths[0] + 0.5)
+        c.both("reply_done", 1)
+        c.run(0.3)
+    finally:
+        c.engine.close()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    melody = played(c, "head", "melody")
+    assert melody, "the melody plays"
+    for clip in melody:
+        (track,) = clip.tracks
+        assert min(np.diff(track.times)) >= 0.5 - 1e-9
+        assert max(abs(v) for v in track.values) <= 0.9 + 1e-9
+        look = clip_look(clip, IDLE_LOOK)
+        assert look is not None and look["target"].get("idle") is True
+        for key in look["target"]["keys"]:
+            assert key["speed_deg_s"] > 0.0 and key["acc_deg_s2"] > 0.0  # a cap and a glide

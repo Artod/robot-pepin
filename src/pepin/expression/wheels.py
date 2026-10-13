@@ -21,16 +21,15 @@ A turn is one continuous motion with a trapezoidal profile (``yaw_rate_deg_s``,
 ``yaw_acc_deg_s2``, both times ``speed_scale``), braking on the remaining angle less what the
 command latency still turns, done within ``settle_deg``; a straight leg likewise in metres.
 
-EVERY MOTION IS CHECKED before it starts and at every control tick (25 Hz): the base server's
-state is fresh, the cart stands (no twist commanded, the wheels still), the servo bus answers,
-the arm is not mid-gesture (a twist would send it to rest), no stop of someone else's within
-``stop_hold_s``; the goal server beside Nav2 (:class:`GoalServerView`, asked ten times a second
-while a motion runs) says nothing navigates and depth_fusion's newest obstacle marks are fresh,
-and the swept footprint keeps ``clearance_m`` from every mark (:mod:`pepin.expression.clearance`:
-the voxel volume's slice, lidar, camera depth and ToF fused, remembered round the cart). Without
-the marks nothing moves: a silent depth_fusion is a refusal with its reason, never the raw scan
-instead. A refusal says why; nothing is ever clamped.
-
+EVERY MOTION IS CHECKED before it starts and at every control tick (25 Hz): the base server's state
+is fresh, the cart stands (no twist commanded, the wheels still), the servo bus answers, no stop of
+someone else's within ``stop_hold_s`` (the arm is not the wheels' business: they move together, each
+within its own caps); the goal server beside Nav2 (:class:`GoalServerView`, asked ten times a second
+while a motion runs) says nothing navigates and depth_fusion's newest obstacle marks are fresh, and
+the swept footprint keeps ``clearance_m`` from every mark (:mod:`pepin.expression.clearance`: the
+voxel volume's slice, lidar, camera depth and ToF fused, remembered round the cart). Without the
+marks nothing moves: a silent depth_fusion is a refusal with its reason, never the raw scan instead.
+A refusal says why; nothing is ever clamped.
 IT NEVER FIGHTS ANOTHER DRIVER. Every state line is checked against the twists this executor
 sent within the last ``ECHO_S``: a line carrying any other twist is someone else's command (the
 red button's stop, the teleop, Nav2) and the motion ends on that tick without another twist;
@@ -105,7 +104,6 @@ STALL_SHARE = 1.0 / 3.0  # a leg that makes less than this of its commanded moti
 STALL_MIN_DEG, STALL_MIN_M = 2.0, 0.005  # ...once at least this much was commanded
 TURN_FLOOR_DEG_S, DRIVE_FLOOR_M_S = 2.0, 0.01  # the least speed a leg commands (stiction)
 SAME = 1e-6  # two twists this close are the same
-ARM_BUSY = ("moving", "holding")  # a twist sends an arm in these to rest (pepin.arm_driver)
 BODY_DOFS = ("yaw_deg", "x_m")
 Source = Literal["gaze", "gesture", "door"]
 Report = Callable[[str], None]
@@ -1018,8 +1016,8 @@ def in_origin_frame(points: Points, pose: Pose2D, origin: Pose2D) -> Points:
 
 
 def standing(state: BaseState) -> str | None:
-    """Why the cart is not standing for an expressive motion (a twist commanded, the wheels
-    rolling, the bus silent, the arm mid-gesture); None when it is."""
+    """Why the cart is not standing for an expressive motion (a twist commanded: a drive or a
+    teleop owns the wheels; the wheels rolling; the bus silent); None when it is."""
     if state.moving or abs(state.v) > SAME or abs(state.w) > SAME:
         twist = f"v {state.v:+.2f} m/s, w {state.w:+.2f} rad/s"
         return f"the wheels are commanded ({twist}): a drive or a teleop"
@@ -1027,8 +1025,6 @@ def standing(state: BaseState) -> str | None:
         return "the cart is rolling"
     if not state.bus_ok:
         return "the servo bus did not answer"
-    if state.arm_phase in ARM_BUSY:
-        return f"the arm is mid-gesture ({state.arm_phase}): a twist would send it to rest"
     return None
 
 

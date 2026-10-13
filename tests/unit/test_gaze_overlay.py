@@ -31,6 +31,7 @@ from pepin.gaze import (
     Speed,
     home_aim,
     look_from_json,
+    overlay_from_json,
 )
 from pepin.neck import NeckConfig
 
@@ -395,3 +396,16 @@ def test_an_eased_look_carries_its_own_speed_and_ramp_to_the_driver() -> None:
     ):
         answer = look_from_json({**request, **bad}, SETTINGS, CFG, unused)
         assert isinstance(answer, str) and why in answer, (bad, answer)
+
+
+def test_an_overlay_key_s_own_ramp_is_read_checked_and_written_with_it() -> None:
+    """A key's ``acc_deg_s2`` (the idle layer's glide) rides to the driver beside its speed;
+    absent, none is written (the neck's own); zero or below is refused whole."""
+    settings = GazeSettings()
+    keys = [{"at_s": 0.0, "tilt_rad": math.radians(0.8), "speed_deg_s": 2.0, "acc_deg_s2": 9.5},
+            {"at_s": 0.7, "tilt_rad": 0.0, "speed_deg_s": 2.0}]  # fmt: skip
+    overlay = overlay_from_json({"keys": keys, "idle": True}, settings)
+    assert not isinstance(overlay, str)
+    assert [k.acc_deg_s2 for k in overlay.keys] == [9.5, None]
+    bad = [{**keys[0], "acc_deg_s2": 0.0}, keys[1]]
+    assert "ramps at more than 0" in str(overlay_from_json({"keys": bad}, settings))

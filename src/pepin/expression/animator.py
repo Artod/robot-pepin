@@ -423,24 +423,6 @@ class GestureEngine:
                                   "rest_s": round(seconds, 2)})  # fmt: skip
             return seconds
 
-    def claim(self, intent: str) -> str | None:
-        """A moment of the listeners' own that stands for ``intent`` under its
-        ``intent_per_minute`` (the laugh heard in the robot's words, for ``laugh``; waived as
-        for the brain's marker): why it may not play now, else None and it counts as one (any
-        thread)."""
-        with self._lock:
-            caps, now = self.config.caps, self.clock()
-            if not self._on:
-                return "gestures are off"
-            if self._driving:
-                return "a drive is under way"
-            waived = intent in caps.laughter_waives and now - self._laughed <= caps.laughter_s
-            limit = caps.intent_per_minute.get(intent)
-            if limit is not None and not waived and self._count(lambda arm: True, intent) >= limit:
-                return f"{intent} per minute"
-            self._started.append((now, intent, False, False))
-            return None
-
     def audio(self, chunk: VoiceChunk) -> None:
         """A chunk of the reply's audio (the voice's thread): to every tap, nothing else here."""
         for tap in self.taps:
@@ -736,7 +718,8 @@ class GestureEngine:
     ) -> list[Outcome]:
         """``request`` capped, rendered and placed (on the engine's thread); a word's anchor
         becomes a cue on its part. Markers and moments are capped (and logged ``capped``); a
-        tool's, the pulse's and the idle layer's are not."""
+        tool's, the pulse's, the idle layer's and the engine's own compositions (the book's
+        callable-false ensembles, the listeners' by name) are not, and count under none."""
         if not self._on:
             return []
         if cue is None and isinstance(request.anchor, AtWord):
@@ -746,7 +729,11 @@ class GestureEngine:
                                          "why": "its part is not with the voice"})  # fmt: skip
                 return []
         turn, index = (cue.turn, cue.index) if cue is not None else (None, None)
-        capped = request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips
+        composition = self.book.compositions.get(request.intent)
+        own = composition is not None and not composition.callable
+        capped = (
+            request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips and not own
+        )
         tally = self._tally(request.intent, turn) if capped else "counted"
         if capped:
             refusal = self._capped(request.intent, cue, tally)
@@ -758,7 +745,7 @@ class GestureEngine:
             performance = Performance(request.intent, 0, 0, request.clips, cue)
         else:
             rendered = self._render(request.intent, request.source, cue, request,
-                                    counted=tally == "counted")  # fmt: skip
+                                    counted=capped and tally == "counted")  # fmt: skip
             if rendered is None:
                 return []
             performance = rendered
@@ -812,13 +799,15 @@ class GestureEngine:
         counted: bool = True,
         arg: str | None = None,
     ) -> Performance | None:
-        """``intent`` rendered for the parts ready now (``arg``: an ask's argument), the arm's
-        and the body's clips stretched to their speed scales (the arm left out past
-        ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
+        """``intent`` rendered for the parts ready now that the request may use (``arg``: an ask's
+        argument), the arm's and the body's clips stretched to their speed scales (the arm left out
+        past ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
         later item); logged with its seed. None when it cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
+        if request.parts is not None:
+            ready &= request.parts
         scene = Scene(ready, speaking=bool(self._replying), conversation=self._conversation,
                       distance_m=self._view().distance_m)  # fmt: skip
         for hook in self.scene_hooks:
@@ -962,15 +951,6 @@ class GestureEngine:
                 refusal = arm_refusal(view)
                 if refusal is not None:
                     return refusal
-                cart = self.scheduler.reservations.holder("body", now)
-                if cart is not None:  # the board refuses the arm while the wheels move
-                    return f"the cart moves ({cart.performance.intent})"
-            if clip.part == "body":  # the board refuses the wheels while the arm moves or holds
-                arm = self.scheduler.reservations.holder("arm", now)
-                if arm is not None:
-                    return f"the arm moves ({arm.performance.intent})"
-                if _holds(self.parts.get("arm")):
-                    return "the arm holds a pose"
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
 
     def _view(self) -> Attention:

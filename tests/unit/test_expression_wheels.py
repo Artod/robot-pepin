@@ -199,7 +199,6 @@ def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_
         (lambda r: r.base.foreign(Twist(0.2, 0.0)), "the wheels are commanded (v +0.20"),
         (lambda r: setattr(r.base, "travel", (0.002, 0.002)), "the cart is rolling"),
         (lambda r: setattr(r.base, "bus_ok", False), "the servo bus did not answer"),
-        (lambda r: setattr(r.base, "arm_phase", "moving"), "the arm is mid-gesture (moving)"),
     ],
 )  # fmt: skip
 def test_every_precondition_refuses_with_its_reason_before_any_twist(
@@ -388,6 +387,34 @@ def test_every_body_atom_of_the_book_fits_the_caps_at_its_extremes_and_faster_is
     yaw = Track("yaw_deg", "additive", (0.0, 2.0), (0.0, 5.0))
     both = Clip("body", 0.0, 0.0, 2.0, (yaw, Track("x_m", "additive", (0.0, 2.0), (0.0, 0.01))))
     assert "turns and drives at once" in str(legs_of(both, FULL))
+
+
+def test_every_composition_s_wheels_keep_the_shipped_caps_as_the_engine_plays_them() -> None:
+    """Each body step of every variant at every corner of its ranges (mirrored or not),
+    stretched by 1 / speed_scale as the engine stretches the body's clips, fits the wheels' caps
+    of config/expression.json (the rock and the sway of the ensembles: the pulse, the nods, the
+    feelings' wheels)."""
+    shipped = WheelsSettings.load(REPO / "config/expression.json")
+    book = load_book(REPO / "config/animation.json")
+    renderer = BookRenderer(book)
+    played = 0
+    for name, composition in book.compositions.items():
+        for variant in composition.variants:
+            for step in variant.steps:
+                atom = book.atoms[step.atom]
+                if atom.part != "body":
+                    continue
+                ranges = sorted({**atom.params, **step.params}.items())
+                for corner in range(2 ** len(ranges)):
+                    params = {k: (r.hi if corner >> i & 1 else r.lo)
+                              for i, (k, r) in enumerate(ranges)}  # fmt: skip
+                    for mirrored in (False, True):
+                        clip = renderer.atom_clip(step.atom, params, mirrored=mirrored)
+                        slow = stretched(clip, 1.0 / shipped.speed_scale)
+                        legs = legs_of(slow, shipped)
+                        assert not isinstance(legs, str), (name, step.atom, params, legs)
+                        played += 1
+    assert played >= 40
 
 
 def test_a_gaze_turn_wins_over_a_gesture_and_a_gesture_waits_its_turn() -> None:
@@ -587,8 +614,9 @@ def test_the_gaze_worker_s_moments_never_wait_on_the_wheels() -> None:
 def test_standing_names_what_keeps_the_cart_from_an_expressive_motion() -> None:
     still = BaseState(Pose2D(0, 0, 0), 0, 0, 0, 0, False, True, False, True, 1, 0, 0)
     assert standing(still) is None
-    assert standing(replace(still, arm_phase="resting")) is None, "on its way to rest: fine"
-    assert "holding" in str(standing(replace(still, arm_phase="holding")))
+    for phase in ("moving", "holding", "resting"):  # the arm and the wheels move together
+        assert standing(replace(still, arm_phase=phase)) is None, phase
+    assert "commanded" in str(standing(replace(still, v=0.1)))
 
 
 def test_the_swept_footprint_blocks_what_the_motion_approaches_not_what_it_leaves() -> None:

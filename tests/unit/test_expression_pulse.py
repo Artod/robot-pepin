@@ -14,6 +14,7 @@ import math
 import random
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +22,9 @@ import numpy as np
 import pytest
 
 from pepin.arm_motion import load_arm_motion
-from pepin.expression.animation import Book, Clip, Track
+from pepin.expression.animation import PARTS, Book, Clip, Scene, Track
 from pepin.expression.animator import EngineConfig, GestureEngine
-from pepin.expression.book import load_book, with_rest
+from pepin.expression.book import load_book, span, with_rest
 from pepin.expression.conversation import (
     FAREWELL_DUE,
     GREETING_DUE,
@@ -35,8 +36,13 @@ from pepin.expression.conversation import (
 from pepin.expression.fakes import FakeAttention, FakeClock, FakeExecutor, FakePlayout
 from pepin.expression.head import GESTURE, IDLE_LOOK
 from pepin.expression.listeners import (
+    ACK_NOD,
     DUE,
-    NOD_PERIOD_S,
+    LAUGHING,
+    LISTEN_NOD,
+    PEAK,
+    STRONG,
+    WEAK,
     Alive,
     AliveKnobs,
     MomentKnobs,
@@ -47,7 +53,6 @@ from pepin.expression.listeners import (
     head_prep_s,
     held_clip,
     melody_pieces,
-    nod_clip,
     spaced,
 )
 from pepin.expression.markers import Marker, Part
@@ -63,6 +68,7 @@ from pepin.expression.prosody import (
     pin_second,
     snap,
 )
+from pepin.expression.render import BookRenderer
 from pepin.expression.schedule import AtWord, Nucleus, Priority, Request
 from pepin.gaze import GazeSettings, overlay_from_json
 
@@ -194,7 +200,13 @@ def refusal(clip: Clip) -> str | None:
 
 def test_every_head_clip_of_the_listeners_passes_the_arbiter_and_the_still_ones_stay_still(
 ) -> None:  # fmt: skip
-    clips = [nod_clip(a, p) for a in (2.0, 4.0) for p in (*NOD_PERIOD_S, 0.5)]
+    """The nods of the pulse's and the moments' ensembles (the book's), the held looks, and
+    the melody's pieces at keys 0.5 s apart within the still overlay's bound."""
+    renderer = BookRenderer(BOOK)
+    head = Scene(frozenset({"head"}))
+    clips = [c for intent in (WEAK, STRONG, PEAK, LAUGHING, LISTEN_NOD, ACK_NOD)
+             for seed in range(20) for c in renderer.render(intent, head, seed).clips]  # fmt: skip
+    assert len(clips) == 120 and {c.part for c in clips} == {"head"}
     clips += [held_clip(3.0 * s, -2.0, 0.25, 1.4) for s in (-1, 1)]  # the question tilt
     looks = ((0, -15), (0, 15), (15, 0), (-8, 0))  # the glance up, down, aside; the aversion
     clips += [held_clip(pan, tilt, 0.35, secs) for pan, tilt in looks for secs in (1.0, 3.5)]
@@ -202,7 +214,7 @@ def test_every_head_clip_of_the_listeners_passes_the_arbiter_and_the_still_ones_
         assert refusal(clip) is None, clip
     rng = random.Random(3)
     keys = [(10.0 + 0.27 * k + rng.uniform(-0.04, 0.04), rng.uniform(-0.9, 0.9)) for k in range(30)]
-    for piece in melody_pieces(keys, [(12.0, 12.45)], 9.0, 0.25):
+    for piece in melody_pieces(keys, [(12.0, 12.45)], 9.0, 0.5):
         clip = head_clip([(t - piece[0][0], 0.0, v) for t, v in piece], 0.0, layer="idle")
         assert refusal(clip) is None
         look = clip_look(clip, IDLE_LOOK)
@@ -214,12 +226,15 @@ def test_every_head_clip_of_the_listeners_passes_the_arbiter_and_the_still_ones_
 def test_the_nod_s_floor_is_its_computed_preparation_never_under_beat_lead_min_s() -> None:
     """The arbiter lets a tilt turn back no sooner than 0.2 s after its last turn, the start of a
     move counting (clip_max_hz 2.5): a nod's bottom comes 0.2 s after its first move at the
-    earliest, whatever its size; with the head's latency every floor variant needs 0.30 s."""
-    for amp in (2.0, 3.0, 4.0):
-        for period in NOD_PERIOD_S:
-            prep = head_prep_s(nod_clip(amp, period), 0.1)
-            assert prep >= PulseKnobs().beat_lead_min_s - 1e-9
-    fast = nod_clip(3.0, 0.3)  # a nod with its bottom 0.15 s in: refused, and its floor says so
+    earliest, whatever its size; with the head's latency every ensemble's nod needs 0.30 s at
+    least, its own way down (the book's widest) when that is longer."""
+    rig = Rig()
+    for intent in (WEAK, STRONG, PEAK, LAUGHING):
+        pre = span(BOOK, intent, "head")[0]
+        floor = rig.alive._head_floor(intent)
+        assert floor == pytest.approx(max(0.30, 0.1 + max(pre, 0.2)))
+        assert floor >= PulseKnobs().beat_lead_min_s - 1e-9
+    fast = head_clip(((0.0, 0.0, 0.0), (0.15, 0.0, 3.0), (0.3, 0.0, 0.0)), 0.15)
     assert refusal(fast) is not None and head_prep_s(fast, 0.1) == pytest.approx(0.3)
 
 
@@ -339,21 +354,27 @@ class Rig:
         return [f for k, f in self.events if k == "moment" and f["name"] == name]
 
 
-def test_an_accent_nod_on_the_top_nucleus_over_beat_z_once_a_part_with_its_stroke_on_it() -> None:
+def test_an_accent_on_the_top_nucleus_over_beat_z_once_a_part_its_ensemble_on_it() -> None:
+    """The part's audio all known: its top nucleus (z 3.4: the reply's strongest, over strong_z)
+    is the peak, the nod's bottom and the cart's forward stroke on it."""
     rig = Rig()
     rig.open()
     rig.say(1, 0, "Это было огромное здание.")
     rig.news(1, 0, [(2.0, 0.5), (2.4, 2.5), (2.9, 3.4), (3.3, 2.2)], start=1.8)
     rig.tick(0.01)
     rig.tick(3.0)
-    (accent,) = rig.sent("accent")
-    nod = next(c for c in rig.clips() if c.layer == "gesture")
+    (accent,) = rig.sent(PEAK)
+    (nod,) = rig.clips_of(PEAK)
     # the bottom heard 0.05 s before the top nucleus: sent at stroke - its stroke_s + lag - latency
     assert accent["planned"] == pytest.approx(2.9 - 0.05 - nod.stroke_s + 0.15 - 0.1, abs=0.011)
-    amp = max(nod.tracks[0].values)
-    assert 3.0 < amp <= 4.0  # z 3.4 over beat_z 2: 2 deg + 0.7 of the range
+    assert 3.5 <= max(nod.tracks[0].values) <= 4.5  # the book's peak nod
+    (rock,) = rig.clips_of(PEAK, "body")
+    (forward,) = rock.tracks
+    assert 0.012 <= max(forward.values) <= 0.015
+    assert rock.offset_s + rock.stroke_s == pytest.approx(0.0)  # its stroke on the nod's
     pulse = next(f for k, f in rig.events if k == "pulse")
-    assert pulse["accent"]["s"] == 2.9 and pulse["z"] == [0.5, 2.5, 3.4, 2.2]
+    assert pulse["accent"]["s"] == 2.9 and pulse["accent"]["kind"] == "peak"
+    assert pulse["accent"]["parts"] == ["body", "head"] and pulse["z"] == [0.5, 2.5, 3.4, 2.2]
 
 
 def test_a_part_being_made_takes_its_first_nucleus_over_beat_z_when_its_lead_runs_out() -> None:
@@ -365,7 +386,7 @@ def test_a_part_being_made_takes_its_first_nucleus_over_beat_z_when_its_lead_run
     assert not rig.sent("accent")
     rig.news(1, 0, [(2.4, 3.5)], complete=False)  # higher, but the first was due first
     rig.tick(2.5)
-    (accent,) = rig.sent("accent")
+    (accent,) = rig.sent(WEAK)  # z 2.3: under strong_z
     assert accent["planned"] == pytest.approx(2.0 - 0.05 - 0.2 + 0.15 - 0.1, abs=0.04)
 
 
@@ -378,13 +399,15 @@ def test_no_nod_with_less_lead_than_its_preparation_and_none_in_a_marked_part() 
     rig.say(1, 1, "{laugh} Смешно.", Marker("gesture", "laugh", 0))
     rig.news(1, 1, [(6.0, 3.0)], start=5.5)
     rig.tick(4.0)
-    assert not rig.sent("accent")
+    assert not [f for k, f in rig.records if k == "cue" and f["intent"] in (WEAK, STRONG, PEAK)]
     pulses = [f for k, f in rig.events if k == "pulse"]
-    assert pulses[0]["skipped"][0].startswith("lead 0.28 s under 0.3")
+    assert pulses[0]["skipped"][0].startswith("head: lead 0.28 s under 0.3")
     assert pulses[1]["skipped"] == ["a marker's part"]
 
 
 def test_accent_nods_two_seconds_apart_and_twelve_a_minute_at_most() -> None:
+    """The nods keep their gap and their cap; an accent whose nod they refuse still moves the
+    rest of its ensemble (the cart's sway on its share)."""
     rig = Rig()
     rig.open()
     for k in range(16):  # part 1 is 1.5 s after part 0, the rest 3 s apart
@@ -393,14 +416,19 @@ def test_accent_nods_two_seconds_apart_and_twelve_a_minute_at_most() -> None:
         rig.news(1, k, [(second, 2.5)], start=second - 0.5)
     rig.tick(0.05)
     pulses = [f for k, f in rig.events if k == "pulse"]
-    played = [f for f in pulses if f["accent"]]
-    assert len(played) == 12
-    assert "a head stroke 1.5 s away (gap 2)" in pulses[1]["skipped"][0]
+    nods = [f for f in pulses if f["accent"] and "head" in f["accent"]["parts"]]
+    assert len(nods) == 12
+    assert "head: a head stroke 1.5 s away (gap 2)" in pulses[1]["skipped"][0]
+    assert pulses[1]["accent"]["parts"] == ["body"], "its sway still goes"
     assert sum("the per-minute cap 12" in s for f in pulses for s in f["skipped"]) == 3
 
 
 def test_a_nod_near_a_marker_s_head_stroke_yields() -> None:
-    rig = Rig(seed=4)
+    agreement = BOOK.compositions["agreement"]
+    floors = tuple(v for v in agreement.variants if v.floor)  # its head at once
+    floored = replace(agreement, variants=floors)
+    book = replace(BOOK, compositions={**BOOK.compositions, "agreement": floored})
+    rig = Rig(book=book, seed=4)
     rig.open()
     rig.engine.request(Request("agreement", None, Priority.MARK, "marker"))
     rig.tick(0.05)
@@ -411,7 +439,8 @@ def test_a_nod_near_a_marker_s_head_stroke_yields() -> None:
     rig.news(1, 0, [(rig.playout.now + lead - 0.15 + 0.05, 3.0)], start=rig.playout.now)
     rig.tick(0.05)
     pulse = next(f for k, f in rig.events if k == "pulse")
-    assert not pulse["accent"] and "agreement" in " ".join(pulse["skipped"])
+    assert "head" not in (pulse["accent"] or {}).get("parts", [])
+    assert "agreement" in " ".join(pulse["skipped"])
 
 
 def test_the_melody_is_a_still_idle_tilt_within_its_knob_and_comes_back_after_a_nod() -> None:
@@ -426,9 +455,9 @@ def test_the_melody_is_a_still_idle_tilt_within_its_knob_and_comes_back_after_a_
     for clip in melody:
         (track,) = clip.tracks
         assert max(abs(v) for v in track.values) <= 0.9
-        assert min(np.diff(track.times)) >= 0.25 - 1e-9
+        assert min(np.diff(track.times)) >= 0.5 - 1e-9
     starts = [f["planned"] for f in rig.sent("melody")]
-    (accent,) = rig.sent("accent")
+    (accent,) = rig.sent(PEAK)
     nod_end = 2.55 - 0.2 + 0.42  # the nod's end on the stream (its period at most 0.45)
     assert any(s > accent["planned"] for s in starts), "the melody again after the nod"
     after = min(s for s in starts if s > accent["planned"])
@@ -544,6 +573,32 @@ def test_the_listener_nod_reads_the_person_s_words_so_far_when_the_pause_brings_
     assert rig.moments(LISTENER_PAUSE)[-1]["played"] and len(rig.sent("listen_nod")) == 1
 
 
+def test_the_listener_s_nod_and_the_acknowledgement_rock_the_cart_with_nod_rock_p() -> None:
+    """Either nod's ensemble rocks the cart 0.5 cm with nod_rock_p, drawn apart from the nod's
+    own odds; at 0 the nods come alone."""
+    rig = Rig(listener_nod_p=1.0, ack_nod_p=1.0, nod_rock_p=1.0, think_p=0.0)
+    rig.open()
+    rig.alive.speech_started(rig.clock.now)
+    rig.tick(2.5)
+    rig.alive.moment(LISTENER_PAUSE, "Ну я тебе так скажу")
+    rig.tick(1.5)
+    assert len(rig.sent(LISTEN_NOD)) == 1 and len(rig.sent(LISTEN_NOD, "body")) == 1
+    (rock,) = rig.clips_of(LISTEN_NOD, "body")
+    assert max(rock.tracks[0].values) == pytest.approx(0.005)
+    rig.heard("Я сегодня весь день чинил колесо.", seconds=2.5)
+    rig.tick(1.5)
+    assert len(rig.sent(ACK_NOD)) == 1 and len(rig.sent(ACK_NOD, "body")) == 1
+    alone = Rig(listener_nod_p=1.0, ack_nod_p=1.0, nod_rock_p=0.0, think_p=0.0)
+    alone.open()
+    alone.alive.speech_started(alone.clock.now)
+    alone.tick(2.5)
+    alone.alive.moment(LISTENER_PAUSE, "Ну я тебе так скажу")
+    alone.tick(1.5)
+    alone.heard("Я сегодня весь день чинил колесо.", seconds=2.5)
+    alone.tick(1.0)
+    assert alone.sent(LISTEN_NOD) and alone.sent(ACK_NOD) and not alone.clips("body")
+
+
 def test_a_reply_sooner_than_the_waits_predict_ends_the_thinking_glance_through_the_engine(
 ) -> None:  # fmt: skip
     """The glance holds until think_back_s into the reply as the waits predict it (1.95 s at
@@ -573,17 +628,17 @@ def test_a_nod_keeps_its_gap_from_a_mark_still_waiting_for_its_word_in_the_next_
     rig.open()
     rig.say(1, 0, "Первая фраза у нас тут.")
     rig.say(1, 1, "Вторая.")
+    nod = head_clip(((0.0, 0.0, 0.0), (0.2, 0.0, 3.0), (0.4, 0.0, 0.0)), 0.2)
     rig.engine.request(Request("agreement", AtWord(1, 1, 0), Priority.MARK, "marker",
-                               clips=(nod_clip(3.0, 0.4),)))  # fmt: skip
+                               clips=(nod,)))  # fmt: skip
     rig.tick(0.02)
     (mark,) = rig.engine.pending("head", turn=1)
     second = rig.playout.now + (mark.stroke - 0.5 - rig.clock.now) - 0.15 + 0.05
     rig.news(1, 0, [(second, 3.0)])
     rig.tick(0.05)
     pulse = next(f for k, f in rig.events if k == "pulse")
-    assert not pulse["accent"] and "agreement's head stroke 0.5 s away (waiting)" in " ".join(
-        pulse["skipped"]
-    )
+    assert "head" not in (pulse["accent"] or {}).get("parts", [])
+    assert "agreement's head stroke 0.5 s away (waiting)" in " ".join(pulse["skipped"])
 
 
 def test_an_acknowledgement_after_a_statement_never_after_a_question() -> None:
@@ -653,118 +708,106 @@ def test_a_goodbye_waves_bye_in_the_wait_and_a_greeting_waits_for_the_body_s_tur
     assert rig.moments(GREETING_DUE)[0]["deferred_s"] >= 0.8
 
 
-def test_the_laugh_never_uses_the_arm_and_rocks_the_cart_once_from_its_part_s_start() -> None:
-    asked = []
-    for seed in range(12):  # a person's ask of the laugh plays whole, its arm included
+def test_the_laugh_is_one_body_its_face_head_gripper_and_cart_together() -> None:
+    """{laugh} is its composition whole: every variant but the floor moves the face, the head,
+    the arm (the gripper's click) and the wheels together, the dice between the variants; the
+    listeners add no rock of their own to it."""
+    everything = Scene(frozenset(PARTS))
+    laugh = BOOK.compositions["laugh"]
+    for k, variant in enumerate(laugh.variants):
+        clips = BookRenderer(BOOK).render("laugh", everything, 3, variant=k).clips
+        parts = {c.part for c in clips}
+        assert parts == ({"face", "head"} if variant.floor else {"face", "head", "arm", "body"})
+    for seed in range(4):
         rig = Rig(seed=seed)
         assert rig.engine.perform("laugh", source="tool").ok
         last = rig.engine.last()
-        asked += [c.part for c in last.clips] if last is not None else []
-    assert "arm" in asked
-    for seed in range(12):
-        rig = Rig(seed=seed)
+        assert last is not None and {c.part for c in last.clips} == {"face", "head", "arm", "body"}
         rig.open()
         rig.say(1, 0, "Ха, смешно вышло.", Marker("gesture", "laugh", 0))
-        rig.tick(0.02)
-        laugh = rig.engine.last()
-        assert laugh is not None and laugh.intent == "laugh"
-        assert all(c.part != "arm" for c in laugh.clips)
         rig.alive.part_started(1, 0, rig.playout.now)
         rig.tick(1.5)
-        rocks = rig.sent("laugh_rock", "body")
-        if any(c.part == "body" for c in laugh.clips):
-            assert not rocks and rig.moments("laugh_rock")[0]["why"].startswith("the laugh moves")
-        else:
-            assert len(rocks) == 1
-            clip = next(c for c in rig.clips("body") if c.tracks[0].dof == "x_m")
-            assert 0.01 <= max(clip.tracks[0].values) <= 0.02 and clip.stroke_s <= 2.5
+        assert not rig.moments("laugh_rock")
 
 
-def test_the_accent_s_rock_takes_the_reply_s_strongest_reachable_accent_once() -> None:
-    """Nuclei over beat_z at 0.5 s (the strongest, but in the reply's first half second of
-    sound with its rock's way), 1.6, 2.4 (stronger than 1.6) and 3.0: the cart rocks 1 cm once,
-    its stroke on 2.4; a later part of the same reply rocks nothing; accent_rock_p 0 never."""
-    rig = Rig(accent_rock_p=1.0)
+def test_the_accents_move_the_cart_by_their_strength_and_the_weak_ones_sway_it_steadily() -> None:
+    """Five sentences, one accent each, z 2.4, 2.6, 3.6, 3.2, 2.5 (strong_z 3): each nods; the
+    weak ones sway the cart 0.5 cm on every second one (wheel_accent_share 0.5: steady, not
+    dice), the reply's strongest is the peak (its rock 1.2-1.5 cm), the strong one after it
+    rocks 1 cm; never only once a reply."""
+    rig = Rig()
     rig.open()
-    rig.say(1, 0, "Это было огромное здание, правда.")
-    rig.news(1, 0, [(0.5, 4.0), (1.6, 2.4), (2.4, 3.6), (3.0, 2.2)], start=0.2)
-    rig.tick(3.5)
-    (rock,) = rig.sent("accent_rock", "body")
-    (clip,) = rig.clips_of("accent_rock", "body")
-    assert max(clip.tracks[0].values) == pytest.approx(0.01) and clip.stroke_s == pytest.approx(
-        0.45
-    )
-    assert rock["planned"] == pytest.approx(2.4 - 0.05 - 0.45 + 0.15, abs=0.011)
-    (moment,) = rig.moments("accent_rock")
-    assert moment["played"] and moment["s"] == 2.4 and moment["z"] == 3.6
-    rig.say(1, 1, "И ещё одно.")
-    rig.news(1, 1, [(rig.playout.now + 2.0, 4.0)], start=rig.playout.now + 0.5)
-    rig.tick(3.0)
-    assert len(rig.sent("accent_rock", "body")) == 1
-    never = Rig(accent_rock_p=0.0)
+    for k, z in enumerate((2.4, 2.6, 3.6, 3.2, 2.5)):
+        rig.say(1, k, f"Фраза номер {k}.")
+        rig.news(1, k, [(3.0 + 3.0 * k, z)], start=2.5 + 3.0 * k)
+    rig.tick(0.05)
+    rig.tick(17.0)
+    kinds = [f["accent"]["kind"] for k, f in rig.events if k == "pulse"]
+    assert kinds == ["weak", "weak", "peak", "strong", "weak"]
+    assert len([c for c in rig.clips() if c.layer == "gesture"]) == 5  # every one nods
+    rocks = [max(c.tracks[0].values) for c in rig.clips("body")]
+    assert rocks[0] == pytest.approx(0.005) and 0.012 <= rocks[1] <= 0.015
+    assert rocks[2] == pytest.approx(0.01) and len(rocks) == 3
+    never = Rig(wheel_accent_share=0.0)
     never.open()
-    never.say(1, 0, "Это было огромное здание.")
-    never.news(1, 0, [(2.4, 3.6)], start=0.2)
-    never.tick(3.0)
-    never.alive.reply_done(1)
-    never.tick(0.1)
-    assert not never.sent("accent_rock", "body") and not never.moments("accent_rock")
+    for k in range(4):
+        never.say(1, k, f"Фраза номер {k}.")
+        never.news(1, k, [(3.0 + 3.0 * k, 2.5)], start=2.5 + 3.0 * k)
+    never.tick(13.0)
+    assert not never.clips("body"), "no sway at share 0, the weak ones only nod"
 
 
-def test_the_accent_s_rock_waits_out_a_moving_arm_and_never_comes_in_quiet() -> None:
-    """While the arm plays a mark the accent at 1.6 s passes (the board refuses the wheels while
-    the arm moves); the next one, at 4.5 s, rocks the cart. In quiet hours: none, logged."""
-    rig = Rig(accent_rock_p=1.0)
+def test_the_cart_rocks_while_a_mark_moves_the_arm_and_nothing_moves_in_quiet() -> None:
+    """One body: the accent at 1.6 s rocks the cart while the arm plays a mark (neither waits
+    for the other). In quiet hours no accent moves anything, logged."""
+    rig = Rig()
     rig.open()
     lift = Track("shoulder_lift", "additive", (0.0, 1.5, 3.0), (0.0, 20.0, 0.0))
     rig.engine.request(Request("mark", None, Priority.MARK, "marker",
                                clips=(Clip("arm", 0.0, 1.5, 3.0, (lift,)),)))  # fmt: skip
     rig.say(1, 0, "Это было огромное здание, правда, очень.")
-    rig.news(1, 0, [(1.6, 3.0), (4.5, 2.5)], start=0.2)
-    rig.tick(5.0)
-    (moment,) = rig.moments("accent_rock")
-    assert moment["played"] and moment["s"] == 4.5
-    assert len(rig.sent("accent_rock", "body")) == 1
-    quiet = Rig(hour=23, accent_rock_p=1.0)
+    rig.news(1, 0, [(1.6, 3.6)], start=0.2)
+    rig.tick(2.5)
+    assert len(rig.sent(PEAK, "body")) == 1
+    arm = rig.engine.scheduler.reservations.last("arm")
+    assert arm is not None and arm.performance.intent == "mark"
+    assert rig.clock.now < arm.ends, "the arm still moves under the rock"
+    quiet = Rig(hour=23)
     quiet.open()
     quiet.say(1, 0, "Это было огромное здание.")
     quiet.news(1, 0, [(2.4, 3.6)], start=0.2)
     quiet.tick(3.0)
-    assert not quiet.sent("accent_rock", "body")
-    assert quiet.moments("accent_rock")[0]["why"] == "quiet: the hours 23-08"
+    assert not quiet.clips("body") and not quiet.sent(PEAK)
+    assert next(f for k, f in quiet.events if k == "pulse")["skipped"] == ["quiet: the hours 23-08"]
 
 
-def test_a_laugh_in_the_robot_s_words_rocks_the_cart_not_in_quiet_nor_while_the_body_turns(
-) -> None:  # fmt: skip
-    """No {laugh} written: a laugh spelled in the words rocks the cart from the part's start
-    (laugh_heard); in quiet, or while the body turns toward the person, it does not, and the
-    laugh's cap is left for the next."""
+def test_the_voice_laughing_rocks_the_cart_per_accent_as_the_wheels_can_follow() -> None:
+    """A part whose accents come 0.35 s apart, seven of them (a laugh, read in its sound, no
+    text): each asks for pulse_laugh and the laugh is the part's accent; the first rocks the
+    cart with the happy face, those during its rock and its settling pass, a later one rocks it
+    again. Two accents in a run, or accents 0.6 s apart, are no laugh."""
     rig = Rig()
     rig.open()
-    rig.view.be(phase="turning")
-    rig.say(1, 0, "Ха-ха, ну ты даёшь.")
-    rig.alive.part_started(1, 0, rig.playout.now)
-    rig.tick(0.1)
-    assert rig.moments("laugh_heard")[-1]["why"] == "a body turn is pending"
-    rig.view.be(phase="track")
-    rig.say(2, 0, "Ахаха, точно.")
-    rig.alive.part_started(2, 0, rig.playout.now)
-    rig.tick(1.5)
-    assert rig.moments("laugh_heard")[-1]["played"]
-    assert len(rig.sent("laugh_rock", "body")) == 1
-    quiet = Rig(hour=23)
-    quiet.open()
-    quiet.say(1, 0, "Ха-ха-ха, вот это да.")
-    quiet.alive.part_started(1, 0, quiet.playout.now)
-    quiet.tick(1.5)
-    assert not quiet.sent("laugh_rock", "body")
-    assert quiet.moments("laugh_heard")[-1]["why"] == "quiet: the hours 23-08"
-    marked = Rig()
-    marked.open()
-    marked.say(1, 0, "Ха-ха, смешно.", Marker("gesture", "laugh", 0))
-    marked.alive.part_started(1, 0, marked.playout.now)
-    marked.tick(1.5)
-    assert not marked.moments("laugh_heard") and marked.moments("laugh_rock")  # the mark's own
+    rig.say(1, 0, "Ну и ну.")
+    laugh = [1.0 + 0.35 * k for k in range(7)]
+    rig.news(1, 0, [(s, 3.0 + 0.1 * k) for k, s in enumerate(laugh)], start=0.5)
+    rig.tick(4.5)
+    sounds = rig.moments("laugh_sound")
+    assert [m["s"] for m in sounds] == pytest.approx(laugh)
+    rocked = [m["s"] for m in sounds if "body" in m["parts"]]
+    assert len(rocked) >= 2 and rocked[0] == pytest.approx(1.0)
+    assert rocked[1] - rocked[0] >= 1.0, "the cart takes the next once its rock has settled"
+    assert all("the cart still moves" in m["why"] for m in sounds if not m["played"])
+    assert len(rig.sent(LAUGHING, "body")) == len(rocked) == len(rig.sent(LAUGHING, "face"))
+    pulse = next(f for k, f in rig.events if k == "pulse")
+    assert pulse["accent"] is None and pulse["skipped"] == ["its laugh is its accent"]
+    for spacing, count in ((0.35, 2), (0.6, 4)):
+        other = Rig()
+        other.open()
+        other.say(1, 0, "Ну и ну.")
+        other.news(1, 0, [(1.0 + spacing * k, 3.0) for k in range(count)], start=0.5)
+        other.tick(4.0)
+        assert not other.moments("laugh_sound"), (spacing, count)
 
 
 def test_the_first_clear_face_brings_one_smile() -> None:
@@ -837,7 +880,9 @@ def test_quiet_leaves_the_melody_and_the_face() -> None:
     assert next(f for k, f in voice.events if k == "quiet")["why"] == "their voice -34 dBFS"
 
 
-def test_a_wrist_beat_inside_an_open_unit_and_none_without_one() -> None:
+def test_an_accent_asks_for_the_arm_s_beat_inside_an_open_unit_and_none_without_one() -> None:
+    """A weak accent with wrist_beat_p 1: while a unit holds the arm up its ensemble asks for the
+    arm's beat beside the nod; with no unit, the nod alone (the arm never leaves rest for it)."""
     rig = Rig(wrist_beat_p=1.0)
     rig.open()
     rig.parts["arm"].held = {"wrist_flex": 70.0}  # type: ignore[attr-defined]
@@ -846,17 +891,17 @@ def test_a_wrist_beat_inside_an_open_unit_and_none_without_one() -> None:
     rig.engine.request(Request("unit", None, Priority.MARK, "marker", clips=(unit,)))
     rig.tick(0.6)
     rig.say(1, 0, "Вот так.")
-    rig.news(1, 0, [(rig.playout.now + 1.0, 3.0)], start=rig.playout.now)
+    rig.news(1, 0, [(rig.playout.now + 1.0, 2.5)], start=rig.playout.now)
     rig.tick(2.0)
-    assert len(rig.sent("wrist_beat", "arm")) == 1
-    clip = rig.clips("arm")[-1]
-    assert clip.then == "hold" and 0 < clip.hold_s <= 2.5 and not rig.sent("accent")
+    pulse = next(f for k, f in rig.events if k == "pulse")
+    assert pulse["accent"]["kind"] == "weak" and {"arm", "head"} <= set(pulse["accent"]["parts"])
     rig = Rig(wrist_beat_p=1.0)
     rig.open()
     rig.say(1, 0, "Вот так.")
-    rig.news(1, 0, [(2.0, 3.0)], start=1.0)
+    rig.news(1, 0, [(2.0, 2.5)], start=1.0)
     rig.tick(2.0)
-    assert rig.sent("accent") and not rig.sent("wrist_beat", "arm")
+    pulse = next(f for k, f in rig.events if k == "pulse")
+    assert pulse["accent"]["parts"] == ["head"] and not rig.clips("arm")
 
 
 def test_off_nothing_moves() -> None:
@@ -880,7 +925,7 @@ def test_the_close_logs_each_part_and_the_counts_a_minute() -> None:
     rig.alive.closed("idle")
     rig.tick(0.01)
     summary = next(f for k, f in rig.events if k == "alive")
-    assert summary["counts"]["accent"] == 1 and summary["reason"] == "idle"
+    assert summary["counts"][PEAK] == 1 and summary["reason"] == "idle"
     assert summary["accents_per_speech_min"] > 0 and "head_moves_per_min" in summary
 
 
@@ -902,12 +947,14 @@ def test_the_listeners_thread_takes_the_calls_and_stops() -> None:
 def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_compositions() -> None:
     data = json.loads((CONFIG / "expression.json").read_text())
     knobs_ = alive_knobs(data)
-    assert (
-        knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.0
-    )  # off since 2026-10-13: the +-0.9 deg melody read as jerky
+    assert knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.9
+    assert knobs_.pulse.melody_key_gap_s == 0.5  # the glide: a key a half second at least
     assert knobs_.moments.head_gap_s == 1.0 and "breath_deg" not in data["moments"]
-    assert knobs_.pulse.wrist_beat_deg == (15.0, 25.0)  # 2026-10-13: 6-8 deg did not show
-    assert knobs_.pulse.accent_rock_p == 0.5 and knobs_.pulse.arm_up_min_sentences == 2
+    assert knobs_.pulse.strong_z == 3.0 and knobs_.pulse.wheel_accent_share == 0.5
+    assert knobs_.pulse.laugh_run == 3 and knobs_.pulse.laugh_gap_s == (0.2, 0.4)
+    assert knobs_.moments.nod_rock_p == 0.3 and knobs_.pulse.arm_up_min_sentences == 2
+    for gone in ("beat_amp_deg", "wrist_beat_deg", "accent_rock_p"):  # the book's sizes now
+        assert gone not in data["pulse"]
     (breath,) = [i for i in BOOK.idle if "breath" in i.atoms]  # the breath is the book's
     assert breath.unless == ("speaking",) and breath.after_speech_s == 0.0
     assert (
@@ -947,6 +994,6 @@ def test_a_recorded_reply_gives_nuclei_a_melody_the_arbiter_takes_and_costs_litt
     turns = [t for item in news for t in item.turns]
     keys = [(turns[0].second - 0.3, 0.0)] + [(t.second, max(-0.9, min(0.9, -0.2 * t.st)))
                                              for t in turns]  # fmt: skip
-    for piece in melody_pieces(spaced(keys, 0.25), [], -1.0):
+    for piece in melody_pieces(spaced(keys, 0.5), [], -1.0, 0.5):
         clip = head_clip([(t - piece[0][0], 0.0, v) for t, v in piece], 0.0, layer="idle")
         assert refusal(clip) is None

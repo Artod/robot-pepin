@@ -361,23 +361,17 @@ def test_a_bad_trajectory_is_refused_with_the_reason_never_clamped(change: Any, 
     assert not arm_writes(bus)
 
 
-def test_nothing_starts_while_the_wheels_are_commanded_to_move() -> None:
+def test_a_trajectory_starts_while_the_wheels_are_commanded_to_move() -> None:
+    """The arm and the wheels move together: a twist neither refuses a trajectory nor sends a
+    moving arm to rest (each part keeps its own caps)."""
     core, _bus = make_core()
     core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, 0.05)
-    reply = send(core, wave(), 0.1)
-    assert reply["status"] == "refused" and "wheels" in reply["reason"]
-
-
-def test_a_twist_sends_a_moving_arm_to_rest() -> None:
-    core, _bus = make_core()
-    send(core, wave(seconds=4.0), 0.1)
+    assert send(core, wave(), 0.1)["status"] == "accepted"
     t = run(core, 0.1, 0.6)
     core.command({"cmd": "twist", "v": 0.1, "w": 0.0}, t)
     core.tick(t + TICK)
-    halted = [r for r in core.take_replies() if r.get("type") == "arm"]
-    assert halted == [{"type": "arm", "id": "t1", "status": "halted",
-                       "reason": "the wheels moved: to rest"}]  # fmt: skip
-    assert core.snapshot(t + TICK).get("arm", {}).get("phase", "resting") == "resting"
+    assert not [r for r in core.take_replies() if r.get("type") == "arm"]
+    assert core.snapshot(t + TICK).get("arm", {}).get("phase") == "moving"
 
 
 def test_a_newer_trajectory_takes_the_arm_from_the_one_playing() -> None:

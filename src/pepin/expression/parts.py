@@ -48,7 +48,7 @@ from pepin.expression.mix import (
     track_value,
 )
 from pepin.expression.trajectory import JOINTS, ArmLink, Knot, Trajectory
-from pepin.neck import NeckMotion
+from pepin.neck import ACC_UNIT_DEG_S2, NeckMotion
 
 logger = logging.getLogger(__name__)
 
@@ -487,6 +487,11 @@ class HeadPart:
 
 
 HEAD_MIN_SPEED_DEG_S = 1.0  # a key's least ceiling (a speed of 0 would be the servo's top)
+# An idle key's ramp: this times the least that lands it on time (4 d / T^2: speeding up half the
+# way, braking the other half), so a quarter of its time each way is a soft start and stop and the
+# servo glides between keys instead of stepping (a key at the neck's full ramp starts and stops at
+# once); never under the Acceleration register's one unit
+GLIDE = 1.25
 HEAD_DOFS = ("pan_deg", "tilt_deg")
 SAME_DEG = 1e-6  # a keyframe this close to the one before it is a hold, not a move
 
@@ -534,7 +539,10 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
     speed): a nod's stroke lands on its word, not a move later. A keyframe where the head
     already is (a hold) writes nothing. The clip starts on the holder's aim (the book's head
     atoms start and end on it). A looping clip closes its period with its first key again
-    (the arbiter's rule for a loop); the idle layer's clip is marked ``idle``."""
+    (the arbiter's rule for a loop); the idle layer's clip is marked ``idle`` and GLIDES: each
+    key also carries its own ramp, ``GLIDE`` times the least that lands its move on time (never
+    under the Acceleration register's unit, never over the axis's ramp), its speed the one that
+    ends the move on time at that ramp: the servo eases between keys instead of stepping."""
     limits = limits if limits is not None else NeckLimits()
     frames = keyframes(clip)
     if not frames:
@@ -546,16 +554,25 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
         if abs(pan - pan0) < SAME_DEG and abs(tilt - tilt0) < SAME_DEG:
             t0 = t
             continue
+        ramps = (limits.pan_acc_deg_s2, limits.tilt_acc_deg_s2)
+        glide = clip.layer == "idle"
+        if glide:  # one ramp for both servos: the gentlest that lands the larger move on time
+            least = GLIDE * max(needed_acc(pan - pan0, t - t0), needed_acc(tilt - tilt0, t - t0))
+            ramp = max(ACC_UNIT_DEG_S2, least)
+            ramps = (min(ramp, ramps[0]), min(ramp, ramps[1]))
         speed = max(
-            move_speed(pan - pan0, t - t0, limits.pan_acc_deg_s2),
-            move_speed(tilt - tilt0, t - t0, limits.tilt_acc_deg_s2),
+            move_speed(pan - pan0, t - t0, ramps[0]),
+            move_speed(tilt - tilt0, t - t0, ramps[1]),
         )
-        keys.append({
+        key: ClipKey = {
             "at_s": round(t0 - start, 4),
             "pan_rad": math.radians(pan),
             "tilt_rad": math.radians(tilt),
             "speed_deg_s": round(min(limits.max_speed_deg_s, max(HEAD_MIN_SPEED_DEG_S, speed)), 2),
-        })  # fmt: skip
+        }
+        if glide:
+            key["acc_deg_s2"] = round(max(ramps), 2)
+        keys.append(key)
         t0, pan0, tilt0 = t, pan, tilt
     if not keys:
         return None

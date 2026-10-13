@@ -16,7 +16,7 @@ import pytest
 
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Range, Scene, Track
-from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
+from pepin.expression.animator import ARM_REST_S, Caps, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
 from pepin.expression.executors import Executor
@@ -51,6 +51,17 @@ CONFIG = Path(__file__).resolve().parents[2] / "config"
 MOTION = load_arm_motion(CONFIG / "arm.json")
 BOOK = with_rest(load_book(CONFIG / "animation.json"), MOTION.rest_deg)
 NOD = Clip("head", -0.2, 0.2, 0.4, (Track("tilt_deg", "additive", (0.0, 0.2, 0.4), (0, 3, 0)),))
+
+
+def floor_only(book: Book, *names: str) -> Book:
+    """``book`` with each of ``names`` played by its floor alone (its head and face, sent at
+    once): the engine's mechanics, not the book's ensembles (whose arm or wheels go first)."""
+    compositions = dict(book.compositions)
+    for name in names:
+        composition = compositions[name]
+        floors = tuple(v for v in composition.variants if v.floor)
+        compositions[name] = replace(composition, variants=floors)
+    return replace(book, compositions=compositions)
 
 
 class Rig:
@@ -186,7 +197,7 @@ def test_requests_go_at_their_word_their_stream_second_and_their_time() -> None:
 
 
 def test_a_pulse_never_takes_the_head_from_a_marker_and_a_tool_always_does() -> None:
-    rig = Rig(seed=1)
+    rig = Rig(floor_only(BOOK, "agreement"), seed=1)
     assert rig.engine.perform("agreement", source="tool").ok
     rig.engine.request(Request("nod", None, Priority.PULSE, "pulse", clips=(NOD,)))
     rig.engine.step()
@@ -212,7 +223,7 @@ def test_an_idle_entry_plays_through_the_states_it_allows_and_fades_at_those_it_
 
 
 def test_attention_keeps_the_head_and_the_arm_clear() -> None:
-    rig = Rig(seed=2)
+    rig = Rig(floor_only(BOOK, "agreement"), seed=2)
     rig.view.be(phase="seek", eyes=True)
     rig.engine.perform("agreement", source="tool")
     assert rig.cues("head", ok=False)[-1]["why"] == "attention: seek"
@@ -743,8 +754,8 @@ def test_every_feeling_holds_the_arm_at_most_2_5_s_before_the_board_s_return() -
     arm = ArmPart(FakeArmLink(), MOTION)
     scene = Scene(frozenset(PARTS))
     for name, composition in BOOK.compositions.items():
-        if composition.bind != "utterance" or name == "evil_click":
-            continue
+        if composition.bind != "utterance" or name == "evil_click" or not composition.callable:
+            continue  # the engine's own sway rides a held unit
         longest: Clip | None = None
         for k in range(len(composition.variants)):
             for seed in range(60):
@@ -841,24 +852,23 @@ def test_a_held_unit_rests_when_the_person_speaks_at_its_reply_s_end_and_for_the
     assert rests(rig) == 4, "a clip moving the arm ends as it was sent"
 
 
-def test_the_arm_never_starts_while_the_cart_rocks_nor_the_cart_while_the_arm_is_up() -> None:
-    """The board refuses the arm while the wheels move and the wheels while the arm moves or
-    holds: the engine refuses them first, with the reason in the cue row."""
-    rig = Ladder(body=FakeExecutor("body", 0.15))
+def test_the_arm_and_the_cart_move_together() -> None:
+    """One body: the arm starts while the cart rocks, and the cart rocks while the arm holds a
+    pose; each part keeps its own caps (no part waits for the other)."""
+    body = FakeExecutor("body", 0.15)
+    rig = Ladder(body=body)
     rock = Clip("body", 0.0, 0.5, 1.0, (Track("x_m", "additive", (0.0, 0.5, 1.0), (0, 0.01, 0)),))
     rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
     rig.engine.step()
     hold_arm(rig, 1)
     rig.tick(0.2)
-    assert not rig.sent()
-    assert rig.rows("cue", part="arm", ok=False)[0]["why"] == "the cart moves (rock)"
+    assert rig.sent() and rig.rows("cue", part="arm", ok=True)
     rig.tick(1.0)
-    hold_arm(rig, 1)
-    rig.tick(0.7)
-    assert rig.sent() and rig.arm.holding() is not None
+    assert rig.arm.holding() is not None
     rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
     rig.engine.step()
-    assert rig.rows("cue", part="body", ok=False)[-1]["why"] == "the arm holds a pose"
+    assert [c for c in body.calls if c[0] == "play"][1:], "the cart rocks under the held arm"
+    assert not rig.rows("cue", ok=False)
 
 
 def test_a_mark_s_last_stroke_stays_up_while_the_listeners_want_the_arm_up() -> None:
@@ -898,3 +908,105 @@ def test_a_mark_s_last_stroke_stays_up_while_the_listeners_want_the_arm_up() -> 
     mark(3)
     rig.tick(2.5)
     assert rig.sent()[-1].then == "rest"
+
+
+# -- one body: the engine's own ensembles, by name ------------------------------------------------
+
+
+def test_a_request_s_parts_bound_its_rendering_and_the_engine_s_own_pass_the_caps() -> None:
+    """The listeners ask for the book's own ensembles by name with the parts they found free:
+    the rendering uses those alone; they are never capped and never count, so a mark of the
+    brain's still plays under a per-minute cap of one."""
+    rig = Rig(caps=Caps(per_minute=1))
+    for _ in range(3):
+        rig.engine.request(Request("pulse_strong", None, Priority.PULSE, "pulse",
+                                   parts=frozenset({"head"})))  # fmt: skip
+        rig.engine.request(Request("listen_nod", None, Priority.MOMENT, "moment",
+                                   parts=frozenset({"head"})))  # fmt: skip
+        rig.tick(1.0)
+    shown = [f for k, f in rig.records if k == "performance"]
+    assert [f["parts"] for f in shown] == [["head"]] * 6
+    assert not [f for k, f in rig.records if k == "capped"]
+    rig.engine.request(Request("agreement", None, Priority.MARK, "marker"))
+    rig.tick(0.05)
+    assert [f for k, f in rig.records if k == "performance"][-1]["intent"] == "agreement"
+
+
+def test_a_pulse_s_arm_beat_rides_the_held_unit_and_keeps_its_hold() -> None:
+    """The arm held up for reply 1 (a posture's way): the strong accent's wrist beat starts from
+    the held pose and ends held for the rest of the unit's hold; once the unit has gone to rest
+    a beat still waiting is dropped, never played from rest."""
+    rig = Ladder()
+    hold_arm(rig, 1, hold_s=6.0)
+    rig.tick(0.7)
+    lifted = rig.sent()[-1]
+    until = rig.arm.held_until
+    rig.engine.request(Request("pulse_strong", AtStream(rig.playout.now + 1.0, 1), Priority.PULSE,
+                               "pulse", bind="word", parts=frozenset({"arm"})))  # fmt: skip
+    rig.tick(1.5)
+    beat = rig.sent()[-1]
+    assert beat is not lifted and beat.knots[0].deg == pytest.approx(lifted.knots[-1].deg)
+    assert beat.then == "hold" and rig.arm.held_until == pytest.approx(until, abs=0.02)
+    flex, roll = JOINTS.index("wrist_flex"), JOINTS.index("wrist_roll")
+    held = lifted.knots[-1].deg
+    down = max(k.deg[flex] for k in beat.knots) - held[flex]  # the flex beat, 16-20 deg
+    turn = max(abs(k.deg[roll] - held[roll]) for k in beat.knots)  # or the roll, 12-16
+    assert 16.0 - 0.01 <= down <= 20.01 or 12.0 - 0.01 <= turn <= 16.01, (down, turn)
+    rig.engine.request(Request("pulse_strong", AtStream(rig.playout.now + 1.0, 1), Priority.PULSE,
+                               "pulse", bind="word", parts=frozenset({"arm"})))  # fmt: skip
+    rig.tick(0.05)
+    rig.engine.hush("the person speaks")
+    rig.tick(1.5)
+    assert rig.sent()[-1] is beat
+    assert rig.rows("late", intent="pulse_strong")[-1]["why"] == "no unit holds the arm any more"
+
+
+def test_a_word_mark_s_wheels_are_fitted_loosely_and_left_out_alone_without_the_time() -> None:
+    """A word-bound mark with a nod and the cart's rock: mid-sentence the rock is fitted as an
+    utterance's (its stroke within late_s of the word) and sent with the nod; on the reply's
+    first word there is no time for the wheels: they are left out, the nod still lands."""
+    data = json.loads((CONFIG / "animation.json").read_text())
+    nod = {"atom": "head_nod", "params": {"amp_deg": 3.0, "period_s": 0.4}}
+    rock = {"atom": "body_rock", "params": {"amp_m": 0.01, "period_s": 0.75}}
+    variants = [{"steps": [nod, rock]}, {"floor": True, "steps": [nod]}]
+    data["compositions"]["rocky"] = {"bind": "word", "variants": variants}
+    book = with_rest(book_from(data), MOTION.rest_deg)
+    body = FakeExecutor("body", 0.15)
+    rig = Ladder(book, body=body)
+    text = "Мы поехали на дачу, и там было очень тихо и спокойно весь вечер."
+    rig.say(1, 0, text, "rocky", text.index("дачу"))
+    (row,) = rig.rows("ladder")
+    assert row["step"] == "authored" and set(row["parts"]) == {"head", "body"}
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(4.0)
+    assert [c for c in body.calls if c[0] == "play"] and rig.rows("send", part="head")
+    (sent,) = rig.rows("send", part="body")
+    assert sent["bind"] == "utterance" and sent["error_s"] <= 0.5
+    first = Ladder(book, body=FakeExecutor("body", 0.15))
+    first.say(1, 0, text, "rocky", 0)
+    (row,) = first.rows("ladder")
+    assert row["parts"] == ["head"] and "the wheels need" in row["why"]
+
+
+def test_a_mark_takes_the_arm_from_the_held_arm_s_sway_at_once() -> None:
+    """The arm held up and swaying (the idle layer's arm_sway): a mark mid-sentence plans from
+    the held pose with the sway still playing (the idle layer holds nothing back) and its
+    stroke lands on its word."""
+    rig = Ladder()
+    hold_arm(rig, 1, hold_s=12.0)
+    rig.tick(0.7)
+    lifted = rig.sent()[-1]
+    rig.engine.request(Request("arm_sway", None, Priority.IDLE, "idle", parts=frozenset({"arm"})))
+    rig.tick(0.3)
+    sway = rig.sent()[-1]
+    assert sway is not lifted and sway.then == "hold"
+    text = "Принтер вон там, у стены."
+    rig.say(1, 0, text, "point", text.index("вон"))
+    (row,) = rig.rows("ladder")
+    assert row["base"] == "unit", row
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(2.0)
+    (arm,) = rig.rows("send", part="arm")
+    assert -0.3 <= arm["error_s"] <= 0.15 and arm["base"] == "unit"

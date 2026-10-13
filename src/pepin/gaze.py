@@ -187,12 +187,14 @@ def new_id() -> str:
 @dataclass(frozen=True)
 class OverlayKey:
     """One key of an overlay: seconds from its start, the pan (+ left) and tilt (+ down) offsets
-    in radians added to the holder's aim, and the speed ceiling of the move to it."""
+    in radians added to the holder's aim, the speed ceiling of the move to it and its ramp's
+    (None: the neck's own; the idle layer's keys glide on a gentle one)."""
 
     at_s: float
     pan_rad: float
     tilt_rad: float
     speed_deg_s: float
+    acc_deg_s2: float | None = None
 
     @property
     def offset(self) -> Aim:
@@ -528,6 +530,7 @@ class Arbiter:
         self.settings = settings if settings is not None else GazeSettings()
         self.reach = reach  # an overlay's keys over the holder's aim are refused past it
         self._back_deg_s = 0.0  # the speed the head goes back to its holder at after an overlay
+        self._back_acc: float | None = None  # and its ramp (the overlay's last key's own, if any)
         self._back_still = False
         self._lock = threading.RLock()
         self._held: list[_Held] = []
@@ -1038,20 +1041,29 @@ class Arbiter:
         if now < self._retry_at or self._driver.blocked(now) is not None:
             return
         playing.key, playing.cycle, playing.base = index, cycle, base
-        self._lift(base, key.offset, playing.still, look.id, key.speed_deg_s, now)
+        self._lift(base, key.offset, playing.still, look.id, key.speed_deg_s, now,
+                   key.acc_deg_s2)  # fmt: skip
 
     def _lift(
-        self, base: Aim, offset: Aim, still: bool, owner: str, speed_deg_s: float, now: float
+        self,
+        base: Aim,
+        offset: Aim,
+        still: bool,
+        owner: str,
+        speed_deg_s: float,
+        now: float,
+        acc_deg_s2: float | None = None,
     ) -> None:
-        """The head sent to ``base`` plus ``offset``: a still overlay over a settled head moves
-        it without starting a move (no blind interval), anything else is a write like any."""
+        """The head sent to ``base`` plus ``offset`` at the key's ceilings: a still overlay over a
+        settled head moves it without starting a move (no blind interval), anything else is a
+        write like any."""
         head = self._head
         active = self._active
         home = active is None or not active.look.views
         if still and head is not None and head.settled is not None and head.aim == base:
             lifted = offset != ZERO
             target = None if home and not lifted else base.plus(offset)
-            self._out(target, "saccade", not home or lifted, now, speed_deg_s)
+            self._out(target, "saccade", not home or lifted, now, speed_deg_s, acc_deg_s2)
             head.offset, head.home = offset, home and not lifted
             return
         holder = active.look.id if active is not None and offset == ZERO else owner
@@ -1063,6 +1075,7 @@ class Arbiter:
             now=now,
             offset=offset,
             speed_deg_s=speed_deg_s,
+            acc_deg_s2=acc_deg_s2,
         )
 
     def _write_back(self, now: float) -> None:
@@ -1073,7 +1086,8 @@ class Arbiter:
             return
         if now < self._retry_at or self._driver.blocked(now) is not None:
             return
-        self._lift(self._holder_aim(), ZERO, self._back_still, "", self._back_deg_s, now)
+        self._lift(self._holder_aim(), ZERO, self._back_still, "", self._back_deg_s, now,
+                   self._back_acc)  # fmt: skip
 
     def _end_overlay(
         self, playing: _Playing, status: Status, reason: str, now: float, *, fade_s: float = 0.0
@@ -1084,8 +1098,10 @@ class Arbiter:
             self._playing = None
         head = self._head
         offset_deg = math.degrees(head.offset.off(ZERO)) if head is not None else 0.0
-        last = playing.overlay.keys[-1].speed_deg_s if playing.overlay.keys else 0.0
+        keys = playing.overlay.keys
+        last = keys[-1].speed_deg_s if keys else 0.0
         self._back_deg_s = offset_deg / fade_s if fade_s > 0.0 and offset_deg > 0.0 else last
+        self._back_acc = keys[-1].acc_deg_s2 if keys and not fade_s > 0.0 else None
         self._back_still = playing.still
         reading = self._readings[-1] if self._readings else None
         outcome = Outcome(
@@ -1365,8 +1381,9 @@ def look_from_json(
     ``kind`` point (``target`` {frame, x, y, z}), direction ({bearing_rad, pitch_rad} in
     base_link), angles ({pan_rad, tilt_rad}; ``speed_deg_s`` and ``acc_deg_s2``, optional, are the
     move's own ceilings: an eased look), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
-    or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s},
-    ...], loop, idle}; a loop's last key closes its period and equals its first); ``hold`` true
+    or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s,
+    acc_deg_s2 (optional: the key's own ramp)}, ...], loop, idle}; a loop's last key closes its
+    period and equals its first); ``hold`` true
     keeps the head on the last view for the rest of the TTL (``dwell_s`` = ``ttl_s``);
     ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why not).
     """
@@ -1459,19 +1476,23 @@ def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay
     keys: list[OverlayKey] = []
     try:
         for item in raw:
+            acc = item.get("acc_deg_s2")
             key = OverlayKey(
                 float(item["at_s"]),
                 float(item.get("pan_rad", 0.0)),
                 float(item.get("tilt_rad", 0.0)),
                 float(item["speed_deg_s"]),
+                None if acc is None else float(acc),
             )
-            values = (key.at_s, key.pan_rad, key.tilt_rad, key.speed_deg_s)
+            values = (key.at_s, key.pan_rad, key.tilt_rad, key.speed_deg_s, key.acc_deg_s2 or 1.0)
             if not all(math.isfinite(v) for v in values):
                 return "a clip's key is a finite number on every field"
             if key.at_s < 0.0 or (keys and key.at_s < keys[-1].at_s):
                 return "a clip's keys are in time order, from 0 s"
             if key.speed_deg_s <= 0.0:
                 return "a clip's key moves at a speed above 0 deg/s"
+            if key.acc_deg_s2 is not None and key.acc_deg_s2 <= 0.0:
+                return "a clip's key ramps at more than 0 deg/s^2"
             keys.append(key)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         return f"a clip's key is incomplete: {exc!r}"

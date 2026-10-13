@@ -248,8 +248,9 @@ class AttentionView(Protocol):
 
 
 class ArmRelease(Protocol):
-    """The one arbitration between the arm and the wheels: the gaze's body turn asks the gesture
-    engine for the arm first (the board refuses the wheels while the arm moves or holds)."""
+    """The gaze's body turn asks the gesture engine for the arm first: attention's rule (no arm
+    motion while the body turns toward a person, gesticulation DESIGN.md §6.5), the one place
+    the arm waits for the wheels."""
 
     def release_arm(self, why: str) -> float:
         """Send the arm to rest now (no new arm motion until the turn is over); the seconds until
@@ -274,7 +275,7 @@ def head_refusal(view: Attention, now: float, seen_s: float = HEAD_SEEN_S) -> st
 
 def arm_refusal(view: Attention) -> str | None:
     """Why no arm motion may start now, None when it may: the person engaged stands past the
-    forward arc or the body turns toward them (the board would refuse the wheels or the arm)."""
+    forward arc or the body turns toward them (attention's turn goes first)."""
     if view.phase == "turning":
         return "attention: the body turns toward the person"
     if view.past_arc:

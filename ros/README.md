@@ -739,16 +739,28 @@ the face comes and goes in the frames, while sitting down or standing up still m
 The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
 `{laugh}`, `{face:smile}`; `{whispering}` and `{}` stay the voice's style) and the gesture engine
 (`pepin.expression`) decides how: it renders the intent from `config/animation.json` (atoms,
-twelve compositions, taught poses; a seed logged with every performance), fits it to the time
-left before its word (below) and plays it through each part's one owner. The arm:
+the twelve feelings and the co-speech marks, taught poses; a seed logged with every performance),
+fits it to the time left before its word (below) and plays it through each part's one owner.
+ONE BODY: every variant of the book plays the face, the head and the arm or the wheels together
+(every step's `p` is 1 since 2026-10-13: the dice are between the variants and in the ranges;
+each feeling has a variant with the cart's small rock or sway beside its arm's), and the arm and
+the wheels move together, neither waiting for the other: the base server plays a trajectory
+whatever the wheels do and a twist no longer sends the arm to rest (`pepin.arm_driver`: deploy it
+to the board with `pepin.base_server`), the wheels' checks and the engine no longer refuse one
+for the other (each part keeps its own caps and limits, the wheels their hull clearance; a drive
+still owns the wheels, and the gaze's body turn still takes the arm to rest first). The arm:
 the laptop sends a whole trajectory (`arm_trajectory`) and the base server plays it on its tick,
 then rests and lets go of the torque by itself (`pepin.arm_driver`, `config/arm.json` `motion`:
 caps, limits, rest pose, torque limit). The face: the head server, source `expression`. The head:
 the gaze arbiter's `clip` overlay on whatever holds it (the person, when the speaker gaze is on;
 home otherwise), source `voice.gesture` (`voice.idle` for the idle layer's fidget, which gives
 way to any gesture): each keyframe of the clip is written one move early with the speed ceiling
-that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/s², pan 2232),
-and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
+that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/s², pan 2232);
+the idle layer's keys (the melody, the breath, the drift) GLIDE: each also carries its own ramp,
+1.25 times the least that lands it on time (at least the servo register's 8.8 deg/s²), passed by
+the arbiter to `neck_target` beside its speed, so the servo eases between keys instead of
+stepping (the gaze node in `pepin-macnav` reads `pepin.gaze`: `ros/laptop.sh kick gaze` after an
+update; an older one ignores the ramp); and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
 so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
 the gesture plays without its head. The wheels: below. The person starting to speak fades
 the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
@@ -769,61 +781,70 @@ takes it (one queue append on the voice's thread) and, on its own thread, finds 
 nuclei of the robot's own voice (voiced band-energy peaks), each one's prominence (band level,
 voiced length and pitch, each a z over the voice's statistics: `pulse.voice_stats`) and the
 pitch contour, 1.2-1.3 ms of one core a second of voice. The listeners turn that and the
-conversation's moments into the engine's own requests, under its one priority table. While the
-robot speaks: the melody, the head tilting with the voice's pitch within `pulse.melody_max_deg`
-(0.9°, inside the arbiter's `clip_still_deg`: the camera keeps its frames), on the idle source;
-an accent nod of 2-4° on the first nucleus of a sentence with z >= `pulse.beat_z` (2) or its
-most prominent once the sentence's audio is all in (at most one a sentence, 2 s apart, 12 a
-minute, never with less lead than the nod needs: 0.30 s with the head's latency, since the
-arbiter lets a nod's bottom come 0.2 s after its first move at the earliest; none in a sentence
-that carries the brain's own marker, none within 2 s of a marker's head stroke, played or still
-waiting for its word); a lift and cock of the head at a question's last syllable;
-one look away in a reply with 6 s of audio. THE ARM UP: a reply whose second sentence reaches the
-voice (`pulse.arm_up_min_sentences`, 2; its text, before its sound) raises the arm once to the
-book's `ready` (about 0.7 s, half the caps) within half a second of its speech, after any rock
-of the cart and only with 1 s of its speech known after it, and holds it there while the reply
-goes on: the hold reaches 0.5 s past the reply's audio known and is sent again before it lapses
-(a lost laptop leaves the arm up at most `config/arm.json`'s `hold_max_s`, 20 s), a mark's
-stroke starts from it and the arm comes back to `ready` after the mark, and an accent inside it
-is a wrist flick of 15-25° (`pulse.wrist_beat_p` 0.5, `wrist_beat_deg`) instead of the nod; the
-arm rests when the reply's audio ends (its end, or the hold's own lapse 0.5 s after the last
-sound), at once when the person starts to speak, at a barge-in, the close, the body's turn, a
-laugh's rock or a sentence in a quiet style. A one-sentence reply never raises it. THE ACCENT'S
-ROCK: once a reply at most (`pulse.accent_rock_p` 0.5), the cart rocks 1 cm (the book's
-`body_rock` at its low end) with its stroke on the reply's strongest syllable over `beat_z` it
-can still reach, never in its first 0.5 s of sound, never in quiet, never in a reply whose arm
-is up (the board refuses the wheels while the arm moves or holds, and the arm while the wheels
-move: the engine refuses either first), never while a mark moves the arm or a body turn is
-pending: in practice one-sentence replies. Between turns: the breath (the book's looping idle
-entry, `breath` at 1° and 0.25 Hz) whenever the robot is silent, through the person's speech
-too; a thinking glance up,
-down or aside 0.8 s into the brain's wait (p 0.75, never the same way twice, back 0.5-1.3 s into
-the reply as the waits predict it, or that long into the reply's first sound when it comes
-sooner); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart, never while
-their words so far, when the ears read them in time, or else their last utterance were a
-question); a small nod after a statement (p 0.3); hello and bye played in the brain's wait from
-the person's own words (after the body's turn toward them; the book's `moments` name them); one
-rock of the cart after a `{laugh}` that played, or after a sentence whose own words laugh
-(`caps.laughter`, «ха-ха», «хи-хи», «ахах»: the moment `laugh_heard`, whatever the brain wrote; one
-a minute by `caps.intent_per_minute.laugh`, counted with the brain's), a tail whose stroke lands
-within `timing.after_s` (2.5 s) of its sentence's start and inside the speech (the laugh never
-uses the arm then; an arm up goes to rest first); a smile at the
-first face (the face's one writer: the speaker gaze's own smile is off, `speaker.smile` null).
-Every discrete head move keeps `moments.head_gap_s` (1 s)
-from the one before. Quiet (`quiet`: a whispering or
-sleepy style, 23:00-08:00, or the person's voice under -30 dBFS): the melody, the breath and the
-face only. Each conversation's events.jsonl gets `pulse` (per sentence: its nuclei's z, the
-accent and why others were skipped), `moment` (each decision, played or why not: `arm_up`,
-`accent_rock` and `laugh_heard` among them, one row a reply each), `quiet` and,
-at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a minute,
-the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.7 accent
-nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel
-of a content word against 44 % for any syllable, every head clip within the arbiter's rules.
+conversation's moments into the engine's own requests, under its one priority table: EVERY
+EVENT IS AN ENSEMBLE, the book's own composition asked for by name (`callable` false: never a
+mark of the brain's, never under its caps; their sizes are tuned in the book) with the parts
+the listeners find free for it (the head where its gaps allow, the arm where a unit holds it up,
+the wheels where the cart stands and the gaze is not turning it, each part where its lead
+covers its way). While the robot speaks: the melody, the head tilting with the voice's pitch
+within `pulse.melody_max_deg` (0.9°, inside the arbiter's `clip_still_deg` 2°: the camera keeps
+its frames), keys at least `pulse.melody_key_gap_s` (0.5 s) apart, gliding, on the idle source;
+an ACCENT on the first nucleus of a sentence with z >= `pulse.beat_z` (2) or its most prominent
+once the sentence's audio is all in (one a sentence), by its strength: under `pulse.strong_z`
+(3.0; the 24 accents played live on 10-12/13 had a median z of 2.9) `pulse_weak`, the nod with,
+while the arm is up, the wrist's beat (`pulse.wrist_beat_p`, 0.5) and on every second one
+(`pulse.wheel_accent_share`, 0.5: steady, the next free one when the cart was busy) the cart's
+0.5 cm sway; from it `pulse_strong`, the nod, the wrist's beat with the arm up and the cart's
+1 cm rock; the reply's strongest known (once a reply) `pulse_peak`, all three bigger. The nod
+keeps 2 s from any head stroke, 12 a minute, never less lead than it needs (0.30 s with the
+head's latency); none in a sentence that carries the brain's own marker, none within 2 s of a
+marker's head stroke; an accent whose nod is refused still moves the rest of its ensemble. The
+decision waits for the lead of the slowest part it wants (the cart's rock: about 1 s at
+`wheels.speed_scale` 0.4). THE LAUGH'S SOUND: a run of `pulse.laugh_run` (3) accents
+`pulse.laugh_gap_s` (0.2-0.4 s) apart is the voice laughing, no text read: each of its accents
+asks for `pulse_laugh`, the cart's rock with the happy face and a bob of the head; the cart
+takes the next accent once its rock has settled (about one every 2 s at speed 0.4: a laugh's
+3-5 Hz is out of the wheels' reach), and the laugh is that sentence's accent. A lift and cock of
+the head at a question's last syllable; one look away in a reply with 6 s of audio. THE ARM UP:
+a reply whose second sentence reaches the voice (`pulse.arm_up_min_sentences`, 2; its text,
+before its sound) raises the arm once to the book's `ready` (about 0.7 s, half the caps) within
+half a second of its speech, only with 1 s of its speech known after it, and holds it there
+while the reply goes on: the hold reaches 0.5 s past the reply's audio known and is sent again
+before it lapses (a lost laptop leaves the arm up at most `config/arm.json`'s `hold_max_s`, 20 s),
+a mark's stroke starts from it and the arm comes back to `ready` after the mark, the accents'
+beats ride it (from the held pose, the rest of its hold kept), the cart rocks under it, and while
+nothing moves it the wrist sways slowly (`arm_sway`, 6-10° of roll over 2.5-3 s: the held arm's
+breath, only when its hold outlasts the sway; a mark takes the arm from it at once); the arm
+rests when the reply's audio ends (its end, or the hold's own lapse 0.5 s after the last sound),
+at once when the person starts to speak, at a barge-in, the close, the body's turn or a sentence
+in a quiet style. A one-sentence reply never raises it. Between turns: the breath (the book's
+looping idle entry, `breath` at 2° and 0.25 Hz, gliding) whenever the robot is silent, through the
+person's speech too; a thinking glance up or down 0.8 s into the brain's wait (`moments.think_p`
+0.5, never the same way twice, back 0.5-1.3 s into the reply as the waits predict it, or that long
+into the reply's first sound when it comes sooner); at the person's pause after 2 s of their speech
+`listen_nod` (5 s apart, never while their words so far, when the ears read them in time, or else
+their last utterance were a question): its nod with `moments.listener_nod_p` (0.6), the cart's 0.5
+cm rock with `moments.nod_rock_p` (0.3); after a statement `ack_nod`, its nod with
+`moments.ack_nod_p` (0.3), its rock with `nod_rock_p`; hello and bye played in the brain's wait from
+the person's own words (after the body's turn toward them; the book's `moments` name them); the
+brain's `{laugh}` is its composition whole (the grin, the head thrown back, the gripper's click, the
+cart's rock or sway); a smile at the first face (the face's one writer: the speaker gaze's own smile
+is off, `speaker.smile` null). Every discrete head move keeps `moments.head_gap_s` (1 s) from the
+one before. Quiet (`quiet`: a whispering or sleepy style, 23:00-08:00, or the person's voice under
+-30 dBFS): the melody, the breath and the face only. Each conversation's events.jsonl gets `pulse`
+(per sentence: its nuclei's z, the accent with its kind and the parts it moved, and why the others
+were left out), `moment` (each decision, played or why not: `arm_up` and `laugh_sound` among them),
+`quiet` and, at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a
+minute, the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.7 accent
+nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel of a
+content word against 44 % for any syllable, every head clip within the arbiter's rules.
 
 ```bash
 uv run python scripts/voice_cascade.py switch --flag gestures=on    # the alive layer with it
 grep -h '"event": "moment"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
-grep -h '"arm_up"\|"accent_rock"\|"laugh_heard"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl
+grep -h '"arm_up"\|"laugh_sound"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl
+grep -h '"event": "pulse"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail  # kinds, parts
+uv run python scripts/gesture.py play pulse_strong --dry-run   # an ensemble of the engine's own
 grep -h '"event": "alive"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl   # per conversation
 ```
 
@@ -838,7 +859,10 @@ its caps; a smaller version; or its head-and-face floor (each composition has on
 then goes at the last moment that lands its stroke `stroke_bias_s` (0.05 s) before the vowel (a
 `send` line). A word's stroke is never more than `stroke_late_s` (0.15 s) late, a feeling's
 never more than `late_s` (0.5 s) nor after the reply's speech, and none lands in the pause after
-a sentence; one that cannot is left out and the rest of its gesture keeps its time. Two arm
+a sentence; one that cannot is left out and the rest of its gesture keeps its time. The wheels
+never bind to a word: a mark's rock or sway is fitted as a feeling's (its stroke within `late_s`
+of the word, inside the speech) and left out alone when it has no time or would run past what
+the speech covers. Two arm
 gestures within `units.hold_s` (2.5 s) share one raise: the first holds its last pose (the
 board's `then: hold`; with nothing after it the board rests the arm by itself) and the second
 starts from there (a third from the second's: one unit is at most three strokes). An arm motion
@@ -919,7 +943,7 @@ per request, a trapezoid at `wheels.yaw_rate_deg_s`/`yaw_acc_deg_s2` (straight:
 stretches the body's clips by its inverse, as the arm's; a clip faster than the caps is
 refused). Before a
 motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
-the wheels still), the bus answering, the arm not mid-gesture (a twist sends it to rest), no
+the wheels still), the bus answering (the arm moves with them: neither waits for the other), no
 stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
 times a second only while a motion runs): nothing navigates, depth_fusion's newest obstacle marks
 (`/depth_marks`) under `wheels.marks_age_s` (1.5 s) old by their own stamp, and the footprint
@@ -1225,7 +1249,7 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `gate_dark_patience_s` | number 0..30 | 1.5 | a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL |
 | `gaze` | `clip_max_deg` | number 0..90 | 30.0 | a head overlay (kind clip: a gesture's keys added to the holder's aim) with any key further than this off the holder's aim, on either axis, is refused whole (never clamped); 30 lets a glance aside (10-25 deg) through, the gestures themselves keep nearer (a nod 3-10) |
 | `gaze` | `clip_max_hz` | number 0..10 | 2.5 | an overlay whose tilt turns back sooner than half a period of this rate after its last turn is refused: the mast rings at 5.3 Hz after sharp tilts (config/neck.json's tilt_max_acc_deg_s2 note), so tilt oscillations stay under 2.5 Hz; the board's tilt ramp (600 deg/s^2) caps every move's acceleration on its own. 0: no check |
-| `gaze` | `clip_still_deg` | number 0..5 | 1.0 | an overlay whose keys all stay within this of the holder's aim (a breath, +-1.0 deg at 0.25 Hz) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. The settle tolerance's 1 deg |
+| `gaze` | `clip_still_deg` | number 0..5 | 2.0 | an overlay whose keys all stay within this of the holder's aim (the breath, +-2.0 deg at 0.25 Hz; the melody, +-0.9 deg) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. 2.0 since 2026-10-13 (the breath at 2 deg), the settle tolerance's 1 deg before |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |

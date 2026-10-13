@@ -23,8 +23,8 @@ Angles are degrees in config/arm.json's convention (lerobot's: the middle of eac
 range is 0; the gripper's -10..100 is linear), knot times seconds from the trajectory's start.
 The board starts any trajectory from where the arm IS: it energises each servo at its present
 position, then joins the first knot within the caps. It refuses (never clamps) a knot outside
-config/arm.json's limits or a step faster than its caps, and refuses everything while the wheels
-are commanded to move; a twist arriving while the arm moves sends it to rest. Its replies say
+config/arm.json's limits or a step faster than its caps, whatever the wheels do (the arm and the
+wheels move together, each within its own caps). Its replies say
 ``accepted``, ``refused``, ``done``, ``preempted`` (a newer trajectory took the arm) or
 ``halted``.
 """
@@ -175,8 +175,8 @@ class ArmDriver(Protocol):
         """Stop where the arm is and hold it."""
         ...
 
-    def step(self, now: float, wheels_moving: bool) -> None:
-        """One tick: progress, the hold's and the rest's ends, the drive rule, the one write."""
+    def step(self, now: float) -> None:
+        """One tick: progress, the hold's and the rest's ends, the one write."""
         ...
 
     def status(self) -> ArmStatus:
