@@ -2,7 +2,8 @@
 
 The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, loop, note),
 ``compositions`` (name -> cooldown_s, variants of steps, note), ``poses`` (name -> joint ->
-degrees, taught by hand with ``scripts/gesture.py teach``), ``idle`` (the idle layers) and
+degrees and an optional note; taught by hand with ``scripts/gesture.py teach`` or authored
+from the URDF), ``idle`` (the idle layers) and
 ``moments`` (a moment of the robot -> a composition). A parameter is a number or ``[lo, hi]``;
 in a step, a string or a list of strings is a named parameter (a face's or a pose's name, one
 drawn). A key value is a number, ``"$param"`` or ``"-$param"``; on the face a name or
@@ -64,7 +65,7 @@ def load_book(path: str | Path | None = None) -> Book:
 def book_from(data: Mapping[str, Any]) -> Book:
     """The book in ``data``; ``ValueError`` naming the first mistake."""
     poses = {
-        name: {str(j): float(v) for j, v in joints.items()}
+        name: {str(j): float(v) for j, v in joints.items() if j != "note"}
         for name, joints in data.get("poses", {}).items()
         if isinstance(joints, dict)
     }

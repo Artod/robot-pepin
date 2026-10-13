@@ -131,8 +131,8 @@ class Idle:
 
 @dataclass(frozen=True)
 class Book:
-    """config/animation.json: the atoms, the compositions (the intents), the poses taught by
-    hand (pose -> joint -> degrees), the idle layers and the robot's moments mapped to intents."""
+    """config/animation.json: the atoms, the compositions (the intents), the arm's poses (pose
+    -> joint -> degrees), the idle layers and the robot's moments mapped to intents."""
 
     atoms: Mapping[str, Atom]
     compositions: Mapping[str, Composition]

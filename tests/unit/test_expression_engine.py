@@ -7,13 +7,14 @@ import copy
 import itertools
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pepin.arm_motion import ArmMotion, ServoRange, arm_motion, load_arm_motion
-from pepin.expression.animation import Book, Clip, Event, Scene, Track
+from pepin.expression.animation import Book, Clip, Event, Range, Scene, Track
 from pepin.expression.animator import EngineConfig, GestureEngine, engine_config
 from pepin.expression.book import book_from, face_names, load_book, vocabulary, with_rest
 from pepin.expression.conversation import Heard
@@ -56,6 +57,20 @@ def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps
              for n in s.choices.get("name", ())}  # fmt: skip
     assert faces <= words.faces  # every face a composition names exists
+
+
+def test_every_pose_keeps_the_arm_s_limits_and_every_pose_named_exists() -> None:
+    limits = dict(zip(JOINTS, MOTION.limits(), strict=True))
+    for name, pose in BOOK.poses.items():
+        assert set(pose) == set(JOINTS), name
+        for joint, deg in pose.items():
+            low, high = limits[joint]
+            assert low <= deg <= high, f"poses.{name}.{joint} {deg} outside {low}..{high}"
+    named = {pose for composition in BOOK.compositions.values() for v in composition.variants
+             for s in v.steps for pose in s.choices.get("pose", ())}  # fmt: skip
+    keyed = {k.pose for a in BOOK.atoms.values() for k in a.keys if k.pose and k.pose[0] != "$"}
+    assert named and named | keyed <= set(BOOK.poses)
+    assert {"raised", "ready", "offer", "emphasis", "thinking", "tucked"} <= set(BOOK.poses)
 
 
 def _data() -> dict[str, Any]:
@@ -107,13 +122,14 @@ def test_parameters_are_drawn_within_their_ranges() -> None:
 
 
 def test_a_part_not_ready_and_a_pose_not_taught_are_left_out_the_rest_plays() -> None:
-    renderer = BookRenderer(BOOK)
+    untaught = Book(BOOK.atoms, BOOK.compositions, {"rest": BOOK.poses["rest"]})
+    renderer = BookRenderer(untaught)
     for seed in range(30):
         clips = renderer.render("greeting", Scene(frozenset({"face", "arm"})), seed).clips
         assert {c.part for c in clips} <= {"face", "arm"} and "face" in {c.part for c in clips}
         for clip in clips:  # no pose is taught: the arm never leaves rest absolutely
             assert all(t.mode == "additive" for t in clip.tracks)
-    taught = Book(BOOK.atoms, BOOK.compositions, {**BOOK.poses, "raised": RAISED})
+    taught = Book(BOOK.atoms, BOOK.compositions, {**untaught.poses, "raised": RAISED})
     clips = BookRenderer(taught).render("greeting", EVERYTHING, 3, variant=0).clips
     arm = next(c for c in clips if c.part == "arm")
     lift = next(t for t in arm.tracks if t.dof == "shoulder_lift")
@@ -202,16 +218,59 @@ def test_a_stretched_clip_keeps_its_stroke_on_the_sync_point() -> None:
     assert slow.duration_s == 5.0 and slow.tracks[0].times == (0.0, 5.0)
 
 
+def _every_step(book: Book, end: str | None = None) -> Book:
+    """``book`` with every step playing; ``end`` (lo or hi) pins every range of a step there."""
+    compositions = {}
+    for name, composition in book.compositions.items():
+        variants = []
+        for variant in composition.variants:
+            steps = []
+            for step in variant.steps:
+                if end is None:
+                    steps.append(replace(step, p=1.0))
+                    continue
+                ranges = {**book.atoms[step.atom].params, **step.params}
+                pinned = {k: Range(getattr(r, end), getattr(r, end)) for k, r in ranges.items()}
+                at = getattr(step.at_s, end)
+                steps.append(replace(step, p=1.0, at_s=Range(at, at), params=pinned))
+            variants.append(replace(variant, steps=tuple(steps)))
+        compositions[name] = replace(composition, variants=tuple(variants))
+    return replace(book, compositions=compositions)
+
+
 def test_every_intent_s_arm_clip_keeps_the_caps_at_full_speed_and_at_the_first_test_s() -> None:
-    """The book is sized to config/arm.json's caps: nothing it renders is refused."""
-    renderer = BookRenderer(Book(BOOK.atoms, BOOK.compositions, {**BOOK.poses, "raised": RAISED}))
+    """The book is sized to config/arm.json's caps and its poses: nothing it renders is
+    refused, every step playing, its ranges at either end or drawn, mirrored or not."""
     fast, slow = ArmPart(FakeArmLink(), MOTION), ArmPart(FakeArmLink(), MOTION, speed_scale=0.2)
-    for intent in BOOK.compositions:
-        for seed in range(15):
-            for clip in renderer.render(intent, EVERYTHING, seed).clips:
+    books = (_every_step(BOOK, "lo"), _every_step(BOOK, "hi"), _every_step(BOOK))
+    for intent, composition in BOOK.compositions.items():
+        for variant, book, seed in itertools.product(range(len(composition.variants)), books,
+                                                     range(2)):  # fmt: skip
+            performance = BookRenderer(book).render(intent, EVERYTHING, seed, variant=variant)
+            for clip in performance.clips:
                 if clip.part == "arm":
-                    assert isinstance(fast.plan(clip), Trajectory), (intent, seed)
-                    assert isinstance(slow.plan(stretched(clip, 5.0)), Trajectory), (intent, seed)
+                    where = (intent, variant, seed)
+                    assert isinstance(fast.plan(clip), Trajectory), (where, fast.plan(clip))
+                    assert isinstance(slow.plan(stretched(clip, 5.0)), Trajectory), where
+
+
+def test_every_arm_clip_fits_the_board_s_longest_trajectory_at_the_first_test_s_speed() -> None:
+    """The arm steps of a variant at their widest (the earliest start, the latest end their
+    ranges allow) last at most config/arm.json's max_duration_s once stretched to speed 0.2."""
+    for name, composition in BOOK.compositions.items():
+        for v, variant in enumerate(composition.variants):
+            starts, ends = [], []
+            for step in variant.steps:
+                atom = BOOK.atoms[step.atom]
+                if atom.part != "arm":
+                    continue
+                ranges = {**atom.params, **step.params}
+                period, hold = ranges["period_s"], ranges.get("hold_s", Range(0.0, 0.0))
+                repeats = round(ranges.get("repeats", Range(1.0, 1.0)).hi)
+                starts.append(step.at_s.lo - atom.stroke * period.hi)
+                ends.append(step.at_s.hi + (repeats - atom.stroke) * period.hi + hold.hi)
+            if starts:
+                assert (max(ends) - min(starts)) / 0.2 <= MOTION.max_duration_s, (name, v)
 
 
 # -- the arm's numbers --------------------------------------------------------------------------
@@ -402,7 +461,7 @@ def test_the_person_speaking_fades_the_gesture_layer_but_a_greeting_past_its_str
     assert ("fade", ("gesture", 0.35)) in rig.parts["head"].calls
     greeting = Rig(seed=1)
     assert greeting.engine.perform("greeting", source="tool").ok
-    greeting.tick(1.5)  # every clip has gone
+    greeting.tick(2.5)  # every clip has gone (the arm starts 2 s before the word)
     playing = greeting.engine._playing["face"]
     greeting.clock.now = playing.ends - 0.5  # past its stroke, ending within finish_s
     greeting.engine.speech_started(greeting.clock.now)
