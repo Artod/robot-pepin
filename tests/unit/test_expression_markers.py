@@ -1,20 +1,17 @@
-"""The marker grammar: a sentence of the brain's stream as the voice's parts and the body's cues,
-and where on the player's clock a cue's word starts."""
+"""The marker grammar: a sentence of the brain's stream as the voice's parts and the body's cues
+(when a cue's word is heard: the word clock's, test_expression_forecast.py)."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
 import pytest
 
 from pepin.expression.markers import (
-    Cue,
     Marker,
     Part,
     Vocabulary,
     classify,
     cues,
     parse,
-    part_length_s,
-    sync_s,
 )
 from pepin.voice_cascade.loop import in_sentences
 from pepin.voice_cascade.stages import Played
@@ -91,16 +88,6 @@ def test_cues_carry_each_marker_s_share_of_its_part() -> None:
     assert (cue.turn, cue.index, cue.marker.name) == (4, 2, "greeting")
     assert cue.share == pytest.approx(len("Привет, ") / len("Привет, Артём!"))
     assert cues(1, 0, Part("", None, (Marker("gesture", "laugh", 0),)))[0].share == 0.0
-
-
-def test_a_cue_s_word_starts_at_its_share_of_the_part_on_the_player_s_clock() -> None:
-    """While the part's audio is still being made its length is at least 0.07 s a character;
-    once all of it is fed, the mark's own length."""
-    cue = Cue(Marker("gesture", "laugh", 10), 1, 0, 0.5)
-    assert part_length_s((2.0, 2.3), 20, spoken=False, char_s=0.07) == pytest.approx(1.4)
-    assert sync_s(cue, (2.0, 2.3), 20, spoken=False, char_s=0.07) == pytest.approx(2.7)
-    assert sync_s(cue, (2.0, 3.0), 20, spoken=True, char_s=0.07) == pytest.approx(2.5)
-    assert sync_s(cue, (2.0, 4.0), 20, spoken=False, char_s=0.07) == pytest.approx(3.0)
 
 
 def test_what_was_heard_counted_in_parts_is_counted_back_in_sentences() -> None:

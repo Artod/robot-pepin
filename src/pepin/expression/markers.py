@@ -30,13 +30,9 @@ written, for the log; a kept one carries its canonical name and argument (:class
 its spelling as written (``raw``).
 
 The parser needs every marker whole: the sentence splitter must not end or cut a sentence inside
-an open brace.
-
-:data:`CHAR_S` is the one estimate of a spoken character's seconds before a part's audio is all
-fed: the body's cues (:func:`sync_s`) and what a barge-in says was heard
-(:meth:`pepin.voice_cascade.player.Player.heard`) both read it. Owners after slice 0
-(gesticulation DESIGN.md §11): C owns the grammar here (``{name:arg}``, aliases, ``{!}``);
-B replaces :func:`sync_s` with its word clock; :class:`Marker`, :class:`Cue` and
+an open brace. When a cue's word is heard is the word clock's (:mod:`pepin.expression.forecast`,
+its one estimate of a character's seconds). Owners after slice 0 (gesticulation DESIGN.md §11):
+C owns the grammar here (``{name:arg}``, aliases, ``{!}``); :class:`Marker`, :class:`Cue` and
 :class:`Playout` are the contract.
 """
 
@@ -59,9 +55,6 @@ CLAUSE_END = re.compile(r"(?:^|[,;:\u2013\u2014-])\s*$")
 # The next clause boundary after a style marker that stood elsewhere: its punctuation and the
 # space after it (a hyphen inside a word is none).
 CLAUSE_BOUNDARY = re.compile(r"[,;:\u2013\u2014-]\s+")
-# Seconds a spoken character takes while a part's audio is still being made: a part's length
-# before its last chunk is fed (the one place this estimate lives; Player.heard reads it too).
-CHAR_S = 0.07
 # The persona's words for the voice's manner: a bare marker of these alone (in any number,
 # commas or spaces between) is a style; config/voice_cascade_persona.md lists the same words.
 STYLE_WORDS = frozenset(
@@ -282,23 +275,6 @@ def _joined(text: str, segment: str) -> str:
             return text.rstrip() + rest
         return text + rest
     return text + segment
-
-
-def part_length_s(
-    mark: tuple[float, float], chars: int, spoken: bool, char_s: float = CHAR_S
-) -> float:
-    """How long a part lasts on the player's clock: its mark's length once all its audio is
-    fed (``spoken``), else at least ``char_s`` a character of its text."""
-    length = mark[1] - mark[0]
-    return length if spoken else max(length, char_s * chars)
-
-
-def sync_s(
-    cue: Cue, mark: tuple[float, float], chars: int, spoken: bool, char_s: float = CHAR_S
-) -> float:
-    """The stream second a cue's word starts: its part's start plus its share of the part's
-    length (:func:`part_length_s`), the timing law of Player.heard."""
-    return mark[0] + cue.share * part_length_s(mark, chars, spoken, char_s)
 
 
 def cues(turn: int, index: int, part: Part) -> list[Cue]:
