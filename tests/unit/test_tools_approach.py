@@ -11,10 +11,18 @@ from typing import Any
 
 import pytest
 
+from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 from pepin.pixel_to_map import Box
 from pepin.tools import TOOLS, Result, Robot, ToolError
-from pepin.tools.clients import FaceSensorSightings, FaceSighting, HeadPose, ServiceDownError
-from pepin.tools.fakes import FakeEyes, FakeGoalServer, FakeNeck, FakeSightings, fake_robot
+from pepin.tools.clients import FaceSensorSightings, FaceSighting, HeadPose, Seen, ServiceDownError
+from pepin.tools.fakes import (
+    FakeCamera,
+    FakeEyes,
+    FakeGoalServer,
+    FakeNeck,
+    FakeSightings,
+    fake_robot,
+)
 
 
 def call(robot: Robot, /, **arguments: Any) -> Result:
@@ -109,7 +117,7 @@ def test_a_box_of_the_last_picture_is_a_thing_the_robot_faces() -> None:
     TOOLS.call("see", {}, robot)
     result = call(robot, target="412,300,470,352")
     assert result["ok"], result
-    assert eyes(robot).boxes == [Box(412, 300, 470, 352)]
+    assert eyes(robot).asked == [(Box(412, 300, 470, 352), RAW_LEFT)], "a snapshot's raw eye"
     (goal,) = sent(robot)
     stand = (goal["x"], goal["y"])
     assert math.dist(stand, (1.8, -1.0)) == pytest.approx(0.8, abs=0.01)
@@ -118,6 +126,29 @@ def test_a_box_of_the_last_picture_is_a_thing_the_robot_faces() -> None:
     assert result["found"]["kind"] == "thing"
     assert result["look"]["looked"] is True
     assert robot.seen is None, "the drive made the picture stale"
+
+
+def test_a_box_on_the_channel_s_picture_is_placed_in_its_rectified_pixels() -> None:
+    """see on the camera channel shows the rectified left eye: it records the head pose, that
+    pixel space and the frame's number, and the box is measured in that space as drawn."""
+    channel = FakeCamera(frame={"seq": 41, "still": True, "optics": RECTIFIED_LEFT})
+    robot = fake_robot(camera=channel)
+    shown = TOOLS.call("see", {}, robot)
+    assert shown["frame"]["optics"] == RECTIFIED_LEFT
+    assert robot.seen == Seen(HeadPose(0.0, 23.8), RECTIFIED_LEFT, 41)
+    assert call(robot, target="412,300,470,352")["ok"]
+    assert eyes(robot).asked == [(Box(412, 300, 470, 352), RECTIFIED_LEFT)]
+
+
+def test_a_picture_taken_while_the_head_still_moved_carries_no_box() -> None:
+    """A frame the channel marks not still was exposed while the head moved: no box drawn on
+    it is placed, and see() is asked again."""
+    moving = FakeCamera(frame={"seq": 42, "still": False, "optics": RECTIFIED_LEFT})
+    robot = fake_robot(camera=moving)
+    TOOLS.call("see", {}, robot)
+    assert robot.seen is None
+    assert "call see()" in call(robot, target="412,300,470,352")["why"]
+    assert not eyes(robot).asked and not sent(robot)
 
 
 def test_a_box_without_a_picture_or_after_the_head_turned_is_refused() -> None:

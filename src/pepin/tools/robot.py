@@ -36,8 +36,8 @@ from pepin.tools.clients import (
     GoalServer,
     GoalServerLink,
     HeadFace,
-    HeadPose,
     Neck,
+    Seen,
     ServiceCamera,
     Sightings,
     Speech,
@@ -102,8 +102,9 @@ class Robot:
     (the approach tool's).
 
     ``seen`` is the one thing a tool leaves for another: where the head pointed for the picture
-    ``see`` last showed the model, so a box the model draws on it is refused once the head has
-    turned (or the robot driven) since and the box would point at something else."""
+    ``see`` last showed the model and that picture's pixel space, so a box the model draws on it
+    is placed in the space it was drawn in, and refused once the head has turned (or the robot
+    driven) since and the box would point at something else."""
 
     goals: GoalServer
     neck: Neck
@@ -120,7 +121,7 @@ class Robot:
     animator: Animator | None = None  # the gesture engine, where one runs (the voice cascade)
     people: PeopleDoor | None = None  # person recognition, where it runs (the voice cascade)
     still_wait_s: float = STILL_WAIT_S  # see: the longest wait for the first still frame
-    seen: HeadPose | None = None
+    seen: Seen | None = None
 
     @classmethod
     def connect(

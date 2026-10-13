@@ -11,6 +11,7 @@ import pytest
 
 from pepin.mounts import OPTICAL_MOUNT
 from pepin.neck import NeckConfig, NeckJoint, NeckPivot, NeckReference
+from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 from pepin.pixel_to_map import (
     Box,
     CameraChain,
@@ -36,6 +37,7 @@ EYE = Eye.ideal(W, H, F, 0.06)
 LEVEL = Head(0.0, 0.0)
 ORIGIN = Pose2D(0.0, 0.0, 0.0)
 STEREO = StereoError(F * 0.06, 0.5)
+CHANNEL = RECTIFIED_LEFT  # the camera channel's frames: the pixel space of most boxes here
 
 
 def neck_at(z_m: float) -> NeckConfig:
@@ -58,8 +60,11 @@ def around(u: float, v: float, half: float = 20.0) -> Box:
     return Box(u - half, v - half, u + half, v + half)
 
 
+CENTRE = around(400, 300)
+
+
 def test_a_point_straight_ahead_at_two_metres() -> None:
-    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), LEVEL, ORIGIN)
+    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), LEVEL, ORIGIN, space=RAW_LEFT)
     assert found is not None
     assert (found.forward, found.left, found.z) == pytest.approx((2.0, 0.0, 1.2), abs=1e-9)
     assert found.range_m == pytest.approx(2.0)
@@ -69,7 +74,7 @@ def test_a_point_straight_ahead_at_two_metres() -> None:
 
 def test_the_robot_s_pose_carries_the_point_onto_the_map() -> None:
     standing = Pose2D(1.0, 2.0, math.radians(90.0))  # facing the map's +y
-    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), LEVEL, standing)
+    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), LEVEL, standing, space=RAW_LEFT)
     assert found is not None
     assert (found.x, found.y) == pytest.approx((1.0, 4.0))
     assert standing.to_base(found.x, found.y) == pytest.approx((2.0, 0.0))
@@ -77,7 +82,7 @@ def test_the_robot_s_pose_carries_the_point_onto_the_map() -> None:
 
 def test_a_point_thirty_degrees_left_with_the_head_panned_there() -> None:
     panned = Head(math.radians(30.0), 0.0)
-    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), panned, ORIGIN)
+    found = locate(EYE, CHAIN, around(400, 300), flat(2.0), panned, ORIGIN, space=RAW_LEFT)
     assert found is not None
     expected = (2.0 * math.cos(math.radians(30)), 2.0 * math.sin(math.radians(30)), 1.2)
     assert (found.forward, found.left, found.z) == pytest.approx(expected)
@@ -89,7 +94,7 @@ def test_a_point_thirty_degrees_left_of_a_straight_head() -> None:
     z along the optical axis, which is the forward distance for a level head."""
     u = 400.0 - F * math.tan(math.radians(30.0))
     forward = 2.0 * math.cos(math.radians(30.0))
-    found = locate(EYE, CHAIN, around(u, 300, 4.0), flat(forward), LEVEL, ORIGIN)
+    found = locate(EYE, CHAIN, around(u, 300, 4.0), flat(forward), LEVEL, ORIGIN, space=RAW_LEFT)
     assert found is not None
     assert (found.forward, found.left) == pytest.approx((forward, 1.0))
     assert found.bearing_deg == pytest.approx(30.0)
@@ -98,7 +103,7 @@ def test_a_point_thirty_degrees_left_of_a_straight_head() -> None:
 def test_a_tilted_head_finds_the_floor_where_its_axis_meets_it() -> None:
     down = Head(0.0, math.radians(30.0))
     axis_to_floor = 1.2 / math.sin(math.radians(30))
-    found = locate(EYE, CHAIN, around(400, 300), flat(axis_to_floor), down, ORIGIN)
+    found = locate(EYE, CHAIN, around(400, 300), flat(axis_to_floor), down, ORIGIN, space=RAW_LEFT)
     assert found is not None
     assert found.z == pytest.approx(0.0, abs=1e-6)  # the depth image is float32
     assert found.forward == pytest.approx(1.2 / math.tan(math.radians(30)))
@@ -115,7 +120,7 @@ def test_every_floor_pixel_lands_on_the_floor_whatever_the_head() -> None:
     z = np.where(down < -1e-6, -origin[2] / np.where(down < -1e-6, down, -1.0), np.nan)
     floor = DepthImage(z.astype(np.float32), "stereo", STEREO)
     for u, v in ((100, 450), (400, 300), (700, 580), (250, 200)):
-        found = locate(EYE, CHAIN, around(u, v, 3.0), floor, head, ORIGIN)
+        found = locate(EYE, CHAIN, around(u, v, 3.0), floor, head, ORIGIN, space=RAW_LEFT)
         assert found is not None
         assert found.z == pytest.approx(0.0, abs=0.02), (u, v)
 
@@ -166,6 +171,27 @@ def test_the_rectified_eye_is_the_depth_host_s_pinhole() -> None:
         ru, rv = eye.rectified(u, v)
         col, row = round(ru), round(rv)
         assert (map_u[row, col], map_v[row, col]) == pytest.approx((u, v), abs=1.0), (u, v)
+
+
+def test_a_rectified_box_is_placed_as_drawn_and_a_raw_one_rectified_once() -> None:
+    """The camera channel's frames ARE the rectified left eye: a box drawn on one is measured
+    where it was drawn, never rectified again; a snapshot's raw box is rectified once; a pixel
+    space without the stereo calibration is refused."""
+    from pepin.stereo import StereoCalibration
+
+    calibration = StereoCalibration.load(REPO / "config" / "stereo_calibration.json")
+    eye = Eye.from_calibration(calibration)
+    columns = np.tile(np.arange(eye.width, dtype=np.float32), (eye.height, 1))
+    depth = DepthImage(1.0 + columns / 1000.0, "stereo", STEREO)  # the depth names its column
+    box = around(120, 300, 6.0)  # near the edge, where the lens bends most
+    drawn = locate(eye, CHAIN, box, depth, LEVEL, ORIGIN, space=RECTIFIED_LEFT)
+    assert drawn is not None and drawn.depth_m == pytest.approx(1.12, abs=0.002)
+    u, _ = eye.rectified(120.0, 300.0)
+    assert abs(u - 120.0) > 3.0, "the raw eye's edge moves under rectification"
+    raw = locate(eye, CHAIN, box, depth, LEVEL, ORIGIN, space=RAW_LEFT)
+    assert raw is not None and raw.depth_m == pytest.approx(1.0 + u / 1000.0, abs=0.002)
+    with pytest.raises(LocateError, match="'undistorted' pixels"):
+        locate(eye, CHAIN, box, depth, LEVEL, ORIGIN, space="undistorted")
 
 
 def test_the_real_chain_puts_the_eye_where_the_configs_say() -> None:
@@ -223,22 +249,26 @@ def locator(*depths: Depth) -> Locator:
 
 
 def test_the_locator_takes_stereo_first_and_the_mono_network_where_stereo_is_blank() -> None:
-    found: Located = locator(Depth("stereo", 2.0), Depth("mono", 3.0)).locate(around(400, 300))
+    found: Located = locator(Depth("stereo", 2.0), Depth("mono", 3.0)).locate(CENTRE, CHANNEL)
     assert (found.source, found.forward) == ("stereo", pytest.approx(2.0))
-    found = locator(Depth("stereo", None), Depth("mono", 3.0)).locate(around(400, 300))
+    found = locator(Depth("stereo", None), Depth("mono", 3.0)).locate(CENTRE, CHANNEL)
     assert (found.source, found.forward) == ("mono", pytest.approx(3.0))
     assert found.sigma_m == pytest.approx(0.45)
-    found = locator(Depth("stereo", 2.0, down=True), Depth("mono", 3.0)).locate(around(400, 300))
+    found = locator(Depth("stereo", 2.0, down=True), Depth("mono", 3.0)).locate(CENTRE, CHANNEL)
     assert found.source == "mono"
 
 
 def test_the_locator_says_why_no_source_answered() -> None:
     with pytest.raises(LocateError) as refused:
-        locator(Depth("stereo", None), Depth("mono", 0.0, down=True)).locate(around(400, 300))
+        locator(Depth("stereo", None), Depth("mono", 0.0, down=True)).locate(CENTRE, CHANNEL)
     assert "stereo: no depth in that box" in str(refused.value)
     assert "mono: refused" in str(refused.value)
     with pytest.raises(LocateError, match="outside the 800x600 picture"):
-        locator(Depth("stereo", 2.0)).locate(Box(900, 10, 950, 40))
+        locator(Depth("stereo", 2.0)).locate(Box(900, 10, 950, 40), RECTIFIED_LEFT)
+    refusing = locator(Depth("stereo", 2.0))
+    with pytest.raises(LocateError, match="'raw' pixels cannot be placed"):
+        refusing.locate(around(400, 300), "raw")  # a one-eyed head's picture
+    assert isinstance(refusing.pairs, Pairs) and refusing.pairs.grabbed == 0
 
 
 # -- the live inputs, their remotes faked ---------------------------------------------------------

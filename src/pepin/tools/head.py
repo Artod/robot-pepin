@@ -10,7 +10,10 @@ judged here.
 ``see`` takes the FIRST STILL FRAME: the arbiter says from which moment (the board's clock) the
 head's pictures are still, and the camera (the perception service's ring) gives the newest frame
 exposed after it, waiting up to the robot's ``still_wait_s`` (0.3 s) in all, the head's own way
-there included; past it, the newest frame there is, marked ``still: false``.
+there included; past it, the newest frame there is, marked ``still: false``. It leaves the
+robot :class:`pepin.tools.clients.Seen`: the head pose and the picture's pixel space (the
+channel's rectified left eye, or a snapshot's raw one), so a box the model draws on that picture
+(``approach``) is placed in the space it was drawn in, and refused once the head has turned.
 """
 
 from __future__ import annotations
@@ -21,7 +24,8 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
-from pepin.tools.clients import HeadMove, HeadPose
+from pepin.perception.record import RAW_LEFT
+from pepin.tools.clients import HeadMove, HeadPose, Seen
 from pepin.tools.registry import Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Robot
 
@@ -93,7 +97,12 @@ def see(robot: Robot) -> Result:
         head = {"head": f"unknown: {error.why}"}
     left = max(0.0, robot.still_wait_s - (robot.clock() - start))
     picture = robot.camera.snapshot(not_before=still_from, wait_s=left)
-    robot.seen = pose  # a box drawn on this picture means something while the head stays
+    frame = picture.frame or {}
+    if pose is not None and frame.get("still", True):
+        # a box drawn on this picture means something while the head stays where it was
+        seq = frame.get("seq")
+        space = str(frame.get("optics") or RAW_LEFT)  # a snapshot: ustreamer's raw left eye
+        robot.seen = Seen(pose, space, int(seq) if isinstance(seq, int) else None)
     with contextlib.suppress(ToolError):
         robot.neck.keep()
     extra = {"frame": picture.frame} if picture.frame else {}

@@ -16,6 +16,7 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from pepin.perception.record import RAW_LEFT
 from pepin.stand_pose import Distances, Relation, Stand, Target, facing_from, stands
 from pepin.tools.drive import drive, pose_on_map
 from pepin.tools.registry import Result, ToolError, fail, tool
@@ -130,7 +131,7 @@ def _speaker(robot: Robot, here: Pose2D) -> Resolved:
         )
     from pepin.pixel_to_map import Box as Rectangle
 
-    located = _locate(robot, Rectangle(*sighting.box), "the person")
+    located = _locate(robot, Rectangle(*sighting.box), RAW_LEFT, "the person")
     yaw = sighting.head_yaw_deg if sighting.head_yaw_deg is not None else 0.0
     facing = facing_from(located.x, located.y, here, yaw)
     found: dict[str, Any] = {"kind": "person", "who": sighting.who, **located.as_dict()}
@@ -151,15 +152,15 @@ def _thing(robot: Robot, box: Box, distances: Distances) -> Resolved:
             "a box means a spot in see()'s picture, and there is none since the last drive:"
             " call see() and give the box from its picture; nothing moved"
         )
-    now = robot.neck.pose()
-    turned = max(abs(now.pan_deg - robot.seen.pan_deg), abs(now.tilt_deg - robot.seen.tilt_deg))
+    now, then = robot.neck.pose(), robot.seen.head
+    turned = max(abs(now.pan_deg - then.pan_deg), abs(now.tilt_deg - then.tilt_deg))
     if turned > distances.head_moved_deg:
         raise ToolError(
             f"the head has turned {turned:.0f} deg since that picture, so the box points at"
             " something else now: call see() again and give the box from the new picture;"
             " nothing moved"
         )
-    located = _locate(robot, box, "that box")
+    located = _locate(robot, box, robot.seen.space, "that box")
     found = {"kind": "thing", **located.as_dict()}
     label = f"the thing at ({located.x:.2f}, {located.y:.2f})"
     return Resolved(
@@ -170,12 +171,12 @@ def _thing(robot: Robot, box: Box, distances: Distances) -> Resolved:
     )
 
 
-def _locate(robot: Robot, box: Box, what: str) -> Located:
-    """``robot.eyes.locate`` with its refusal in the model's words."""
+def _locate(robot: Robot, box: Box, space: str, what: str) -> Located:
+    """``robot.eyes.locate`` of a box in pixels of ``space``, its refusal in the model's words."""
     from pepin.pixel_to_map import LocateError
 
     try:
-        return robot.eyes.locate(box)
+        return robot.eyes.locate(box, space)
     except LocateError as error:
         raise ToolError(f"cannot tell where {what} is: {error}; nothing moved") from error
 

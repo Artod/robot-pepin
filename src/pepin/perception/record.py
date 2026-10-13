@@ -21,12 +21,18 @@ from typing import Any
 Box = tuple[float, float, float, float]
 Point = tuple[float, float]
 
+# The pixel spaces a picture of the head is in, by the names camera_stream gives them: the
+# stereo calibration's shared pinhole (the camera channel's frames, the depth host's pairs), and
+# the left eye as ustreamer sends it (a snapshot, distorted and unrectified).
+RECTIFIED_LEFT = "rectified-left"
+RAW_LEFT = "raw-left"
+
 
 @dataclass(frozen=True)
 class Optics:
     """A pinhole without distortion at one image size, and the name of the pixel space it is
-    (``rectified-left``: the stereo calibration's shared pinhole; ``nominal-left``: the raw eye
-    with the vendor's field of view, while the head is uncalibrated)."""
+    (:data:`RECTIFIED_LEFT`: the stereo calibration's shared pinhole; :data:`RAW_LEFT`: the raw
+    eye with its pinhole only, while the head is uncalibrated)."""
 
     name: str
     fx: float

@@ -342,11 +342,13 @@ class FakeWorld:
 
 @dataclass
 class FakeCamera:
-    """A camera whose every picture is the same small JPEG."""
+    """A camera whose every picture is the same small JPEG: a snapshot's (no ``frame``), or
+    the camera channel's when ``frame`` says so (its number, still, optics)."""
 
     jpeg: bytes = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
     down: bool = False
     asked: list[tuple[float | None, float]] = field(default_factory=list)
+    frame: dict[str, Any] = field(default_factory=dict)
 
     def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
         """The picture (what it was asked for is kept)."""
@@ -355,7 +357,7 @@ class FakeCamera:
             raise ServiceDownError(
                 "camera", "http://10.0.0.187:8080", "timed out", "Is the board up?"
             )
-        return Image(self.jpeg, "image/jpeg", 800, 600)
+        return Image(self.jpeg, "image/jpeg", 800, 600, frame=dict(self.frame))
 
     def health(self) -> dict[str, Any]:
         """Streaming."""
@@ -502,7 +504,8 @@ class FakeSightings:
 class FakeEyes:
     """Points of the picture: whatever box is asked lies at map ``point`` (x, y, z), measured
     with ``sigma_m`` by ``source``, seen from where the fake goal server says the robot stands;
-    ``blank`` makes every box a :class:`pepin.pixel_to_map.LocateError` with that text."""
+    ``blank`` makes every box a :class:`pepin.pixel_to_map.LocateError` with that text. Each
+    box asked is kept with the pixel space it was given in (``asked``)."""
 
     goals: FakeGoalServer
     neck: FakeNeck
@@ -511,10 +514,12 @@ class FakeEyes:
     source: str = "stereo"
     blank: str | None = None
     boxes: list[Box] = field(default_factory=list)
+    asked: list[tuple[Box, str]] = field(default_factory=list)
 
-    def locate(self, box: Box) -> Located:
+    def locate(self, box: Box, space: str) -> Located:
         """The scripted point, with its range and bearing from the robot."""
         self.boxes.append(box)
+        self.asked.append((box, space))
         if self.blank is not None:
             raise LocateError(self.blank)
         where = self.goals.where()

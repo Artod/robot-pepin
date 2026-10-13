@@ -1,12 +1,16 @@
 """A point in the head camera's picture as a point on the map.
 
-The picture is the RAW left eye of the stereo head, the one ``see`` shows a model and the face
-sensor detects faces on. A box drawn on it becomes a map point in five steps:
+The picture is the stereo head's left eye in one of two pixel spaces, named with the box: the
+RECTIFIED left eye (:data:`pepin.perception.record.RECTIFIED_LEFT`: the camera channel's frames,
+which ``see`` shows a model and the perception service finds faces and people on, rectified by
+camera_stream already) or the RAW left eye (:data:`pepin.perception.record.RAW_LEFT`:
+ustreamer's snapshot, which ``see`` shows while ``vision.source`` is snapshot). A box drawn on
+it becomes a map point in five steps:
 
-1. the box's pixels are undistorted and rectified with the left lens and the rectification of
+1. a raw box's pixels are undistorted and rectified with the left lens and the rectification of
    ``config/stereo_calibration.json`` (:class:`Eye`: the same pinhole
-   :class:`pepin.stereo.Rectifier` hands the depth host, so a disparity and a ray speak of the
-   same pixel);
+   :class:`pepin.stereo.Rectifier` hands the depth host and camera_stream, so a disparity and a
+   ray speak of the same pixel); a rectified box is taken as it is, never rectified twice;
 2. a depth source answers a depth image of the rectified pair (:class:`DepthSource`: RAFT-Stereo's
    disparity through the laptop's depth host, z = fx * B / d, or Depth-Anything's metric mono), and
    the box's depth is the median of the valid depths in its central part;
@@ -44,6 +48,7 @@ import numpy.typing as npt
 
 from pepin.mounts import Mount, config_path, load_camera_mounts
 from pepin.neck import NeckAngles, NeckConfig, camera_pose
+from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 
 Array = npt.NDArray[np.float64]
 Image = npt.NDArray[np.uint8]
@@ -381,6 +386,19 @@ def box_depth(
     return median, spread, int(valid.size)
 
 
+def rectified(eye: Eye, box: Box, space: str) -> Box:
+    """``box`` in the rectified left eye's pixels: as it is when ``space`` is already that eye,
+    rectified once when it is the raw eye; :class:`LocateError` for any other space."""
+    if space == RECTIFIED_LEFT:
+        return box
+    if space == RAW_LEFT:
+        return eye.rectified_box(box)
+    raise LocateError(
+        f"a box in {space!r} pixels cannot be placed: only the rectified left eye (the camera"
+        " channel's frames) or the raw left eye (a snapshot) carries the stereo calibration"
+    )
+
+
 def locate(
     eye: Eye,
     chain: CameraChain,
@@ -388,11 +406,14 @@ def locate(
     depth: DepthImage,
     head: Head,
     pose: Pose2D,
+    *,
+    space: str,
     inner: float = INNER,
     min_valid: float = MIN_VALID,
 ) -> Located | None:
-    """The map point under raw-eye ``box``, or None when ``depth`` has too little there."""
-    rect = eye.rectified_box(box)
+    """The map point under ``box`` (pixels of ``space``: :data:`RECTIFIED_LEFT` or
+    :data:`RAW_LEFT`), or None when ``depth`` has too little there."""
+    rect = rectified(eye, box, space)
     measured = box_depth(depth, rect, inner, min_valid)
     if measured is None:
         return None
@@ -495,7 +516,8 @@ class CameraGeometry:
 
 
 class Locator:
-    """The primitive with its inputs: a box of the raw left eye in, a :class:`Located` out.
+    """The primitive with its inputs: a box of the left eye (rectified or raw, named with it)
+    in, a :class:`Located` out.
 
     ``depths`` are asked in order; the first whose depth covers the box answers (stereo first,
     the mono network where stereo has no texture), and a source that is down or blank there is
@@ -524,8 +546,10 @@ class Locator:
             self._geometry = CameraGeometry.load()
         return self._geometry
 
-    def locate(self, box: Box) -> Located:
-        """Where the thing under ``box`` is now; :class:`LocateError` saying why not."""
+    def locate(self, box: Box, space: str) -> Located:
+        """Where the thing under ``box`` (pixels of ``space``: :data:`RECTIFIED_LEFT`, the
+        camera channel's, or :data:`RAW_LEFT`, a snapshot's) is now; :class:`LocateError`
+        saying why not."""
         geometry = self.geometry
         eye = geometry.eye
         if not box.inside(eye.width, eye.height):
@@ -533,6 +557,7 @@ class Locator:
                 f"the box {box.u0:.0f},{box.v0:.0f},{box.u1:.0f},{box.v1:.0f} lies outside the"
                 f" {eye.width}x{eye.height} picture"
             )
+        rectified(eye, box, space)  # a space without the calibration is refused before any grab
         head = self.head_source.head()
         pose = self.pose_source.pose()
         pair = self.pairs.grab()
@@ -544,7 +569,10 @@ class Locator:
             except LocateError as error:
                 tried.append(f"{source.name}: {error}")
                 continue
-            found = locate(eye, geometry.chain, box, depth, head, pose, self.inner, self.min_valid)
+            found = locate(
+                eye, geometry.chain, box, depth, head, pose,
+                space=space, inner=self.inner, min_valid=self.min_valid,
+            )  # fmt: skip
             if found is not None:
                 return found
             tried.append(f"{source.name}: no depth in that box (a blank or too distant surface)")

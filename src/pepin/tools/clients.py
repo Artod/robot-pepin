@@ -163,6 +163,18 @@ class HeadPose:
 
 
 @dataclass(frozen=True)
+class Seen:
+    """The picture ``see`` last showed the model: where the head pointed for it, the pixel space
+    a box drawn on it is in (the camera channel's rectified left eye, or the raw left eye of a
+    snapshot: :mod:`pepin.perception.record`'s names) and the channel's frame number (None for
+    a snapshot)."""
+
+    head: HeadPose
+    space: str
+    seq: int | None = None
+
+
+@dataclass(frozen=True)
 class HeadReach:
     """How far the head turns: pan from ``pan_right_deg`` (negative) to ``pan_left_deg``, tilt
     from ``tilt_up_deg`` (negative, above level) to ``tilt_down_deg``."""
@@ -932,9 +944,11 @@ class FaceSensorSightings:
 class Eyes(Protocol):
     """Points of the picture as points of the map (:class:`pepin.pixel_to_map.Locator`)."""
 
-    def locate(self, box: Box) -> Located:
-        """Where the thing under ``box`` (pixels of the raw left eye) is now;
-        :class:`pepin.pixel_to_map.LocateError` saying why not."""
+    def locate(self, box: Box, space: str) -> Located:
+        """Where the thing under ``box`` is now, the box in pixels of ``space`` (the rectified
+        left eye of the camera channel's frames, or the raw left eye of a snapshot: the one it
+        was drawn on, rectified here only when raw); :class:`pepin.pixel_to_map.LocateError`
+        saying why not."""
         ...
 
     def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:

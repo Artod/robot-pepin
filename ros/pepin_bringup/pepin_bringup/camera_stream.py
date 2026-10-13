@@ -113,6 +113,7 @@ from pepin.mjpeg import STAMP_MODES, GrabPeriod, capture_time, has_grab, parts, 
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
 from pepin.perception import CONTAINER_URL
 from pepin.perception.feed import FrameFeed
+from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 from pepin.perception.record import Optics as ChannelOptics
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import (
@@ -601,11 +602,11 @@ class CameraStream(Node):
         # a straightened mono picture, or a raw one (its pinhole only: angles through it are
         # approximate, the lens's distortion left in the picture).
         if rectifier is not None:
-            space = "rectified-left"
+            space = RECTIFIED_LEFT
         elif maps is not None:
             space = "undistorted"
         else:
-            space = "raw-left" if self._rig is not None else "raw"
+            space = RAW_LEFT if self._rig is not None else "raw"
         channel = ChannelOptics(space, lens.fx, lens.fy, lens.cx, lens.cy, size[0], size[1])
         return Published(size, info, lens, maps, rectifier, right, channel.header())
 
