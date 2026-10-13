@@ -136,20 +136,21 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         at = clip.offset_s - start
         if clip.part == "arm":
             slow = clip
-            planned = part.plan(slow, args.name)
-            if isinstance(planned, str):
-                print(f"  arm: refused here: {planned}")
+            plan = part.plan(slow, args.name)
+            if isinstance(plan, str):
+                print(f"  arm: refused here: {plan}")
                 return 3
-            trajectory = planned
+            planned = trajectory = plan.trajectory
             seconds = planned.knots[-1].t_s
             stretched_by = (
-                f" (the clip's {slow.duration_s:.1f} s stretched by the caps)"
+                f" (the clip's {slow.duration_s:.1f} s stretched by the caps x{plan.stretch:.2f})"
                 if seconds > slow.duration_s + 0.05
                 else ""
             )
             print(
                 f"  arm at +{at:.2f} s: {len(planned.knots)} knots over {seconds:.1f} s"
-                f"{stretched_by} at speed {args.speed}, then rest; peak {_peak(planned, motion)}"
+                f"{stretched_by} at speed {args.speed}, stroke at {plan.stroke_s:.2f} s, then"
+                f" rest; peak {_peak(planned, motion)}"
             )
         elif clip.part == "face":
             shown = [f"{e.name} for {e.hold_s or 2.0:.1f} s" for e in clip.events]
@@ -261,10 +262,11 @@ def nudge(args: argparse.Namespace, motion: ArmMotion) -> int:
                   (0.0, args.deg, args.deg, 0.0))  # fmt: skip
     part = ArmPart(_NoLink(), motion, speed_scale=args.speed)
     clip = stretched(Clip("arm", 0.0, 0.0, seconds, (track,)), 1.0 / args.speed)
-    planned = part.plan(clip, f"nudge-{args.joint}")
-    if isinstance(planned, str):
-        print(f"refused here: {planned}")
+    plan = part.plan(clip, f"nudge-{args.joint}")
+    if isinstance(plan, str):
+        print(f"refused here: {plan}")
         return 3
+    planned = plan.trajectory
     print(f"{args.joint} {args.deg:+.1f} deg and back over {clip.duration_s:.1f} s at speed"
           f" {args.speed} ({len(planned.knots)} knots), then rest and torque off")  # fmt: skip
     if args.dry_run:

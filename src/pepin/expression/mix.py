@@ -25,6 +25,9 @@ CAP_SLACK = 1.0 + 1e-6  # float rounding a knot check forgives
 STRETCH_MARGIN = (
     0.98  # a stretch aims this far under the caps: the wire rounds knots to 1 ms and 0.01 deg
 )
+# A preparation compressed to fit its lead runs at this share of the caps, never at them: an
+# additive stroke over it (a wave, a wrist beat) then keeps the clip under the caps unstretched
+PREP_CAPS = 0.9
 
 
 def min_jerk(s: float) -> float:

@@ -143,8 +143,9 @@ def wave(amp: float = 8.0, seconds: float = 2.0, speed: float = 1.0, tid: str = 
     track = Track("wrist_flex", "additive", (0.0, 0.3 * seconds, 0.7 * seconds, seconds),
                   (0.0, amp, -amp, 0.0))  # fmt: skip
     part = ArmPart(FakeArmLink(), MOTION, speed_scale=speed)
-    planned = part.plan(Clip("arm", 0.0, 0.0, seconds, (track,)), "wave")
-    assert isinstance(planned, Trajectory), planned
+    plan = part.plan(Clip("arm", 0.0, 0.0, seconds, (track,)), "wave")
+    assert not isinstance(plan, str), plan
+    planned = plan.trajectory
     return Trajectory(tid, planned.source, planned.knots, planned.then, planned.hold_s, "wave",
                       planned.speed_scale)  # fmt: skip
 

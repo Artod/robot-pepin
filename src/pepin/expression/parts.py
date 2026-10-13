@@ -1,11 +1,14 @@
 """The body parts as the gesture engine plays them (:class:`pepin.expression.executors.Executor`).
 
-* :class:`ArmPart`: a clip sampled into joint knots over the rest pose, checked against the
-  arm's limits and caps (scaled by ``speed_scale``: speeds by it, accelerations by its square,
-  as a clip stretched by its inverse moves), and sent to the board in one ``arm_trajectory``;
-  the board plays it, then rests and lets go of the torque by itself. A clip outside the
-  limits or the caps is refused here with the reason, never clamped (the board would refuse it
-  too). Fading the gesture layer is ``arm_rest``.
+* :class:`ArmPart`: a clip sampled into joint knots over a base pose (rest, or the pose the
+  last trajectory held: a unit), stretched in time where it would break the arm's caps (scaled
+  by ``speed_scale``: speeds by it, accelerations by its square, as a clip stretched by its
+  inverse moves), checked against the limits, and sent to the board in one
+  ``arm_trajectory``; the board plays it (joining it from where the arm is by its own
+  approach), then rests and lets go of the torque, or holds the last pose (``Clip.then``). Its
+  plan (:class:`Planned`) says when the stroke lands: the approach plus the stretched stroke. A
+  clip outside the limits is refused here with the reason, never clamped (the board would
+  refuse it too). Fading the gesture layer is ``arm_rest``. B owns the arm's units here.
 * :class:`FacePart`: a clip's events as timed expressions of the head server's face.
 * :class:`HeadPart`: a clip's keyframes as a relative ``clip`` overlay of the gaze arbiter
   (:mod:`pepin.expression.head`, :func:`clip_look`) on top of whatever holds the head (the
@@ -26,15 +29,41 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol
 
+from pepin.arm_driver import ARRIVED_DEG
 from pepin.arm_motion import ArmMotion
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.executors import FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
-from pepin.expression.mix import STRETCH_MARGIN, check_knots, sample, stretch_to_caps, track_value
+from pepin.expression.mix import (
+    STRETCH_MARGIN,
+    check_knots,
+    min_jerk_time,
+    sample,
+    stretch_to_caps,
+    track_value,
+)
 from pepin.expression.trajectory import JOINTS, ArmLink, Knot, Trajectory
 from pepin.neck import NeckMotion
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass(frozen=True)
+class Planned:
+    """A clip as the board will play it: the trajectory, the board's approach from where the arm
+    is to its first knot (seconds; 0 when it is there), the factor the caps stretched the clip
+    by (1: none), and when its stroke lands after the board takes it (the approach plus the
+    stretched stroke): the one stroke time the engine schedules and logs."""
+
+    trajectory: Trajectory
+    approach_s: float
+    stretch: float
+    stroke_s: float
+
+    @property
+    def seconds(self) -> float:
+        """The whole motion: the approach and the trajectory."""
+        return self.approach_s + self.trajectory.knots[-1].t_s
 
 
 class ArmPart:
@@ -62,6 +91,7 @@ class ArmPart:
         self.source = source
         self._ids = itertools.count(1)
         self.base = dict(motion.rest_deg)
+        self.held: dict[str, float] | None = None  # the pose the last trajectory holds (a unit)
 
     @property
     def latency_s(self) -> float:
@@ -77,48 +107,77 @@ class ArmPart:
             return f"the arm's servos are silent: {status.error or 'no reply'}"
         return None
 
-    def plan(self, clip: Clip, name: str = "") -> Trajectory | str:
-        """``clip`` as the trajectory to send, or why it cannot be played."""
+    def plan(
+        self, clip: Clip, name: str = "", *, base: dict[str, float] | None = None
+    ) -> Planned | str:
+        """``clip`` as the trajectory to send over ``base`` (the rest pose by default; a unit's
+        next stroke: :attr:`held`) and when its stroke lands, or why it cannot be played."""
         if clip.part != "arm":
             return f"an {clip.part} clip is not the arm's"
         motion = self.motion
         max_speed = motion.max_speed_deg_s * self.speed_scale
         max_acc = motion.max_acc_deg_s2 * self.speed_scale**2
         # a clip stretched by 1 / speed_scale needs no more knots than at full speed
-        knots = stretch_to_caps(
-            sample(clip, self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale)),
-            max_speed * STRETCH_MARGIN,
-            max_acc * STRETCH_MARGIN,
-        )  # a stroke too fast for the caps takes longer rather than being refused
+        sampled = sample(clip, base or self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
+        knots = stretch_to_caps(sampled, max_speed * STRETCH_MARGIN, max_acc * STRETCH_MARGIN)
+        # a stroke too fast for the caps takes longer rather than being refused
         if knots[-1][0] > motion.max_duration_s:
             return f"{knots[-1][0]:.1f} s is longer than the board's {motion.max_duration_s:.0f} s"
         refusal = check_knots(knots, motion.limits(), max_speed, max_acc, JOINTS)
         if refusal is not None:
             return refusal
-        return Trajectory(
+        span = sampled[-1][0] - sampled[0][0]
+        stretch = (knots[-1][0] - knots[0][0]) / span if span > 0 else 1.0
+        trajectory = Trajectory(
             f"{name or 'gesture'}-{next(self._ids)}",
             self.source,
             tuple(Knot(round(t, 3), tuple(round(d, 2) for d in deg)) for t, deg in knots),
-            "rest",
-            0.0,
+            clip.then,
+            clip.hold_s if clip.then == "hold" else 0.0,
             name,
             self.speed_scale,
         )
+        approach = self.approach_s(knots[0][1])
+        return Planned(trajectory, approach, stretch, approach + stretch * clip.stroke_s)
+
+    def approach_s(self, first: tuple[float, ...] | list[float]) -> float:
+        """The board's approach from where the arm is (its newest state line) to ``first``: none
+        within ``ARRIVED_DEG`` of it, or when the arm's place is unknown."""
+        status = self.link.status()
+        if status is None or status.deg is None:
+            return 0.0
+        travel = max(abs(a - b) for a, b in zip(status.deg, first, strict=True))
+        if travel <= ARRIVED_DEG:
+            return 0.0
+        scale = self.speed_scale
+        return min_jerk_time(
+            travel, self.motion.max_speed_deg_s * scale, self.motion.max_acc_deg_s2 * scale**2
+        )
+
+    def rest_s(self) -> float:
+        """How long the board takes the arm to rest from where it is (its newest state line)."""
+        return self.approach_s(self.motion.rest())
 
     def play(self, clip: Clip) -> Outcome:
-        """Send ``clip`` to the board; refused here when it breaks the limits or the caps."""
-        planned = self.plan(clip)
+        """Send ``clip`` to the board; refused here when it breaks the limits. Its stroke is the
+        plan's (approach and stretch included)."""
+        planned = self.plan(clip, base=self.held)  # from the pose a unit holds, else rest
         if isinstance(planned, str):
             return Outcome(False, planned)
-        self.link.send(planned)
-        return Outcome(True, f"sent as {planned.id}", planned.knots[-1].t_s)
+        trajectory = planned.trajectory
+        self.link.send(trajectory)
+        last = trajectory.knots[-1].deg
+        self.held = dict(zip(JOINTS, last, strict=True)) if clip.then == "hold" else None
+        return Outcome(True, f"sent as {trajectory.id}", planned.seconds, planned.stroke_s)
 
     def fade(self, layer: Layer, seconds: float) -> None:
         """The gesture (or idle) layer let go: the board takes the arm to rest at its caps."""
+        self.held = None
         self.link.rest()
 
     def rest(self) -> None:
         """To rest, then torque off (the board's)."""
+        self.held = None
         self.link.rest()
 
 

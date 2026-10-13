@@ -44,11 +44,14 @@ NO_BODY = "the wheels make no expressive motion here: no robot"
 
 @dataclass(frozen=True)
 class Outcome:
-    """How a request to play went: started (or refused, and why), and for how long it plays."""
+    """How a request to play went: started (or refused, and why), for how long it plays, and
+    when its stroke lands from now as the part planned it (None: where its clip says; the arm
+    adds the board's approach and its stretch to the caps)."""
 
     ok: bool
     why: str = ""
     seconds: float = 0.0
+    stroke_s: float | None = None
 
 
 class Executor(Protocol):

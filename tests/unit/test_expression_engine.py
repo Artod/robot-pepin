@@ -28,9 +28,9 @@ from pepin.expression.mix import (
     stretched,
     track_value,
 )
-from pepin.expression.parts import Absent, ArmPart, FacePart
+from pepin.expression.parts import Absent, ArmPart, FacePart, Planned
 from pepin.expression.render import BookRenderer, WeightedChooser
-from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
+from pepin.expression.trajectory import JOINTS, ArmStatus
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 MOTION = load_arm_motion(CONFIG / "arm.json")
@@ -250,8 +250,8 @@ def test_every_intent_s_arm_clip_keeps_the_caps_at_full_speed_and_at_the_first_t
             for clip in performance.clips:
                 if clip.part == "arm":
                     where = (intent, variant, seed)
-                    assert isinstance(fast.plan(clip), Trajectory), (where, fast.plan(clip))
-                    assert isinstance(slow.plan(stretched(clip, 5.0)), Trajectory), where
+                    assert isinstance(fast.plan(clip), Planned), (where, fast.plan(clip))
+                    assert isinstance(slow.plan(stretched(clip, 5.0)), Planned), where
 
 
 def test_every_arm_clip_fits_the_board_s_longest_trajectory_at_the_first_test_s_speed() -> None:
