@@ -557,7 +557,7 @@ def main() -> int:
     people = robot_people(finder)  # voices only without the robot's camera
     robot.people = people  # the remember_person / forget_person tools' door
     # The wheels' one owner for the gaze's turn and the gestures' body (no I/O until a motion;
-    # each moves only behind its own flag); the guard stops them when the person speaks.
+    # each moves only behind its own flag); the guard stops a gesture's when the person speaks.
     wheels: WheelsExecutor | None = None
     if on_robot:
         try:
