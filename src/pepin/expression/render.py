@@ -8,6 +8,9 @@ a logged seed (and variant) replays a performance exactly: ``scripts/gesture.py 
 of one variant repeats it, its parameters still drawn afresh). A step whose part is not ready,
 or whose pose has not been taught, is left out; when every optional step is left out by chance,
 the most likely one that can play still plays.
+
+Owners after slice 0: B (the variants a scene allows by their ``needs`` and its lead, the
+ladder), then C (the resolver of ``@`` references: cells, loci, places, the person's bearing).
 """
 
 from __future__ import annotations

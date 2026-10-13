@@ -19,13 +19,18 @@ Whom to look at is :mod:`pepin.expression.policy`'s over the people tracked
 (:mod:`pepin.expression.tracks`), and how to turn there is :class:`GazePlan`'s split between the
 head and the wheels: the head alone within the forward arc, the body turned toward a person past
 it when the wheels may move, and the head as far as it reaches when they may not.
+
+What the gesture engine may know of attention is :class:`Attention` (read through
+:class:`AttentionView`, never written), and the one thing it is asked is :class:`ArmRelease`;
+:func:`head_refusal` and :func:`arm_refusal` are the rules it keeps (the contract's; owned by
+none of the gesticulation slices).
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol
 
 from pepin.audio_link import DoaReading
 from pepin.gaze import Aim, Speed
@@ -199,3 +204,77 @@ class GazePlan:
 
     body_rad: float
     head: Aim
+
+
+# What the attention engine is doing, as the gesture engine reads it: no conversation (or the
+# switch off), a drive, looking for the person engaged (a seek's stops, or a check of a new
+# voice), the body turning toward them, the head on their face, or on their voice (nobody seen)
+AttentionPhase = Literal["idle", "paused", "seek", "check", "turning", "track", "voice"]
+HEAD_SEEN_S = 1.0  # a gesture overlay plays only on a person seen within this (DESIGN.md §8.4)
+
+
+@dataclass(frozen=True)
+class Attention:
+    """A read-only snapshot of the attention engine (the speaker gaze), laptop monotonic clock:
+    its phase and since when, whether it has eyes (a face finder: frames to protect), when the
+    person engaged was last seen by a face or a body (None: never), their bearing and tilt
+    (degrees, the cart's frame, + left, + down) and rough distance (None: unknown), whether they
+    stand past the forward arc (a body turn is wanted) and when their first clear face of the
+    conversation was found."""
+
+    phase: AttentionPhase = "idle"
+    since_s: float = 0.0
+    eyes: bool = False
+    seen_s: float | None = None
+    bearing_deg: float | None = None
+    tilt_deg: float | None = None
+    distance_m: float | None = None
+    past_arc: bool = False
+    first_face_s: float | None = None
+
+
+NO_ATTENTION = Attention()  # the speaker gaze off, or no conversation: nothing to keep clear
+
+
+class AttentionView(Protocol):
+    """The attention engine as the gesture engine reads it (never writes): the latest snapshot,
+    from any thread."""
+
+    def attention(self) -> Attention:
+        """The snapshot now (:data:`NO_ATTENTION` while the gaze is off)."""
+        ...
+
+
+class ArmRelease(Protocol):
+    """The one arbitration between the arm and the wheels: the gaze's body turn asks the gesture
+    engine for the arm first (the board refuses the wheels while the arm moves or holds)."""
+
+    def release_arm(self, why: str) -> float:
+        """Send the arm to rest now (no new arm motion until the turn is over); the seconds until
+        it is there (0: it is already). Never blocks on the arm."""
+        ...
+
+
+def head_refusal(view: Attention, now: float) -> str | None:
+    """Why a gesture overlay may not take the head now, None when it may: while attention looks
+    for the person (a seek, a check), turns the body, or has not seen them within
+    :data:`HEAD_SEEN_S`, a gesture's skipped frames would blind it (the idle layer's still
+    overlays never do). No rule without eyes, a conversation, or during a drive."""
+    if not view.eyes or view.phase in ("idle", "paused"):
+        return None
+    if view.phase != "track":
+        return f"attention: {view.phase}"
+    if view.seen_s is None or now - view.seen_s > HEAD_SEEN_S:
+        unseen = "never" if view.seen_s is None else f"{now - view.seen_s:.1f} s"
+        return f"attention: the person unseen for {unseen}"
+    return None
+
+
+def arm_refusal(view: Attention) -> str | None:
+    """Why no arm motion may start now, None when it may: the person engaged stands past the
+    forward arc or the body turns toward them (the board would refuse the wheels or the arm)."""
+    if view.phase == "turning":
+        return "attention: the body turns toward the person"
+    if view.past_arc:
+        return "attention: the person stands past the forward arc"
+    return None

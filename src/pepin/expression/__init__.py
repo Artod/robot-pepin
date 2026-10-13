@@ -24,4 +24,20 @@ while nothing else plays). The voice cascade drives it through
 :class:`pepin.expression.conversation.ConversationObserver`; two live switches, ``gestures``
 and ``speaker_gaze`` (:class:`pepin.expression.conversation.LiveFlag`), turn the two features
 on and off.
+
+Co-speech gesticulation is built in slices on one contract (the engine's requests, anchors,
+priority table and reservations, :mod:`pepin.expression.schedule`; the conversation's seams,
+:mod:`pepin.expression.conversation`; attention, :mod:`pepin.expression.speaker`). Who owns what
+on it:
+
+* A (alive): ``prosody.py``, ``listeners.py``, config/expression.json's ``pulse``, ``moments``
+  and ``quiet`` blocks, the book's ``moments`` and ``idle`` entries;
+* B (on the word): ``forecast.py``, the internals of :mod:`pepin.expression.schedule` (the word
+  clock, the ladder, units), :mod:`pepin.expression.render`, :mod:`pepin.expression.parts`,
+  :mod:`pepin.expression.mix`, :mod:`pepin.voice_cascade.text` and the brains' ``text_ahead``;
+* C (meaning): the grammar of :mod:`pepin.expression.markers`, the book's ``space``, poses,
+  compositions and ``aliases``, the resolver (into :mod:`pepin.expression.render` after B), the
+  persona;
+* nobody of them: :mod:`pepin.expression.animator`, :mod:`pepin.voice_cascade.loop`,
+  :mod:`pepin.expression.tracker` and the contract's types.
 """

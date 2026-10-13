@@ -520,6 +520,12 @@ class People:
     def voice_started(self, turn: int) -> None:
         """Nothing."""
 
+    def part_started(self, turn: int, index: int, stream_s: float) -> None:
+        """Nothing."""
+
+    def text_ahead(self, turn: int, sentence: int, text: str) -> None:
+        """Nothing."""
+
     def part_spoken(self, turn: int, index: int) -> None:
         """Nothing."""
 

@@ -17,7 +17,7 @@ from pepin.audio_link import DoaReading
 from pepin.base_link import BaseState, StateListener
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.clearance import View
-from pepin.expression.conversation import Heard
+from pepin.expression.conversation import Heard, VoiceChunk
 from pepin.expression.executors import (
     Headings,
     Outcome,
@@ -28,7 +28,10 @@ from pepin.expression.executors import (
 )
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
+from pepin.expression.schedule import Nucleus
 from pepin.expression.speaker import (
+    NO_ATTENTION,
+    Attention,
     BodySighting,
     Ease,
     FaceFrame,
@@ -89,6 +92,14 @@ class RecordingObserver:
     def part_spoken(self, turn: int, index: int) -> None:
         """Recorded."""
         self.calls.append(("part_spoken", (turn, index)))
+
+    def part_started(self, turn: int, index: int, stream_s: float) -> None:
+        """Recorded."""
+        self.calls.append(("part_started", (turn, index, stream_s)))
+
+    def text_ahead(self, turn: int, sentence: int, text: str) -> None:
+        """Recorded."""
+        self.calls.append(("text_ahead", (turn, sentence, text)))
 
     def reply_cut(self, turn: int) -> None:
         """Recorded."""
@@ -391,6 +402,62 @@ class FakeWheels:
         done(report)
 
 
+@dataclass
+class FakeAttention:
+    """The attention engine as the gesture engine reads it: ``view`` is the snapshot, set by the
+    test (:meth:`be` changes some of its fields)."""
+
+    view: Attention = NO_ATTENTION
+
+    def attention(self) -> Attention:
+        """As scripted."""
+        return self.view
+
+    def be(self, **fields: Any) -> FakeAttention:
+        """The snapshot with ``fields`` changed; returns self so it chains."""
+        self.view = replace(self.view, **fields)
+        return self
+
+
+@dataclass
+class FakeNuclei:
+    """The prosody listener's nuclei as scripted, by (turn, part); ``complete`` the parts whose
+    whole audio was analysed."""
+
+    found: dict[tuple[int, int], list[Nucleus]] = field(default_factory=dict)
+    done: set[tuple[int, int]] = field(default_factory=set)
+
+    def nuclei(self, turn: int, index: int) -> list[Nucleus]:
+        """The part's nuclei so far."""
+        return list(self.found.get((turn, index), ()))
+
+    def complete(self, turn: int, index: int) -> bool:
+        """As scripted."""
+        return (turn, index) in self.done
+
+
+@dataclass
+class FakePlaces:
+    """The robot's places as bearings from where it stands (degrees, + left), as scripted."""
+
+    bearings: dict[str, float] = field(default_factory=dict)
+
+    def bearing_deg(self, name: str) -> float | None:
+        """As scripted; None for a place it lacks."""
+        return self.bearings.get(name)
+
+
+@dataclass
+class RecordingTap:
+    """An audio tap that keeps every chunk it hears."""
+
+    chunks: list[VoiceChunk] = field(default_factory=list)
+
+    def audio(self, chunk: VoiceChunk) -> None:
+        """Kept."""
+        self.chunks.append(chunk)
+
+
 class FakeClock:
     """A clock that moves only when told."""
 
@@ -565,6 +632,8 @@ class FakeView:
 
 
 if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisfy their seams
+    from pepin.expression.animator import GestureEngine
+    from pepin.expression.tracker import SpeakerGazeWorker
 
     def _conforms() -> None:
         from pepin.audio_link import AudioClient
@@ -596,3 +665,16 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         views: list[Surroundings] = [FakeView(FakeBase(FakeClock())), GoalServerView()]
         del playout, observers, flag, parts, faces, arm, door, finder, doa, wheels, heads
         del bases, views
+
+    def _contract(engine: GestureEngine, gaze: SpeakerGazeWorker) -> None:
+        """The gesticulation contract's seams: the fakes, the engine and the gaze fit them."""
+        from pepin.expression.conversation import AudioTap
+        from pepin.expression.schedule import Nuclei, Places
+        from pepin.expression.speaker import ArmRelease, AttentionView
+
+        attention: list[AttentionView] = [FakeAttention(), gaze]
+        arms: list[ArmRelease] = [engine]
+        taps: list[AudioTap] = [RecordingTap(), engine]
+        nuclei: Nuclei = FakeNuclei()
+        places: Places = FakePlaces()
+        del attention, arms, taps, nuclei, places

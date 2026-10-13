@@ -1347,3 +1347,131 @@ def test_a_wheel_report_names_what_the_stub_refuses() -> None:
 def test_the_fake_finder_still_scripts_frames() -> None:
     finder = FakeFaceFinder(deque([frame(face(1.0)), None]))
     assert finder.look() == frame(face(1.0)) and finder.look() is None and finder.looks == 2
+
+
+# ---- the gesture engine reads attention; the body's turn asks for the arm ----------
+def test_a_frame_a_gesture_skips_spends_no_seek_stop_and_no_check() -> None:
+    """2026-10-12 critic: a frame skipped while a gesture overlay played counted as a miss, so a
+    seek swept away from the caller while the hand waved and a check went back unlooked. Now it
+    is no look: counted by its cause and taken again BLIND_RETRY_S later."""
+    r = rig()
+    r.person(-50.0, tilt_deg=3.0)
+    read = r.wake(-15.0, peak_db=-22.0)
+    assert r.machine.phase == "seek" and r.machine.attention(read).phase == "seek"
+    r.door.view = replace(r.door.view, overlay=GESTURE) if r.door.view else None
+    for k in range(10):
+        r.machine.tick(read + 0.1 * k)
+    assert r.scene.looks == 0 and r.aimed() == [(-15.0, 3.0)], "no stop spent, no sweep"
+    assert r.machine.counts["frames_skipped_gesture"] == 10
+    assert r.machine.next_frame == pytest.approx(read + 0.9 + 0.1)
+    r.door.view = replace(r.door.view, overlay="") if r.door.view else None
+    r.run(read + 3.0, read + 1.0)
+    assert r.machine.phase == "track" and r.aimed()[-1] == (-50.0, 3.0)
+
+
+def test_attention_tells_the_engine_its_phase_whom_it_saw_when_and_the_arc() -> None:
+    r = rig(wheels=FakeWheels())
+    assert r.machine.attention(0.0).phase == "idle"
+    r.person(60.0)
+    read = r.wake(60.0)
+    seek = r.machine.attention(read)
+    assert seek.phase == "seek" and seek.eyes and seek.seen_s is None and not seek.past_arc
+    r.machine.tick(read)
+    seen = r.machine.attention(read)
+    assert seen.phase == "track" and seen.seen_s == read and seen.first_face_s == read
+    assert seen.bearing_deg == pytest.approx(60.0) and seen.since_s == read
+    r.say(-60.0, 3.0, 4.0, "в эфире новости")
+    assert r.machine.attention(4.1).phase == "check"
+    behind = rig(wheels=FakeWheels())
+    behind.person(150.0)
+    turning = behind.machine.attention(behind.wake(150.0))
+    assert turning.phase == "turning" and turning.past_arc
+
+
+class Arm:
+    """The gesture engine as the gaze asks it: the arm rests in ``seconds``."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds, self.asked = seconds, 0
+
+    def release_arm(self, why: str) -> float:
+        self.asked += 1
+        return self.seconds
+
+
+def test_a_wake_from_behind_rests_the_arm_first_then_turns_the_body() -> None:
+    """«Пепин, привет!» from behind while the hand is up (a greeting the engine started): the
+    board refuses the wheels while the arm moves, so the turn asks for the arm first and starts
+    once it has had the seconds the engine answered; frames wait meanwhile."""
+    r = rig(wheels=FakeWheels())
+    arm = Arm(0.9)
+    r.machine.arm = arm
+    r.person(150.0)
+    read = r.wake(150.0)
+    assert arm.asked == 1 and r.wheels.calls == [], "the arm first"
+    turning = r.machine.turning
+    assert turning is not None and turning.starts_s == pytest.approx(read + 0.9)
+    assert r.machine.tick(read + 0.5) == pytest.approx(read + 0.9)
+    assert r.wheels.calls == [] and r.scene.looks == 0
+    r.machine.tick(read + 0.9)
+    assert r.wheels.calls == [("start", (WheelMove(turn_deg=pytest.approx(30.0)),))]
+    calm = rig(wheels=FakeWheels())
+    calm.machine.arm = Arm(0.0)
+    calm.person(150.0)
+    calm.wake(150.0)
+    assert len(calm.wheels.calls) == 1, "an arm at rest: the turn at once"
+
+
+def test_the_engine_lets_the_turn_go_first_on_a_wake_from_behind_with_a_greeting() -> None:
+    """The same wake with the engine itself: the arm of a gesture playing goes to rest when the
+    turn asks, and while the body turns the reply's greeting marker plays its face but neither
+    the arm nor the head."""
+    from pepin.arm_motion import load_arm_motion
+    from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
+    from pepin.expression.book import load_book, with_rest
+    from pepin.expression.fakes import FakeExecutor, FakePlayout
+    from pepin.expression.markers import Marker, Part
+
+    motion = load_arm_motion(REPO / "config/arm.json")
+    book = with_rest(load_book(REPO / "config/animation.json"), motion.rest_deg)
+    clock = [1.0]
+    r = rig(wheels=FakeWheels())
+    records: list[tuple[str, dict[str, Any]]] = []
+
+    class View:
+        def attention(self) -> Any:
+            return r.machine.attention(clock[0])
+
+    for seed in range(50):  # a shrug whose variant raises the arm
+        parts = {p: FakeExecutor(p) for p in ("arm", "head", "face")}  # type: ignore[arg-type]
+        records.clear()
+        config = EngineConfig(arm_speed_scale=1.0, seed=seed)
+        engine = GestureEngine(
+            parts,  # type: ignore[arg-type]
+            FakePlayout(), lambda c=config: (book, c), on=True, clock=lambda: clock[0],
+            record=lambda kind, fields: records.append((kind, fields)), attention=View(),
+        )  # fmt: skip
+        assert engine.perform("shrug", source="tool").ok
+        last = engine.last()
+        if last is not None and any(c.part == "arm" for c in last.clips):
+            break
+    for _ in range(10):  # the hand goes up
+        clock[0] += 0.01
+        engine.step()
+    assert [c for c in parts["arm"].calls if c[0] == "play"]
+    r.machine.arm = engine
+    r.person(150.0)
+    read = r.wake(150.0)
+    clock[0] = read
+    assert ("fade", ("gesture", 0.35)) in parts["arm"].calls and r.wheels.calls == []
+    since = len(records)
+    engine.part_queued(1, 0, Part("Привет!", None, (Marker("gesture", "greeting", 0),)))
+    engine.part_spoken(1, 0)
+    for _ in range(300):
+        clock[0] += 0.01
+        engine.step()
+    cues = [f for k, f in records[since:] if k == "cue"]
+    assert cues and all(not c["ok"] for c in cues if c["part"] in ("arm", "head")), cues
+    assert any(c["ok"] for c in cues if c["part"] == "face")
+    r.machine.tick(read + ARM_REST_S + 0.06)
+    assert len(r.wheels.calls) == 1, "the turn after the arm's rest"
