@@ -10,8 +10,8 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
     {"cmd": "go", "place": "printer"}      {"cmd": "go", "x": -11.4, "y": 0.8, "yaw_deg": 140}
     {"cmd": "cancel"}                      {"cmd": "where"}
     {"cmd": "places"}                      {"cmd": "planner", "name": "navfn"}
-    {"cmd": "clearance", "radius_m": 1.0}  (where's ``navigating`` and ``lidar``, and the newest
-                                           scan's returns near the cart, for the voice's wheels)
+    {"cmd": "clearance", "radius_m": 1.0}  (where's ``navigating``, and depth_fusion's newest
+                                           obstacle marks near the cart, for the voice's wheels)
 
 and answers with one JSON line per event: accepted, feedback, arrival, done. It also owns the
 run's recording: it starts one when a goal starts and closes it when the goal ends, so a
@@ -57,7 +57,7 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import NavigateToPose, Spin
 from rclpy.action import ActionClient
 from rclpy.node import Node
-from rclpy.qos import DurabilityPolicy, QoSProfile, qos_profile_sensor_data
+from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
@@ -204,13 +204,19 @@ RPP_GOAL_CHECKER = "xy_only_goal_checker"
 LIDAR_SCAN_TOPIC = "/scan"
 LIDAR_SILENT_S = 5.0  # no scan for this long: `where` says so
 # `clearance` (the voice's expressive wheels, pepin.expression.wheels, ten times a second while
-# they move): the newest scan's returns near the cart, decoded only when asked.
+# they move): depth_fusion's obstacle marks near the cart, decoded only when asked. The marks are
+# the voxel volume's own surface sliced round the whole turn in base_link (the lidar, the camera's
+# depth and the ToF fused, remembered behind the cart), never Nav2's inflated costmaps; a bearing
+# the volume holds nothing on is NaN and blocks nothing. No marks, no clearance: the raw scan is
+# not a stand-in, so a silent depth_fusion refuses every expressive motion with its reason.
+MARKS_TOPIC = "/depth_marks"
+MARKS_SILENT_S = 5.0  # no marks for this long: `clearance` says depth_fusion is silent
 CLEARANCE_RADIUS_M = 1.0  # the default; the request may name its own, up to the max
 CLEARANCE_MAX_RADIUS_M = 3.0
 
 
 def scan_message(raw: bytes) -> Any:
-    """A raw /scan (as the subscription keeps it) as a ``sensor_msgs/LaserScan``."""
+    """A raw ``LaserScan`` (as a raw subscription keeps it: the marks) as a message."""
     from rclpy.serialization import deserialize_message
 
     return deserialize_message(raw, LaserScan)
@@ -326,14 +332,22 @@ class GoalServer(Node):
                 lambda msg, a=action: self._on_nav_status(a, msg),
                 status_qos,
             )
-        # The lidar as Nav2 receives it, taken raw: only its arrival matters here, and its returns
-        # only when `clearance` asks (decoded then, never per scan).
+        # The lidar as Nav2 receives it, taken raw: only its arrival matters here (`where`).
         self._last_scan_at: float | None = None
-        self._last_scan: bytes | None = None
-        self._laser: tuple[Any, Any] | None = None  # base_link <- laser (config/lidar.json)
         self._started_at = time.monotonic()
         self.create_subscription(
             LaserScan, LIDAR_SCAN_TOPIC, self._on_scan, qos_profile_sensor_data, raw=True
+        )
+        # depth_fusion's obstacle marks (pepin-vslam), taken raw: `clearance` decodes the newest
+        # only when it is asked.
+        self._last_marks_at: float | None = None
+        self._last_marks: bytes | None = None
+        self.create_subscription(
+            LaserScan,
+            MARKS_TOPIC,
+            self._on_marks,
+            QoSProfile(depth=1, reliability=ReliabilityPolicy.RELIABLE),
+            raw=True,
         )
         # The recorder is a node of its own (run_recorder, beside this one): one command opens a
         # tape, the latched status names it (pepin.runlink).
@@ -373,39 +387,52 @@ class GoalServer(Node):
         )
         self._up = True  # last: everything above exists, the timers may run
 
-    def _on_scan(self, raw: bytes) -> None:
-        """A scan arrived (kept unparsed): the lidar reaches Nav2."""
-        self._last_scan, self._last_scan_at = raw, time.monotonic()
+    def _on_scan(self, _raw: bytes) -> None:
+        """A scan arrived (left unparsed): the lidar reaches Nav2."""
+        self._last_scan_at = time.monotonic()
+
+    def _on_marks(self, raw: bytes) -> None:
+        """depth_fusion's marks arrived (kept unparsed until `clearance` asks)."""
+        self._last_marks, self._last_marks_at = raw, time.monotonic()
 
     def clearance(self, radius_m: float, now: float) -> dict[str, Any]:
-        """``clearance``'s answer: whether anything navigates, the lidar's status, how long ago
-        the last cancel came (None: none since the start), the newest scan's age and its returns
-        within ``radius_m`` of the cart (base_link, metres, through config/lidar.json's mount:
-        the numbers the static transform is published from)."""
+        """``clearance``'s answer: whether anything navigates, the marks' status, how long ago
+        the last cancel came (None: none since the start), the newest marks' age by their own
+        stamp, and their points within ``radius_m`` of the cart (base_link, metres: the slice is
+        published in base_link, its ranges from that frame's origin)."""
+        import numpy as np
+
         from pepin.expression.clearance import near_points
-        from pepin.mounts import load_lidar_mount
 
         cancelled = self._cancelled_at
         answer: dict[str, Any] = {
             "event": "clearance",
             "navigating": self.navigating(),
-            "lidar": self.lidar_status(now),
+            "marks": self.marks_status(now),
             "cancel_age_s": None if cancelled is None else round(now - cancelled, 3),
-            "scan_age_s": None,
+            "marks_age_s": None,
             "points": [],
         }
-        raw, at = self._last_scan, self._last_scan_at
-        if raw is None or at is None:
+        raw = self._last_marks
+        if raw is None:
             return answer
-        if self._laser is None:
-            mount = load_lidar_mount()
-            self._laser = (mount.rotation(), mount.translation())
-        angles, ranges = scan_arrays(scan_message(raw))
+        msg = scan_message(raw)
+        angles, ranges = scan_arrays(msg)
         radius = min(max(radius_m, 0.0), CLEARANCE_MAX_RADIUS_M)
-        points = near_points(angles, ranges, self._laser[0], self._laser[1], radius)
-        answer["scan_age_s"] = round(now - at, 3)
+        points = near_points(angles, ranges, np.eye(3), np.zeros(3), radius)
+        clock = self.get_clock().now().nanoseconds * 1e-9
+        answer["marks_age_s"] = round(max(0.0, clock - stamp_seconds(msg.header.stamp)), 3)
         answer["points"] = [[round(float(x), 3), round(float(y), 3)] for x, y in points]
         return answer
+
+    def marks_status(self, now: float) -> str:
+        """``ok``, or how long depth_fusion's marks have not reached this node."""
+        last = self._started_at if self._last_marks_at is None else self._last_marks_at
+        silent = now - last
+        if silent < MARKS_SILENT_S:
+            return "ok"
+        heard = "" if self._last_marks_at is not None else ", none since the start"
+        return f"silent {silent:.0f} s{heard} (depth_fusion, in pepin-vslam: ros/laptop.sh vslam)"
 
     def lidar_status(self, now: float) -> str:
         """``ok``, or how long no scan has reached this node (report only)."""

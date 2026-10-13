@@ -16,12 +16,13 @@ One :class:`Executor` per body part turns a rendered clip into requests to that 
 THE WHEELS never drive for expression, and never through Nav2: a turn in place of at most
 ``max_turn_deg`` per request (30) or a rock of at most ``max_rock_m`` (0.02), by the measured
 motions' method (``ros/tools/move.py``'s: velocity commands judged by the odometry's swept
-heading and travel, the lidar, a time cap per leg, the base server's deadman behind it), only
-while the goal server says ``"navigating": false``. When the wheels stall or the lidar says the
-arc is blocked, the cart backs off ``backoff_m`` and turns again, at most ``attempts`` times and
-``max_backoff_m`` of backing in all, and then gives up: the speaker gaze then looks as far as
-the head reaches. Every call to the wheels returns at once: a motion runs on the wheels' own
-thread and answers through a callback, so nothing the voice waits on ever waits on the wheels.
+heading and travel, depth_fusion's obstacle marks, a time cap per leg, the base server's deadman
+behind it), only while the goal server says ``"navigating": false``. When the wheels stall or the
+marks say the arc is blocked, the cart backs off ``backoff_m`` and turns again, at most
+``attempts`` times and ``max_backoff_m`` of backing in all, and then gives up: the speaker gaze
+then looks as far as the head reaches. Every call to the wheels returns at once: a motion runs
+on the wheels' own thread and answers through a callback, so nothing the voice waits on ever
+waits on the wheels.
 
 The :class:`Animator` is the one place a gesture is asked for: the cascade's cues, the
 ``gesture`` tool and the laptop's command line all go through it.

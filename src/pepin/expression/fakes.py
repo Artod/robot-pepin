@@ -528,13 +528,13 @@ class FakeBase:
 @dataclass
 class FakeView:
     """The goal server's word (:class:`pepin.expression.clearance.Surroundings`), always fresh
-    on the base's clock: whether Nav2 navigates, the scan's age, and fixed points of the room
+    on the base's clock: whether Nav2 navigates, the marks' age, and fixed marks of the room
     (world frame) seen from where the fake base's cart stands; ``why`` for a goal server away;
     ``cancelled_at`` the base clock's time of its last cancel (ros/stop.sh)."""
 
     base: FakeBase
     navigating: bool | None = False
-    scan_age_s: float | None = 0.05
+    marks_age_s: float | None = 0.05
     world: list[tuple[float, float]] = field(default_factory=list)
     why: str = ""
     silent: bool = False  # never answers
@@ -557,7 +557,7 @@ class FakeView:
         array = np.asarray(points, dtype=np.float64).reshape(-1, 2)
         now = self.base.clock()
         cancel = None if self.cancelled_at is None else now - self.cancelled_at
-        return View(now, self.navigating, self.scan_age_s, array, self.why, cancel)
+        return View(now, self.navigating, self.marks_age_s, array, self.why, cancel)
 
 
 if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisfy their seams

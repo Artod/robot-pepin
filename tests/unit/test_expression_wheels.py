@@ -131,20 +131,20 @@ def test_a_stall_backs_off_and_tries_again_within_three_attempts_and_six_centime
 
 
 def test_a_blocked_arc_backs_off_and_the_turn_goes_once_the_arc_is_clear() -> None:
-    r = rig(replace(FULL, clearance_m=0.05), world=[BLOCKER], scan_age_s=0.0)
+    r = rig(replace(FULL, clearance_m=0.05), world=[BLOCKER], marks_age_s=0.0)
     report = turn(r, 20.0)
     assert report.done and report.attempts == 2
     assert report.backed_m == pytest.approx(0.03, abs=0.006)
     assert report.turned_deg == pytest.approx(20.0, abs=FULL.settle_deg)
-    wide = rig(replace(FULL, clearance_m=0.10), world=[BLOCKER], scan_age_s=0.0)
+    wide = rig(replace(FULL, clearance_m=0.10), world=[BLOCKER], marks_age_s=0.0)
     given_up = turn(wide, 20.0)
     assert not given_up.done and given_up.attempts == 3 and given_up.turned_deg == 0.0
-    assert given_up.why.startswith("gave up: the arc is blocked: a return at (+0.")
+    assert given_up.why.startswith("gave up: the arc is blocked: a mark at (+0.")
     assert given_up.backed_m == pytest.approx(0.06, abs=0.012)
 
 
 def test_a_return_that_walks_into_the_arc_mid_turn_stops_it() -> None:
-    r = rig(replace(FULL, limits=BodyLimits(attempts=1)), scan_age_s=0.0)
+    r = rig(replace(FULL, limits=BodyLimits(attempts=1)), marks_age_s=0.0)
     r.base.at(r.clock.now + 0.4, lambda b: r.view.world.append((-0.30, -0.40)))  # behind right
     report = turn(r, 30.0)
     assert not report.done and "the arc is blocked" in report.why
@@ -159,8 +159,8 @@ def test_a_return_that_walks_into_the_arc_mid_turn_stops_it() -> None:
         (lambda r: setattr(r.view, "navigating", None), "did not say whether Nav2 navigates"),
         (lambda r: setattr(r.view, "why", "the goal server does not answer (refused)"),
          "the goal server does not answer"),
-        (lambda r: setattr(r.view, "scan_age_s", 2.0), "the lidar's newest scan is 2.0 s old"),
-        (lambda r: setattr(r.view, "scan_age_s", None), "no lidar scan"),
+        (lambda r: setattr(r.view, "marks_age_s", 2.0), "the newest obstacle marks are 2.0 s old"),
+        (lambda r: setattr(r.view, "marks_age_s", None), "no obstacle marks"),
         (lambda r: r.base.foreign(Twist(0.2, 0.0)), "the wheels are commanded (v +0.20"),
         (lambda r: setattr(r.base, "travel", (0.002, 0.002)), "the cart is rolling"),
         (lambda r: setattr(r.base, "bus_ok", False), "the servo bus did not answer"),
@@ -720,17 +720,21 @@ def test_on_the_real_wire_the_turn_knows_its_own_twists_and_ends_on_a_teleop_s()
 def test_the_goal_server_s_answer_becomes_a_view_and_an_older_build_refuses() -> None:
     from pepin.expression.clearance import view_of
 
-    answer = {"event": "clearance", "navigating": False, "lidar": "ok", "cancel_age_s": 12.5,
-              "scan_age_s": 0.04, "points": [[0.5, 0.0], [-0.4, 0.2]]}  # fmt: skip
+    answer = {"event": "clearance", "navigating": False, "marks": "ok", "cancel_age_s": 12.5,
+              "marks_age_s": 0.04, "points": [[0.5, 0.0], [-0.4, 0.2]]}  # fmt: skip
     view = view_of(answer, 7.0)
-    assert (view.at, view.navigating, view.scan_age_s) == (7.0, False, 0.04)
+    assert (view.at, view.navigating, view.marks_age_s) == (7.0, False, 0.04)
     assert view.cancel_age_s == 12.5 and view.points.shape == (2, 2) and view.why == ""
     old = view_of({"event": "error", "detail": "unknown command 'clearance'"}, 7.0)
     assert "an older build" in old.why and "kick goal_server" in old.why
-    silent = view_of({**answer, "lidar": "silent 9 s"}, 7.0)
-    assert silent.why == "the lidar: silent 9 s"
-    unscanned = view_of({**answer, "scan_age_s": None, "points": []}, 7.0)
-    assert unscanned.why == "no lidar scan has reached the goal server"
+    silent = view_of({**answer, "marks": "silent 9 s (depth_fusion)"}, 7.0)
+    assert silent.why == "the obstacle marks: silent 9 s (depth_fusion)"
+    unmarked = view_of({**answer, "marks_age_s": None, "points": []}, 7.0)
+    assert unmarked.why.startswith("no obstacle marks have reached the goal server")
+    raw_scan = {"event": "clearance", "navigating": False, "lidar": "ok", "cancel_age_s": None,
+                "scan_age_s": 0.04, "points": [[0.5, 0.0]]}  # fmt: skip
+    before = view_of(raw_scan, 7.0)
+    assert "kick goal_server" in before.why, "a goal server answering from the raw scan refuses"
 
 
 def test_the_goal_server_view_asks_only_while_watched() -> None:
@@ -751,8 +755,8 @@ def test_the_goal_server_view_asks_only_while_watched() -> None:
                 return
             with conn:
                 asked.append(conn.makefile("r").readline())
-                line = {"event": "clearance", "navigating": True, "lidar": "ok",
-                        "scan_age_s": 0.02, "points": [[0.3, 0.0]]}  # fmt: skip
+                line = {"event": "clearance", "navigating": True, "marks": "ok",
+                        "marks_age_s": 0.02, "points": [[0.3, 0.0]]}  # fmt: skip
                 conn.sendall((json.dumps(line) + "\n").encode())
 
     threading.Thread(target=serve, daemon=True).start()

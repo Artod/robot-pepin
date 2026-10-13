@@ -25,9 +25,11 @@ EVERY MOTION IS CHECKED before it starts and at every control tick (25 Hz): the 
 state is fresh, the cart stands (no twist commanded, the wheels still), the servo bus answers,
 the arm is not mid-gesture (a twist would send it to rest), no stop of someone else's within
 ``stop_hold_s``; the goal server beside Nav2 (:class:`GoalServerView`, asked ten times a second
-while a motion runs) says nothing navigates and its newest lidar scan is fresh, and the swept
-footprint keeps ``clearance_m`` from every return (:mod:`pepin.expression.clearance`). A refusal
-says why; nothing is ever clamped.
+while a motion runs) says nothing navigates and depth_fusion's newest obstacle marks are fresh,
+and the swept footprint keeps ``clearance_m`` from every mark (:mod:`pepin.expression.clearance`:
+the voxel volume's slice, lidar, camera depth and ToF fused, remembered round the cart). Without
+the marks nothing moves: a silent depth_fusion is a refusal with its reason, never the raw scan
+instead. A refusal says why; nothing is ever clamped.
 
 IT NEVER FIGHTS ANOTHER DRIVER. Every state line is checked against the twists this executor
 sent within the last ``ECHO_S``: a line carrying any other twist is someone else's command (the
@@ -126,7 +128,7 @@ class WheelsSettings:
     settle_deg: float = 2.0
     settle_m: float = 0.005
     clearance_m: float = 0.10
-    lidar_age_s: float = 0.5
+    marks_age_s: float = 1.5
     stall_s: float = 0.5
     stop_hold_s: float = 30.0
     latency_s: float = 0.15
@@ -155,7 +157,7 @@ class WheelsSettings:
                 f"wheels.speed_scale is above 0 and at most 1, not {settings.speed_scale}"
             )
         positive = ("yaw_rate_deg_s", "yaw_acc_deg_s2", "speed_m_s", "acc_m_s2", "settle_deg",
-                    "settle_m", "lidar_age_s", "stall_s")  # fmt: skip
+                    "settle_m", "marks_age_s", "stall_s")  # fmt: skip
         for name in positive:
             if getattr(settings, name) <= 0.0:
                 raise ValueError(f"wheels.{name} must be above 0")
@@ -638,7 +640,7 @@ class WheelsExecutor:
 
     def _view_refusal(self, view: View, now: float) -> str | None:
         """What the goal server's word refuses: no word, a recent cancel (the red button), a
-        drive, a silent lidar."""
+        drive, old or no obstacle marks."""
         if now - view.at > VIEW_STALE_S:
             return f"the goal server's newest word is {now - view.at:.1f} s old"
         if view.why:
@@ -652,11 +654,11 @@ class WheelsExecutor:
             return "the goal server did not say whether Nav2 navigates"
         if view.navigating:
             return "Nav2 navigates (`ros/goto.sh where`)"
-        if view.scan_age_s is None:
-            return "no lidar scan has reached the goal server"
-        age = view.scan_age_s + (now - view.at)
-        if age > self.settings.lidar_age_s:
-            return f"the lidar's newest scan is {age:.1f} s old"
+        if view.marks_age_s is None:
+            return "no obstacle marks have reached the goal server"
+        age = view.marks_age_s + (now - view.at)
+        if age > self.settings.marks_age_s:
+            return f"the newest obstacle marks are {age:.1f} s old (wheels.marks_age_s)"
         return None
 
     def _held_locked(self, now: float) -> str | None:
@@ -908,9 +910,9 @@ class WheelsExecutor:
         speed: float,
         now: float,
     ) -> tuple[str, str]:
-        """(stopped, blocked) from the goal server's newest word: a drive, a silent lidar, the
-        footprint swept from here to the target (and what the cart moved since the scan) within
-        ``clearance_m`` of a return."""
+        """(stopped, blocked) from the goal server's newest word: a drive, old or no marks, the
+        footprint swept from here to the target (and what the cart moved since the marks' stamp)
+        within ``clearance_m`` of a mark."""
         view = self.around.latest()
         if view is None:
             return "the goal server has said nothing", ""
@@ -918,10 +920,11 @@ class WheelsExecutor:
         if refusal is not None:
             return refusal, ""
         points = in_origin_frame(view.points, pose, origin)
-        # What the cart may have moved since the scan, past the target; none on the way back
-        # toward where the motion began (the cart stood there).
+        # What the cart may have moved since the marks' stamp, past the target; none on the way
+        # back toward where the motion began (the cart stood there).
         homeward = min(0.0, here) <= target <= max(0.0, here)
-        lag = 0.0 if homeward else abs(speed) * ((view.scan_age_s or 0.0) + now - view.at + LEAD_S)
+        age = (view.marks_age_s or 0.0) + now - view.at
+        lag = 0.0 if homeward else abs(speed) * (age + LEAD_S)
         end = target + math.copysign(lag, target - here)
         margin = self.settings.clearance_m
         if axis == "yaw":

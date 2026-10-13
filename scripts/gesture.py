@@ -23,10 +23,10 @@ clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds
 (move it by hand first) and writes the six angles as ``poses.NAME`` of config/animation.json.
 ``turn`` and ``rock`` are the wheels' expressive motions exactly as the voice cascade makes them
 (pepin.expression.wheels: twists to the base server judged by its odometry, the goal server on
-this Mac saying nothing navigates and the lidar's arc is clear), at ``--speed`` (a share of
-config/expression.json's wheels caps, its ``wheels.speed_scale`` by default); Ctrl-C halts.
-``ros/stop.sh`` stays the red button: the motion ends on the first state line of a stop it did
-not send.
+this Mac saying nothing navigates and depth_fusion's obstacle marks clear the arc), at
+``--speed`` (a share of config/expression.json's wheels caps, its ``wheels.speed_scale`` by
+default); Ctrl-C halts. ``ros/stop.sh`` stays the red button: the motion ends on the first
+state line of a stop it did not send.
 The board is ``PEPIN_HOST`` (or --host).
 """
 

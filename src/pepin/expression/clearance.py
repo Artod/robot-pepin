@@ -1,20 +1,24 @@
 """Whether a small motion of the cart is clear: the footprint swept through a turn in place or a
-straight leg, against the lidar's returns.
+straight leg, against the obstacle marks around the cart.
 
 The cart turns about the middle of its drive axle (``base_link``'s origin), which sits at its
 front: the rectangle of config/base.json's ``footprint`` reaches 0.0625 m ahead of it and 0.30 m
 behind, 0.275 m to each side, so a turn in place swings the rear corners round a circle of
 0.41 m while the nose barely moves (a turn to the left sweeps the rear to the right and the
-front-right corner forward). A return BLOCKS a motion when, somewhere along it, the footprint
+front-right corner forward). A mark BLOCKS a motion when, somewhere along it, the footprint
 comes within ``margin_m`` of it AND closer than it stood at the motion's origin: a wall already
-near the cart blocks a motion toward it, not one away from it (a back-off from what stopped a
-turn), and going back to where the cart stood never counts. A return inside the footprint itself
+near the cart blocks a motion toward it, not one away from it (a step away from what stopped a
+turn), and going back to where the cart stood never counts. A mark inside the footprint itself
 is the cart (a post, a cable) and never blocks.
 
-The returns come from the goal server beside Nav2 (``{"cmd": "clearance"}``,
-:func:`near_points` on its newest scan through config/lidar.json's mount). A check is made in
-the frame of the motion's ORIGIN (where the cart stood when it began); one made while the cart
-moves is extended ahead by what the cart may have turned or driven since the scan.
+The marks are depth_fusion's ``/depth_marks``: the voxel volume that fuses the lidar, the
+camera's depth and the ToF fans, sliced over the whole turn in base_link (the nearest surface
+per half degree, 0.15-1.3 m above the floor, out to 3 m), so what stands behind the cart is
+remembered after the camera has looked away. A bearing the volume holds nothing on says nothing
+and blocks nothing, as a beam without a return did. They come through the goal server beside
+Nav2 (``{"cmd": "clearance"}``, :func:`near_points` on the newest slice). A check is made in the
+frame of the motion's ORIGIN (where the cart stood when it began); one made while the cart moves
+is extended ahead by what the cart may have turned or driven since the slice's stamp.
 """
 
 from __future__ import annotations
@@ -63,7 +67,7 @@ class Footprint:
 
 @dataclass(frozen=True)
 class Blocker:
-    """The return that blocks a motion: where it is (the origin's frame, metres), how near the
+    """The mark that blocks a motion: where it is (the origin's frame, metres), how near the
     footprint comes to it, and where on the motion (degrees or metres from the origin)."""
 
     x_m: float
@@ -72,11 +76,11 @@ class Blocker:
     at: float
 
     def text(self, unit: str) -> str:
-        """``a return at (-0.42, -0.20) m comes within 0.04 m at 12 deg`` (``unit`` deg or cm:
+        """``a mark at (-0.42, -0.20) m comes within 0.04 m at 12 deg`` (``unit`` deg or cm:
         the motion's own)."""
         at = self.at if unit == "deg" else self.at * 100.0
         return (
-            f"a return at ({self.x_m:+.2f}, {self.y_m:+.2f}) m comes within {self.gap_m:.2f} m"
+            f"a mark at ({self.x_m:+.2f}, {self.y_m:+.2f}) m comes within {self.gap_m:.2f} m"
             f" at {at:+.0f} {unit}"
         )
 
@@ -110,7 +114,7 @@ def _first_hit(
 def turn_blocker(
     points: Points, footprint: Footprint, start_rad: float, end_rad: float, margin_m: float
 ) -> Blocker | None:
-    """The return the footprint would come within ``margin_m`` of while turning in place from
+    """The mark the footprint would come within ``margin_m`` of while turning in place from
     ``start_rad`` to ``end_rad`` (headings from the motion's origin, + left; ``points`` as the
     cart at the origin sees them); None when the arc is clear."""
     sweep = end_rad - start_rad
@@ -135,7 +139,7 @@ def turn_blocker(
 def drive_blocker(
     points: Points, footprint: Footprint, start_m: float, end_m: float, margin_m: float
 ) -> Blocker | None:
-    """The return the footprint would come within ``margin_m`` of while driving straight from
+    """The mark the footprint would come within ``margin_m`` of while driving straight from
     ``start_m`` to ``end_m`` (travel from the motion's origin, + forward; ``points`` as the cart
     at the origin sees them); None when the way is clear."""
     run = end_m - start_m
@@ -157,8 +161,9 @@ def near_points(
     translation: NDArray[np.float64],
     radius_m: float,
 ) -> Points:
-    """A scan's returns (laser frame: bearings and ranges, NaN where none) in ``base_link``
-    through the laser's mount, the ones within ``radius_m`` of the axle's middle."""
+    """A scan's points (its own frame: bearings and ranges, NaN where none) in ``base_link``
+    through its mount (identity for the marks, published in base_link), the ones within
+    ``radius_m`` of the axle's middle."""
     good = np.isfinite(ranges)
     a, r = angles[good], ranges[good]
     if len(r) == 0:
@@ -174,13 +179,14 @@ def near_points(
 @dataclass(frozen=True)
 class View:
     """The goal server's word on the surroundings: when it arrived (this process's clock),
-    whether anything navigates (None: no word), how old its newest lidar scan was, that scan's
-    returns near the cart (base_link, metres), why there is no usable view ("" when there is
-    one), and how long ago its last cancel came (ros/stop.sh sends one; None: none)."""
+    whether anything navigates (None: no word), how old its newest obstacle marks were by their
+    own stamp, those marks near the cart (base_link, metres), why there is no usable view (""
+    when there is one), and how long ago its last cancel came (ros/stop.sh sends one; None:
+    none)."""
 
     at: float
     navigating: bool | None = None
-    scan_age_s: float | None = None
+    marks_age_s: float | None = None
     points: Points = field(default_factory=lambda: np.zeros((0, 2)), compare=False, repr=False)
     why: str = ""
     cancel_age_s: float | None = None
@@ -205,14 +211,15 @@ def view_of(answer: Mapping[str, Any], at: float) -> View:
         return View(at, why=f"the goal server has no clearance ({detail}): an older build,"
                             " `ros/laptop.sh kick goal_server`")  # fmt: skip
     nav = answer.get("navigating")
-    age = answer.get("scan_age_s")
+    age = answer.get("marks_age_s")
     cancel = answer.get("cancel_age_s")
     raw = answer.get("points") or []
     points = np.asarray(raw, dtype=np.float64).reshape(-1, 2) if raw else np.zeros((0, 2))
-    lidar = str(answer.get("lidar", ""))
-    why = "" if lidar == "ok" else f"the lidar: {lidar or 'no word'}"
+    marks = str(answer.get("marks", ""))
+    older = "no word (a goal server older than the marks: `ros/laptop.sh kick goal_server`)"
+    why = "" if marks == "ok" else f"the obstacle marks: {marks or older}"
     if age is None and not why:
-        why = "no lidar scan has reached the goal server"
+        why = "no obstacle marks have reached the goal server (depth_fusion: ros/laptop.sh vslam)"
     return View(
         at,
         bool(nav) if isinstance(nav, bool) else None,
@@ -225,9 +232,9 @@ def view_of(answer: Mapping[str, Any], at: float) -> View:
 
 class GoalServerView:
     """:class:`Surroundings` from the goal server beside Nav2 on this Mac (``{"cmd":
-    "clearance"}`` on 127.0.0.1:3337: ``navigating`` as ``where`` says it, and the newest scan's
-    returns within ``radius_m``), asked every ``every_s`` on a daemon thread of its own while
-    watched; idle otherwise."""
+    "clearance"}`` on 127.0.0.1:3337: ``navigating`` as ``where`` says it, and the newest
+    obstacle marks within ``radius_m``), asked every ``every_s`` on a daemon thread of its own
+    while watched; idle otherwise."""
 
     def __init__(
         self,
