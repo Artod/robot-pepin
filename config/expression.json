@@ -9,7 +9,19 @@
     "audio_lag_s": 0.15,
     "late_s": 0.5,
     "poll_s": 0.02,
-    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. A part's length before all its audio is made: pepin.expression.markers.CHAR_S, the one estimate (Player.heard reads it too). late_s: a clip whose time has passed by at most this is sent at once, a later one is dropped and logged (a stroke shifted 0.5 s still looks natural on a word; the first part of a reply plays as soon as it is made, so its preparations are late by their length). poll_s: how often the engine looks at the player's clock while a clip waits for its word."
+    "char_s": 0.09,
+    "tts_first_s": 0.10,
+    "lead_silence_s": 0.16,
+    "stroke_bias_s": -0.05,
+    "stroke_late_s": 0.15,
+    "short_s": 1.0,
+    "phrase_slide_s": 0.5,
+    "note": "The word clock (pepin.expression.forecast) and the scheduler's send rule (pepin.expression.schedule). A marker's word is heard: the reply's first part tts_first_s after its text went to the voice (the first chunk's p10, 0.10 s: a stroke errs early, the free side; MEASURED p50 0.15) or where the part before it ends, then lead_silence_s (the voice's leading silence, MEASURED p50 0.16, p10 0.12, p90 0.30) and the word's first vowel at its share of the rest of the part, the part's length char_s a character (MEASURED 0.096 per reply, 0.089 on 2026-10-12) until this conversation's spoken parts give their running median; exact from the part's first chunk on, the prosody's stressed nucleus once its audio is analysed; audio_lag_s later on the speaker (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop). Each clip is sent at the last moment that lands its stroke stroke_bias_s from the vowel (negative: before; early is free, late costs recall). A word- or phrase-bound stroke is never later than stroke_late_s (past it: a smaller version, the head and face, or nothing); late_s: how late an utterance-bound one (today's feelings) may still land, inside the speech. short_s: an arm or wheels motion longer than this plays only when the speech ahead covers it. phrase_slide_s: how much later a phrase-bound mark may slide to one of the next two words. poll_s: how often the engine looks at a waiting clip."
+  },
+  "units": {
+    "hold_s": 2.5,
+    "strokes": 3,
+    "note": "An arm unit (pepin.expression.schedule): a stroke with the next arm stroke due within hold_s after its end holds its last pose (the board's then: hold, under config/arm.json's hold_max_s 3) and the next plans from that pose instead of rest; at most strokes in one unit; a hold not taken lapses and the board rests the arm by itself."
   },
   "layers": {
     "fade_s": {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35},

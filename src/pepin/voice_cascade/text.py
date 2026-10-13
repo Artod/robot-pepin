@@ -1,7 +1,9 @@
 """The brain's text stream cut into sentences the voice can start on, and cleaned for speech.
 
-Owner after the gesticulation contract: B (the splitter's report of a sentence before it is
-whole, :class:`pepin.voice_cascade.stages.Ahead`, for the body's ``text_ahead``).
+The splitter also reports a sentence before it is whole (:meth:`SentenceSplitter.ahead`), the
+body's ``text_ahead`` (:class:`pepin.voice_cascade.stages.Ahead`): a gesture marker the brain
+has just closed, and the first word of a round's first sentence (a yes or a no), each known
+0.18 s (p50) before its sentence ends.
 """
 
 from __future__ import annotations
@@ -15,6 +17,8 @@ _MARKUP = re.compile(r"[*_#`~>|]+")
 _ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")
 _SPACES = re.compile(r"\s+")
 _WORDS = re.compile(r"\w+")
+_CLOSED = re.compile(r"\{[^{}]*\}")  # a whole marker
+_FIRST_WORD = re.compile(r"^\W*\w+\W")  # a word followed by what ends it
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
 
 
@@ -39,6 +43,7 @@ class SentenceSplitter:
         self.soft_chars = soft_chars
         self._buffer = ""
         self._emitted = 0
+        self._told = (0, 0, False)  # the open sentence's number, its markers and word told
 
     def feed(self, text: str) -> list[str]:
         """The sentences ``text`` completes."""
@@ -68,6 +73,25 @@ class SentenceSplitter:
                 out.append(self._buffer[:cut].strip())
                 self._buffer = self._buffer[cut:]
         self._emitted += len(out)
+        return out
+
+    def ahead(self) -> list[str]:
+        """The open sentence so far (markers as written), once each time a marker in it has
+        just closed and once when the splitter's first sentence has its first word whole; []
+        when there is nothing new. Ask after each :meth:`feed`."""
+        text = self._buffer.lstrip()
+        number, markers, word = self._told
+        if number != self._emitted:  # a new open sentence
+            number, markers, word = self._emitted, 0, False
+        out: list[str] = []
+        closed = len(_CLOSED.findall(text))
+        if closed > markers:
+            markers = closed
+            out.append(text)
+        if not word and not self._emitted and _FIRST_WORD.match(_ASIDE.sub(" ", text).lstrip()):
+            word = True
+            out = out or [text]
+        self._told = (number, markers, word)
         return out
 
     def flush(self) -> str:

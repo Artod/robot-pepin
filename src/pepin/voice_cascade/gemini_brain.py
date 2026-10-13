@@ -41,6 +41,7 @@ from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
     CUT,
     FOLLOW_UP,
+    Ahead,
     Emit,
     FirstToken,
     Played,
@@ -352,6 +353,8 @@ class GeminiBrain:
                                 chars += len(part.text)
                                 for sentence in splitter.feed(part.text):
                                     say(sentence)
+                                for early in splitter.ahead():
+                                    emit(Ahead(early, round_index))
             except asyncio.CancelledError:
                 ms = round((self.clock() - t0) * 1000)
                 emit(gemini_cut(metadata, chars, self.last_prompt, self.price, ms))

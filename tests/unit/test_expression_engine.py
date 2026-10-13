@@ -422,9 +422,10 @@ def marked(text: str, name: str, at: int) -> Part:
     return Part(text, None, (Marker("gesture", name, at),))
 
 
-def test_a_marker_s_clips_go_when_the_player_reaches_their_word() -> None:
-    """The word starts at its share of the part; each clip goes its offset earlier, later by
-    the audio's lag, earlier by its part's latency."""
+def test_a_marker_s_clips_go_when_their_stroke_lands_on_its_word_s_vowel() -> None:
+    """The word's first vowel is heard after the part's leading silence at its share of the
+    rest, the speaker's lag later; each clip goes its preparation (and its part's latency)
+    before the stroke, aimed stroke_bias_s before the vowel (the word clock)."""
     rig = Rig(seed=7)
     text = "Ну что ж, привет всем!"
     rig.engine.part_queued(1, 0, marked(text, "agreement", 10))
@@ -433,32 +434,36 @@ def test_a_marker_s_clips_go_when_the_player_reaches_their_word() -> None:
     assert performance["seed"] == 7
     assert performance["share"] == pytest.approx(10 / len(text), abs=1e-3)
     rig.tick(0.5)
-    assert rig.played("head") == []  # no audio of the part yet: it waits
-    rig.playout.marks[(1, 0)] = (1.0, 1.0 + 0.07 * len(text))  # its first chunk is fed
+    assert rig.played("head") == []  # no audio of the part yet: the vowel is still >1 s away
+    length = 0.07 * len(text)
+    rig.playout.marks[(1, 0)] = (1.0, 1.0 + length)  # its first chunk is fed
     rig.engine.part_spoken(1, 0)
     rig.tick(3.0)
     (cue,) = [c for c in rig.kinds("cue") if c["part"] == "head"]
     clip = rig.played("head")[0]
-    word = 1.0 + 10 / len(text) * 0.07 * len(text)
-    assert cue["planned"] == pytest.approx(word + clip.offset_s + 0.15, abs=1e-3)
+    vowel = 1.0 + 0.16 + text.index("и") / len(text) * (length - 0.16)
+    assert cue["planned"] == pytest.approx(vowel + 0.15 - 0.05 - clip.stroke_s, abs=1e-3)
     assert 0.0 <= cue["late_s"] <= 0.011
 
 
-def test_a_clip_past_its_time_goes_at_once_and_a_much_later_one_is_dropped() -> None:
-    rig = Rig(seed=3)
-    rig.playout.now = 5.3
-    rig.playout.marks[(2, 0)] = (4.6, 6.0)  # the word was at 4.6 + 0.4 x 1.4 = 5.16
-    rig.engine.part_queued(2, 0, marked("Да да да.", "emphasis", 4))
-    rig.engine.part_spoken(2, 0)
-    rig.engine.step()
-    assert rig.played("head") or rig.played("arm")  # within late_s: sent at once
-    late = Rig(seed=3)
-    late.playout.now = 9.0
-    late.playout.marks[(2, 0)] = (4.6, 6.0)
-    late.engine.part_queued(2, 0, marked("Да да да.", "emphasis", 4))
-    late.engine.part_spoken(2, 0)
-    late.engine.step()
-    assert late.kinds("late") and not late.played("head") and not late.played("arm")
+def test_a_feeling_just_past_goes_at_once_a_word_s_never_late_one_long_past_dropped() -> None:
+    """The word's vowel was heard at 4.6 + 0.16 + 4/9 x (1.4 - 0.16) + the 0.15 lag = 5.46 on
+    the player's clock, aimed 0.05 earlier: at 5.6 an UTTERANCE feeling is 0.2 s past it,
+    inside late_s, and goes at once; a WORD mark is never late, so it is dropped at render
+    ("no time"), as is anything long past."""
+    for intent, now, played in (("agreement", 5.6, True), ("emphasis", 5.6, False),
+                                ("agreement", 9.0, False)):  # fmt: skip
+        rig = Rig(seed=3)
+        rig.playout.now = now
+        rig.playout.marks[(2, 0)] = (4.6, 6.0)
+        rig.engine.part_queued(2, 0, marked("Да да да.", intent, 4))
+        rig.engine.part_spoken(2, 0)
+        rig.engine.step()
+        moved = bool(rig.played("head") or rig.played("face") or rig.played("arm"))
+        assert moved == played, (intent, now)
+        if not played:
+            (dropped,) = rig.kinds("dropped")
+            assert dropped["why"] == "no time"
 
 
 def test_a_part_with_no_audio_plays_its_cues_once_the_voice_is_past_it() -> None:
@@ -620,3 +625,56 @@ def test_a_clip_faster_than_the_caps_is_stretched_in_time_not_refused() -> None:
     assert check_knots(slow, [(-180, 180)] * 2, 20.0, 1e9) is None
     # within the caps nothing changes
     assert stretch_to_caps(knots, max_speed=200.0, max_acc=1e9) == [(t, list(d)) for t, d in knots]
+
+
+def test_a_compressed_preparation_keeps_the_stroke_on_its_word_and_the_rest_untouched() -> None:
+    from pepin.expression.mix import PREP_CAPS, fit_preparation, prep_min_s, track_value
+
+    lift = Track("shoulder_lift", "absolute", (0.0, 1.0, 1.5), (-100.0, -60.0, -60.0))
+    wave = Track("wrist_flex", "additive", (0.8, 1.2, 1.6), (0.0, 8.0, 0.0))
+    clip = Clip("arm", -1.0, 1.0, 1.6, (lift, wave), (Event(0.5, "smile"),), then="hold")
+    fast = fit_preparation(clip, 0.4)
+    assert fast.offset_s + fast.stroke_s == pytest.approx(clip.offset_s + clip.stroke_s)
+    assert fast.stroke_s == pytest.approx(0.4) and fast.duration_s == pytest.approx(1.0)
+    assert fast.then == "hold" and fast.events[0].t_s == pytest.approx(0.2)
+    for t in (1.3, 1.45, 1.6):  # between keys after the stroke: the same motion, 0.6 s sooner
+        assert track_value(fast.tracks[1], t - 0.6) == pytest.approx(track_value(wave, t))
+    assert fit_preparation(clip, 2.0) is clip  # never slowed
+    rest = dict.fromkeys(JOINTS, 0.0) | {"shoulder_lift": -100.0}
+    least = prep_min_s(clip, rest, JOINTS, 240.0 * PREP_CAPS, 2232.0 * PREP_CAPS)
+    assert 0.0 < least < clip.stroke_s
+    assert prep_min_s(clip, rest, JOINTS, 1.0, 1.0) == pytest.approx(clip.stroke_s)
+
+
+def test_a_unit_s_clip_starts_where_the_arm_is_held_not_at_rest() -> None:
+    from pepin.expression.mix import rebased
+
+    rest = dict(MOTION.rest_deg)
+    held = rest | {"shoulder_lift": -60.0}
+    pose = Track("shoulder_lift", "absolute", (0.0, 1.0), (rest["shoulder_lift"], -40.0))
+    trace = Track("elbow_flex", "absolute", (0.0, 1.0), (50.0, 40.0))  # starts off rest: kept
+    moved = rebased(Clip("arm", 0.0, 1.0, 1.0, (pose, trace)), held, rest)
+    assert moved.tracks[0].values == (-60.0, -40.0) and moved.tracks[1] == trace
+    arm = ArmPart(FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), True, "holding")), MOTION)
+    planned = arm.plan(Clip("arm", 0.0, 1.0, 1.0, (pose,)), base=held)
+    assert not isinstance(planned, str)
+    assert planned.trajectory.knots[0].deg[JOINTS.index("shoulder_lift")] == pytest.approx(-60.0)
+    # the approach is from where the board was told to hold, not from the sagging encoders
+    knot = tuple(held[j] for j in JOINTS)
+    from_knot = arm.plan(Clip("arm", 0.0, 1.0, 1.0, (pose,)), base=held, start=knot)
+    assert not isinstance(from_knot, str) and from_knot.approach_s == 0.0
+    assert planned.approach_s > 0.0  # the encoders at rest, 40 deg below the held pose
+
+
+def test_a_hold_lapses_on_the_clock_and_the_next_clip_plans_from_rest() -> None:
+    now = [10.0]
+    link = FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"))
+    arm = ArmPart(link, MOTION, clock=lambda: now[0])
+    raise_ = Track("shoulder_lift", "additive", (0.0, 0.5, 1.0), (0.0, 20.0, 20.0))
+    assert arm.play(Clip("arm", 0.0, 0.5, 1.0, (raise_,), then="hold", hold_s=1.0)).ok
+    assert arm.holding() is not None and arm.held_until == pytest.approx(10.0 + 0.06 + 1.0 + 1.0)
+    now[0] = 12.2
+    assert arm.holding() is None  # the board has rested the arm by itself
+    assert arm.play(Clip("arm", 0.0, 0.5, 1.0, (raise_,))).ok
+    (_, (last,)) = link.calls[-1]
+    assert last.knots[0].deg == pytest.approx(MOTION.rest(), abs=0.01)

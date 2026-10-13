@@ -717,8 +717,8 @@ the face comes and goes in the frames, while sitting down or standing up still m
 The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
 `{laugh}`, `{face:smile}`; `{whispering}` and `{}` stay the voice's style) and the gesture engine
 (`pepin.expression`) decides how: it renders the intent from `config/animation.json` (atoms,
-twelve compositions, taught poses; a seed logged with every performance), places each part's
-clip on the word by the player's clock, and plays it through each part's one owner. The arm:
+twelve compositions, taught poses; a seed logged with every performance), fits it to the time
+left before its word (below) and plays it through each part's one owner. The arm:
 the laptop sends a whole trajectory (`arm_trajectory`) and the base server plays it on its tick,
 then rests and lets go of the torque by itself (`pepin.arm_driver`, `config/arm.json` `motion`:
 caps, limits, rest pose, torque limit). The face: the head server, source `expression`. The head:
@@ -767,6 +767,24 @@ uv run python scripts/voice_cascade.py switch --flag gestures=on    # the alive 
 grep -h '"event": "moment"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
 grep -h '"event": "alive"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl   # per conversation
 ```
+
+**On the word** (`pepin.expression.forecast`, `pepin.expression.schedule`). The engine learns of
+a marker when its sentence goes to the voice (or earlier, from the brain's token stream) and the
+word clock predicts when the word's first vowel is heard: the voice's first chunk 0.10 s after
+the text (its p10, so a stroke errs early), its leading silence of 0.16 s, the character's share
+of the sentence at 0.09 s a character until the conversation's own sentences give their median,
+then the speaker's `audio_lag_s`; exact from the sentence's first fed chunk on. The gesture is
+fitted to the time left (a `ladder` line): as written; with the arm's rise compressed to 0.9 of
+its caps; a smaller version; or its head-and-face floor (each composition has one). Each clip
+then goes at the last moment that lands its stroke `stroke_bias_s` (0.05 s) before the vowel (a
+`send` line). A word's stroke is never more than `stroke_late_s` (0.15 s) late, a feeling's
+never more than `late_s` (0.5 s) nor after the reply's speech, and none lands in the pause after
+a sentence; one that cannot is left out and the rest of its gesture keeps its time. Two arm
+gestures within `units.hold_s` (2.5 s) share one raise: the first holds its last pose (the
+board's `then: hold`; with nothing after it the board rests the arm by itself) and the second
+starts from there. An arm motion longer than `short_s` (1 s) plays only when the speech ahead
+covers it (hello and bye may run 1 s past it). A marker on a reply's first words, seen in the
+token stream, may send the arm to `ready` and hold it there first: a preparation, never a stroke.
 
 **The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
 `body_rock`, `body_wiggle`, `body_turn`; each behind its own flag, no third). Never Nav2: twist
@@ -820,7 +838,7 @@ uv run python scripts/voice_cascade.py switch --flag gestures=on    # off as shi
 uv run python scripts/gesture.py read                               # the arm's angles, no motion
 uv run python scripts/gesture.py play greeting --speed 0.2 --dry-run
 uv run python scripts/gesture.py teach raised                       # torque off, place, Enter
-tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performances and cues
+tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performances, ladder, send, cue
 ```
 
 The base bridge publishes the arm's angles as `/arm/joint_states` (the URDF's joint names, radians,
@@ -828,8 +846,11 @@ at the stamp of the read of joints 1-4, wrist_roll and gripper a tick older: 25 
 is energised, 5 Hz at rest), which depth_fusion's
 `arm_filter` reads under `config/arm.json` `joints.source: topic`. A board without `config/arm.json`
 in `/opt/pepin/config` never reads or writes the arm, and publishes nothing there. Every
-cue line says the stream second it was planned for, the one it went at and how late; the
-board's `accepted`/`done` come back as `arm` lines with the laptop's time.
+cue line says the stream second it was planned for, the one it went at and how late; a `send`
+line says when the word was forecast to be heard at each moment (`w_text`, `w_start`,
+`w_audio`), when the clip went and where its stroke was planned, in seconds after the sentence
+went to the voice; the board's `accepted`/`done` come back as `arm` lines with the laptop's
+time.
 
 ## People: who is speaking
 

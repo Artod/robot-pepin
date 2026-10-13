@@ -61,6 +61,22 @@ def test_in_braces_knows_an_open_marker_from_a_closed_one() -> None:
     assert in_braces("a {b c", 4) and not in_braces("a {b} c", 6) and not in_braces("abc", 1)
 
 
+def test_the_splitter_tells_a_closed_marker_and_the_first_word_before_the_sentence_ends() -> None:
+    """text_ahead: the open sentence once a marker in it closes, once when the first sentence's
+    first word is whole, never twice for the same, and a new sentence counts afresh."""
+    splitter = SentenceSplitter()
+    assert splitter.feed("{wei") == [] and splitter.ahead() == []  # the marker still open
+    assert splitter.feed("gh} Пя") == [] and splitter.ahead() == ["{weigh} Пя"]
+    assert splitter.feed("тьдесят на") == [] and splitter.ahead() == ["{weigh} Пятьдесят на"]
+    assert splitter.ahead() == [] and splitter.feed(" пятьдесят") == [] and splitter.ahead() == []
+    assert splitter.feed(". Зонт {point:you} возьми") == ["{weigh} Пятьдесят на пятьдесят."]
+    assert splitter.ahead() == ["Зонт {point:you} возьми"]  # the second sentence's marker only
+    reply = SentenceSplitter()
+    assert reply.feed("Да") == [] and reply.ahead() == []  # «Да» may still be «Дальше»
+    assert reply.feed(", конечно") == [] and reply.ahead() == ["Да, конечно"]
+    assert reply.feed(" можно") == [] and reply.ahead() == []
+
+
 # -- the player's marks -------------------------------------------------------------------------
 
 

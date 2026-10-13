@@ -33,6 +33,7 @@ from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
     CUT,
     FOLLOW_UP,
+    Ahead,
     Emit,
     FirstToken,
     Played,
@@ -242,6 +243,8 @@ class ChatBrain:
                         words.append(delta.content)
                         for sentence in splitter.feed(delta.content):
                             say(sentence)
+                        for early in splitter.ahead():
+                            emit(Ahead(early, round_index))
                     for part in delta.tool_calls or []:
                         if not calls:
                             rest = splitter.flush()  # the words before a call end here
