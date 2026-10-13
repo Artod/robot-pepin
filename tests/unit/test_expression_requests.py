@@ -8,6 +8,7 @@ bookings, and the feelings' arm lengths."""
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -351,7 +352,9 @@ class Ladder:
             parts, self.playout, lambda: (GESTURES, config), on=True,  # type: ignore[arg-type]
             clock=lambda: self.now, record=lambda kind, fields: self.records.append((kind, fields)),
         )  # fmt: skip
-        self.engine.scheduler.attach(self.engine.parts, lambda: self.engine.renderer)
+        self.engine.scheduler.attach(
+            self.engine.parts, lambda: self.engine.renderer, hooks=self.engine.scene_hooks
+        )
 
     def rows(self, kind: str, **match: Any) -> list[dict[str, Any]]:
         rows = [f for k, f in self.records if k == kind]
@@ -659,6 +662,23 @@ def test_every_feeling_holds_the_arm_at_most_2_5_s_before_the_board_s_return() -
         planned = arm.plan(longest)
         assert not isinstance(planned, str), name
         assert planned.trajectory.knots[-1].t_s <= 2.5, name
+
+
+def test_the_ladder_s_other_versions_pass_the_engine_s_scene_hooks() -> None:
+    """A hook that keeps a part out (the quiet rule, the laugh's arm) holds for every rung:
+    here the head is kept out, the drawn arm cannot make the reply's first word, and the floor
+    (a nod) must not bring the head back: nothing plays."""
+
+    def no_head(scene: Scene, request: Request) -> Scene:
+        return replace(scene, ready=scene.ready - {"head"})
+
+    rig = Ladder()
+    rig.engine.scene_hooks.append(no_head)
+    rig.say(1, 0, "Принтер вон там.", "point", 0)
+    assert not rig.rows("ladder") and rig.rows("dropped", why="no time")
+    bare = Ladder()
+    bare.say(1, 0, "Принтер вон там.", "point", 0)
+    assert bare.rows("ladder")[0]["parts"] == ["head"]  # without the hook: the floor's nod
 
 
 def test_the_scheduler_s_knobs_are_config_expression_json_s() -> None:

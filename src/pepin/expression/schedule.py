@@ -100,6 +100,7 @@ from pepin.expression.trajectory import JOINTS
 __all__ = ["Spoken"]  # the clock's part record, as the engine clears it (``spoken``)
 
 Record = Callable[[str, dict[str, Any]], None]
+SceneHook = Callable[[Scene, "Request"], Scene]  # the engine's: what a rendering may use, refined
 NOT_YET = math.inf  # the end of a reservation that lasts until let go (a looping idle clip)
 MARGIN_S = 0.3  # the most a forecast's spread holds a preparation back (DESIGN.md §7.6)
 EARLY_S = 0.3  # a stroke this much before its vowel is still on it (early is free: Nirme 2024)
@@ -462,6 +463,7 @@ class Scheduler:
         self.waiting: list[Waiting] = []
         self.parts: Mapping[PartName, Executor] = {}
         self._renderer: Callable[[], Rendering] | None = None
+        self._hooks: Sequence[SceneHook] = ()
         self._now = 0.0  # the engine's clock as last told (a call that carries none uses it)
         self._seen: set[tuple[int, int, int, str]] = set()  # token-stream marks looked at
         self._arm_last: tuple[dict[str, float], float] | None = None  # the last motion's end
@@ -501,15 +503,19 @@ class Scheduler:
         parts: Mapping[PartName, Executor],
         renderer: Callable[[], Rendering] | None = None,
         nuclei: Nuclei | None = None,
+        hooks: Sequence[SceneHook] = (),
     ) -> None:
         """What the ladder computes with: the engine's parts (the arm's planner, who is ready),
         its renderer (the book's other variants and floors; a callable: the engine makes a new
-        one when its book is read again) and the prosody listener's nuclei (the AUDIO moment).
-        Without them a word's clips are fitted as drawn, the floor being the drawn version
-        without the arm and the wheels."""
+        one when its book is read again), the prosody listener's nuclei (the AUDIO moment) and
+        the engine's scene hooks (the list itself: every rendering of another variant passes
+        them, as the engine's own does: the quiet rule, the laugh without the arm). Without
+        them a word's clips are fitted as drawn, the floor being the drawn version without the
+        arm and the wheels."""
         self.parts = parts
         self._renderer = renderer
         self.words.nuclei = nuclei
+        self._hooks = hooks
 
     # -- the conversation ------------------------------------------------------------------------
 
@@ -723,7 +729,7 @@ class Scheduler:
                 if arm:
                     yield Candidate("slid, compressed", drawn, slid, compress=True)
         rendering = self._rendering()
-        scene = self._scene()
+        scene = self._scene(request)
         floors: list[Performance] = []
         if composition is not None and rendering is not None:
             for k, variant in enumerate(composition.variants):
@@ -1201,7 +1207,8 @@ class Scheduler:
             if not any(rendering.book.atoms[s.atom].part == "arm" and s.p >= 1.0
                        for s in variant.steps):  # fmt: skip
                 return
-            drawn = rendering.render(marker.name, self._scene(), 0, None, variant=k)
+            ahead = Request(marker.name, None, Priority.MARK, "marker", composition.bind)
+            drawn = rendering.render(marker.name, self._scene(ahead), 0, None, variant=k)
             clip = next((c for c in drawn.clips if c.part == "arm"), None)
             planned = arm.plan(clip, start=_knot(arm.base)) if clip is not None else "no arm"
             if clip is None or isinstance(planned, str):
@@ -1274,10 +1281,14 @@ class Scheduler:
         arm = self.parts.get("arm")
         return arm if isinstance(arm, ArmPart) else None
 
-    def _scene(self) -> Scene:
-        """What a rendering of another variant may use: the parts ready now."""
+    def _scene(self, request: Request) -> Scene:
+        """What a rendering of another variant may use: the parts ready now, refined by the
+        engine's scene hooks for ``request``."""
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
-        return Scene(ready, speaking=True, conversation=True)
+        scene = Scene(ready, speaking=True, conversation=True)
+        for hook in self._hooks:
+            scene = hook(scene, request)
+        return scene
 
 
 def _without(performance: Performance, *parts: PartName) -> tuple[Clip, ...]:
