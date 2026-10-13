@@ -89,6 +89,7 @@ from pepin.expression.animation import (
     Scene,
     Track,
 )
+from pepin.expression.book import vocabulary
 from pepin.expression.executors import Executor
 from pepin.expression.forecast import (
     SPREAD_INSIDE_S,
@@ -100,7 +101,7 @@ from pepin.expression.forecast import (
     Stage,
     WordClock,
 )
-from pepin.expression.markers import Channel, Cue, Marker, Playout, Vocabulary, anchor, parse
+from pepin.expression.markers import Channel, Cue, Marker, Playout, anchor, parse
 from pepin.expression.mix import PREP_CAPS, prep_min_s
 from pepin.expression.parts import ArmPart, Planned
 from pepin.expression.trajectory import JOINTS
@@ -575,9 +576,9 @@ class Scheduler:
         rendering = self._rendering()
         if rendering is None:
             return
-        vocabulary = Vocabulary(frozenset(rendering.book.compositions), frozenset())
+        words = vocabulary(rendering.book, frozenset())  # the arguments and other spellings too
         first = sum(1 for t, _ in self.words.parts if t == turn)
-        for k, part in enumerate(parse(text, vocabulary).parts):
+        for k, part in enumerate(parse(text, words).parts):
             for marker in part.markers:
                 key = (turn, first + k, marker.at, marker.name)
                 if marker.channel != "gesture" or key in self._seen:
@@ -1315,10 +1316,12 @@ class Scheduler:
     def _ahead(
         self, rendering: Rendering, turn: int, index: int, text: str, marker: Marker
     ) -> None:
-        """A marker of the token stream whose every version moves the arm for certain: when
-        the arm is free and could not reach its stroke from rest once the part is queued, the
-        arm sent to its home pose and held (the version drawn at TEXT then starts from there;
-        a marker whose arm is left to chance prepares nothing: a raise for nothing is noise)."""
+        """A marker of the token stream whose every version for its argument moves the arm for
+        certain: when the arm is free and could not reach its stroke from rest once the part is
+        queued, the arm sent to its home pose and held (the version drawn at TEXT then starts
+        from there; a marker whose arm is left to chance, or whose place does not resolve,
+        prepares nothing: a raise for nothing is noise). Each version is rendered for the
+        marker's argument (a version written for another renders nothing and is passed)."""
         composition = rendering.book.compositions.get(marker.name)
         arm, home, now = self._arm_part(), rendering.book.poses.get(HOME), self._now
         if not isinstance(composition, Composition) or arm is None or home is None:
@@ -1326,15 +1329,19 @@ class Scheduler:
         busy = self.reservations.holder("arm", now) is not None or arm.holding() is not None
         if busy or arm.ready() is not None or any(w.clip.part == "arm" for w in self.waiting):
             return
+        share = min(1.0, marker.at / max(1, len(text)))
+        cue = Cue(marker, turn, index, share, *anchor(text, marker.at))
+        ahead = Request(marker.name, None, Priority.MARK, "marker", composition.bind)
         need = math.inf
         for k, variant in enumerate(composition.variants):
             if variant.floor:
                 continue
+            drawn = rendering.render(marker.name, self._scene(ahead), 0, cue, variant=k)
+            if not drawn.clips:
+                continue  # written for another argument
             if not any(rendering.book.atoms[s.atom].part == "arm" and s.p >= 1.0
                        for s in variant.steps):  # fmt: skip
                 return
-            ahead = Request(marker.name, None, Priority.MARK, "marker", composition.bind)
-            drawn = rendering.render(marker.name, self._scene(ahead), 0, None, variant=k)
             clip = next((c for c in drawn.clips if c.part == "arm"), None)
             planned = arm.plan(clip, start=_knot(arm.base)) if clip is not None else "no arm"
             if clip is None or isinstance(planned, str):

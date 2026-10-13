@@ -19,7 +19,13 @@ from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Ran
 from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
-from pepin.expression.fakes import FakeArmLink, FakeAttention, FakeExecutor, FakePlayout
+from pepin.expression.fakes import (
+    FakeArmLink,
+    FakeAttention,
+    FakeExecutor,
+    FakePlaces,
+    FakePlayout,
+)
 from pepin.expression.markers import Marker, Part, cues
 from pepin.expression.mix import PREP_CAPS, prep_min_s
 from pepin.expression.parts import Absent, ArmPart
@@ -342,7 +348,7 @@ class Ladder:
     """An engine over the arm's real planner on a fake board, fake head and face, a fake player
     and a fake clock; the scheduler is lent the engine's parts and renderer (the seam)."""
 
-    def __init__(self) -> None:
+    def __init__(self, book: Book | None = None) -> None:
         self.now = 1000.0
         self.playout = FakePlayout(now=1.0)
         self.link = FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"))
@@ -352,8 +358,9 @@ class Ladder:
         config = EngineConfig(arm_speed_scale=1.0, audio_lag_s=0.15, seed=7)
         parts = {"arm": self.arm, "head": self.head, "face": self.face,
                  "body": Absent("body", "no wheels")}  # fmt: skip
+        played = book if book is not None else GESTURES
         self.engine = GestureEngine(
-            parts, self.playout, lambda: (GESTURES, config), on=True,  # type: ignore[arg-type]
+            parts, self.playout, lambda: (played, config), on=True,  # type: ignore[arg-type]
             clock=lambda: self.now, record=lambda kind, fields: self.records.append((kind, fields)),
         )  # fmt: skip
         self.engine.scheduler.attach(
@@ -658,6 +665,25 @@ def test_a_token_stream_mark_gains_its_lead() -> None:
     assert stroke.knots[0].deg == pytest.approx(ready, abs=0.01)  # from the held home pose
     (arm,) = rig.rows("send", part="arm")
     assert -0.3 <= arm["error_s"] <= 0.15
+
+
+def test_a_token_stream_mark_with_an_argument_or_another_spelling_prepares_the_arm() -> None:
+    """The token stream reads marks as the parser does (the book's arguments and aliases):
+    «{count:second} Колёса» is ``count:2`` on the reply's first word, rendered for its argument
+    (the outer spot): too soon for the arm from rest, so it goes home first; so does a pointing
+    at a place the arm reaches, and one at a place past its pans prepares nothing."""
+    for text, prepares in (("{count:second} Колёса", "count"), ("{point:printer} Там", "point"),
+                           ("{point:door} Дверь", None)):  # fmt: skip
+        rig = Ladder(BOOK)
+        rig.engine.resolver.room = FakePlaces({"printer": 10.0, "door": 80.0})
+        rig.engine.text_ahead(1, 0, text)
+        rig.engine.step()
+        if prepares is None:
+            assert not rig.rows("prepared") and not rig.sent(), text
+            continue
+        (prepared,) = rig.rows("prepared")
+        assert prepared["intent"] == prepares and prepared["pose"] == "ready"
+        assert [t.then for t in rig.sent()] == ["hold"]
 
 
 def test_a_lower_request_is_refused_a_part_promised_to_a_mark_and_a_tool_takes_it() -> None:
