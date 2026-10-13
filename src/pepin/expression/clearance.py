@@ -154,6 +154,20 @@ def drive_blocker(
     return Blocker(float(points[i, 0]), float(points[i, 1]), gap, float(shifts[k]))
 
 
+def away_from(points: Points, footprint: Footprint) -> float:
+    """Which way a straight step takes the footprint away from the nearest mark (base_link
+    metres): +1, forward, unless the mark nearest the footprint lies ahead of its middle, then
+    -1, backward. Marks inside the footprint are the cart's own; with none outside it, forward
+    (ahead is where the camera and the ToF fans look)."""
+    gap = gaps(points, footprint)
+    outside = np.flatnonzero(gap > 0.0)
+    if len(outside) == 0:
+        return 1.0
+    nearest = outside[int(np.argmin(gap[outside]))]
+    middle = (footprint.front_m - footprint.rear_m) / 2.0
+    return -1.0 if points[nearest, 0] > middle else 1.0
+
+
 def near_points(
     angles: NDArray[np.float64],
     ranges: NDArray[np.float64],

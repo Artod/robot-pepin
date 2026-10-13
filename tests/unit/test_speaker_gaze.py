@@ -254,18 +254,19 @@ def test_the_turn_eases_in_and_out_like_a_head_and_a_seek_looks_outward_first() 
 
 
 class Steps:
-    """The wheels' attempts: each turn answered from ``blocked`` (a stall short of the turn),
-    ``stopped`` ends one for good; a back-off answered from ``backs`` (its blocked reason)."""
+    """The wheels' attempts: each turn answered from ``blocked`` (a stall short of the turn, the
+    degrees it made), ``stopped`` ends one for good; a step away answered from ``aways`` (its
+    blocked reason)."""
 
     def __init__(
         self,
         blocked: list[float] | None = None,
         stopped: str = "",
-        backs: list[str] | None = None,
+        aways: list[str] | None = None,
     ) -> None:
         self.blocked = deque(blocked or [])
         self.stopped = stopped
-        self.backs = deque(backs or [])
+        self.aways = deque(aways or [])
         self.calls: list[tuple[str, float]] = []
 
     def turn(self, deg: float) -> Step:
@@ -276,42 +277,50 @@ class Steps:
             return Step(math.copysign(self.blocked.popleft(), deg), blocked="stalled")
         return Step(deg)
 
-    def back_off(self, metres: float) -> Step:
-        self.calls.append(("back", metres))
-        blocked = self.backs.popleft() if self.backs else ""
+    def step_away(self, metres: float) -> Step:
+        self.calls.append(("away", metres))
+        blocked = self.aways.popleft() if self.aways else ""
         return Step(0.0 if blocked else metres, blocked=blocked)
 
 
-def test_a_turn_goes_in_one_go_backs_off_on_a_stall_and_gives_up_within_its_bounds() -> None:
+def test_a_turn_goes_in_one_go_and_a_stall_gets_one_step_away_and_one_more_try() -> None:
     steps = Steps()
     done = BoundedTurn(steps).move(WheelMove(turn_deg=25.0))
     assert done.done and done.turned_deg == pytest.approx(25.0) and done.attempts == 1
     assert steps.calls == [("turn", 25.0)], "one continuous turn, its steps are checkpoints"
     steps = Steps(blocked=[4.0])
     retried = BoundedTurn(steps).move(WheelMove(turn_deg=-20.0))
-    assert retried.done and retried.backed_m == pytest.approx(0.03) and retried.attempts == 2
-    assert steps.calls == [("turn", -20.0), ("back", 0.03), ("turn", -16.0)]
-    steps = Steps(blocked=[1.0, 1.0, 1.0, 1.0])
+    assert retried.done and retried.backed_m == pytest.approx(0.02) and retried.attempts == 2
+    assert steps.calls == [("turn", -20.0), ("away", 0.02), ("turn", -16.0)]
+    steps = Steps(blocked=[1.0, 1.0, 1.0])
     given_up = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
-    assert not given_up.done and given_up.attempts == 3 and given_up.turned_deg == 3.0
-    assert given_up.backed_m == pytest.approx(0.06) and given_up.why == "gave up: stalled"
-    assert [c for c in steps.calls if c[0] == "back"] == [("back", 0.03), ("back", 0.03)]
+    assert not given_up.done and given_up.attempts == 2 and given_up.turned_deg == 2.0
+    assert given_up.backed_m == pytest.approx(0.02) and given_up.why == "gave up: stalled"
+    assert steps.calls == [("turn", 20.0), ("away", 0.02), ("turn", 19.0)], "one try more"
     assert "past 30" in BoundedTurn(Steps()).move(WheelMove(turn_deg=35.0)).why
     assert "rock" in BoundedTurn(Steps()).move(WheelMove(rock_m=0.01, rocks=2)).why
-    tight = BoundedTurn(Steps(blocked=[1.0, 1.0]), BodyLimits(attempts=5, max_backoff_m=0.03))
-    assert tight.move(WheelMove(turn_deg=10.0)).backed_m == pytest.approx(0.03)
 
 
-def test_a_stopped_turn_never_backs_off_and_a_blocked_back_off_gives_up() -> None:
-    """A halt, someone else's stop, a drive: final (no back-off after the red button)."""
+def test_a_step_that_cannot_go_turns_back_the_other_way_once_then_the_rest_once_more() -> None:
+    steps = Steps(blocked=[3.0], aways=["the step forward is blocked: a mark ahead"])
+    unwound = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
+    assert steps.calls == [("turn", 20.0), ("away", 0.02), ("turn", -10.0), ("turn", 27.0)]
+    assert unwound.done and unwound.turned_deg == pytest.approx(20.0) and unwound.attempts == 2
+    assert unwound.backed_m == 0.0
+    steps = Steps(blocked=[3.0, 2.0], aways=["the step back is blocked: a mark behind"])
+    stuck = BoundedTurn(steps, BodyLimits(backoff_deg=5.0)).move(WheelMove(turn_deg=-20.0))
+    assert steps.calls == [("turn", -20.0), ("away", 0.02), ("turn", 5.0)], "never a retry"
+    assert not stuck.done and stuck.attempts == 1 and stuck.turned_deg == pytest.approx(-1.0)
+    assert stuck.why == ("gave up: stalled; the step back is blocked: a mark behind;"
+                         " the turn back: stalled")  # fmt: skip
+
+
+def test_a_stopped_turn_never_steps_away() -> None:
+    """A halt, someone else's stop, a drive: final (no recovery after the red button)."""
     steps = Steps(stopped="halted: the person speaks")
     cut = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
     assert not cut.done and cut.cut and cut.why == "halted: the person speaks"
     assert steps.calls == [("turn", 20.0)] and cut.turned_deg == 2.0
-    steps = Steps(blocked=[1.0], backs=["the back-off is blocked: a return behind"])
-    stuck = BoundedTurn(steps).move(WheelMove(turn_deg=20.0))
-    assert not stuck.done and stuck.why == "gave up: the back-off is blocked: a return behind"
-    assert stuck.attempts == 1 and stuck.backed_m == 0.0
 
 
 # ---- the people and whom to look at ----------

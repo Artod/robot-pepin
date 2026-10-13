@@ -613,8 +613,9 @@ behind, someone walking round) turns the body toward them in place, at most `whe
 30°). The wheels are started before the head's aim is asked, since their checks take longer than
 the head's turn, and neither waits for the other: the head arrives first and the robot answers
 at once ("Gestures" below for how the wheels move and what stops them). A check of an unknown
-voice turns the head alone. Wheels that cannot turn (a refused check, a stall or a blocked arc after three
-tries, the caps) leave the head alone on the person, as far as it reaches: a refusal is asked
+voice turns the head alone. Wheels that cannot turn (a refused check, a stall or a blocked arc
+after the one recovery and one more try, the caps) leave the head alone on the person, as far
+as it reaches: a refusal is asked
 again at the person's next utterance, a turn that moved the cart and still fell short is not
 asked again for that person in the conversation. The person speaking does not stop the turn
 toward them; a drive or the close does. Nothing on the voice's path waits for any of it: the
@@ -681,9 +682,14 @@ keep the 5 Hz slice coming while the head turns and its frames are not fused): a
 identical lidar revolutions count once, so something that steps in behind a standing cart, where
 neither the camera nor the ToF fans look, enters the marks only after the turn has begun, after
 about twelve revolutions on floor the volume has seen a few times and not within a 30° turn on
-floor it has seen forty times (the volume's own code against a simulated lidar). A stall (a third
-of the commanded motion in `stall_s`) or a blocked arc backs the cart off 3 cm (its rear checked)
-and turns the rest again: three tries and 6 cm at most, then the head alone. A drive or the
+floor it has seen forty times (the volume's own code against a simulated lidar). A turn that ends
+short (a stall: under a third of the commanded motion in `stall_s`; or a blocked arc) gets one
+recovery, the same rule whatever stopped it: a straight step of `wheels.backoff_m` (2 cm) away
+from the mark nearest the footprint (forward unless that mark lies ahead of the footprint's
+middle, forward when there is none), checked like any leg, or, when that step is blocked or
+stalls too, a turn of `wheels.backoff_deg` (10°) back the other way. Then the rest of the turn
+once more; if that ends short too, the head alone. The cart never ends a request more than 30°
+from the heading it began at. A drive or the
 conversation's close halts every motion at once, the person speaking a gesture's (a flag and one
 stop line from the voice's own loop); the turn toward the person speaking goes on. Nothing new
 runs on the board; the goal server keeps the newest slice and decodes it once per request on

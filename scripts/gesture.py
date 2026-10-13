@@ -308,7 +308,7 @@ def wheels(args: argparse.Namespace) -> int:
     try:
         refusal = executor.preview(request)
         retries = bool(request.turn_deg) and str(refusal).startswith("the arc")
-        then = " (the turn would back off and try again)" if retries else ""
+        then = " (the turn would step away and try once more)" if retries else ""
         print(f"checks: {'ok' if refusal is None else refusal}{then}")
         if args.dry_run or (refusal is not None and not retries):
             return 0 if refusal is None else 3

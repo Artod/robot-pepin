@@ -9,12 +9,15 @@ wheels may not move (a drive, the stub, a refused check) or turn less than asked
 as far as it reaches. The head never needs the wheels to SEE a person (its reach is about +-156
 deg); the wheels only bring a person far round back into the arc.
 
-:class:`BoundedTurn` is the wheels' retry made concrete over :class:`TurnSteps` (the board's
-measured motion, :class:`pepin.expression.wheels.WheelsExecutor`): one continuous turn per
-attempt; a turn the wheels could not finish because they stalled or the arc is blocked backs the
-cart off ``backoff_m`` and tries the rest again, at most ``attempts`` times and ``max_backoff_m``
-of backing in all; then it gives up. A turn STOPPED (a halt, someone else's command, a drive, a
-precondition) is never retried and never backs off.
+:class:`BoundedTurn` is the wheels' one recovery made concrete over :class:`TurnSteps` (the
+board's measured motion, :class:`pepin.expression.wheels.WheelsExecutor`), one rule for every
+way a turn can end short. A turn the wheels could not finish because they stalled or the arc is
+blocked steps ``backoff_m`` straight away from the nearest obstacle mark (forward unless that
+mark lies ahead of the footprint's middle); when that step cannot go (blocked, or stalled too)
+it turns ``backoff_deg`` back the other way instead. Then it tries the rest of the turn once
+more, and gives up if that ends short too. The cart never ends more than ``max_turn_deg`` from
+the heading the request began at, and never steps more than ``backoff_m``. A turn STOPPED (a
+halt, someone else's command, a drive, a precondition) is never retried and never steps away.
 """
 
 from __future__ import annotations
@@ -31,14 +34,13 @@ from pepin.gaze import Aim, Reach
 @dataclass(frozen=True)
 class BodyLimits:
     """config/expression.json's ``wheels`` block: the turn and the rock per request, the turn's
-    progress step, the retries."""
+    progress step, the one recovery's step away and turn back."""
 
     max_turn_deg: float = 30.0
     step_deg: float = 10.0
     max_rock_m: float = 0.02
-    attempts: int = 3
-    backoff_m: float = 0.03
-    max_backoff_m: float = 0.06
+    backoff_m: float = 0.02
+    backoff_deg: float = 10.0
 
 
 def split(
@@ -71,10 +73,11 @@ def head_after(bearing_rad: float, turned_rad: float, tilt_rad: float, reach: Re
 
 @dataclass(frozen=True)
 class Step:
-    """One motion as the wheels made it: how far (degrees of a turn, + left; metres of a
-    back-off) and why it stopped short: ``blocked`` (a stall, a blocked arc: worth a back-off and
-    another try) or ``stopped`` (a halt, someone else's command, a drive, a precondition: final);
-    ``cut`` when a halt cut it (a drive began, a newer motion), so it is worth finishing later."""
+    """One motion as the wheels made it: how far (degrees of a turn, + left; metres of a step
+    away) and why it stopped short: ``blocked`` (a stall, a blocked arc: worth the recovery and
+    one more try) or ``stopped`` (a halt, someone else's command, a drive, a precondition:
+    final); ``cut`` when a halt cut it (a drive began, a newer motion), so it is worth finishing
+    later."""
 
     amount: float
     blocked: str = ""
@@ -90,13 +93,13 @@ class TurnSteps(Protocol):
         """Turn in place by ``deg`` (+ left) in one go, or as far as the wheels went."""
         ...
 
-    def back_off(self, metres: float) -> Step:
-        """Back straight off by ``metres``; the distance it went."""
+    def step_away(self, metres: float) -> Step:
+        """Straight by ``metres`` away from the nearest obstacle mark; the distance it went."""
         ...
 
 
 class BoundedTurn:
-    """A turn with the bounded retry over :class:`TurnSteps` (runs on the wheels' thread)."""
+    """A turn with its one recovery over :class:`TurnSteps` (runs on the wheels' thread)."""
 
     def __init__(self, steps: TurnSteps, limits: BodyLimits | None = None) -> None:
         """The steps it drives and the knobs that bound it."""
@@ -104,31 +107,37 @@ class BoundedTurn:
         self.limits = limits if limits is not None else BodyLimits()
 
     def move(self, request: WheelMove) -> WheelReport:
-        """Turn by ``request.turn_deg``; refused past ``max_turn_deg`` or for a rock."""
+        """Turn by ``request.turn_deg``: one go; ended short (stalled, blocked), one recovery
+        (the step away, or the turn back when the step cannot go) and one more try of the rest;
+        refused past ``max_turn_deg`` or for a rock."""
         lim = self.limits
         if request.rocks or request.rock_m:
             return WheelReport(False, why="a rock is not a turn")
         if abs(request.turn_deg) > lim.max_turn_deg + 1e-9:
             past = f"a turn of {request.turn_deg:+.0f} deg is past {lim.max_turn_deg:.0f}"
             return WheelReport(False, why=f"refused: {past}")
-        left, turned, backed, attempts = request.turn_deg, 0.0, 0.0, 1
-        while True:
-            step = self._steps.turn(left)
-            turned += step.amount
-            left -= step.amount
-            if step.stopped:
-                return WheelReport(False, turned, backed, attempts, step.stopped, step.cut)
-            if not step.blocked:
-                return WheelReport(True, turned, backed, attempts)
-            why = step.blocked
-            if attempts >= lim.attempts or backed + lim.backoff_m > lim.max_backoff_m + 1e-9:
-                break
-            back = self._steps.back_off(lim.backoff_m)
-            backed += abs(back.amount)
+        first = self._steps.turn(request.turn_deg)
+        turned = first.amount
+        if first.stopped:
+            return WheelReport(False, turned, 0.0, 1, first.stopped, first.cut)
+        if not first.blocked:
+            return WheelReport(True, turned, 0.0, 1)
+        away = self._steps.step_away(lim.backoff_m)
+        backed = abs(away.amount)
+        if away.stopped:
+            return WheelReport(False, turned, backed, 1, away.stopped, away.cut)
+        if away.blocked:
+            back = self._steps.turn(-math.copysign(lim.backoff_deg, request.turn_deg))
+            turned += back.amount
             if back.stopped:
-                return WheelReport(False, turned, backed, attempts, back.stopped, back.cut)
+                return WheelReport(False, turned, backed, 1, back.stopped, back.cut)
             if back.blocked:
-                why = back.blocked
-                break
-            attempts += 1
-        return WheelReport(False, turned, backed, attempts, f"gave up: {why}")
+                why = f"{first.blocked}; {away.blocked}; the turn back: {back.blocked}"
+                return WheelReport(False, turned, backed, 1, f"gave up: {why}")
+        again = self._steps.turn(request.turn_deg - turned)
+        turned += again.amount
+        if again.stopped:
+            return WheelReport(False, turned, backed, 2, again.stopped, again.cut)
+        if again.blocked:
+            return WheelReport(False, turned, backed, 2, f"gave up: {again.blocked}")
+        return WheelReport(True, turned, backed, 2)

@@ -21,12 +21,18 @@ import pytest
 from pepin.base_link import BaseState, StateListener
 from pepin.expression.animation import Clip, Track
 from pepin.expression.book import load_book
-from pepin.expression.clearance import Footprint, View, drive_blocker, near_points, turn_blocker
+from pepin.expression.clearance import (
+    Footprint,
+    View,
+    away_from,
+    drive_blocker,
+    near_points,
+    turn_blocker,
+)
 from pepin.expression.conversation import Heard
 from pepin.expression.executors import WheelMove, WheelReport, WheelsDone
 from pepin.expression.fakes import FakeBase, FakeClock, FakeDoa, FakeFace, FakeFaceFinder, FakeView
 from pepin.expression.mix import stretched
-from pepin.expression.plan import BodyLimits
 from pepin.expression.render import BookRenderer
 from pepin.expression.tracker import SpeakerGaze, SpeakerGazeWorker, SpeakerSettings
 from pepin.expression.wheels import (
@@ -119,36 +125,65 @@ def test_a_turn_reaches_its_angle_within_the_tolerance_and_the_caps() -> None:
     assert report.done and max(t.angular for t in slow.base.twists()) <= RATE * 0.2 + 1e-9
 
 
-def test_a_stall_backs_off_and_tries_again_within_three_attempts_and_six_centimetres() -> None:
-    r = rig()
+@pytest.mark.parametrize(
+    ("world", "x"),
+    [
+        ([], 0.02),  # no mark: forward, where the camera and the ToF look
+        ([(-0.50, 0.30)], 0.02),  # the nearest mark behind: forward
+        ([(0.40, 0.0), (-0.70, 0.0)], -0.02),  # the nearest mark ahead: back
+    ],
+)
+def test_a_stall_steps_away_from_the_nearest_mark_once_and_tries_once_more(
+    world: list[tuple[float, float]], x: float
+) -> None:
+    r = rig(world=world, marks_age_s=0.0)
     r.base.stalled_turns = True  # the wheels do not turn; they do drive straight
     report = turn(r, 20.0)
-    assert not report.done and report.attempts == 3 and report.why.startswith("gave up: stalled")
-    assert report.backed_m == pytest.approx(0.06, abs=0.012) and report.turned_deg == 0.0
-    backs = [t.linear for t in r.base.twists() if t.linear < 0]
-    assert backs and max(abs(v) for v in backs) <= FULL.speed_m_s + 1e-9
-    assert r.base.pose.x == pytest.approx(-0.06, abs=0.012), "two back-offs of 3 cm, no third"
+    assert not report.done and report.attempts == 2 and report.why.startswith("gave up: stalled")
+    assert report.backed_m == pytest.approx(0.02, abs=0.006) and report.turned_deg == 0.0
+    steps = [t.linear for t in r.base.twists() if t.linear != 0.0]
+    assert steps and all(v * x > 0 for v in steps), "one direction, away from the mark"
+    assert max(abs(v) for v in steps) <= FULL.speed_m_s + 1e-9
+    assert r.base.pose.x == pytest.approx(x, abs=0.006), "one step of 2 cm, no second"
+    turns = [t for t in r.base.twists() if t.angular != 0.0]
+    assert turns and all(t.angular > 0 for t in turns), "never the other way: the step went"
 
 
-def test_a_blocked_arc_backs_off_and_the_turn_goes_once_the_arc_is_clear() -> None:
+def test_a_stall_whose_step_cannot_go_turns_back_the_other_way_and_gives_up() -> None:
+    r = rig(marks_age_s=0.0)
+    r.base.stalled_turns = r.base.stalled_drives = True  # wedged: nothing moves
+    report = turn(r, 20.0)
+    assert not report.done and report.attempts == 1 and report.turned_deg == 0.0
+    assert report.why.startswith("gave up: stalled") and "the step forward is blocked" in report.why
+    assert "the turn back: stalled" in report.why
+    assert any(t.angular < 0 for t in r.base.twists()), "it tried the other way once"
+
+
+def test_a_blocked_arc_steps_away_and_the_turn_goes_once_the_arc_is_clear() -> None:
     r = rig(replace(FULL, clearance_m=0.05), world=[BLOCKER], marks_age_s=0.0)
     report = turn(r, 20.0)
     assert report.done and report.attempts == 2
-    assert report.backed_m == pytest.approx(0.03, abs=0.006)
+    assert report.backed_m == pytest.approx(0.02, abs=0.006)
+    assert r.base.pose.x == pytest.approx(-0.02, abs=0.006), "back: the mark is ahead"
     assert report.turned_deg == pytest.approx(20.0, abs=FULL.settle_deg)
     wide = rig(replace(FULL, clearance_m=0.10), world=[BLOCKER], marks_age_s=0.0)
     given_up = turn(wide, 20.0)
-    assert not given_up.done and given_up.attempts == 3 and given_up.turned_deg == 0.0
+    assert not given_up.done and given_up.attempts == 2 and given_up.turned_deg == 0.0
     assert given_up.why.startswith("gave up: the arc is blocked: a mark at (+0.")
-    assert given_up.backed_m == pytest.approx(0.06, abs=0.012)
+    assert given_up.backed_m == pytest.approx(0.02, abs=0.006)
 
 
-def test_a_return_that_walks_into_the_arc_mid_turn_stops_it() -> None:
-    r = rig(replace(FULL, limits=BodyLimits(attempts=1)), marks_age_s=0.0)
+def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_clear_it() -> None:
+    r = rig(marks_age_s=0.0)
     r.base.at(r.clock.now + 0.4, lambda b: r.view.world.append((-0.30, -0.40)))  # behind right
+    cleared = turn(r, 30.0)
+    assert cleared.done and cleared.attempts == 2, "stopped, stepped forward, turned the rest"
+    assert r.base.pose.x > 0.01
+    r = rig(marks_age_s=0.0)
+    r.base.at(r.clock.now + 0.4, lambda b: r.view.world.append((-0.20, -0.42)))
     report = turn(r, 30.0)
-    assert not report.done and "the arc is blocked" in report.why
-    assert 0.0 < report.turned_deg < 25.0
+    assert not report.done and report.why.startswith("gave up: the arc is blocked")
+    assert 0.0 < report.turned_deg < 25.0 and report.attempts == 2
 
 
 # ---- refusals --------------------------------------------------------------------------------
@@ -591,12 +626,27 @@ def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     settings = WheelsSettings.load(REPO / "config/expression.json")
     lim = settings.limits
     # shipped at 0 until the first supervised motion (2026-10-12); the design bounds are 30 / 0.02
-    assert (lim.max_turn_deg, lim.max_rock_m, lim.attempts) == (30.0, 0.02, 3)
-    assert (lim.backoff_m, lim.max_backoff_m) == (0.03, 0.06)
+    assert (lim.max_turn_deg, lim.max_rock_m) == (30.0, 0.02)
+    assert (lim.backoff_m, lim.backoff_deg) == (0.02, 10.0), "the one recovery, within the caps"
     assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
+    assert settings.marks_age_s == 1.5
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})
+    with pytest.raises(ValueError, match="backoff_m"):
+        WheelsSettings.from_config({"wheels": {"backoff_m": 0.03}})
+    with pytest.raises(ValueError, match="backoff_deg"):
+        WheelsSettings.from_config({"wheels": {"backoff_deg": 40.0}})
+
+
+def test_a_step_goes_away_from_the_mark_nearest_the_footprint() -> None:
+    fp = Footprint()
+    assert away_from(np.zeros((0, 2)), fp) == 1.0, "no mark: forward"
+    assert away_from(np.array([[-0.1, 0.0]]), fp) == 1.0, "the cart's own: forward"
+    assert away_from(np.array([[-0.45, 0.0], [0.5, 0.0]]), fp) == 1.0, "behind is nearer"
+    assert away_from(np.array([[-0.60, 0.0], [0.2, 0.0]]), fp) == -1.0, "ahead is nearer"
+    assert away_from(np.array([[-0.05, 0.40]]), fp) == -1.0, "beside, ahead of the middle"
+    assert away_from(np.array([[-0.20, -0.40]]), fp) == 1.0, "beside, behind the middle"
 
 
 def test_the_listener_hears_every_state_line_and_the_arm_s_last_word_holds() -> None:

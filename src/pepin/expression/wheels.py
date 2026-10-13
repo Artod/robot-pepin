@@ -38,11 +38,13 @@ a foreign STOP is answered with a stop of our own (the same word, so the wheels 
 once instead of after the deadman) and holds every motion off for ``stop_hold_s``. A deadman in
 the state line (our twists stopped arriving: the WiFi) ends the motion too.
 
-THE RETRY (:class:`pepin.expression.plan.BoundedTurn`): a turn the wheels could not finish
-because they stalled (less than a third of the commanded motion over ``stall_s``) or the arc is
-blocked backs the cart off ``backoff_m`` (its rear checked first) and turns the rest again, at
-most ``attempts`` times and ``max_backoff_m`` of backing in all. A halt, a foreign command, a
-drive or a failed precondition is final.
+THE ONE RECOVERY (:class:`pepin.expression.plan.BoundedTurn`): a turn the wheels could not
+finish because they stalled (less than a third of the commanded motion over ``stall_s``) or the
+arc is blocked steps ``backoff_m`` straight away from the nearest obstacle mark (forward unless
+that mark lies ahead of the footprint's middle; checked like any leg), or, when that step cannot
+go, turns ``backoff_deg`` back the other way; then it tries the rest of the turn once more and
+gives up if that ends short too. A halt, a foreign command, a drive or a failed precondition is
+final.
 """
 
 from __future__ import annotations
@@ -68,6 +70,7 @@ from pepin.expression.clearance import (
     Points,
     Surroundings,
     View,
+    away_from,
     drive_blocker,
     turn_blocker,
 )
@@ -161,8 +164,14 @@ class WheelsSettings:
         for name in positive:
             if getattr(settings, name) <= 0.0:
                 raise ValueError(f"wheels.{name} must be above 0")
-        if limits.attempts < 1 or limits.step_deg <= 0.0:
-            raise ValueError("wheels: attempts >= 1 and step_deg > 0")
+        if limits.step_deg <= 0.0:
+            raise ValueError("wheels.step_deg must be above 0")
+        if not 0.0 < limits.backoff_m <= limits.max_rock_m:
+            raise ValueError(f"wheels.backoff_m is above 0 and at most max_rock_m"
+                             f" ({limits.max_rock_m}), not {limits.backoff_m}")  # fmt: skip
+        if not 0.0 < limits.backoff_deg <= limits.max_turn_deg:
+            raise ValueError(f"wheels.backoff_deg is above 0 and at most max_turn_deg"
+                             f" ({limits.max_turn_deg}), not {limits.backoff_deg}")  # fmt: skip
         return settings
 
     @classmethod
@@ -751,14 +760,18 @@ class WheelsExecutor:
                         self._progress(job, before_deg))  # fmt: skip
         return Step(math.degrees(end.at), end.blocked, end.stopped, job.cut)
 
-    def back_off(self, job: Job, metres: float) -> Step:
-        """Straight back by ``metres`` (its rear checked first)."""
+    def step_away(self, job: Job, metres: float) -> Step:
+        """Straight by ``metres`` away from the nearest obstacle mark in the newest view
+        (:func:`pepin.expression.clearance.away_from`), checked like any leg."""
         state = self._base_state()
         if state is None:
             return Step(0.0, stopped=job.why or "no word from the base server")
+        view = self.around.latest()
+        sign = away_from(view.points, self.footprint) if view is not None else 1.0
         speed, acc = self.settings.drive_caps()
-        end = self._leg(job, "x", state.pose, -abs(metres), speed, acc, None)
-        blocked = f"the back-off is blocked: {end.blocked}" if end.blocked else ""
+        end = self._leg(job, "x", state.pose, sign * abs(metres), speed, acc, None)
+        way = "forward" if sign > 0 else "back"
+        blocked = f"the step {way} is blocked: {end.blocked}" if end.blocked else ""
         return Step(abs(end.at), blocked, end.stopped, job.cut)
 
     def _play_legs(self, job: Job, legs: tuple[Leg, ...], *, timed: bool) -> WheelReport:
@@ -948,9 +961,9 @@ class _Steps:
         self.turned_deg += step.amount
         return step
 
-    def back_off(self, metres: float) -> Step:
-        """Straight back."""
-        return self.wheels.back_off(self.job, metres)
+    def step_away(self, metres: float) -> Step:
+        """Straight away from the nearest mark."""
+        return self.wheels.step_away(self.job, metres)
 
 
 def stalled(

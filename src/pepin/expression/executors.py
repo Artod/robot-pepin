@@ -18,11 +18,11 @@ THE WHEELS never drive for expression, and never through Nav2: a turn in place o
 motions' method (``ros/tools/move.py``'s: velocity commands judged by the odometry's swept
 heading and travel, depth_fusion's obstacle marks, a time cap per leg, the base server's deadman
 behind it), only while the goal server says ``"navigating": false``. When the wheels stall or the
-marks say the arc is blocked, the cart backs off ``backoff_m`` and turns again, at most
-``attempts`` times and ``max_backoff_m`` of backing in all, and then gives up: the speaker gaze
-then looks as far as the head reaches. Every call to the wheels returns at once: a motion runs
-on the wheels' own thread and answers through a callback, so nothing the voice waits on ever
-waits on the wheels.
+marks say the arc is blocked, the cart steps ``backoff_m`` away from the nearest mark (or turns
+``backoff_deg`` back when it cannot), tries the rest once more, and then gives up: the speaker
+gaze then looks as far as the head reaches. Every call to the wheels returns at once: a motion
+runs on the wheels' own thread and answers through a callback, so nothing the voice waits on
+ever waits on the wheels.
 
 The :class:`Animator` is the one place a gesture is asked for: the cascade's cues, the
 ``gesture`` tool and the laptop's command line all go through it.
@@ -129,8 +129,9 @@ class WheelMove:
 @dataclass(frozen=True)
 class WheelReport:
     """How a wheel motion ended: whether it did all it was asked, the heading it turned, the
-    distance it backed off, the attempts it took, why it stopped short, and whether a halt cut
-    it (a drive began, a newer motion: worth finishing later)."""
+    distance it stepped away (forward or back), the attempts it took (two at most), why it
+    stopped short, and whether a halt cut it (a drive began, a newer motion: worth finishing
+    later)."""
 
     done: bool
     turned_deg: float = 0.0
