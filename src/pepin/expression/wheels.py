@@ -109,9 +109,9 @@ class WheelsSettings:
     motion's caps at full speed and ``speed_scale``, the tolerances and the checks."""
 
     limits: BodyLimits = field(default_factory=BodyLimits)
-    speed_scale: float = 0.2
+    speed_scale: float = 0.4
     yaw_rate_deg_s: float = 30.0
-    yaw_acc_deg_s2: float = 90.0
+    yaw_acc_deg_s2: float = 360.0
     speed_m_s: float = 0.10
     acc_m_s2: float = 0.5
     settle_deg: float = 2.0

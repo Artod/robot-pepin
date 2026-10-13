@@ -44,7 +44,7 @@ from pepin.neck import NeckConfig
 from pepin.odometry import Pose2D
 
 REPO = Path(__file__).resolve().parents[2]
-FULL = WheelsSettings(speed_scale=1.0)
+FULL = WheelsSettings(speed_scale=1.0, yaw_acc_deg_s2=90.0)  # the caps these tests pin
 RATE, RAMP = math.radians(30.0), math.radians(90.0)  # the caps at speed 1
 BLOCKER = (0.13, -0.06)  # ahead-right: a 20 deg left turn's front corner comes within 0.04 m
 # A caller's thread is never held: milliseconds here, bounded far under the 0.6 s a stuck goal
@@ -536,7 +536,7 @@ def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     # shipped at 0 until the first supervised motion (2026-10-12); the design bounds are 30 / 0.02
     assert (lim.max_turn_deg, lim.max_rock_m, lim.attempts) == (30.0, 0.02, 3)
     assert (lim.backoff_m, lim.max_backoff_m) == (0.03, 0.06)
-    assert settings.speed_scale == 0.2
+    assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})
