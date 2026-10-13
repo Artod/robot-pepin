@@ -658,9 +658,18 @@ class Scheduler:
         return forecast.stream + lag + self.timing.stroke_bias_s - latency - waiting.fit.prep_s
 
     def _tell(self, now: float) -> None:
-        """The engine's clock, as a call brought it: parts queued since take it as their TEXT."""
+        """The engine's clock, as a call brought it: parts queued since take it as their TEXT,
+        and a preparation made on an older time starts no sooner than now."""
         self._now = now
         self.words.stamp(now)
+        for waiting in self.waiting:
+            fit = waiting.fit
+            if fit is not None and fit.step == "prepare" and waiting.due < now:
+                shift = now - waiting.due
+                waiting.due = now
+                fit.start, fit.stroke, fit.end = (
+                    t + shift for t in (fit.start, fit.stroke, fit.end)
+                )
 
     # -- the ladder (at render) ------------------------------------------------------------------
 
