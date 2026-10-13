@@ -109,9 +109,9 @@ class RecordingObserver:
         """Recorded."""
         self.calls.append(("reply_done", (turn,)))
 
-    def moment(self, name: str) -> None:
-        """Recorded."""
-        self.calls.append(("moment", (name,)))
+    def moment(self, name: str, text: str = "") -> None:
+        """Recorded (the words only when there are some)."""
+        self.calls.append(("moment", (name, text) if text else (name,)))
 
     def drive(self, active: bool) -> None:
         """Recorded."""

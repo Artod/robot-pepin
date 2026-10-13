@@ -155,9 +155,10 @@ class ConversationObserver(Protocol):
         """Reply ``turn``'s audio has played out."""
         ...
 
-    def moment(self, name: str) -> None:
+    def moment(self, name: str, text: str = "") -> None:
         """A named moment of the robot (:data:`SLOW_TOOL`), which config/animation.json may map
-        to an intent."""
+        to an intent; ``text``: at :data:`LISTENER_PAUSE`, the person's words so far when the
+        ears' early read of that pause has landed ("" otherwise, and for every other moment)."""
         ...
 
     def drive(self, active: bool) -> None:

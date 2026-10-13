@@ -416,8 +416,9 @@ class GestureEngine:
         """The reply played out: whatever still waited for it is dropped."""
         self._post(lambda: self._drop_turns(turn, "done", only=True))
 
-    def moment(self, name: str) -> None:
-        """A moment of the robot the book maps to an intent (``slow_tool`` -> thinking)."""
+    def moment(self, name: str, text: str = "") -> None:
+        """A moment of the robot the book maps to an intent (``slow_tool`` -> thinking); the
+        person's words at a pause are the listeners'."""
         self._post(lambda: self._moment(name))
 
     def drive(self, active: bool) -> None:

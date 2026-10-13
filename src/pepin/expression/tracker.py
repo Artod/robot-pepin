@@ -1393,7 +1393,7 @@ class SpeakerGazeWorker:
         """The robot stopped speaking."""
         self._post("speaking", False)
 
-    def moment(self, name: str) -> None:
+    def moment(self, name: str, text: str = "") -> None:
         """Nothing: a moment is the gestures'."""
 
     def drive(self, active: bool) -> None:

@@ -535,7 +535,7 @@ class People:
     def reply_done(self, turn: int) -> None:
         """Nothing."""
 
-    def moment(self, name: str) -> None:
+    def moment(self, name: str, text: str = "") -> None:
         """Nothing."""
 
     def drive(self, active: bool) -> None:
