@@ -4,11 +4,15 @@ The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable,
 ``compositions`` (name -> cooldown_s, bind, args, family, long, variants of steps with their
 weight, needs and floor, note), ``poses`` (name -> joint ->
 degrees and an optional note; taught by hand with ``scripts/gesture.py teach`` or authored
-from the URDF), ``idle`` (the idle layers) and
-``moments`` (a moment of the robot -> a composition). A parameter is a number or ``[lo, hi]``;
+from the URDF), ``idle`` (the idle layers),
+``moments`` (a moment of the robot -> a composition), ``aliases`` (another spelling of a
+marker -> its canonical ``name`` or ``name:arg``) and ``space`` (the gesture space:
+:class:`pepin.expression.animation.Space`). A parameter is a number or ``[lo, hi]``;
 in a step, a string or a list of strings is a named parameter (a face's or a pose's name, one
 drawn). A key value is a number, ``"$param"`` or ``"-$param"``; on the face a name or
-``"$name"``; a key's ``pose`` is a pose's name or ``"$pose"``. Every mistake is a ``ValueError``
+``"$name"``; a key's ``pose`` is a pose's name, ``"$pose"`` or a reference into the gesture space
+(``"@from"``, ``"@via"``, ``"@path:0"``; :mod:`pepin.expression.render` resolves them, as it
+does a step's ``pose`` that starts with ``@``). Every mistake is a ``ValueError``
 naming where it is, at load: a book that loads plays.
 
 The arm's ``rest`` pose is not the book's: it is config/arm.json's ``motion.rest_deg``, the pose
@@ -22,7 +26,9 @@ from __future__ import annotations
 
 import json
 import math
+import re
 from collections.abc import Mapping
+from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast
 
@@ -42,11 +48,13 @@ from pepin.expression.animation import (
     Key,
     PartName,
     Range,
+    Space,
     Step,
     Value,
     Variant,
 )
-from pepin.expression.markers import Vocabulary
+from pepin.expression.markers import ANY, Vocabulary
+from pepin.expression.markers import ARG as ARG_ANY
 from pepin.expression.trajectory import JOINTS
 
 BOOK_FILE = "animation.json"
@@ -59,6 +67,8 @@ DOFS: dict[PartName, tuple[str, ...]] = {
 }
 RESERVED = (PERIOD, REPEATS, HOLD)
 NAMED = ("name", "pose")  # the named parameters a key may refer to
+ARG = "arg"  # a variant's need of its marker's argument (beside the parts' states)
+SPELLING = re.compile(r"^[^\s:{}]+(?::[^:{}]+)?$")  # an alias: a name, or name:arg
 
 
 def load_book(path: str | Path | None = None) -> Book:
@@ -95,18 +105,21 @@ def book_from(data: Mapping[str, Any]) -> Book:
     for moment, intent in moments.items():
         if intent not in compositions:
             raise ValueError(f"moments.{moment}: no composition {intent!r}")
-    return Book(atoms, compositions, poses, idle, moments)
+    aliases = _aliases(data.get("aliases", {}), compositions)
+    space = _space(data.get("space", {}), poses)
+    return Book(atoms, compositions, poses, idle, moments, aliases, space)
 
 
 def with_rest(book: Book, rest: Mapping[str, float]) -> Book:
     """``book`` with the arm's ``rest`` pose (config/arm.json's) among its poses."""
-    return Book(book.atoms, book.compositions, {**book.poses, REST: dict(rest)}, book.idle,
-                book.moments)  # fmt: skip
+    return replace(book, poses={**book.poses, REST: dict(rest)})
 
 
 def vocabulary(book: Book, faces: frozenset[str]) -> Vocabulary:
-    """What a marker may name: the book's compositions, and the face's expressions."""
-    return Vocabulary(frozenset(book.compositions), faces)
+    """What a marker may name: the book's compositions with the arguments each takes and their
+    other spellings, and the face's expressions."""
+    args = {name: c.args for name, c in book.compositions.items() if c.args}
+    return Vocabulary(frozenset(book.compositions), faces, args, dict(book.aliases))
 
 
 def face_names(path: str | Path | None = None) -> frozenset[str]:
@@ -246,8 +259,10 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
         if weight <= 0:
             raise ValueError(f"{where}.variants[{v}].weight: above 0")
         needs = raw.get("needs", {})
-        if not isinstance(needs, dict) or not set(needs) <= set(PARTS):
-            raise ValueError(f"{where}.variants[{v}].needs: part -> state, parts of {PARTS}")
+        if not isinstance(needs, dict) or not set(needs) <= {*PARTS, ARG}:
+            raise ValueError(
+                f"{where}.variants[{v}].needs: part -> state, parts of {PARTS}, or {ARG}"
+            )
         needs = {str(k): str(x) for k, x in needs.items()}
         variants.append(Variant(tuple(steps), weight, needs, bool(raw.get("floor", False))))
     if not variants:
@@ -302,3 +317,82 @@ def _idle(i: int, body: Mapping[str, Any], atoms: Mapping[str, Atom]) -> Idle:
     every = _range(f"{where}.every_s", body.get("every_s"))
     states = tuple(cast(IdleState, u) for u in unless)
     return Idle(cast(PartName, part), names, every, when, states)
+
+
+def _aliases(raw: Any, compositions: Mapping[str, Composition]) -> dict[str, str]:
+    """``aliases``: a spelling (lower case, ``name`` or ``name:arg``) -> a composition, with an
+    argument it takes when it takes any."""
+    if not isinstance(raw, dict):
+        raise ValueError("aliases: spelling -> name or name:arg")
+    out: dict[str, str] = {}
+    for spelling, target in raw.items():
+        if spelling == "note":
+            continue
+        where = f"aliases.{spelling}"
+        spelled = SPELLING.match(spelling) and spelling == spelling.lower()
+        if not isinstance(target, str) or not spelled:
+            raise ValueError(f"{where}: a lower-case name or name:arg -> a name or name:arg")
+        name, _, arg = target.partition(":")
+        composition = compositions.get(name)
+        if composition is None:
+            raise ValueError(f"{where}: no composition {name!r}")
+        free = ANY in composition.args and ARG_ANY.match(arg) is not None
+        if arg and arg not in composition.args and not free:
+            raise ValueError(f"{where}: {name} takes no argument {arg!r}")
+        out[spelling] = target
+    return out
+
+
+def _space(raw: Any, poses: Mapping[str, Mapping[str, float]]) -> Space:
+    """``space``, every pose it names checked (``rest`` is config/arm.json's, never named)."""
+    if not isinstance(raw, dict):
+        raise ValueError("space: an object")
+
+    def pose(where: str, name: Any) -> str:
+        if not isinstance(name, str) or name not in poses:
+            raise ValueError(f"space.{where}: no pose {name!r}")
+        return name
+
+    def pair(where: str, value: Any) -> tuple[float, float]:
+        rng = _range(f"space.{where}", value)
+        return rng.lo, rng.hi
+
+    def two(where: str, value: Any, what: str) -> tuple[float, float]:
+        if not (
+            isinstance(value, list)
+            and len(value) == 2
+            and all(isinstance(v, int | float) and not isinstance(v, bool) for v in value)
+        ):
+            raise ValueError(f"space.{where}: {what}")
+        return float(value[0]), float(value[1])
+
+    d = Space()
+    if not raw:
+        return d
+    hand = raw.get("pointing", {})
+    paths = {
+        str(k): tuple(pose(f"paths.{k}", p) for p in v)
+        for k, v in raw.get("paths", {}).items()
+        if k != "note"
+    }
+    head = {
+        str(k): two(f"head.{k}", v, "[pan, tilt] in degrees")
+        for k, v in raw.get("head", {}).items()
+        if k != "note"
+    }
+    via_pan = raw.get("via_pan_deg")
+    return Space(
+        home=pose("home", raw.get("home", d.home)),
+        via_pan_deg=None if via_pan is None else float(via_pan),
+        via=tuple(pose("via", p) for p in raw.get("via", [])),
+        loci=tuple(pose("loci", p) for p in raw.get("loci", [])),
+        paths=paths,
+        head=head,
+        open_hand=pose("pointing.open", hand["open"]) if "open" in hand else None,
+        shut_hand=pose("pointing.shut", hand["shut"]) if "shut" in hand else None,
+        pan_deg=pair("pointing.pan_deg", hand.get("pan_deg", [0.0, 0.0])),
+        arm_axis_m=two("pointing.arm_axis_m", hand.get("arm_axis_m", [0.0, 0.0]), "[x, y] m"),
+        neck_m=two("pointing.neck_m", hand.get("neck_m", [0.0, 0.0]), "[x, y] m"),
+        person_m=float(hand.get("person_m", d.person_m)),
+        again=tuple(str(x) for x in raw.get("again", [])),
+    )

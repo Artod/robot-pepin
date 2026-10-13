@@ -30,7 +30,8 @@ layers fades over the ``fade_s`` knob. The person starting to speak fades the ge
 on every part; the base layer (the head on the person) stays.
 
 Owners of what this file declares (co-speech gesticulation, DESIGN.md §11): ``Composition.bind,
-args, family, long`` and ``Variant.needs, floor`` are authored by C (the book's primitives) and
+args, family, long``, ``Variant.needs, floor``, ``Book.aliases`` and :class:`Space` are authored
+by C (the book's primitives and the gesture space; the resolver reads them) and
 read by B (the ladder); ``Idle.unless`` by A (the breath, the melody); ``Scene``'s
 ``lead_s``/``arm_at`` are filled by B, ``quiet``/``energy`` by A, ``distance_m`` from the
 attention view; ``Clip.then``/``hold_s`` by B (arm units).
@@ -116,8 +117,9 @@ class Step:
 @dataclass(frozen=True)
 class Variant:
     """One way to perform an intent, how often it is drawn against the others, what it needs of
-    the body (``needs``: a part -> a state, e.g. ``{"arm": "any"}``; none: anything) and whether
-    it is the floor (``floor``: the head and face version that always fits)."""
+    the body (``needs``: a part -> a state, e.g. ``{"arm": "any"}``; none: anything) and of its
+    marker (``"arg"``: the argument, or its kind: ``you``, ``me``, ``place``, ``thing``), and
+    whether it is the floor (``floor``: the head and face version that always fits)."""
 
     steps: tuple[Step, ...]
     weight: float = 1.0
@@ -159,15 +161,45 @@ class Idle:
 
 
 @dataclass(frozen=True)
+class Space:
+    """The gesture space in front of the robot (config/animation.json's ``space``, DESIGN.md
+    §4.3): the home pose, the shoulder pan inward of which a way to a target goes through home,
+    and the poses always reached through it (``via``); the cells the referents and the counted
+    items take, in order (``loci``); the cells each path-drawing mark goes through (``paths``,
+    ``"arc:up"`` -> cells); the head's (pan, tilt) offset for a mark whose head turns its
+    argument's way (``head``, ``"arc:up"`` -> degrees); the pointing hand (the open and the shut
+    hand's poses straight ahead, the clear pan range, the arm's pan axis and the neck's in the
+    cart frame, a person's distance when unknown); the marks the brain may repeat in a reply."""
+
+    home: str = "ready"
+    via_pan_deg: float | None = None
+    via: tuple[str, ...] = ()
+    loci: tuple[str, ...] = ()
+    paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    head: Mapping[str, tuple[float, float]] = field(default_factory=dict)
+    open_hand: str | None = None
+    shut_hand: str | None = None
+    pan_deg: tuple[float, float] = (0.0, 0.0)
+    arm_axis_m: tuple[float, float] = (0.0, 0.0)
+    neck_m: tuple[float, float] = (0.0, 0.0)
+    person_m: float = 1.2
+    again: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class Book:
     """config/animation.json: the atoms, the compositions (the intents), the arm's poses (pose
-    -> joint -> degrees), the idle layers and the robot's moments mapped to intents."""
+    -> joint -> degrees), the idle layers, the robot's moments mapped to intents, the marks'
+    other spellings (``aliases``: ``"beat"`` -> ``"accent"``, ``"point:i"`` -> ``"point:me"``)
+    and the gesture space."""
 
     atoms: Mapping[str, Atom]
     compositions: Mapping[str, Composition]
     poses: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     idle: tuple[Idle, ...] = ()
     moments: Mapping[str, str] = field(default_factory=dict)
+    aliases: Mapping[str, str] = field(default_factory=dict)
+    space: Space = field(default_factory=Space)
 
 
 @dataclass(frozen=True)
