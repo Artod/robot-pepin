@@ -756,7 +756,23 @@ minute, never with less lead than the nod needs: 0.30 s with the head's latency,
 arbiter lets a nod's bottom come 0.2 s after its first move at the earliest; none in a sentence
 that carries the brain's own marker, none within 2 s of a marker's head stroke, played or still
 waiting for its word); a lift and cock of the head at a question's last syllable;
-one look away in a reply with 6 s of audio. Between turns: the breath (the book's looping idle
+one look away in a reply with 6 s of audio. THE ARM UP: a reply whose second sentence reaches the
+voice (`pulse.arm_up_min_sentences`, 2; its text, before its sound) raises the arm once to the
+book's `ready` (about 0.7 s, half the caps) within half a second of its speech, after any rock
+of the cart and only with 1 s of its speech known after it, and holds it there while the reply
+goes on: the hold reaches 0.5 s past the reply's audio known and is sent again before it lapses
+(a lost laptop leaves the arm up at most `config/arm.json`'s `hold_max_s`, 20 s), a mark's
+stroke starts from it and the arm comes back to `ready` after the mark, and an accent inside it
+is a wrist flick of 15-25° (`pulse.wrist_beat_p` 0.5, `wrist_beat_deg`) instead of the nod; the
+arm rests when the reply's audio ends (its end, or the hold's own lapse 0.5 s after the last
+sound), at once when the person starts to speak, at a barge-in, the close, the body's turn, a
+laugh's rock or a sentence in a quiet style. A one-sentence reply never raises it. THE ACCENT'S
+ROCK: once a reply at most (`pulse.accent_rock_p` 0.5), the cart rocks 1 cm (the book's
+`body_rock` at its low end) with its stroke on the reply's strongest syllable over `beat_z` it
+can still reach, never in its first 0.5 s of sound, never in quiet, never in a reply whose arm
+is up (the board refuses the wheels while the arm moves or holds, and the arm while the wheels
+move: the engine refuses either first), never while a mark moves the arm or a body turn is
+pending: in practice one-sentence replies. Between turns: the breath (the book's looping idle
 entry, `breath` at 1° and 0.25 Hz) whenever the robot is silent, through the person's speech
 too; a thinking glance up,
 down or aside 0.8 s into the brain's wait (p 0.75, never the same way twice, back 0.5-1.3 s into
@@ -765,14 +781,18 @@ sooner); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart
 their words so far, when the ears read them in time, or else their last utterance were a
 question); a small nod after a statement (p 0.3); hello and bye played in the brain's wait from
 the person's own words (after the body's turn toward them; the book's `moments` name them); one
-rock of the cart after a `{laugh}`, a tail whose stroke lands within `timing.after_s` (2.5 s) of
-its sentence's start and inside the speech (the laugh never uses the arm then); a smile at the
+rock of the cart after a `{laugh}` that played, or after a sentence whose own words laugh
+(`caps.laughter`, «ха-ха», «хи-хи», «ахах»: the moment `laugh_heard`, whatever the brain wrote; one
+a minute by `caps.intent_per_minute.laugh`, counted with the brain's), a tail whose stroke lands
+within `timing.after_s` (2.5 s) of its sentence's start and inside the speech (the laugh never
+uses the arm then; an arm up goes to rest first); a smile at the
 first face (the face's one writer: the speaker gaze's own smile is off, `speaker.smile` null).
 Every discrete head move keeps `moments.head_gap_s` (1 s)
 from the one before. Quiet (`quiet`: a whispering or
 sleepy style, 23:00-08:00, or the person's voice under -30 dBFS): the melody, the breath and the
 face only. Each conversation's events.jsonl gets `pulse` (per sentence: its nuclei's z, the
-accent and why others were skipped), `moment` (each decision, played or why not), `quiet` and,
+accent and why others were skipped), `moment` (each decision, played or why not: `arm_up`,
+`accent_rock` and `laugh_heard` among them, one row a reply each), `quiet` and,
 at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a minute,
 the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.7 accent
 nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel
@@ -781,6 +801,7 @@ of a content word against 44 % for any syllable, every head clip within the arbi
 ```bash
 uv run python scripts/voice_cascade.py switch --flag gestures=on    # the alive layer with it
 grep -h '"event": "moment"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
+grep -h '"arm_up"\|"accent_rock"\|"laugh_heard"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl
 grep -h '"event": "alive"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl   # per conversation
 ```
 
