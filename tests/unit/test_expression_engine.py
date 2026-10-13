@@ -393,7 +393,7 @@ class Clock:
 class Rig:
     """An engine over fake parts, a fake player and a fake clock; the thread never runs."""
 
-    def __init__(self, on: bool = True, **knobs: Any) -> None:
+    def __init__(self, on: bool = True, book: Book = BOOK, **knobs: Any) -> None:
         self.clock = Clock()
         self.playout = FakePlayout()
         self.parts = {p: FakeExecutor(p) for p in ("arm", "head", "face")}  # type: ignore[arg-type]
@@ -403,7 +403,7 @@ class Rig:
         self.engine = GestureEngine(
             {**self.parts, "body": Absent("body", "no wheels")},  # type: ignore[dict-item]
             self.playout,
-            lambda: (BOOK, config),
+            lambda: (book, config),
             on=on,
             clock=self.clock,
             record=lambda kind, fields: self.records.append((kind, fields)),
@@ -527,10 +527,54 @@ def test_the_caps_hold_markers_back_but_never_a_person_s_ask() -> None:
     rig.engine.part_queued(1, 0, Part("Да, да.", None, two))
     rig.engine.part_queued(1, 1, marked("Ещё.", "doubt", 0))
     rig.engine.part_queued(1, 2, marked("И ещё.", "shrug", 0))
+    rig.engine.part_queued(1, 3, marked("И всё.", "surprise", 0))
     rig.engine.step()
-    assert [r["why"] for r in rig.kinds("capped")] == ["per_part", "per_reply"]
+    assert [r["why"] for r in rig.kinds("capped")] == ["per_part", "per_reply"]  # three a reply
     for _ in range(3):
         assert rig.engine.perform("emphasis", source="tool").ok  # cooldown or not
+
+
+def test_the_accent_and_a_count_series_stand_outside_the_counts() -> None:
+    """«Две причины: {count:1} батарея и {count:2} колёса, это {!} очень {!} важно.»: the series
+    counts once (as its first: per_part, per_reply and the minute's), the accent counts nowhere
+    and plays once a part; two more marks fill the reply's three, a third is capped."""
+    rig = Rig()
+    text = "Две причины: батарея и колёса, это очень важно."
+
+    def at(word: str, name: str, arg: str | None = None) -> Marker:
+        return Marker("gesture", name, text.index(word), "", arg)
+
+    marks = (at("батарея", "count", "1"), at("колёса", "count", "2"), at("очень", "accent"),
+             at("важно", "accent"))  # fmt: skip
+    rig.engine.part_queued(1, 0, Part(text, None, marks))
+    rig.engine.part_queued(1, 1, marked("Ещё одно.", "doubt", 0))
+    rig.engine.part_queued(1, 2, marked("И третье.", "shrug", 0))
+    rig.engine.part_queued(1, 3, marked("И всё.", "surprise", 0))
+    rig.engine.step()
+    assert [r["why"] for r in rig.kinds("capped")] == ["accent_per_part", "per_reply"]
+    played = [r["intent"] for r in rig.kinds("performance")]
+    assert played == ["count", "count", "accent", "doubt", "shrug"]
+    assert rig.engine._count(lambda arm: True) == 3  # the series once, the accent never
+
+
+def test_a_cooldown_holds_the_same_mark_and_argument_another_argument_plays() -> None:
+    point = replace(BOOK.compositions["point"], cooldown_s=10.0)
+    rig = Rig(book=replace(BOOK, compositions={**BOOK.compositions, "point": point}))
+    text = "Это ведь ты сам сказал."
+
+    def point_at(turn: int, arg: str) -> None:
+        mark = Marker("gesture", "point", text.index("сам"), "", arg)
+        rig.engine.part_queued(turn, 0, Part(text, None, (mark,)))
+        rig.engine.step()
+        rig.clock.now += 1.0
+
+    point_at(1, "you")
+    point_at(2, "me")  # another argument: no cooldown
+    point_at(3, "you")  # the same within 10 s
+    assert [r["why"] for r in rig.kinds("capped")] == ["cooldown 10 s"]
+    rig.clock.now += 10.0
+    point_at(4, "you")
+    assert [r["intent"] for r in rig.kinds("performance")] == ["point"] * 3
 
 
 def test_a_laugh_once_a_minute_unless_the_person_laughed() -> None:
@@ -605,6 +649,8 @@ def test_the_config_file_s_knobs_are_read() -> None:
     config = engine_config(json.loads((CONFIG / "expression.json").read_text()))
     assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
     assert config.arm_speed_scale == 1.0 and config.caps.intent_per_minute == {"laugh": 1}
+    assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (1, 3, 1)
+    assert config.caps.accents == ("accent",) and config.caps.series == ("count",)
     assert config.finish == ("greeting", "farewell") and config.seed is None
 
 

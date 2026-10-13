@@ -46,9 +46,10 @@ the engine's record and to the conversation's events.jsonl (:attr:`GestureEngine
 Caps (config/expression.json ``caps``) hold the markers and the moments back, never a tool or
 the command line, which a person asked for: per part (a sentence or a clause of one), per
 reply, per minute, arm gestures per minute, an intent's own per minute (``laugh``: 1, waived
-while the person's own laugh is fresh), and each composition's ``cooldown_s``. Arm gestures are
-counted on the final version (the ladder's: a mark that fell to its head-and-face floor used no
-arm).
+while the person's own laugh is fresh), and each composition's ``cooldown_s`` per mark and
+argument. The accent (``{!}``) is outside those counts, one a part; a series (``count``) counts
+once a reply, its later items passing every count. Arm gestures are counted on the final
+version (the ladder's: a mark that fell to its head-and-face floor used no arm).
 
 A requester ends its own move with :meth:`release` (what that very request holds fades, what
 it still waits for is dropped), and sees what waits with :meth:`pending` (each clip's part,
@@ -80,7 +81,7 @@ import time
 from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
-from typing import Any
+from typing import Any, Literal
 
 from pepin.expression.animation import (
     PARTS,
@@ -141,16 +142,24 @@ RENEW_MIN_S = 0.1  # a looping clip is renewed at most this often
 
 @dataclass(frozen=True)
 class Caps:
-    """How often the markers and the moments may move the body (a tool's ask is never capped)."""
+    """How often the markers and the moments may move the body (a tool's ask is never capped):
+    the accents (``{!}``) outside the counts, at most ``accent_per_part`` a part; a series'
+    later items (``count``) in a reply counted once, as its first."""
 
     per_part: int = 1
-    per_reply: int = 2
+    per_reply: int = 3
     per_minute: int = 6
     arm_per_minute: int = 3
     intent_per_minute: Mapping[str, int] = field(default_factory=lambda: {"laugh": 1})
     laughter: str = r"(?:х[аеи][- ]?){2,}|ахах|хих|haha"  # noqa: RUF001
     laughter_waives: tuple[str, ...] = ("laugh",)
     laughter_s: float = 30.0
+    accent_per_part: int = 1
+    accents: tuple[str, ...] = ("accent",)
+    series: tuple[str, ...] = ("count",)
+
+
+Tally = Literal["counted", "accent", "series"]  # how a capped request counts (Caps)
 
 
 @dataclass(frozen=True)
@@ -214,6 +223,9 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
             laughter=str(caps.get("laughter", c.laughter)),
             laughter_waives=tuple(caps.get("laughter_waives", c.laughter_waives)),
             laughter_s=float(caps.get("laughter_s", c.laughter_s)),
+            accent_per_part=int(caps.get("accent_per_part", c.accent_per_part)),
+            accents=tuple(str(x) for x in caps.get("accents", c.accents)),
+            series=tuple(str(x) for x in caps.get("series", c.series)),
         ),
         timing=timing_from(data),
     )
@@ -265,8 +277,11 @@ class GestureEngine:
         self._stop = False
         self._per_part: dict[tuple[int, int], int] = {}
         self._per_reply: dict[int, int] = {}
-        self._started: deque[tuple[float, str, bool]] = deque()  # (when, intent, with the arm)
-        self._used: dict[str, float] = {}  # intent -> when it last played
+        self._accents: dict[tuple[int, int], int] = {}  # accents placed in each part
+        self._series: dict[int, set[str]] = {}  # each reply's series counted (their first)
+        # (when, intent, with the arm, counted under per_minute and arm_per_minute)
+        self._started: deque[tuple[float, str, bool, bool]] = deque()
+        self._used: dict[str, float] = {}  # a mark (intent, or intent:arg) -> when it last played
         self._laughed = float("-inf")
         self._last: Performance | None = None
         self._conversation = False
@@ -665,8 +680,9 @@ class GestureEngine:
                 return []
         turn, index = (cue.turn, cue.index) if cue is not None else (None, None)
         capped = request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips
+        tally = self._tally(request.intent, turn) if capped else "counted"
         if capped:
-            refusal = self._capped(request.intent, turn, index)
+            refusal = self._capped(request.intent, cue, tally)
             if refusal is not None:
                 where = {"moment": moment} if moment is not None else {"turn": turn, "part": index}
                 self.record("capped", {"intent": request.intent, **where, "why": refusal})
@@ -674,14 +690,30 @@ class GestureEngine:
         if request.clips:
             performance = Performance(request.intent, 0, 0, request.clips, cue)
         else:
-            rendered = self._render(request.intent, request.source, cue, request)
+            rendered = self._render(request.intent, request.source, cue, request,
+                                    counted=tally == "counted")  # fmt: skip
             if rendered is None:
                 return []
             performance = rendered
         if capped and turn is not None and index is not None:
-            self._per_part[(turn, index)] = self._per_part.get((turn, index), 0) + 1
-            self._per_reply[turn] = self._per_reply.get(turn, 0) + 1
+            if tally == "accent":
+                self._accents[(turn, index)] = self._accents.get((turn, index), 0) + 1
+            elif tally == "counted":
+                self._per_part[(turn, index)] = self._per_part.get((turn, index), 0) + 1
+                self._per_reply[turn] = self._per_reply.get(turn, 0) + 1
+                if request.intent in self.config.caps.series:
+                    self._series.setdefault(turn, set()).add(request.intent)
         return self._place(request, performance, cue, rendered=not request.clips)
+
+    def _tally(self, intent: str, turn: int | None) -> Tally:
+        """How a marker's or a moment's ``intent`` counts under the caps: an accent outside
+        them, a series' later item in its reply as none, anything else as itself."""
+        caps = self.config.caps
+        if intent in caps.accents:
+            return "accent"
+        if turn is not None and intent in self._series.get(turn, ()):
+            return "series"
+        return "counted"
 
     def _place(
         self, request: Request, performance: Performance, cue: Cue | None, *, rendered: bool
@@ -697,18 +729,25 @@ class GestureEngine:
             arm = any(w.clip.part == "arm" for w in placed)
             started = self._started[-1] if self._started else None
             if started is not None and started[1] == performance.intent and started[2] != arm:
-                self._started[-1] = (started[0], started[1], arm)  # rendered just before
+                self._started[-1] = (started[0], started[1], arm, started[3])  # rendered just now
             if placed:
                 self._last = replace(placed[0].performance, clips=tuple(w.clip for w in placed))
         outcomes = [self._send(waiting, now, None) for waiting in at_once]
         return outcomes + [Outcome(True, "waiting")] * (len(placed) - len(at_once))
 
     def _render(
-        self, intent: str, source: str, cue: Cue | None, request: Request
+        self,
+        intent: str,
+        source: str,
+        cue: Cue | None,
+        request: Request,
+        *,
+        counted: bool = True,
     ) -> Performance | None:
         """``intent`` rendered for the parts ready now, the arm's and the body's clips stretched
-        to their speed scales (the arm left out past ``arm_per_minute``); logged with its seed.
-        None when it cannot be played."""
+        to their speed scales (the arm left out past ``arm_per_minute``, unless the performance
+        is not ``counted``: an accent, a series' later item); logged with its seed. None when it
+        cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
@@ -723,7 +762,7 @@ class GestureEngine:
             stretched(c, 1.0 / scales[c.part]) if c.part in scales else c for c in performance.clips
         )
         capped = source in ("marker", "moment") and any(c.part == "arm" for c in clips)
-        if capped and self._count(lambda arm: arm) >= self.config.caps.arm_per_minute:
+        if capped and counted and self._count(lambda arm: arm) >= self.config.caps.arm_per_minute:
             clips = tuple(c for c in clips if c.part != "arm")
             self.record("capped", {"intent": intent, "part": "arm", "why": "arm_per_minute"})
         if not clips:
@@ -731,8 +770,9 @@ class GestureEngine:
             return None
         performance = replace(performance, clips=clips)
         now = self.clock()
-        self._started.append((now, intent, any(c.part == "arm" for c in clips)))  # see _place
-        self._used[intent] = now
+        arm = any(c.part == "arm" for c in clips)
+        self._started.append((now, intent, arm, counted))  # the arm's: see _place
+        self._used[_mark(intent, cue)] = now
         self._last = performance
         self.record("performance", {
             "intent": intent, "source": source, "seed": performance.seed,
@@ -742,8 +782,10 @@ class GestureEngine:
         })  # fmt: skip
         return performance
 
-    def _capped(self, intent: str, turn: int | None, index: int | None) -> str | None:
-        """Why a marker's or a moment's ``intent`` may not play now, None when it may."""
+    def _capped(self, intent: str, cue: Cue | None, tally: Tally) -> str | None:
+        """Why a marker's or a moment's ``intent`` (on ``cue``'s part, when a marker's) may not
+        play now, None when it may: an accent only by ``accent_per_part``, a series' later item
+        by none of the counts, a cooldown per mark and argument."""
         caps, now = self.config.caps, self.clock()
         if not self._on:
             return "gestures are off"
@@ -752,30 +794,35 @@ class GestureEngine:
         composition = self.book.compositions.get(intent)
         if composition is None:
             return "not in the book"
-        if turn is not None and index is not None:
-            if self._per_part.get((turn, index), 0) >= caps.per_part:
+        if cue is not None:
+            where = (cue.turn, cue.index)
+            if tally == "accent" and self._accents.get(where, 0) >= caps.accent_per_part:
+                return "accent_per_part"
+            if tally == "counted" and self._per_part.get(where, 0) >= caps.per_part:
                 return "per_part"
-            if self._per_reply.get(turn, 0) >= caps.per_reply:
+            if tally == "counted" and self._per_reply.get(cue.turn, 0) >= caps.per_reply:
                 return "per_reply"
-        if self._count(lambda arm: True) >= caps.per_minute:
+        if tally == "counted" and self._count(lambda arm: True) >= caps.per_minute:
             return "per_minute"
         waived = intent in caps.laughter_waives and now - self._laughed <= caps.laughter_s
         limit = caps.intent_per_minute.get(intent)
         if limit is not None and not waived and self._count(lambda arm: True, intent) >= limit:
             return f"{intent} per minute"
-        last = self._used.get(intent)
+        last = self._used.get(_mark(intent, cue))
         if last is not None and now - last < composition.cooldown_s and not waived:
             return f"cooldown {composition.cooldown_s:.0f} s"
         return None
 
     def _count(self, which: Callable[[bool], bool], intent: str | None = None) -> int:
-        """Performances started in the last minute (of ``intent`` when given) that ``which``
-        (with the arm?) accepts."""
+        """Performances started in the last minute that ``which`` (with the arm?) accepts: of
+        ``intent`` when given, else those counted (no accent, no series' later item)."""
         now = self.clock()
         while self._started and now - self._started[0][0] > 60.0:
             self._started.popleft()
         return sum(
-            1 for _, name, arm in self._started if which(arm) and (intent is None or name == intent)
+            1
+            for _, name, arm, counted in self._started
+            if which(arm) and (name == intent if intent is not None else counted)
         )
 
     def _fire_due(self) -> float | None:
@@ -982,6 +1029,13 @@ class GestureEngine:
         self.scheduler.configure(
             audio_lag_s=c.audio_lag_s, late_s=c.late_s, poll_s=c.poll_s, timing=c.timing
         )
+
+
+def _mark(intent: str, cue: Cue | None) -> str:
+    """A mark as its cooldown knows it: the intent, with the argument its marker gave
+    (``point:you`` and ``point:printer`` are two)."""
+    arg = cue.marker.arg if cue is not None and cue.marker.name == intent else None
+    return intent if arg is None else f"{intent}:{arg}"
 
 
 def bounded(wait: float | None) -> float | None:

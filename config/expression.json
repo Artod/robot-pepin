@@ -37,14 +37,17 @@
   },
   "caps": {
     "per_part": 1,
-    "per_reply": 2,
+    "per_reply": 3,
     "per_minute": 6,
     "arm_per_minute": 3,
+    "accent_per_part": 1,
+    "accents": ["accent"],
+    "series": ["count"],
     "intent_per_minute": {"laugh": 1},
     "laughter": "(?:х[аеи][- ]?){2,}|ахах|хих|haha",
     "laughter_waives": ["laugh"],
     "laughter_s": 30.0,
-    "note": "What the brain's markers and the robot's moments may play (a tool or scripts/gesture.py, which a person asked for, is never capped); a marker over a cap is dropped and logged. per_part: gestures in one voice part (a sentence, or a clause a style cut); per_reply, per_minute: of all gestures; arm_per_minute: gestures with the arm (over it the rest of the gesture plays without the arm); intent_per_minute: an intent's own; a composition's cooldown_s (config/animation.json) between two of its own. The person's laugh (laughter, a regex on what Whisper read, within laughter_s) waives the caps of laughter_waives. From expressive_motion.md: a person telling a story makes ~4 gestures a minute; no study gives an annoyance threshold: these are starting knobs."
+    "note": "What the brain's markers and the robot's moments may play (a tool or scripts/gesture.py, which a person asked for, is never capped); a marker over a cap is dropped and logged. per_part: gestures in one voice part (a sentence, or a clause a style cut); per_reply (3, gesticulation DESIGN.md 5.5), per_minute: of all gestures; arm_per_minute: gestures with the arm (over it the rest of the gesture plays without the arm). accents ({!}, the accent): outside every count above, at most accent_per_part in a part (it replaces that sentence's pulse nod). series (count): the items of one reply count once, as its first: the later ones pass per_part, per_reply, per_minute and arm_per_minute (one unit of the arm). intent_per_minute: an intent's own; a composition's cooldown_s (config/animation.json) between two of its own with the same argument ({point:you} and {point:printer} are two). The person's laugh (laughter, a regex on what Whisper read, within laughter_s) waives the caps of laughter_waives. From expressive_motion.md: a person telling a story makes ~4 gestures a minute; no study gives an annoyance threshold: these are starting knobs."
   },
   "pulse": {
     "melody_deg_per_st": 0.2,
