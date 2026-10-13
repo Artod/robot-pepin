@@ -327,7 +327,34 @@ def test_the_arm_part_refuses_with_the_reason_never_clamps() -> None:
     link = FakeArmLink(state=ArmStatus(1.0, MOTION.rest(), False, "off"))
     arm = ArmPart(link, MOTION)
     assert "outside" in arm.play(wave_clip(amp=40.0, period=10.0)).why  # 76.6 + 40 > 100.9
-    assert "deg/s" in arm.play(wave_clip(amp=10.0, period=0.4)).why
+    assert not link.calls
+    # a stroke too fast for the caps is stretched in time, its angles untouched
+    fast = arm.play(wave_clip(amp=10.0, period=0.4))
+    ((name, (trajectory,)),) = link.calls
+    assert fast.ok and name == "send" and fast.seconds == trajectory.knots[-1].t_s > 0.4
+    wrist = JOINTS.index("wrist_flex")
+    swing = [k.deg[wrist] - MOTION.rest()[wrist] for k in trajectory.knots]
+    assert max(swing) == pytest.approx(10.0, abs=0.05) and min(swing) == pytest.approx(
+        -10.0, abs=0.05
+    )
+    assert (
+        check_knots(
+            [(k.t_s, k.deg) for k in trajectory.knots],
+            MOTION.limits(),
+            MOTION.max_speed_deg_s,
+            MOTION.max_acc_deg_s2,
+        )
+        is None
+    )
+    # stretched past the board's longest trajectory: refused, nothing sent (the animator hands
+    # the part its clip already 67x slower: 26.7 s, which the caps stretch past 30)
+    link.calls.clear()
+    assert (
+        "longer"
+        in ArmPart(link, MOTION, speed_scale=0.015)
+        .play(stretched(wave_clip(amp=10.0, period=0.4), 1 / 0.015))
+        .why
+    )
     assert not link.calls
     assert "no word" in str(ArmPart(FakeArmLink(), MOTION).ready())
     silent = FakeArmLink(state=ArmStatus(1.0, None, False, "silent", error="no reply"))
@@ -567,7 +594,7 @@ def test_a_tool_s_perform_is_answered_from_the_engine_s_thread() -> None:
 def test_the_config_file_s_knobs_are_read() -> None:
     config = engine_config(json.loads((CONFIG / "expression.json").read_text()))
     assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
-    assert config.arm_speed_scale == 0.2 and config.caps.intent_per_minute == {"laugh": 1}
+    assert config.arm_speed_scale == 1.0 and config.caps.intent_per_minute == {"laugh": 1}
     assert config.finish == ("greeting", "farewell") and config.seed is None
 
 
@@ -580,3 +607,16 @@ def test_the_arm_part_takes_the_engine_s_speed_scale() -> None:
 def test_unused_arm_motion_fields_round_trip() -> None:
     assert isinstance(MOTION, ArmMotion)
     assert MOTION.limits()[JOINTS.index("gripper")] == (-10.0, 103.3)
+
+
+def test_a_clip_faster_than_the_caps_is_stretched_in_time_not_refused() -> None:
+    from pepin.expression.mix import check_knots, stretch_to_caps
+
+    # 100 deg in 1 s asks 100 deg/s; at a 20 deg/s cap the same path must take 5 s
+    knots = [(0.0, [0.0, 0.0]), (1.0, [100.0, 0.0]), (2.0, [100.0, 0.0])]
+    slow = stretch_to_caps(knots, max_speed=20.0, max_acc=1e9)
+    assert [t for t, _ in slow] == pytest.approx([0.0, 5.0, 10.0])
+    assert [d for _, d in slow] == [[0.0, 0.0], [100.0, 0.0], [100.0, 0.0]]
+    assert check_knots(slow, [(-180, 180)] * 2, 20.0, 1e9) is None
+    # within the caps nothing changes
+    assert stretch_to_caps(knots, max_speed=200.0, max_acc=1e9) == [(t, list(d)) for t, d in knots]

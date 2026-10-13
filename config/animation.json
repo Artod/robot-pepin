@@ -96,10 +96,17 @@
     },
     "arm_wave": {
       "part": "arm", "mode": "additive", "stroke": 0.25,
-      "params": {"amp_deg": [8.0, 10.0], "period_s": [1.5, 1.7], "repeats": [2, 3]},
+      "params": {"amp_deg": [7.0, 9.0], "period_s": [0.58, 0.65], "repeats": [2, 3]},
       "keys": [{"at": 0.0, "wrist_flex": 0.0}, {"at": 0.3, "wrist_flex": "$amp_deg"}, {"at": 0.7, "wrist_flex": "-$amp_deg"}, {"at": 1.0, "wrist_flex": 0.0}],
       "mirror": ["wrist_flex"],
-      "note": "the hand waved by the wrist on the pose under it (raised when taught, else rest); +-10 deg at 0.65 Hz is about the most 360 deg/s^2 allows (the swing's peak acceleration ~75 amp / period^2)"
+      "note": "the hand waved forward and back by the wrist on the pose under it (raised when taught, else rest): the bye wave; +-9 deg at ~1.7 Hz is the most the servos' 2232 deg/s^2 allows (peak acceleration ~75 amp / period^2)"
+    },
+    "arm_wave_side": {
+      "part": "arm", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [7.0, 9.0], "period_s": [0.58, 0.65], "repeats": [2, 3]},
+      "keys": [{"at": 0.0, "shoulder_pan": 0.0}, {"at": 0.3, "shoulder_pan": "$amp_deg"}, {"at": 0.7, "shoulder_pan": "-$amp_deg"}, {"at": 1.0, "shoulder_pan": 0.0}],
+      "mirror": ["shoulder_pan"],
+      "note": "the hand waved side to side by the shoulder's pan on the pose under it: the hello wave (the wrist wave reads as bye); +-9 deg at ~1.7 Hz is the most the servos' 2232 deg/s^2 allows (peak acceleration ~75 amp / period^2)"
     },
     "arm_beat": {
       "part": "arm", "mode": "additive", "stroke": 0.35,
@@ -123,9 +130,9 @@
     },
     "gripper_click": {
       "part": "arm", "mode": "additive", "stroke": 1.0,
-      "params": {"amp_deg": [10.0, 15.0], "period_s": [1.0, 1.2], "repeats": [1, 3]},
+      "params": {"amp_deg": [5.0, 7.0], "period_s": [0.5, 0.6], "repeats": [3, 6]},
       "keys": [{"at": 0.0, "gripper": 0.0}, {"at": 0.5, "gripper": "$amp_deg"}, {"at": 1.0, "gripper": 0.0}],
-      "note": "open and shut (the stroke: shut); a menacing click wants 2-3 Hz, the caps give 1 Hz: the gripper's caps are the first to raise"
+      "note": "open and shut (the stroke: shut), a quick clack at ~1.8 Hz: 5-7 deg is what the servos' 2232 deg/s^2 allows at that tempo"
     },
     "gripper_set": {
       "part": "arm", "mode": "additive", "stroke": 0.3,
@@ -143,13 +150,13 @@
   "compositions": {
     "greeting": {
       "cooldown_s": 30.0,
-      "note": "hello: a happy face a little before the word, the head up, the hand raised and waved",
+      "note": "hello: a happy face a little before the word, the head up, the hand raised and waved side to side, the wave starting on the way up",
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.3, -0.2], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
           {"atom": "head_back", "p": 0.8, "params": {"amp_deg": [3.0, 5.0], "period_s": [1.0, 1.2]}},
-          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "period_s": [1.95, 2.0], "hold_s": [3.2, 3.6]}},
-          {"atom": "arm_wave", "at_s": [0.45, 0.7], "p": 0.7, "params": {"repeats": 2}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [0.8, 1.2], "period_s": [0.9, 1.1]}},
+          {"atom": "arm_wave_side", "at_s": [-0.2, 0.0], "params": {"repeats": 2}},
           {"atom": "head_nod", "at_s": [1.1, 1.3], "p": 0.5, "params": {"amp_deg": [2.0, 4.0]}}
         ]},
         {"weight": 1.0, "steps": [
@@ -161,12 +168,12 @@
     },
     "farewell": {
       "cooldown_s": 30.0,
-      "note": "bye: a smile, a slower wave or a nod, the head dropped a little after",
+      "note": "bye: a smile, the hand raised and waved forward and back starting on the way up, or a nod; the head dropped a little after",
       "variants": [
         {"weight": 3.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
-          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "p": 0.6, "params": {"pose": "raised", "period_s": [1.95, 2.0], "hold_s": [3.2, 3.6]}},
-          {"atom": "arm_wave", "at_s": [0.45, 0.7], "p": 0.6, "params": {"period_s": [1.6, 1.7], "repeats": 2}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [0.8, 1.2], "period_s": [0.9, 1.1]}},
+          {"atom": "arm_wave", "at_s": [-0.2, 0.0], "params": {"repeats": 2}},
           {"atom": "head_drop", "at_s": [0.8, 1.2], "p": 0.3, "params": {"amp_deg": [2.0, 3.0]}}
         ]},
         {"weight": 2.0, "steps": [
@@ -285,14 +292,14 @@
     },
     "evil_click": {
       "cooldown_s": 300.0,
-      "note": "the mischievous one: the head lowered and a clenched grin first, then three clicks of the gripper; marker only, once in five minutes",
+      "note": "the mischievous one (world domination): the hand raised, the gripper clacking quickly on the way up and at the top, a clenched grin, the head lowered; marker only, once in five minutes",
       "variants": [
         {"steps": [
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "grin"], "hold_s": [3.0, 3.5]}},
           {"atom": "body_rock", "at_s": [-0.6, -0.4]},
-          {"atom": "arm_pose", "at_s": [-1.4, -1.2], "p": 0.6, "params": {"pose": "raised", "period_s": [1.95, 2.0], "hold_s": [3.2, 3.6]}},
-          {"atom": "gripper_click", "params": {"repeats": 3, "period_s": [1.0, 1.1]}}
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.8, 2.4], "period_s": [0.9, 1.1]}},
+          {"atom": "gripper_click", "params": {"repeats": [4, 6]}, "at_s": [-0.3, -0.1]}
         ]}
       ]
     },

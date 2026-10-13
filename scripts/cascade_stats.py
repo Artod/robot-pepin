@@ -3,6 +3,7 @@
 Reads the events.jsonl of each session directory (data/voice/<day>/cascade_<HHMMSS>/) and prints one
 row per session so combinations can be set side by side: the person's turns, time to the robot's
 first sound (p50 / p90, counted from the person's last loud frame, the closing silence included),
+the voice process's footprint in MB at the first and the last turn (a climbing pair is a leak),
 the stage medians (Whisper, the brain's first token, the first sentence, the TTS's first chunk),
 the turns that called a tool and their first token, the barge-ins, and the price per reply (the
 brain's calls and a paid voice's sentences). With brain.speculative on, the row ends with the
@@ -94,6 +95,7 @@ def session_row(directory: Path) -> dict[str, Any] | None:
     whisper = [w for e in heard if (w := e.get("whisper_ms")) is not None and w > 20]
     early = [e for e in events if e.get("event") == "speculative"]
     dropped = [t for t in rows if t.get("outcome") == "speculative"]
+    mbs = [int(t["mb"]) for t in rows if t.get("mb") is not None]  # the process on the scales
     return {
         "session": directory.name.replace("cascade_", ""),
         "day": directory.parent.name,
@@ -121,13 +123,14 @@ def session_row(directory: Path) -> dict[str, Any] | None:
             sum(e.get("state") == "dropped" for e in early),
             100 * sum(float((t.get("usage") or {}).get("usd") or 0.0) for t in dropped),
         ),
+        "mb": (mbs[0], mbs[-1]) if mbs else None,
         "turn_events": turns,
     }
 
 
 HEADER = (
     "session        brain     voice        ears   bi  turns | to sound p50/p90 |"
-    " whisper ttft sent  tts | tools  sound | barge int |  c/reply total cache"
+    " whisper ttft sent  tts | tools  sound | barge int |  c/reply total cache | MB first  last"
 )
 
 
@@ -145,8 +148,15 @@ def format_row(row: dict[str, Any]) -> str:
         f" | {row['tool_turns']:>5} {_fmt(row['tool_sound_p50'], 6)}"
         f" | {row['barge_ins']:>5} {row['interrupted']:>3}"
         f" | {row['cents_per_reply']:>7.2f} {row['cents_total']:>5.1f} {cache}"
+        + _mb_cell(row["mb"])
         + _early_cell(row["early"])
     )
+
+
+def _mb_cell(mb: tuple[int, int] | None) -> str:
+    """`` |  2810  2905``: the voice process's footprint (MB) at the session's first and last
+    turn; a steady pair clears the engines of growing, a climbing one says how fast."""
+    return f" | {mb[0]:>7} {mb[1]:>5}" if mb else " |       -     -"
 
 
 def _early_cell(early: tuple[int, int, int, float]) -> str:
@@ -167,7 +177,8 @@ def turn_lines(row: dict[str, Any]) -> list[str]:
             f"  [{t.get('turn')}] {t.get('outcome', '?'):<11}"
             f" sound {m.get('speaker_start', '-'):>5} | whisper {s.get('whisper', '-'):>4}"
             f" ttft {s.get('brain_ttft', '-'):>5} sent {s.get('sentence', '-'):>4}"
-            f" tts {s.get('tts', '-'):>4} | {100 * usd:.2f} c | {str(t.get('user', ''))[:50]}"
+            f" tts {s.get('tts', '-'):>4} | {t.get('mb') or '-':>5} MB"
+            f" | {100 * usd:.2f} c | {str(t.get('user', ''))[:50]}"
         )
     return out
 

@@ -36,9 +36,9 @@
   "parts": {
     "arm": {
       "latency_s": 0.06,
-      "speed_scale": 0.2,
+      "speed_scale": 1.0,
       "knot_hz": 25.0,
-      "note": "latency_s: the WiFi hop and the board's next tick. speed_scale: every arm clip's time stretched by 1/speed_scale and the servos' profile capped by it; 0.2 for the first live test, raised by Artem's word. knot_hz: the knots a clip is sampled into (the board interpolates between them on its 50 Hz tick)."
+      "note": "latency_s: the WiFi hop and the board's next tick. speed_scale: every arm clip's time stretched by 1/speed_scale and the servos' profile capped by it; 0.2 for the first live test; 1.0 since 2026-10-12 evening on Artem's word (hello, bye and evil_click played at 1.0 by hand; the voice loop at 0.2 read as slow motion). knot_hz: the knots a clip is sampled into (the board interpolates between them on its 50 Hz tick)."
     },
     "head": {
       "latency_s": 0.1,

@@ -30,7 +30,7 @@ from pepin.arm_motion import ArmMotion
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.executors import FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
-from pepin.expression.mix import check_knots, sample, track_value
+from pepin.expression.mix import STRETCH_MARGIN, check_knots, sample, stretch_to_caps, track_value
 from pepin.expression.trajectory import JOINTS, ArmLink, Knot, Trajectory
 from pepin.neck import NeckMotion
 
@@ -82,19 +82,17 @@ class ArmPart:
         if clip.part != "arm":
             return f"an {clip.part} clip is not the arm's"
         motion = self.motion
-        if clip.duration_s > motion.max_duration_s:
-            return (
-                f"{clip.duration_s:.1f} s is longer than the board's {motion.max_duration_s:.0f} s"
-            )
+        max_speed = motion.max_speed_deg_s * self.speed_scale
+        max_acc = motion.max_acc_deg_s2 * self.speed_scale**2
         # a clip stretched by 1 / speed_scale needs no more knots than at full speed
-        knots = sample(clip, self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
-        refusal = check_knots(
-            knots,
-            motion.limits(),
-            motion.max_speed_deg_s * self.speed_scale,
-            motion.max_acc_deg_s2 * self.speed_scale**2,
-            JOINTS,
-        )
+        knots = stretch_to_caps(
+            sample(clip, self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale)),
+            max_speed * STRETCH_MARGIN,
+            max_acc * STRETCH_MARGIN,
+        )  # a stroke too fast for the caps takes longer rather than being refused
+        if knots[-1][0] > motion.max_duration_s:
+            return f"{knots[-1][0]:.1f} s is longer than the board's {motion.max_duration_s:.0f} s"
+        refusal = check_knots(knots, motion.limits(), max_speed, max_acc, JOINTS)
         if refusal is not None:
             return refusal
         return Trajectory(
@@ -113,7 +111,7 @@ class ArmPart:
         if isinstance(planned, str):
             return Outcome(False, planned)
         self.link.send(planned)
-        return Outcome(True, f"sent as {planned.id}", clip.duration_s)
+        return Outcome(True, f"sent as {planned.id}", planned.knots[-1].t_s)
 
     def fade(self, layer: Layer, seconds: float) -> None:
         """The gesture (or idle) layer let go: the board takes the arm to rest at its caps."""

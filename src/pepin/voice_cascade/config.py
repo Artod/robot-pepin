@@ -179,8 +179,8 @@ DEFAULT_NEUTRAL = ("Хм…", "Ммм…", "Э-э…", "Хм-м…")
 # thinking: short interjections only (a phrase may still be playing when the reply is ready);
 # the whole phrases are the tools' and again's
 DEFAULT_THINKING: Phrases = {
-    "ru": ("Так-с.", "Хм.", "Пум.", "Трям.", "Так.", "Ну."),  # noqa: RUF001
-    "en": ("Hmm.", "Well.", "So.", "Um.", "Okay."),
+    "ru": ("Хм.", "Эм.", "М-м."),  # noqa: RUF001
+    "en": ("Hmm.", "Um.", "Uh."),
 }
 DEFAULT_COMMON: Phrases = {
     "ru": ("Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент.", "Секундочку."),

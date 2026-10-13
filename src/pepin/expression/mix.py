@@ -22,6 +22,9 @@ from pepin.expression.animation import Clip, Track
 MIN_JERK_SPEED = 1.875  # peak speed of a minimum-jerk move: this times distance over time
 MIN_JERK_ACC = 10.0 / math.sqrt(3.0)  # peak acceleration: this times distance over time squared
 CAP_SLACK = 1.0 + 1e-6  # float rounding a knot check forgives
+STRETCH_MARGIN = (
+    0.98  # a stretch aims this far under the caps: the wire rounds knots to 1 ms and 0.01 deg
+)
 
 
 def min_jerk(s: float) -> float:
@@ -131,6 +134,35 @@ def sample(
         pose = pose_at(clip, t, base)
         out.append((t, tuple(pose[j] for j in joints)))
     return out
+
+
+def stretch_to_caps(
+    knots: Sequence[tuple[float, Sequence[float]]], max_speed: float, max_acc: float
+) -> list[tuple[float, list[float]]]:
+    """``knots`` with their times stretched by one factor so no step exceeds ``max_speed`` and no
+    change of speed exceeds ``max_acc`` (deg/s, deg/s^2): a gesture asked slower than its caps
+    allow takes longer instead of being refused. Angles are never changed; a factor under 1 is 1."""
+    factor = 1.0
+    previous: list[float] | None = None
+    for k in range(1, len(knots)):
+        t0, d0 = knots[k - 1]
+        t, deg = knots[k]
+        dt = t - t0
+        if dt <= 0.0:
+            continue
+        speeds = [(b - a) / dt for a, b in zip(d0, deg, strict=True)]
+        if max_speed > 0:
+            factor = max(factor, max(abs(v) for v in speeds) / max_speed)
+        if previous is not None and max_acc > 0:
+            dt_mid = (t - knots[k - 2][0]) / 2.0
+            if dt_mid > 0:
+                acc = max(abs(v1 - v0) for v0, v1 in zip(previous, speeds, strict=True)) / dt_mid
+                factor = max(factor, math.sqrt(acc / max_acc))
+        previous = speeds
+    if factor <= 1.0 + 1e-9:
+        return [(t, list(d)) for t, d in knots]
+    t_first = knots[0][0] if knots else 0.0
+    return [(t_first + (t - t_first) * factor, list(d)) for t, d in knots]
 
 
 def check_knots(

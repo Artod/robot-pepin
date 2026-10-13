@@ -141,8 +141,16 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
                 print(f"  arm: refused here: {planned}")
                 return 3
             trajectory = planned
-            print(f"  arm at +{at:.2f} s: {len(planned.knots)} knots over {slow.duration_s:.1f} s"
-                  f" at speed {args.speed}, then rest; peak {_peak(planned, motion)}")  # fmt: skip
+            seconds = planned.knots[-1].t_s
+            stretched_by = (
+                f" (the clip's {slow.duration_s:.1f} s stretched by the caps)"
+                if seconds > slow.duration_s + 0.05
+                else ""
+            )
+            print(
+                f"  arm at +{at:.2f} s: {len(planned.knots)} knots over {seconds:.1f} s"
+                f"{stretched_by} at speed {args.speed}, then rest; peak {_peak(planned, motion)}"
+            )
         elif clip.part == "face":
             shown = [f"{e.name} for {e.hold_s or 2.0:.1f} s" for e in clip.events]
             print(f"  face at +{at:.2f} s: {', '.join(shown)}")

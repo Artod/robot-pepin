@@ -62,10 +62,10 @@ def test_the_file_s_book_is_the_code_s_with_lines_per_tool_and_language() -> Non
     assert config.filler_cooldown_s == {"backchannel": 2.0}
     assert config.filler_max_s == {"thinking": 0.6}, "the thinking filler is a short sound"
     lines = fillers.lines()
-    assert len(lines) == len(set(lines)) == 78  # "Сейчас гляну." once for see and look
+    assert len(lines) == len(set(lines)) == 73  # "Сейчас гляну." once for see and look
     clips = clip_lines(config)  # the backchannel's flag off: none of its lines
-    assert len(clips) == 72 and "угу" not in clips
-    assert clips[:4] == fillers.neutral and clips.index("Так-с.") < clips.index("Hmm.")
+    assert len(clips) == 67 and "угу" not in clips
+    assert clips[:4] == fillers.neutral and clips.index("Эм.") < clips.index("Hmm.")
 
 
 def test_the_thinking_book_holds_short_sounds_and_the_phrases_moved_to_the_tools() -> None:
@@ -73,7 +73,7 @@ def test_the_thinking_book_holds_short_sounds_and_the_phrases_moved_to_the_tools
     thinking book draws interjections and hums, the whole phrases are said for a tool (a tool
     call is long anyway) and again."""
     thinking = BOOK.thinking["ru"]
-    assert {"Так-с.", "Хм.", "Пум.", "Трям."} <= set(thinking)
+    assert {"Хм.", "Эм.", "М-м."} <= set(thinking)  # Artem, 22:30: "хм" and "эм" only
     assert all(len(line.split()) == 1 for book in BOOK.thinking.values() for line in book)
     assert "Секундочку." in BOOK.common["ru"] and "Let me see." in BOOK.common["en"]
     assert not {"Секундочку…", "Сейчас…", "Так-так…"} & set(thinking)
@@ -272,14 +272,14 @@ def test_only_a_line_with_its_clip_made_is_picked() -> None:
 def test_a_context_s_max_s_keeps_its_longer_clips_unsaid() -> None:
     """The thinking filler says only a clip within ``filler_max_s``: the hums the voice drew
     out (1.4-1.8 s on 2026-10-12) are left to the contexts without a cap."""
-    length = {"Хм.": 0.42, "Пум.": 0.55, "Хм…": 1.44, "Хм-м…": 1.85, "Так-с.": 0.61}
+    length = {"Хм.": 0.42, "Эм.": 0.55, "Хм…": 1.44, "Хм-м…": 1.85, "М-м.": 0.61}
     engine = FillerEngine(random.Random(3))
 
     def said(n: int, max_s: float | None) -> str | None:
         return engine.choose(BOOK, "thinking", float(n), turn=n, ready=length.__contains__,
                              max_s=max_s, seconds=length.get)  # fmt: skip
 
-    assert {said(n, 0.6) for n in range(60)} == {"Хм.", "Пум."}, "0.61 s is over 0.6"
+    assert {said(n, 0.6) for n in range(60)} == {"Хм.", "Эм."}, "0.61 s is over 0.6"
     assert said(70, 0.3) is None and 70 not in engine.spent, "none short enough: not spent"
     assert "Хм-м…" in {said(n, None) for n in range(80, 140)}, "no max_s: any length"
 

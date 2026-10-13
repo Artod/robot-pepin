@@ -68,6 +68,7 @@ import concurrent.futures
 import contextlib
 import json
 import logging
+import math
 import random
 import threading
 import time
@@ -113,6 +114,7 @@ from pepin.voice_cascade.stages import (
     Usage,
     VoiceBill,
 )
+from pepin.voice_cascade.stt.runtime import footprint_mb
 from pepin.voice_cascade.text import speakable
 from pepin.voice_cascade.timeline import Timeline
 from pepin.voice_cascade.timing import log_rows
@@ -1237,6 +1239,8 @@ class CascadeLoop:
         self.player.forget(reply.id)
         self.replies.pop(reply.id, None)
         u = reply.usage
+        footprint = footprint_mb()  # this process on the scales, once a turn
+        mb = None if math.isnan(footprint) else round(footprint)
         row: dict[str, Any] = {
             "turn": reply.id,
             "kind": reply.input.kind,
@@ -1252,6 +1256,7 @@ class CascadeLoop:
             "error": reply.error,
             "brain": reply.brain,
             "voice": reply.voice,
+            "mb": mb,
         }
         if reply.styles:
             row["styles"] = reply.styles
@@ -1291,7 +1296,7 @@ class CascadeLoop:
             print(
                 f"  [{reply.id} {reply.outcome}] {timeline.line()} | cache {u.cache_read}r/"
                 f"{u.cache_write}w in {u.input} out {u.output} | {u.usd * 100:.4f} US cents"
-                f" | {voice_cell(reply)}" + eot_cell,
+                f" | {voice_cell(reply)}" + eot_cell + (f" | {mb} MB" if mb is not None else ""),
                 flush=True,
             )
         if conversation is not None:

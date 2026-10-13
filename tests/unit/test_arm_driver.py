@@ -288,7 +288,7 @@ def test_a_trajectory_energises_where_the_arm_stands_then_one_goal_a_tick() -> N
     assert name == "block"
     torque, acc, _goal, goal_time, speed, limit = block["servo4"]
     assert (torque, goal_time, limit) == (1, 0, 500)
-    assert acc == acc_units(360.0) and speed == speed_ticks(90.0)
+    assert acc == acc_units(MOTION.max_acc_deg_s2) and speed == speed_ticks(MOTION.max_speed_deg_s)
     assert {m: row[2] for m, row in block.items()} == dict(zip(NAMES, REST_TICKS, strict=True))
     bus.writes.clear()
     t = run(core, 0.12, 2.1)
@@ -309,7 +309,8 @@ def test_the_speed_scale_slows_the_profile_and_the_rest_after_it() -> None:
     assert send(core, wave(seconds=10.0, speed=0.2), 0.12)["status"] == "accepted"
     core.tick(0.12)
     ((_, block),) = arm_writes(bus)
-    assert block["servo1"][4] == speed_ticks(18.0) and block["servo1"][1] == acc_units(14.4)
+    assert block["servo1"][4] == speed_ticks(MOTION.max_speed_deg_s * 0.2)
+    assert block["servo1"][1] == acc_units(MOTION.max_acc_deg_s2 * 0.2**2)
 
 
 def test_away_from_the_first_knot_the_arm_joins_it_within_the_caps() -> None:
@@ -330,7 +331,9 @@ def test_away_from_the_first_knot_the_arm_joins_it_within_the_caps() -> None:
         goals += [RANGES[WRIST].degrees(v["servo4"]) for n, v in arm_writes(bus)[-1:]
                   if n == "Goal_Position"]  # fmt: skip
     steps = [abs(b - a) / TICK for a, b in itertools.pairwise(goals)]
-    assert max(steps) <= 90.0 * 1.05 and goals[-1] > 60.0  # on its way back to 76.6
+    assert (
+        max(steps) <= MOTION.max_speed_deg_s * 1.05 and goals[-1] > 60.0
+    )  # on its way back to 76.6
 
 
 @pytest.mark.parametrize(
@@ -492,7 +495,7 @@ def test_on_the_wire_the_arm_rides_the_one_read_and_its_block_lands_in_the_servo
             core.tick(0.12 + i * TICK)
         assert wire.counts.sync_reads - reads == 10  # the wheels, the neck and the arm: one read
         assert wire.byte(4, 40) == 1 and wire.word(4, 48) == 500
-        assert wire.word(4, 46) == speed_ticks(90.0)
+        assert wire.word(4, 46) == speed_ticks(MOTION.max_speed_deg_s)
         replies = [
             len(params[2:]) * (HEADER_BYTES + params[1])
             for instruction, params in wire.counts.log
