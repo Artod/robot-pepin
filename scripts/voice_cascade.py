@@ -632,6 +632,9 @@ def main() -> int:
         wheels=wheels,
     )
     robot.animator = body.engine  # the gesture tool's door
+    if gaze is not None:  # attention first: the engine reads it, a body turn asks for the arm
+        body.engine.attention = gaze
+        gaze.arm = body.engine
     switchboard = Switchboard(
         control,
         configure=lambda brain, voice: configure(brain, voice),
@@ -661,6 +664,7 @@ def main() -> int:
         switchboard=switchboard,
         observers=[*guards, body.engine, people] + ([gaze] if gaze is not None else []),
         flags=[body.engine, people] + ([gaze] if gaze is not None else []),
+        taps=[body.engine],
         vocabulary=body.vocabulary,
         people=people,
         judge=judge,

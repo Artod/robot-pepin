@@ -212,6 +212,16 @@ class Sentence:
 
 
 @dataclass(frozen=True)
+class Ahead:
+    """A sentence of round ``round`` before it is whole, from the token stream (a marker just
+    closed, the reply's first word): its text so far, markers as written; the sentence itself
+    still comes as a :class:`Sentence`."""
+
+    text: str
+    round: int
+
+
+@dataclass(frozen=True)
 class ToolUse:
     """The brain calls a tool."""
 
@@ -265,7 +275,7 @@ def text_tokens(chars: int) -> int:
     return math.ceil(chars / CHARS_PER_TOKEN)
 
 
-BrainEvent = FirstToken | Sentence | ToolUse | ToolDone | Usage
+BrainEvent = FirstToken | Sentence | Ahead | ToolUse | ToolDone | Usage
 FOLLOW_UP = "follow_up"  # a tool result's key: False ends the turn without another model call
 ToolExecutor = Callable[[str, dict[str, Any]], Awaitable[Result]]
 Emit = Callable[[BrainEvent], None]

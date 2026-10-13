@@ -54,11 +54,17 @@ off, the tag line is the prosody one as before.
 
 The body hears the conversation through observers
 (:class:`pepin.expression.conversation.ConversationObserver`), told each moment on the event
-loop: the conversation opened, the person started and stopped speaking, a part of a reply went
-to the voice and was all fed to the player, a reply was cut or played out, a slow tool's filler,
-a drive's start and end, the close. None is registered by default; one that raises is logged
-and never stops the voice. A feature's live switch (:class:`pepin.expression.conversation.
-LiveFlag`) is flipped through the control file's ``flags``.
+loop: the conversation opened, the person started and stopped speaking, paused mid-utterance
+(the moment ``listener_pause``), a part of a reply went to the voice, had its first chunk with
+the player and was all fed to it, a sentence before it is whole (``text_ahead``, from the
+brain's token stream), a reply was cut or played out, a slow tool's filler, a drive's start and
+end, the close. Every chunk of a reply also goes to the audio taps
+(:class:`pepin.expression.conversation.AudioTap`) on the voice's thread, and each part spoken
+leaves a ``part_audio`` event (its stream span, its leading silence, when each chunk came). None
+is registered by default; one that raises is logged and never stops the voice. A feature's live
+switch (:class:`pepin.expression.conversation.LiveFlag`) is flipped through the control file's
+``flags``. These seams are the gesticulation contract's: its slices (DESIGN.md §11) add no code
+here.
 """
 
 from __future__ import annotations
@@ -77,7 +83,17 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from pepin.expression.conversation import SLOW_TOOL, ConversationObserver, Heard, LiveFlag
+import numpy as np
+
+from pepin.expression.conversation import (
+    LISTENER_PAUSE,
+    SLOW_TOOL,
+    AudioTap,
+    ConversationObserver,
+    Heard,
+    LiveFlag,
+    VoiceChunk,
+)
 from pepin.expression.markers import EMPTY, Part, Vocabulary, parse
 from pepin.tools.registry import Result, fail, ok, progress_to, render
 from pepin.voice_cascade.barge_in import FuturePending, Pending, build_detector
@@ -98,6 +114,7 @@ from pepin.voice_cascade.player import FillerFade, Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import (
     FOLLOW_UP,
+    Ahead,
     Brain,
     BrainEvent,
     FirstToken,
@@ -155,6 +172,33 @@ HOLD_RELEASE_S = 0.3
 # a reply dropped for the turn after it (the person went on; asked early on other words): it
 # answered no turn of its own
 UNANSWERED = frozenset(("merged", "speculative"))
+LEADING_LEVEL = 32  # a sample under this (16-bit, about -60 dBFS) is the voice's leading silence
+
+
+@dataclass
+class PartAudio:
+    """A reply part's audio as it reached the player (the voice's thread keeps it): when its
+    first chunk came, every chunk's arrival after it, its leading silence (samples at ``rate``)
+    and whether a sound has ended it."""
+
+    first_t: float
+    rate: int
+    arrivals: list[float] = field(default_factory=list)
+    leading: int = 0
+    sounded: bool = False
+
+    def take(self, pcm: bytes, t: float) -> None:
+        """One more chunk (16-bit mono at :attr:`rate`), fed at ``t``."""
+        self.arrivals.append(round(t - self.first_t, 3))
+        if self.sounded:
+            return
+        samples = np.frombuffer(pcm[: len(pcm) // 2 * 2], dtype=np.int16)
+        loud = np.flatnonzero(np.abs(samples.astype(np.int32)) >= LEADING_LEVEL)
+        if loud.size:
+            self.leading += int(loud[0])
+            self.sounded = True
+        else:
+            self.leading += samples.size
 
 
 class Mic(Protocol):
@@ -294,6 +338,7 @@ class CascadeLoop:
         switchboard: Switchboard | None = None,
         observers: Sequence[ConversationObserver] = (),
         flags: Sequence[LiveFlag] = (),
+        taps: Sequence[AudioTap] = (),
         vocabulary: Vocabulary = EMPTY,
         people: SpeakerId | None = None,
         judge: TextJudge | None = None,
@@ -305,11 +350,12 @@ class CascadeLoop:
         brain); ``switchboard``: the brain and the voice may be switched while it runs;
         ``observers`` hear the conversation's moments, ``flags`` and ``knobs`` are switched by
         name; ``cells``: more cells for each turn's line, read from memory (the vision cell);
-        ``vocabulary``: the intents and faces a marker may name (any other bare name is a
-        voice style, a spelled-out unknown one is dropped); ``people``: who said each
-        utterance, named in the tag line while its switch is on; ``judge``: two-gates' reader
-        of the early words (:mod:`pepin.voice_cascade.turn_text`); ``seed``: the fillers'
-        choices (None: each run differs)."""
+        ``taps`` hear every chunk of a reply's audio (on the voice's thread);
+        ``vocabulary``: the intents and faces a marker may name (a bare name of the persona's
+        style words is a voice style, any other and a spelled-out unknown one are dropped);
+        ``people``: who said each utterance, named in the tag line while its switch is on;
+        ``judge``: two-gates' reader of the early words (:mod:`pepin.voice_cascade.turn_text`);
+        ``seed``: the fillers' choices (None: each run differs)."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
         player.on_fade = self._filler_faded
@@ -372,6 +418,8 @@ class CascadeLoop:
         self.flags: dict[str, LiveFlag] = {flag.flag: flag for flag in flags}
         self.knobs: dict[str, LiveKnob] = {knob.knob: knob for knob in knobs}
         self.cells = list(cells)
+        self.taps: list[AudioTap] = list(taps)
+        self._parts_audio: dict[tuple[int, int], PartAudio] = {}  # the voice's thread's own
         self.vocabulary = vocabulary
         self.people = people
         self._people = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people")
@@ -487,6 +535,32 @@ class CascadeLoop:
             if first and self.observers and self._loop is not None:
                 with contextlib.suppress(RuntimeError):  # the loop has ended
                     self._loop.call_soon_threadsafe(self._tell, "voice_started", job.turn)
+        if job.kind == "reply" and job.index >= 0:
+            self._part_chunk(job, pcm, t)
+
+    def _part_chunk(self, job: SpeechJob, pcm: bytes, t: float) -> None:
+        """A chunk of a reply's part (the voice's thread): its part's first tells the observers
+        where the part starts; every one goes to the taps and the part's audio record."""
+        mark = self.player.mark(job.turn, job.index)
+        if mark is None:
+            return
+        key = (job.turn, job.index)
+        record = self._parts_audio.get(key)
+        if record is None:
+            record = self._parts_audio[key] = PartAudio(t, self.speech.job_rate)
+            if self.observers and self._loop is not None:
+                with contextlib.suppress(RuntimeError):  # the loop has ended
+                    self._loop.call_soon_threadsafe(
+                        self._tell, "part_started", job.turn, job.index, mark[0]
+                    )
+        record.take(pcm, t)
+        if self.taps:
+            chunk = VoiceChunk(job.turn, job.index, mark[0], mark[1], pcm, record.rate, t)
+            for tap in self.taps:
+                try:
+                    tap.audio(chunk)
+                except Exception:
+                    logger.exception("audio tap %s broke", type(tap).__name__)
 
     def _at_log_rate(self, pcm: bytes, rate: int) -> bytes:
         """A voice chunk at the rate the conversation's out.wav was opened with (a voice
@@ -505,9 +579,25 @@ class CascadeLoop:
             with contextlib.suppress(RuntimeError):
                 self._loop.call_soon_threadsafe(reply.spoken.set)
         spoken = job.kind == "reply" and job.index >= 0 and job.turn > self.speech.cut_through
+        record = self._parts_audio.pop((job.turn, job.index), None) if job.kind == "reply" else None
         if spoken and self.observers and self._loop is not None:
             with contextlib.suppress(RuntimeError):  # every chunk of the part is with the player
                 self._loop.call_soon_threadsafe(self._tell, "part_spoken", job.turn, job.index)
+        if spoken and record is not None and self._loop is not None:
+            with contextlib.suppress(RuntimeError):
+                self._loop.call_soon_threadsafe(self._part_audio, job.turn, job.index, record)
+
+    def _part_audio(self, turn: int, index: int, record: PartAudio) -> None:
+        """A spoken part's ``part_audio`` event: its stream span, its leading silence and when
+        each chunk came after its first (the lead a gesture has is measured from these)."""
+        conversation = self.conversation
+        mark = self.player.mark(turn, index)
+        if conversation is None or mark is None:
+            return
+        conversation.log.event("part_audio", record.first_t, turn=turn, index=index,
+                               start_s=round(mark[0], 3), end_s=round(mark[1], 3),
+                               leading_s=round(record.leading / record.rate, 3),
+                               chunks_s=record.arrivals)  # fmt: skip
 
     def _on_bill(self, job: SpeechJob, bill: VoiceBill) -> None:
         """A paid voice's sentence (on the voice's thread): to the turn and the conversation."""
@@ -547,6 +637,8 @@ class CascadeLoop:
                 if joins:
                     self._continues = await self._continuation()
             elif event.kind == "pause":
+                if self.conversation is not None:
+                    self._tell("moment", LISTENER_PAUSE)
                 self._backchannel()
             elif event.kind == "barge_in":
                 await self._barge_in(event, played if played is not None else 0.0)
@@ -1116,6 +1208,9 @@ class CascadeLoop:
         log = conversation.log if conversation is not None else None
         if isinstance(event, FirstToken):
             timeline.mark("first_token", now)
+        elif isinstance(event, Ahead):
+            sentence = len(reply.sentences)  # the one the stream is in
+            self._when_free(reply, lambda: self._tell("text_ahead", reply.id, sentence, event.text))
         elif isinstance(event, Sentence):
             timeline.mark("first_sentence", now)
             sentence = len(reply.sentences)

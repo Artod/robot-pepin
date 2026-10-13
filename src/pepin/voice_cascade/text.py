@@ -1,4 +1,8 @@
-"""The brain's text stream cut into sentences the voice can start on, and cleaned for speech."""
+"""The brain's text stream cut into sentences the voice can start on, and cleaned for speech.
+
+Owner after the gesticulation contract: B (the splitter's report of a sentence before it is
+whole, :class:`pepin.voice_cascade.stages.Ahead`, for the body's ``text_ahead``).
+"""
 
 from __future__ import annotations
 

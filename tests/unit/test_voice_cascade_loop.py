@@ -19,7 +19,7 @@ import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
-from pepin.expression.conversation import GESTURES, SLOW_TOOL, Heard
+from pepin.expression.conversation import GESTURES, LISTENER_PAUSE, SLOW_TOOL, Heard
 from pepin.expression.fakes import FakeFlag, RecordingObserver
 from pepin.expression.markers import EMPTY, Vocabulary
 from pepin.perception.source import VisionSource
@@ -33,7 +33,16 @@ from pepin.voice_cascade.fillers import clip_lines
 from pepin.voice_cascade.loop import CascadeLoop
 from pepin.voice_cascade.player import FillerFade, Player
 from pepin.voice_cascade.speech import SpeechWorker
-from pepin.voice_cascade.stages import CUT, Prosody, Speaker, TimedWord, Transcript, Unit, Vowel
+from pepin.voice_cascade.stages import (
+    CUT,
+    Prosody,
+    Sentence,
+    Speaker,
+    TimedWord,
+    Transcript,
+    Unit,
+    Vowel,
+)
 from pepin.voice_live.events import Events
 from pepin.voice_live.sources import FrameSink
 
@@ -1222,3 +1231,80 @@ def test_one_word_is_never_asked_early(tmp_path: Path) -> None:
     events, summary = events_of(tmp_path)
     assert not [e for e in events if e["event"] == "speculative"]
     assert "speculative" not in summary and all("speculative" not in t for t in rig.loop.turns)
+
+
+def test_the_body_hears_each_part_start_its_audio_the_text_ahead_and_each_part_s_audio_record(
+    tmp_path: Path,
+) -> None:
+    """The gesticulation contract's seams: ``part_started`` at each part's first chunk with its
+    stream second, every chunk to the audio taps (the voice's thread), ``text_ahead`` from the
+    brain's token stream before a sentence is whole, and one ``part_audio`` event per part
+    spoken (its stream span, leading silence and chunk arrivals)."""
+    from pepin.expression.fakes import RecordingTap
+    from pepin.voice_cascade.stages import Ahead, BrainEvent
+
+    observer, tap = RecordingObserver(), RecordingTap()
+    script: list[list[Step]] = [["Ну {laugh} да, это было очень весело.", "Всё."]]
+    rig = Rig(tmp_path, ["Пепин, привет"], script, observers=[observer],
+              vocabulary=Vocabulary(frozenset({"laugh"}), frozenset()))  # fmt: skip
+    rig.loop.taps.append(tap)
+    scripted = rig.brain.turn
+
+    async def ahead(text: str, tools: Any, emit: Callable[[BrainEvent], None]) -> None:
+        def tee(event: BrainEvent) -> None:
+            if isinstance(event, Sentence):  # the stream had its first words a moment before
+                emit(Ahead(event.text.split()[0], event.round))
+            emit(event)
+
+        await scripted(text, tools, tee)
+
+    rig.brain.turn = ahead  # type: ignore[method-assign]
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    calls = observer.calls
+    assert [args for name, args in calls if name == "text_ahead"] == [(1, 0, "Ну"), (1, 1, "Всё.")]
+    started = [args for name, args in calls if name == "part_started"]
+    assert [(turn, index) for turn, index, _ in started] == [(1, 0), (1, 1)]
+    assert 0.0 <= started[0][2] < started[1][2]
+    for index in (0, 1):
+        assert calls.index(("part_started", started[index])) < calls.index(
+            ("part_spoken", (1, index))
+        )
+    by_part = {(c.turn, c.index) for c in tap.chunks}
+    assert by_part == {(1, 0), (1, 1)} and all(c.rate == RATE for c in tap.chunks)
+    zero, one = ([c for c in tap.chunks if c.index == i] for i in (0, 1))
+    assert len(zero) > 1 and {c.start_s for c in zero} == {started[0][2]}
+    assert [c.end_s for c in zero] == sorted({c.end_s for c in zero}) and zero[-1].end_s <= one[
+        0
+    ].start_s
+    assert one[0].start_s == started[1][2]
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    audio = [r for r in rows if r["event"] == "part_audio"]
+    assert [(r["turn"], r["index"]) for r in audio] == [(1, 0), (1, 1)]
+    assert audio[1]["start_s"] == pytest.approx(started[1][2], abs=1e-3)
+    assert all(r["end_s"] > r["start_s"] and r["leading_s"] >= 0.0 for r in audio)
+    assert all(r["chunks_s"][0] == 0.0 and len(r["chunks_s"]) >= 1 for r in audio)
+
+
+def test_the_person_s_pause_is_a_moment_of_the_body_whatever_the_backchannel_s_flag(
+    tmp_path: Path,
+) -> None:
+    observer = RecordingObserver()
+    rig = Rig(tmp_path, ["Пепин", "послушай меня"], observers=[observer], backchannel=False)
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet())
+        await rig.say(quiet(0.2) + tone(1.0) + quiet(0.7))
+        await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
+
+    asyncio.run(rig.run(scenario))
+    assert ("moment", (LISTENER_PAUSE,)) in observer.calls
+    (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
+    rows = [json.loads(line) for line in events.read_text().splitlines()]
+    assert not [r for r in rows if r["event"] == "backchannel"]  # its flag is off
