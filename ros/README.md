@@ -730,13 +730,16 @@ and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a
 so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
 the gesture plays without its head. The wheels: below. The person starting to speak fades
 the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
-conversation sends every part to rest; markers are capped (`config/expression.json` `caps`; an
-arm gesture counts against `arm_per_minute` only when the arm made it into what was placed). A
+conversation sends every part to rest; markers are capped (`config/expression.json` `caps`: one
+a sentence, three a reply, six a minute; `{!}` outside those counts, one a sentence; a reply's
+`{count:n}` series counted once; a composition's `cooldown_s` per mark and argument; an arm
+gesture counts against `arm_per_minute` only when the arm made it into what was placed). A
 gesture takes the head only while the speaker gaze tracks a person it saw within
 `layers.head_seen_s` (1.2 s: its frames come at 1 Hz while the robot speaks). A looping idle
 clip holds its part until a state it excludes or another clip takes it, renewed at the arbiter
-once a period (an overlay's TTL is one period and a second); an idle entry of the book may set
-its own `after_speech_s` (0: a breath right after a reply) over `layers.idle_after_speech_s`.
+once a period (an overlay's TTL is one period and a second); the drift plays over it and the
+loop comes back after; an idle entry of the book may set its own `after_speech_s` (0: a breath
+right after a reply) over `layers.idle_after_speech_s`.
 
 **The alive layer** (`pepin.expression.prosody`, `pepin.expression.listeners`; it rides
 `gestures`, no flag of its own). The prosody listener hears every chunk of a reply as the player
@@ -753,8 +756,9 @@ minute, never with less lead than the nod needs: 0.30 s with the head's latency,
 arbiter lets a nod's bottom come 0.2 s after its first move at the earliest; none in a sentence
 that carries the brain's own marker, none within 2 s of a marker's head stroke, played or still
 waiting for its word); a lift and cock of the head at a question's last syllable;
-one look away in a reply with 6 s of audio. Between turns: the breath (`moments.breath_deg`, 1°
-at 0.25 Hz) in every free moment of the head while the robot is silent; a thinking glance up,
+one look away in a reply with 6 s of audio. Between turns: the breath (the book's looping idle
+entry, `breath` at 1° and 0.25 Hz) whenever the robot is silent, through the person's speech
+too; a thinking glance up,
 down or aside 0.8 s into the brain's wait (p 0.75, never the same way twice, back 0.5-1.3 s into
 the reply as the waits predict it, or that long into the reply's first sound when it comes
 sooner); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart, never while
@@ -794,9 +798,14 @@ never more than `late_s` (0.5 s) nor after the reply's speech, and none lands in
 a sentence; one that cannot is left out and the rest of its gesture keeps its time. Two arm
 gestures within `units.hold_s` (2.5 s) share one raise: the first holds its last pose (the
 board's `then: hold`; with nothing after it the board rests the arm by itself) and the second
-starts from there. An arm motion longer than `short_s` (1 s) plays only when the speech ahead
-covers it (hello and bye may run 1 s past it). A marker on a reply's first words, seen in the
-token stream, may send the arm to `ready` and hold it there first: a preparation, never a stroke.
+starts from there (a third from the second's: one unit is at most three strokes). An arm motion
+longer than `short_s` (1 s) plays only when the speech after its stroke covers what follows the
+stroke, up to 0.5 s past it (hello and bye 1 s; the fed audio as it is, 0.7 of a forecast). A
+marker on a reply's first words, seen in the token stream (read with the book's arguments and
+spellings), may send the arm to `ready` and hold it there first: a preparation, never a stroke.
+Where the arm is when a mark is rendered (at rest, or up in a unit: `arm_at` in the
+`performance` line) picks the variants that need it: `{!}` inside a unit is the wrist's flick
+from the held pose, else a nod.
 The voice loop lends the scheduler the arm's planner, the engine's renderer and scene hooks and
 the prosody listener's nuclei (the AUDIO moment), and the player tells the clock what is queued
 ahead of the speaker (a thinking filler holds a reply's first word back only by what was sent
@@ -832,23 +841,28 @@ case, spaces and transliteration: `принтер` is `printer`), turns the shut
 where the robot stands, for directions -52..+41 deg of the nose (shoulder pan -68..+25), and the
 head glances its way as an overlay of at most 25 deg on attention's aim (never a change of whom
 it looks at); past the arm's directions the glance alone, a place more than 90 deg from the
-person nothing. Without the attention view the person is taken to stand ahead; without the
-places (a renderer whose resolver has no `room`) a NAME is neither a place nor a referent and
-gets a nod.
+person nothing. The engine keeps one resolver for its life: the speaker gaze's attention view is
+its person, the voice loop gives it the goal server's places book and the robot's map pose
+(read every second on a thread of their own; `pepin.expression.places.GoalPlaces`). Without the
+attention view the person is taken to stand ahead; until the goal server has answered once a
+NAME is neither a place nor a referent and gets a nod.
 
 CATCHMENTS: any other NAME is a referent (`{point:план А}`), given a spot when the brain's mark
 is first rendered and pointed at there for the rest of the conversation, in one order for
 referents and counted items, `space.loci`: the middle, the outer side, then the right (the
-widest pair first). `{count:n}` takes the n-th spot and overwrites what sat there; a fourth
-referent takes the least recently pointed spot; both are logged (`catchment`: referent, cell,
-new / again / evicted / overwritten), and an evicted referent mentioned again is placed anew,
-the one moved spot there is. A first mention whose arm did not play (its floor) leaves the spot
-unseen: the next mention is then its first showing, never a contradiction. Every spot is
-forgotten at the conversation's close (`Resolver.forget`).
+widest pair first). `{count:n}` takes the n-th spot for its item (`#n`) and overwrites what sat
+there; a fourth referent takes the least recently pointed spot; all are logged (`catchment`:
+referent or item, cell, new / again / evicted / overwritten, in the gesture log and each
+conversation's events.jsonl), and an evicted referent mentioned again is placed anew, the one
+moved spot there is. A first mention whose arm did not play (its floor) leaves the spot unseen:
+the next mention is then its first showing, never a contradiction. Every spot is forgotten at
+the conversation's close (`Resolver.forget`). A person's ask takes a mark the same way: the
+gesture tool's engine door and `gesture.py play` read `point:printer`, `count:second`, `!`.
 
 ```bash
 uv run python scripts/gesture.py play point --dry-run    # a tool's ask: the first argument (you)
-grep -h '"catchment"\|"repeat"' data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl | tail
+uv run python scripts/gesture.py play point:printer --dry-run   # the goal server's place, read once
+grep -h '"event": "catchment"\|"event": "repeat"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
 ```
 
 **The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
@@ -1168,7 +1182,7 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `gate_dark_patience_s` | number 0..30 | 1.5 | a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL |
 | `gaze` | `clip_max_deg` | number 0..90 | 30.0 | a head overlay (kind clip: a gesture's keys added to the holder's aim) with any key further than this off the holder's aim, on either axis, is refused whole (never clamped); 30 lets a glance aside (10-25 deg) through, the gestures themselves keep nearer (a nod 3-10) |
 | `gaze` | `clip_max_hz` | number 0..10 | 2.5 | an overlay whose tilt turns back sooner than half a period of this rate after its last turn is refused: the mast rings at 5.3 Hz after sharp tilts (config/neck.json's tilt_max_acc_deg_s2 note), so tilt oscillations stay under 2.5 Hz; the board's tilt ramp (600 deg/s^2) caps every move's acceleration on its own. 0: no check |
-| `gaze` | `clip_still_deg` | number 0..5 | 1.0 | an overlay whose keys all stay within this of the holder's aim (a breath, +-0.6 deg at 0.25 Hz) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. The settle tolerance's 1 deg |
+| `gaze` | `clip_still_deg` | number 0..5 | 1.0 | an overlay whose keys all stay within this of the holder's aim (a breath, +-1.0 deg at 0.25 Hz) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. The settle tolerance's 1 deg |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |
