@@ -33,6 +33,7 @@ from pepin.tools.fakes import (
     FakeEyes,
     FakeGoalServer,
     FakeNeck,
+    FakePeople,
     FakeSightings,
     fake_robot,
 )
@@ -281,6 +282,17 @@ def test_turn_to_me_is_a_turn_where_the_robot_stands() -> None:
     eyes(near).point = (0.6, 0.6, 1.55)  # 0.74 m off at 48 deg: "come closer" only turns
     assert call(near, target="me")["stand"]["heading_deg"] == 48
     assert [(g["x"], g["y"]) for g in sent(near)] == [(0.1, 0.05)]
+
+
+def test_recognition_s_door_and_the_sightings_are_two_parts_of_the_robot() -> None:
+    """Robot.people names and forgets people; Robot.sightings says who stands in front: the
+    approach reads the second and never touches the first."""
+    robot = fake_robot()
+    assert isinstance(robot.people, FakePeople) and isinstance(robot.sightings, FakeSightings)
+    assert call(robot, target="me")["ok"]
+    assert robot.people.names == [] and len(robot.sightings.heads) == 1
+    assert TOOLS.call("remember_person", {"name": "Саша"}, robot)["ok"]
+    assert robot.people.names == ["Саша"] and len(robot.sightings.heads) == 1
 
 
 def test_approach_is_a_drive_of_the_registry() -> None:
