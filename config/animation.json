@@ -76,7 +76,7 @@
     },
     "breath": {
       "part": "head", "mode": "additive", "stroke": 0.25, "callable": false, "loop": true,
-      "params": {"amp_deg": 1.0, "period_s": 4.0, "repeats": 3},
+      "params": {"amp_deg": 2.0, "period_s": 4.0, "repeats": 3},
       "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "tilt_deg": "-$amp_deg"}, {"at": 0.75, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
       "note": "+-1.0 deg at 0.25 Hz (config/face.json's breathe_hz; the amplitude the alive layer's breath was tuned to), a looped overlay (loop: the arbiter repeats it until released or lapsed, the engine renews it once a period); within the arbiter's clip_still_deg (1 deg) it never blinds the head; the idle list's breath while the robot is silent"
     },
@@ -146,27 +146,27 @@
     },
     "arm_beat": {
       "part": "arm", "mode": "additive", "stroke": 0.35,
-      "params": {"amp_deg": [8.0, 12.0], "period_s": [1.3, 1.6]},
+      "params": {"amp_deg": [20.0, 30.0], "period_s": [1.1, 1.3]},
       "keys": [{"at": 0.0, "wrist_flex": 0.0}, {"at": 0.35, "wrist_flex": "$amp_deg"}, {"at": 1.0, "wrist_flex": 0.0}],
       "note": "a down-stroke of the wrist and its rebound; a beat wants 0.15-0.25 s, the caps give 0.45 s (timid until raised)"
     },
     "arm_flourish": {
       "part": "arm", "mode": "additive", "stroke": 0.3,
-      "params": {"roll_deg": [15.0, 25.0], "lift_deg": [4.0, 8.0], "period_s": [2.2, 2.8]},
+      "params": {"roll_deg": [30.0, 45.0], "lift_deg": [10.0, 15.0], "period_s": [1.6, 2.0]},
       "keys": [{"at": 0.0, "wrist_roll": 0.0, "wrist_flex": 0.0}, {"at": 0.3, "wrist_roll": "$roll_deg", "wrist_flex": "-$lift_deg"}, {"at": 0.7, "wrist_roll": "$roll_deg", "wrist_flex": "-$lift_deg"}, {"at": 1.0, "wrist_roll": 0.0, "wrist_flex": 0.0}],
       "mirror": ["wrist_roll"],
       "note": "the hand opened outward by the wrist alone (a shrug's open palm); the shoulder only moves through taught poses"
     },
     "wrist_turn": {
       "part": "arm", "mode": "additive", "stroke": 0.25,
-      "params": {"amp_deg": [10.0, 15.0], "period_s": [1.9, 2.1], "repeats": [1, 2]},
+      "params": {"amp_deg": [30.0, 45.0], "period_s": [1.3, 1.5], "repeats": [2, 2]},
       "keys": [{"at": 0.0, "wrist_roll": 0.0}, {"at": 0.3, "wrist_roll": "$amp_deg"}, {"at": 0.7, "wrist_roll": "-$amp_deg"}, {"at": 1.0, "wrist_roll": 0.0}],
       "mirror": ["wrist_roll"],
       "note": "so-so: the wrist rolled one way and the other"
     },
     "gripper_click": {
       "part": "arm", "mode": "additive", "stroke": 1.0,
-      "params": {"amp_deg": [5.0, 7.0], "period_s": [0.5, 0.6], "repeats": [3, 6]},
+      "params": {"amp_deg": [28.0, 40.0], "period_s": [1.0, 1.2], "repeats": [2, 2]},
       "keys": [{"at": 0.0, "gripper": 0.0}, {"at": 0.5, "gripper": "$amp_deg"}, {"at": 1.0, "gripper": 0.0}],
       "note": "open and shut (the stroke: shut), a quick clack at ~1.8 Hz: 5-7 deg is what the servos' 2232 deg/s^2 allows at that tempo"
     },
@@ -388,7 +388,7 @@
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "grin"], "hold_s": [3.0, 3.5]}},
           {"atom": "body_rock", "at_s": [-0.6, -0.4]},
-          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.8, 2.4], "period_s": [0.9, 1.1]}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.0, 1.4], "period_s": [0.9, 1.1]}},
           {"atom": "gripper_click", "params": {"repeats": [4, 6]}, "at_s": [-0.3, -0.1]}
         ]},
         {"floor": true, "steps": [

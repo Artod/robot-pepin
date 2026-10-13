@@ -343,10 +343,15 @@ def test_without_a_judge_two_gates_is_the_fixed_silence() -> None:
 def test_the_config_takes_the_knobs_and_refuses_what_cannot_work() -> None:
     config = CascadeConfig.load(CONFIG, ["ears.turn_model=two-gates"])
     assert config.turn_model == "two-gates" and config.turn_acoustic == "pause"
-    assert (config.turn_early_close_s, config.turn_incomplete_s) == (0.25, 0.8)
+    assert (config.turn_early_close_s, config.turn_incomplete_s) == (
+        0.2,
+        0.8,
+    )  # the file: two-gates 0.2 since 2026-10-13
     assert config.turn_text_model is None
     named = CascadeConfig.load(CONFIG, ["ears.turn_model=two-gates", "turn.text_model=namo-ru",
-                                        "turn.acoustic=smart-turn-v3.2"])  # fmt: skip
+                                        "turn.acoustic=smart-turn-v3.2",
+                                        "turn.min_silence_s=0.15"])  # fmt: skip
+    # (the model is asked before the file's 0.2 close)
     assert (named.turn_text_model, named.turn_acoustic) == ("namo-ru", "smart-turn-v3.2")
     # silence alone may go under the early close: the order is two-gates' only
     assert CascadeConfig.load(CONFIG, ["ears.silence_s=0.22"]).silence_s == 0.22

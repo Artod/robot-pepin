@@ -17,7 +17,8 @@ from pepin.voice_cascade.stages import Brain, Voice
 
 # say: the brain speaks through the voice, not a tool. find: it needs the world service (:8798),
 # which is not part of the stack yet; offering it made the brain blame the head when it failed.
-NOT_FOR_THE_BRAIN = frozenset({"say", "find"})
+# look_around and map_tree need the world memory service, which is not in this tree
+NOT_FOR_THE_BRAIN = frozenset({"say", "find", "look_around", "map_tree"})
 ECHO = "echo"  # the brain that repeats what it heard (no API call)
 API_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 FIRST_SENTENCE = (

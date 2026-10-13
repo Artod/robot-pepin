@@ -172,3 +172,4 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `voice_live.py` | Voice over the Gemini Live API with a local wake gate | `uv run python scripts/voice_live.py [--dry-run]` |
 | `voice_cascade.py` | Voice cascade: local Whisper, Claude with the tools, local Qwen3-TTS; per-stage latency, `--bench` p50/p90 | `uv run python scripts/voice_cascade.py [--brain sonnet] [--bench DIR]` |
 | `cascade_stats.py` | Voice-cascade sessions side by side: to-sound p50/p90, Whisper / first token / first sentence / TTS medians, tool turns, barge-ins, cents per reply | `uv run python scripts/cascade_stats.py data/voice/DAY [SESSION_DIR] [-v]` |
+| `b2_ship.sh` | the recordings to Backblaze B2: `ship` moves finished audio, video, drive recordings, the ring and day-old logs to the bucket (same paths under `pepin/`); nothing is deleted on the laptop; `status`, `restore PATH`, `mount` (~/B2, NFS), `install` (launchd: ship every 30 min, mount at login) |

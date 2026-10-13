@@ -705,7 +705,9 @@ def test_the_breath_fills_the_silent_head_survives_the_person_s_start_and_stops_
     rig.tick(0.3)
     (first,) = [c for c in rig.clips() if c.layer == "idle"]
     assert first.loop and refusal(first) is None
-    assert max(first.tracks[0].values) == pytest.approx(1.0)
+    assert max(first.tracks[0].values) == pytest.approx(
+        2.0
+    )  # the book's breath, 2 deg since 2026-10-13
     rig.alive.speech_started(rig.clock.now)
     rig.engine.speech_started(rig.clock.now)
     rig.tick(0.5)
@@ -813,11 +815,15 @@ def test_the_listeners_thread_takes_the_calls_and_stops() -> None:
 def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_compositions() -> None:
     data = json.loads((CONFIG / "expression.json").read_text())
     knobs_ = alive_knobs(data)
-    assert knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.9
+    assert (
+        knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.0
+    )  # off since 2026-10-13: the +-0.9 deg melody read as jerky
     assert knobs_.moments.head_gap_s == 1.0 and "breath_deg" not in data["moments"]
     (breath,) = [i for i in BOOK.idle if "breath" in i.atoms]  # the breath is the book's
     assert breath.unless == ("speaking",) and breath.after_speech_s == 0.0
-    assert BOOK.atoms["breath"].loop and BOOK.atoms["breath"].params["amp_deg"].hi == 1.0
+    assert (
+        BOOK.atoms["breath"].loop and BOOK.atoms["breath"].params["amp_deg"].hi == 2.0
+    )  # 2026-10-13: 1 deg read as jerky ticks
     assert knobs_.pulse.voice_stats == VoiceStats() and knobs_.quiet.hours == (23, 8)
     assert alive_knobs({}) == AliveKnobs()
     assert DUE == {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
