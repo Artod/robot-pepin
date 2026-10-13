@@ -112,7 +112,7 @@ GOAL_CODES = {204: "goal outside the map", 206: "goal occupied", 208: "no valid 
 # among them. A goal where the cart's hull would cover a lethal cell is inside that obstacle's
 # footprint grown by the cart's (the polygon collision check every controller makes): Nav2 cannot
 # reach it, and the tree answers it with minutes of backing up and spinning beside the person
-# (2026-10-13, "подъедь ко мне поближе"). The inscribed band (253) is left to the planner: with
+# (2026-10-13, "come a bit closer to me"). The inscribed band (253) is left to the planner: with
 # base_link 6 cm behind the bumper it is where a bumper-to-furniture place stands.
 COSTMAP_TOPIC = "/global_costmap/costmap"
 LETHAL_AT = 100  # nav2_costmap_2d's LETHAL_OBSTACLE (254) as its OccupancyGrid carries it
