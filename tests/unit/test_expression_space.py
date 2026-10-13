@@ -23,6 +23,7 @@ from pepin.expression.animation import Book, Clip, Performance, Range, Scene
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.fakes import FakeArmLink, FakeAttention
 from pepin.expression.markers import Cue, Marker
+from pepin.expression.mix import track_value
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
 from pepin.expression.places import GoalPlaces, bearing, latin, match
 from pepin.expression.render import CAPS_DEG_S, CAPS_DEG_S2, BookRenderer, Resolver
@@ -72,10 +73,15 @@ def track(clip: Clip, dof: str) -> tuple[tuple[float, ...], tuple[float, ...]]:
     return found.times, found.values
 
 
+def at_stroke(clip: Clip, dof: str) -> float:
+    """Where a joint of the arm stands at the clip's stroke."""
+    return round(track_value(next(t for t in clip.tracks if t.dof == dof), clip.stroke_s), 3)
+
+
 def pan_of(performance: Performance) -> float | None:
-    """Where the arm's shoulder pan ends (None: no arm)."""
+    """Where the arm's shoulder pan stands at its stroke (None: no arm)."""
     clip = arm_of(performance)
-    return None if clip is None else track(clip, "shoulder_pan")[1][-1]
+    return None if clip is None else at_stroke(clip, "shoulder_pan")
 
 
 # -- the cells -----------------------------------------------------------------------------------
@@ -222,6 +228,9 @@ def test_a_way_to_the_middle_stop_and_me_goes_through_home_the_others_straight()
     assert home in lifts("stop", None) and home in lifts("point", "me", 2)
     assert home in lifts("sympathy", None, 0, _pinned(BOOK, "hi"))  # the feeling's tucked too
     assert home not in lifts("offer", None)  # a plain pose: straight
+    # after its hold the middle goes back home: the board's own way to rest from there would
+    # pass the speaker box; the outer side stays for the board (or the next stroke)
+    assert lifts("count", "1")[-1] == home and lifts("count", "2")[-1] != home
     greeting = arm_of(BookRenderer(_pinned(BOOK, "hi")).render("greeting", EVERYTHING, 3,
                                                                variant=0))  # fmt: skip
     assert greeting is not None and len(track(greeting, "shoulder_lift")[0]) == 3  # as before
@@ -239,8 +248,8 @@ def test_toward_turns_the_open_hand_at_the_person_and_an_edge_falls_to_the_floor
         attention.be(bearing_deg=bearing_deg, distance_m=1.2)
         performance = renderer.render("point", EVERYTHING, 5, cue("point", "you"))
         clip = arm_of(performance)
-        assert clip is not None and track(clip, "wrist_roll")[1][-1] == 0.0  # the palm up
-        pans[bearing_deg] = track(clip, "shoulder_pan")[1][-1]
+        assert clip is not None and at_stroke(clip, "wrist_roll") == 0.0  # the palm up
+        pans[bearing_deg] = pan_of(performance) or 0.0
         for base in HOLDS.values():  # from every cell a unit may hold
             planned = arm.plan(clip, base=base, start=tuple(base[j] for j in JOINTS))
             assert not isinstance(planned, str) and planned.stretch <= 1.0 + 1e-6
@@ -261,7 +270,7 @@ def test_a_place_gets_the_shut_hand_and_a_glance_past_the_pans_the_glance_behind
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "принтер"))
     arm, head = arm_of(performance), head_of(performance)
     assert arm is not None and head is not None
-    assert track(arm, "gripper")[1][-1] == 0.0  # the finger
+    assert at_stroke(arm, "gripper") == 0.0  # the finger
     assert pan_of(performance) == pytest.approx(-27.0 + 30.0, abs=3.0)  # 3 m: little parallax
     assert min(track(head, "pan_deg")[1]) == pytest.approx(-25.0)  # 40 deg off: the most
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "door"))

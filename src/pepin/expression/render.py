@@ -24,7 +24,9 @@ THE RESOLVER (:class:`Resolver`; DESIGN.md §4.3-§4.6, the gesture space of con
   space inward of ``space.via_pan_deg`` or a pose of ``space.via``: straight from rest the hand
   passes the speaker box at 1.1 cm on its way to the middle, and the ways between ``stop``,
   ``tucked`` and the sweep's top pass the head (scratch/gesticulation_space/cells.py); its time
-  divides the way so both legs run at one share of the caps; otherwise no key;
+  divides the way so both legs run at one share of the caps; otherwise no key; and a step that
+  ends there, inward of ``space.via_pan_deg``, goes back home after its hold (the board's own
+  straight way to rest from the middle would pass the speaker box at 0.2-1.1 cm);
 * ``@pose:NAME``: the book's pose NAME as a place of the space (the via applies);
 * ``@toward``: the open hand (``space.open_hand``) turned at the person engaged (the attention
   view's bearing and distance), ``@bearing``: the shut hand at the marker's place (the room's);
@@ -96,6 +98,7 @@ YOU, ME, PLACE, THING, NAME = "you", "me", "place", "thing", "name"
 SHUT = {"gripper": 0.0}  # a referent's spot is pointed at with the gripper shut (the finger)
 AWAY_DEG = 90.0  # a place further than this from the person gets no head glance
 GLANCE_DEG = 1.0  # ... and one nearer than this none either: the head is looking there
+BACK_SHARE = 0.8  # the way home after a hold in the middle runs at this share of the caps
 # The caps the book's timings are sized for (config/arm.json): their ratio places a via
 CAPS_DEG_S, CAPS_DEG_S2 = 240.0, 2232.0
 
@@ -245,6 +248,19 @@ class Resolver:
                 self._take(cell, f"#{meaning.arg}", "overwritten")
             return None if cell is None else book.poses.get(cell)
         return None
+
+    def back(self, ctx: Context, final: Pose, final_ref: str) -> Pose | None:
+        """Home, where an arm step that ends on a place of the space inward of
+        ``space.via_pan_deg`` goes after its hold: the board's own way to rest from there (a
+        straight line, when the hold lapses or the clip ends) would pass the speaker box at
+        0.2-1.1 cm; from home it keeps 1.7 cm. None: it stays."""
+        space, book = ctx.book.space, ctx.book
+        home = book.poses.get(space.home)
+        if home is None or space.via_pan_deg is None or not final_ref.startswith(REF):
+            return None
+        if final_ref in (FROM, VIA) or _same(final, home):
+            return None
+        return home if final["shoulder_pan"] < space.via_pan_deg else None
 
     def via(self, ctx: Context, start: Pose, target: Pose, target_ref: str) -> Pose | None:
         """Home, when the way from ``start`` to ``target`` (a place of the space) must pass it;
@@ -498,7 +514,7 @@ class BookRenderer:
         if not playing and able:
             playing = [max(able, key=lambda d: d.step.p)]
         keyed = self._keyed_all(playing, ctx)  # the brain's first rendering places here
-        clips = merge([self._unroll(d, keyed[id(d)]) for d in playing if id(d) in keyed],
+        clips = merge([self._unroll(d, *keyed[id(d)]) for d in playing if id(d) in keyed],
                       "gesture")  # fmt: skip
         return Performance(intent, seed, index, clips, cue)
 
@@ -527,7 +543,7 @@ class BookRenderer:
         keyed = self._keyed(drawn, ctx, {})
         if keyed is None:
             raise KeyError(f"{drawn.atom.name}: a pose it names is not in the book")
-        (clip,) = merge([self._unroll(drawn, keyed)], layer)
+        (clip,) = merge([self._unroll(drawn, keyed, None)], layer)
         return replace(clip, loop=drawn.atom.loop)
 
     def _draw(self, step: Step, rng: random.Random) -> Drawn:
@@ -595,10 +611,14 @@ class BookRenderer:
                 params[name] = min(max(value, ranges[name].lo), ranges[name].hi)
         return replace(drawn, params=params)
 
-    def _keyed_all(self, drawn: Sequence[Drawn], ctx: Context) -> dict[int, Keyed]:
-        """Each step's keys resolved (a step that cannot resolve is absent), the arm's steps in
-        the order they start, each from where the one before leaves the arm."""
-        out: dict[int, Keyed] = {}
+    def _keyed_all(
+        self, drawn: Sequence[Drawn], ctx: Context
+    ) -> dict[int, tuple[Keyed, Pose | None]]:
+        """Each step's keys resolved (a step that cannot resolve is absent) and the pose its
+        arm goes back to after its hold (home from the middle: :meth:`Resolver.back`; None:
+        none), the arm's steps in the order they start, each from where the one before leaves
+        the arm."""
+        out: dict[int, tuple[Keyed, Pose | None]] = {}
         start: Pose = {}
         arm = sorted(
             (d for d in drawn if d.atom.part == "arm"),
@@ -608,10 +628,14 @@ class BookRenderer:
             keyed = self._keyed(d, ctx, start)
             if keyed is None:
                 continue
-            out[id(d)] = keyed
+            back = None
             if d.atom.part == "arm" and d.atom.mode == "absolute" and keyed:
                 last = keyed[-1]
                 start = {**last[2], **_numbers(last[0], d.params)}
+                final = pose_name(d.atom.keys[-1].pose, d.names)
+                back = self.resolver.back(ctx, start, final)
+                start = back or start
+            out[id(d)] = (keyed, back)
         return out
 
     def _keyed(self, drawn: Drawn, ctx: Context, start: Pose) -> Keyed | None:
@@ -653,9 +677,10 @@ class BookRenderer:
         paths = [n for _, n in raw if n.startswith(PATH)]
         return _traced(out, len(paths)) if len(paths) > 1 else out
 
-    def _unroll(self, drawn: Drawn, keyed: Keyed) -> Unrolled:
-        """A step's atom over its cycles: (part, start from the sync point, stroke from its
-        start, duration, tracks, events)."""
+    def _unroll(self, drawn: Drawn, keyed: Keyed, back: Pose | None) -> Unrolled:
+        """A step's atom over its cycles, and the arm's way ``back`` home after its hold at
+        :data:`BACK_SHARE` of the caps (None: none): (part, start from the sync point, stroke
+        from its start, duration, tracks, events)."""
         atom, params = drawn.atom, drawn.params
         period = params[PERIOD]
         repeats = max(1, round(params.get(REPEATS, 1.0)))
@@ -687,6 +712,13 @@ class BookRenderer:
                 times[dof].append(end + hold)
                 values[dof].append(values[dof][-1])
         duration = end + hold
+        if back is not None:
+            here = {dof: vals[-1] for dof, vals in values.items()}
+            duration += _leg_s(_travel(here, back)) / BACK_SHARE
+            for dof in times:
+                if dof in back:
+                    times[dof].append(duration)
+                    values[dof].append(back[dof])
         tracks = [Track(dof, atom.mode, tuple(times[dof]), tuple(values[dof])) for dof in times]
         return atom.part, start, stroke, duration, tracks, events
 
