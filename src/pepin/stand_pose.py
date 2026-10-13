@@ -46,9 +46,9 @@ class Distances:
     person than ``person_min_m``, the alternatives ``ring_deg`` either way, and ``to`` a turn in
     place when the robot already stands within ``near_m`` of its stand distance."""
 
-    front_m: float = 0.8
-    side_m: float = 0.7
-    person_min_m: float = 0.6
+    front_m: float = 0.3
+    side_m: float = 0.5
+    person_min_m: float = 0.25
     ring_deg: float = 30.0
     head_moved_deg: float = 2.0
     near_m: float = 0.15

@@ -9,7 +9,23 @@ from pathlib import Path
 import pytest
 
 from pepin.pixel_to_map import Pose2D
-from pepin.stand_pose import RELATIONS, Distances, Stand, Target, facing_from, stands
+from pepin.stand_pose import RELATIONS, Distances, Relation, Stand, Target, facing_from
+from pepin.stand_pose import stands as _stands
+
+# the geometry below is checked at the design's original distances; the shipped defaults
+# (config/approach.json, Artem's 20 cm "come closer") are pinned by their own test at the end
+GEOMETRY = Distances(front_m=0.8, side_m=0.7, person_min_m=0.6)
+
+
+def stands(
+    target: Target,
+    relation: Relation,
+    robot: Pose2D,
+    distances: Distances | None = None,
+    distance_m: float | None = None,
+) -> list[Stand]:
+    return _stands(target, relation, robot, distances or GEOMETRY, distance_m)
+
 
 REPO = Path(__file__).resolve().parents[2]
 AT_ORIGIN = Pose2D(0.0, 0.0, 0.0)
@@ -139,7 +155,7 @@ def test_no_stand_point_is_nearer_a_person_than_the_minimum_plus_two_sigma() -> 
     for sigma in (0.0, 0.05, 0.2):
         for facing in (0.0, 1.0, 2.5, -2.0):
             person = Target("person", 2.0, 1.0, facing, sigma)
-            floor = Distances().person_min_m + 2.0 * sigma
+            floor = GEOMETRY.person_min_m + 2.0 * sigma
             for relation in RELATIONS:
                 for spoken in (None, 0.2, 0.65):
                     for stand in stands(person, relation, AT_ORIGIN, distance_m=spoken):  # type: ignore[arg-type]

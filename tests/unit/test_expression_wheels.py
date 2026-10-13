@@ -657,7 +657,7 @@ def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     assert (lim.max_turn_deg, lim.max_rock_m) == (30.0, 0.02)
     assert (lim.backoff_m, lim.backoff_deg) == (0.02, 10.0), "the one recovery, within the caps"
     assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
-    assert settings.marks_age_s == 1.5
+    assert settings.marks_age_s == 3.0
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})
