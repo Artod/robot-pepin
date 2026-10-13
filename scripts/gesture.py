@@ -9,7 +9,7 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
     uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
-    uv run python scripts/gesture.py turn 10 --speed 0.2      # the wheels: 10 deg left in place
+    uv run python scripts/gesture.py turn 10                  # the wheels: 10 deg left in place
     uv run python scripts/gesture.py rock 2 --times 1         # 2 cm forward and back
     uv run python scripts/gesture.py turn -10 --dry-run       # every check, nothing moves
 
@@ -24,8 +24,9 @@ clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds
 ``turn`` and ``rock`` are the wheels' expressive motions exactly as the voice cascade makes them
 (pepin.expression.wheels: twists to the base server judged by its odometry, the goal server on
 this Mac saying nothing navigates and the lidar's arc is clear), at ``--speed`` (a share of
-config/expression.json's wheels caps); Ctrl-C halts. ``ros/stop.sh`` stays the red button: the
-motion ends on the first state line of a stop it did not send.
+config/expression.json's wheels caps, its ``wheels.speed_scale`` by default); Ctrl-C halts.
+``ros/stop.sh`` stays the red button: the motion ends on the first state line of a stop it did
+not send.
 The board is ``PEPIN_HOST`` (or --host).
 """
 
@@ -286,6 +287,8 @@ def wheels(args: argparse.Namespace) -> int:
     from pepin.expression.executors import WheelMove, WheelReport
     from pepin.expression.wheels import WheelsSettings, robot_wheels
 
+    if args.speed is None:
+        args.speed = WheelsSettings.load().speed_scale
     if not 0.0 < args.speed <= 1.0:
         print("--speed: above 0, at most 1")
         return 2
@@ -409,7 +412,8 @@ def main() -> int:
     r.add_argument("cm", type=float, nargs="?", default=2.0)
     r.add_argument("--times", type=int, choices=range(1, 6), default=1, metavar="1..5")
     for wheel in (w, r):
-        wheel.add_argument("--speed", type=float, default=0.2, help="share of the wheels' caps")
+        wheel.add_argument("--speed", type=float, help="share of the wheels' caps (default:"
+                           " config/expression.json's wheels.speed_scale)")  # fmt: skip
         wheel.add_argument("--dry-run", action="store_true", help="every check, nothing moves")
     args = ap.parse_args()
     if args.command in ("turn", "rock"):
