@@ -635,6 +635,15 @@ def main() -> int:
     if gaze is not None:  # attention first: the engine reads it, a body turn asks for the arm
         body.engine.attention = gaze
         gaze.arm = body.engine
+    # The alive layer (riding gestures): the voice's own nuclei and melody from every reply chunk,
+    # the listeners' requests into the engine, the quiet rule over the engine's renderings.
+    from pepin.expression.listeners import Alive
+    from pepin.expression.prosody import ProsodyListener
+
+    prosody = ProsodyListener()
+    alive = Alive(body.engine, prosody, say=lambda line: print(line, flush=True))
+    body.engine.taps.append(prosody)
+    body.engine.scene_hooks.append(alive.scene)
     switchboard = Switchboard(
         control,
         configure=lambda brain, voice: configure(brain, voice),
@@ -662,7 +671,7 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
-        observers=[*guards, body.engine, people] + ([gaze] if gaze is not None else []),
+        observers=[*guards, body.engine, alive, people] + ([gaze] if gaze is not None else []),
         flags=[body.engine, people] + ([gaze] if gaze is not None else []),
         taps=[body.engine],
         vocabulary=body.vocabulary,
@@ -675,6 +684,8 @@ def main() -> int:
     holder.append(loop)
     if gaze is not None:
         gaze.journal = loop.record  # the gaze's decisions in each conversation's events.jsonl
+    alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
+    alive.start()
     b = config.brain
     print(
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
@@ -696,6 +707,7 @@ def main() -> int:
         if moving and fake_drive_s is None:
             print("halt:", robot.halt(), flush=True)
     finally:
+        alive.close()
         if gaze is not None:
             gaze.close()  # the head let go before the links close
         if wheels is not None:

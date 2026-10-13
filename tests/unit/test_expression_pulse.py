@@ -12,6 +12,7 @@ import itertools
 import json
 import math
 import random
+import time
 from collections import deque
 from pathlib import Path
 from typing import Any
@@ -719,6 +720,21 @@ def test_the_close_logs_each_part_and_the_counts_a_minute() -> None:
     summary = next(f for k, f in rig.events if k == "alive")
     assert summary["counts"]["accent"] == 1 and summary["reason"] == "idle"
     assert summary["accents_per_speech_min"] > 0 and "head_moves_per_min" in summary
+
+
+def test_the_listeners_thread_takes_the_calls_and_stops() -> None:
+    rig = Rig()
+    rig.alive.clock = time.monotonic
+    rig.alive.start()
+    try:
+        rig.alive.opened(Heard(0.0, 1.0, "Пепин"))
+        deadline = time.monotonic() + 1.0
+        while not rig.alive._conversation and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert rig.alive._conversation
+    finally:
+        rig.alive.close()
+    assert rig.alive._thread is not None and not rig.alive._thread.is_alive()
 
 
 def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_compositions() -> None:
