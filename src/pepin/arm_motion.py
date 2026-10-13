@@ -30,7 +30,7 @@ RANGES = {
     "max_acc_deg_s2": (10.0, 2232.0),
     "torque_limit": (0.05, 1.0),
     "max_duration_s": (1.0, 60.0),
-    "hold_max_s": (0.0, 10.0),
+    "hold_max_s": (0.0, 30.0),
 }
 
 
