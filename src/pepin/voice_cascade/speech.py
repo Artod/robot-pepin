@@ -44,7 +44,9 @@ CLIP_TRIES = 3
 @dataclass(frozen=True)
 class SpeechJob:
     """Sentence ``index`` of reply ``turn`` (said in ``style``, "" for the plain voice); a
-    backchannel (``pcm`` ready, index -1); or the turn's end (play out what is queued)."""
+    backchannel (``pcm`` ready, index -1; with ``fade_s`` a filler the reply's first audio
+    fades out over that long, :class:`pepin.voice_cascade.player.Player`); or the turn's end
+    (play out what is queued)."""
 
     turn: int
     index: int
@@ -52,6 +54,7 @@ class SpeechJob:
     kind: JobKind = "reply"
     pcm: bytes | None = None  # at the voice's rate
     style: str = ""
+    fade_s: float = 0.0
 
 
 class _Wake:
@@ -343,7 +346,9 @@ class SpeechWorker:
                 with self.lock:
                     if job.kind == "reply" and job.turn <= self.cut_through:
                         return
-                    self.player.feed(resampler.process(pcm), player_kind, job.turn, job.index)
+                    self.player.feed(
+                        resampler.process(pcm), player_kind, job.turn, job.index, job.fade_s
+                    )
                 if self.on_audio is not None:
                     self.on_audio(job, pcm, self.clock())
         finally:

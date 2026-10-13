@@ -17,7 +17,7 @@ from pepin.voice_cascade.barge_in import Frame
 from pepin.voice_cascade.config import CascadeConfig, ProsodyConfig, apply_overrides
 from pepin.voice_cascade.ears import Ears
 from pepin.voice_cascade.fake import ToneVoice
-from pepin.voice_cascade.player import Playback, Player, PlayoutClock
+from pepin.voice_cascade.player import FillerFade, Playback, Player, PlayoutClock
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import Prosody
 from pepin.voice_cascade.tagger import ProsodyTagger, comparatives
@@ -272,6 +272,82 @@ def test_the_player_tells_a_backchannel_from_a_reply() -> None:
     assert player.playback() == "reply"
 
 
+def level(seconds: float, value: int) -> bytes:
+    return np.full(round(seconds * RATE), value, dtype="<i2").tobytes()
+
+
+def drain(player: Player, clock: Clock, seconds: float = 2.0) -> np.ndarray:
+    """Let the pacer send everything on the fake clock; the stream the speaker got."""
+    for _ in range(round(seconds / 0.02)):
+        clock.now += 0.02
+        player.pacer.step()
+    sink = player.playout.speaker
+    assert isinstance(sink, Sink)
+    return np.frombuffer(b"".join(sink.played), dtype="<i2")
+
+
+def test_the_reply_fades_out_a_thinking_filler_still_playing_and_starts_right_after() -> None:
+    """A filler fed with a fade goes only that far ahead of the speaker (not the 0.5 s lead);
+    the reply's first chunk ramps its unsent rest from full level to silence over the fade, on
+    the stream's own samples, drops what is left and follows the ramp at once."""
+    clock, sink = Clock(), Sink()
+    player = Player(sink, rate=RATE, lead_s=0.5, clock=clock)
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    player.feed(level(0.6, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.pacer.step()
+    assert player.playout.sent_s <= 0.06 + 0.04 + 1e-9, "held to the fade, not the lead"
+    for _ in range(10):  # 0.2 s of the filler plays
+        clock.now += 0.02
+        player.pacer.step()
+    sent = player.playout.sent_s
+    asked = clock.now
+    player.feed(level(0.3, 2000), "reply", 3, 0)
+    (fade,) = fades
+    ahead = sent - player.playout.played()
+    assert (fade.turn, fade.faded_s) == (3, pytest.approx(0.06))
+    assert fade.ahead_s == pytest.approx(ahead) and 0.0 < ahead <= 0.1 + 1e-9
+    assert fade.cut_s == pytest.approx(0.6 - sent - 0.06)
+    stream = drain(player, clock)
+    head, ramp = round(sent * RATE), round(0.06 * RATE)
+    assert np.all(stream[:head] == 1000), "what was sent plays as it was"
+    shape = stream[head : head + ramp].astype(float)
+    assert shape[0] == 1000 and shape[-1] == 0 and np.all(np.diff(shape) <= 0), "a linear ramp"
+    assert np.allclose(shape, np.linspace(1000, 0, ramp), atol=0.5)
+    reply = stream[head + ramp :]
+    assert len(reply) == round(0.3 * RATE) and np.all(reply == 2000), "then the reply, whole"
+    start, _ = player.span(3) or (0.0, 0.0)
+    assert start == pytest.approx(sent + 0.06), "the reply's marks follow the ramp"
+    waited = (player.playout.when(start) or 0.0) - asked
+    assert waited == pytest.approx(ahead + 0.06), "the reply waits for the sent part and the ramp"
+
+
+def test_a_filler_without_a_fade_or_already_over_leaves_the_reply_queued_as_before() -> None:
+    clock, sink = Clock(), Sink()
+    player = Player(sink, rate=RATE, lead_s=0.5, clock=clock)
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    player.feed(level(0.6, 1000), "backchannel", 1, -1)  # fade 0: today's behaviour
+    player.pacer.step()
+    assert player.playout.sent_s == pytest.approx(0.52), "the pacer's whole lead"
+    player.feed(level(0.3, 2000), "reply", 1, 0)
+    stream = drain(player, clock)
+    assert fades == [] and len(stream) == round(0.9 * RATE), "the whole filler, then the reply"
+    player.feed(level(0.04, 1000), "backchannel", 2, -1, fade_s=0.06)
+    drain(player, clock, 0.02)
+    player.feed(level(0.3, 2000), "reply", 2, 0)
+    (short,) = fades
+    assert short.faded_s == 0.0 and short.cut_s == 0.0 and short.ahead_s > 0.0, "too little left"
+    drain(player, clock)
+    player.feed(level(0.3, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.flush()  # a barge-in drops the filler and its hold
+    player.feed(level(0.6, 2000), "reply", 4, 0)
+    before = player.playout.sent_s
+    player.pacer.step()
+    assert player.playout.sent_s - before == pytest.approx(0.52), "the reply has its whole lead"
+    assert len(fades) == 1
+
+
 # -- the ears -------------------------------------------------------------------------------
 
 
@@ -430,6 +506,28 @@ def test_sentences_are_spoken_in_order_and_a_cut_turn_is_dropped() -> None:
     assert heard[0] == (1, 0) and (2, 0) not in heard and (2, -1) in heard and (3, 0) in heard
     assert voice.spoken == ["мм", "Раз два.", "последнее"]  # the backchannel came from memory
     assert player.span(1) is not None and player.span(2) is None
+
+
+def test_a_filler_job_with_a_fade_is_faded_by_its_reply_s_first_chunk() -> None:
+    player = Player(Sink(), rate=RATE, lead_s=0.5, clock=Clock())  # the pacer never steps
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    replied = threading.Event()
+
+    def on_done(job: SpeechJob, t: float) -> None:
+        if job.kind == "reply":
+            replied.set()
+
+    worker = SpeechWorker(ToneVoice(rate=RATE, seconds_per_char=0.01), player, on_done=on_done)
+    worker.start()
+    assert worker.ready.wait(2.0)
+    worker.say(SpeechJob(5, -1, "Хм.", "backchannel", pcm=level(0.5, 1000), fade_s=0.06))
+    worker.say(SpeechJob(5, 0, "Да."))
+    assert replied.wait(2.0)
+    worker.close()
+    (fade,) = fades
+    assert (fade.turn, fade.faded_s, fade.ahead_s) == (5, pytest.approx(0.06), 0.0)
+    assert fade.cut_s == pytest.approx(0.44), "nothing was sent: all but the ramp is cut"
 
 
 def test_openers_are_found_among_the_clips_by_their_words() -> None:

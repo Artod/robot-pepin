@@ -29,7 +29,7 @@ from pepin.voice_cascade.engines import BrainSetup
 from pepin.voice_cascade.fake import ListTranscriber, ScriptedBrain, Step, ToneVoice
 from pepin.voice_cascade.fillers import clip_lines
 from pepin.voice_cascade.loop import CascadeLoop
-from pepin.voice_cascade.player import Player
+from pepin.voice_cascade.player import FillerFade, Player
 from pepin.voice_cascade.speech import SpeechWorker
 from pepin.voice_cascade.stages import CUT, Prosody, Speaker, TimedWord, Transcript, Unit, Vowel
 from pepin.voice_live.events import Events
@@ -654,6 +654,8 @@ def test_a_brain_late_to_its_first_token_gets_one_thinking_filler(tmp_path: Path
         clock.skew = 9.0  # once a reply
         await asyncio.sleep(0.2)
         said.append(list(reply.fillers))
+        assert rig.player.on_fade is not None  # the player's word on a fade reaches the log
+        rig.player.on_fade(FillerFade(reply.id, 0.06, 0.2, 0.08))
         release.set()
         await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
 
@@ -665,6 +667,10 @@ def test_a_brain_late_to_its_first_token_gets_one_thinking_filler(tmp_path: Path
     (filler,) = [r for r in rows if r["event"] == "filler"]
     assert (filler["context"], filler["language"], filler["text"]) == ("thinking", "ru", said[1][0])
     assert filler["clip_s"] == pytest.approx(rig.speech.clip_s(said[1][0]), abs=0.01)
+    assert filler["fade_ms"] == 60, "conversation.filler_fade_ms, a thinking filler's"
+    (fade,) = [r for r in rows if r["event"] == "filler_fade"]
+    assert (fade["turn"], fade["text"]) == (filler["turn"], said[1][0])
+    assert (fade["faded_ms"], fade["cut_ms"], fade["ahead_ms"]) == (60, 200, 80)
 
 
 def test_a_thinking_clip_over_filler_max_s_is_never_said_and_the_lengths_are_told_once(

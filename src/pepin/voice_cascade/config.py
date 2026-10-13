@@ -346,6 +346,8 @@ class CascadeConfig:
     filler_cooldown_s: Mapping[str, float] = field(default_factory=lambda: {"backchannel": 2.0})
     # per context: the longest clip said (seconds); a context not named says any length
     filler_max_s: Mapping[str, float] = field(default_factory=lambda: {"thinking": 0.6})
+    # the reply's first audio fades a thinking filler still playing out over this (0: it waits)
+    filler_fade_ms: float = 60.0
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -450,6 +452,7 @@ class CascadeConfig:
             filler_silent_p=by_context(conv.get("filler_silent_p"), d.filler_silent_p),
             filler_cooldown_s=by_context(conv.get("filler_cooldown_s"), d.filler_cooldown_s),
             filler_max_s=by_context(conv.get("filler_max_s"), d.filler_max_s),
+            filler_fade_ms=float(conv.get("filler_fade_ms", d.filler_fade_ms)),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -556,6 +559,10 @@ class CascadeConfig:
             )
         if self.filler_thinking_s < 0:
             raise ValueError("conversation.filler_thinking_s >= 0 (0: no thinking filler)")
+        if not 0 <= self.filler_fade_ms <= 500:
+            raise ValueError(
+                "conversation.filler_fade_ms from 0 (the reply waits for the filler) to 500"
+            )
         for key, table, top in (
             ("filler_silent_p", self.filler_silent_p, 1.0),
             ("filler_cooldown_s", self.filler_cooldown_s, None),

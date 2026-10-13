@@ -86,7 +86,7 @@ from pepin.voice_cascade.control import FLAG, Request, Switchboard
 from pepin.voice_cascade.ears import EarEvent, Ears
 from pepin.voice_cascade.fillers import Context, FillerEngine, again_due, thinking_due
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
-from pepin.voice_cascade.player import Player
+from pepin.voice_cascade.player import FillerFade, Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import (
     FOLLOW_UP,
@@ -300,6 +300,7 @@ class CascadeLoop:
         choices (None: each run differs)."""
         self.config = config
         self.mic, self.player, self.transcriber, self.tagger = mic, player, transcriber, tagger
+        player.on_fade = self._filler_faded
         self.brain, self.speech = brain, speech
         self.tools, self.allowed, self.moving, self.halt = tools, allowed, moving, halt
         self.events, self.logs, self.ledger = events, logs, ledger
@@ -682,17 +683,31 @@ class CascadeLoop:
         self, reply: Reply, line: str, context: Context, tool: str | None = None
     ) -> None:
         """A filler of ``reply`` to the voice (``tool``: the slow tool it waits for), logged
-        and printed; none from a paid voice without a local fallback."""
+        and printed; none from a paid voice without a local fallback. A thinking filler is one
+        the reply's first audio fades out (``conversation.filler_fade_ms``; 0: it waits)."""
         if not self.speech.says_asides:
             return
-        self.speech.say(SpeechJob(reply.id, -1, line, "backchannel"))
+        fade_ms = self.config.filler_fade_ms if context == "thinking" else 0.0
+        self.speech.say(SpeechJob(reply.id, -1, line, "backchannel", fade_s=fade_ms / 1000.0))
         reply.filler_s = self.clock()
         reply.fillers.append(line)
         length = self.speech.clip_s(line)
         self._event("filler", turn=reply.id, context=context, tool=tool, text=line,
                     language=self.fillers.language,
-                    clip_s=None if length is None else round(length, 2))  # fmt: skip
+                    clip_s=None if length is None else round(length, 2),
+                    fade_ms=round(fade_ms))  # fmt: skip
         print(f"  (filler{'' if context == 'tool' else ' ' + context}: {line})", flush=True)
+
+    def _filler_faded(self, fade: FillerFade) -> None:
+        """The reply's first audio met its filler still playing (the voice's thread, after the
+        reply's chunk is with the player): what played on, how long the ramp, what was cut."""
+        reply = self.replies.get(fade.turn)
+        text = reply.fillers[-1] if reply is not None and reply.fillers else None
+        faded, cut, ahead = (round(s * 1000) for s in (fade.faded_s, fade.cut_s, fade.ahead_s))
+        self._event("filler_fade", turn=fade.turn, text=text, faded_ms=faded, cut_ms=cut,
+                    ahead_ms=ahead)  # fmt: skip
+        print(f"  (filler faded: {ahead} ms played on, a {faded} ms ramp, {cut} ms cut)",
+              flush=True)  # fmt: skip
 
     def _waiting(self, reply: Reply | None) -> bool:
         """``reply`` is in flight with nothing of its own said: its brain still at work, the

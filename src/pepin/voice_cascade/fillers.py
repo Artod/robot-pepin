@@ -19,8 +19,10 @@ bark"), and a moment passed in silence counts as one spoken; no line comes again
 among the last :data:`RECENT` picked, as far as the lines allow; only a line whose clip is
 made is picked (synthesised on the spot it would hold the voice ahead of the reply), and none
 whose clip plays longer than its context's ``filler_max_s`` (the thinking filler is a short
-sound: a whole phrase may still be playing when the reply is ready, and the player queues the
-reply behind it).
+sound: a whole phrase may still be playing when the reply is ready). A thinking filler still
+playing when the reply's first audio comes is faded out over ``filler_fade_ms`` and the reply
+follows at once (:mod:`pepin.voice_cascade.player`); the other fillers stay whole and the reply
+queues behind them.
 """
 
 from __future__ import annotations
