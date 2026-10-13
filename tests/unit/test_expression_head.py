@@ -24,8 +24,11 @@ from pepin.expression.book import load_book, with_rest
 from pepin.expression.door import AWAY, OverlayDoor
 from pepin.expression.fakes import FakeExecutor, FakeHeadDoor, FakePlayout
 from pepin.expression.head import GESTURE, IDLE_LOOK, SPEAKER, ClipLook
+from pepin.expression.listeners import head_clip
 from pepin.expression.markers import Marker, Part
 from pepin.expression.parts import (
+    GLIDE,
+    HEAD_MIN_SPEED_DEG_S,
     Absent,
     HeadPart,
     NeckLimits,
@@ -50,7 +53,7 @@ from pepin.gaze import (
     look_from_json,
     overlay_from_json,
 )
-from pepin.neck import NeckConfig
+from pepin.neck import ACC_UNIT_DEG_S2, NeckConfig
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 BOOK = with_rest(
@@ -159,6 +162,52 @@ def test_the_idle_layer_s_clip_is_marked_idle_and_a_looping_atom_loops() -> None
     overlay = overlay_from_json(dict(look["target"]), BOUNDS)
     assert not isinstance(overlay, str) and overlay.loop and overlay.idle
     assert math.degrees(overlay.reach_rad) <= BOUNDS.clip_still_deg  # never blinds the head
+
+
+def test_the_idle_layer_s_keys_glide_and_a_gesture_s_strike_at_the_neck_s_ramp() -> None:
+    """Each key of an idle clip (the melody, the breath, the drift) carries its own ramp, the
+    gentlest that lands its move on time (GLIDE times the least, never under the Acceleration
+    register's unit), and the speed that ends the move on time at it: the servo eases from key
+    to key; a gesture's keys carry none (the neck's own ramp, a nod's stroke on its word)."""
+    melody = head_clip(((0.0, 0.0, 0.0), (0.6, 0.0, -0.9), (1.3, 0.0, 0.5), (2.0, 0.0, 0.0)), 0.0,
+                       layer="idle")  # fmt: skip
+    for clip in (melody, RENDERER.render_atom("breath", 5), RENDERER.render_atom("head_drift", 5)):
+        look = clip_look(clip, IDLE_LOOK)
+        assert look is not None
+        pairs = itertools.pairwise(keyframes(clip))
+        moves = [(b[0] - a[0], max(abs(b[1] - a[1]), abs(b[2] - a[2])))
+                 for a, b in pairs if (b[1], b[2]) != (a[1], a[2])]  # fmt: skip
+        for key, (seconds, travel) in zip(look["target"]["keys"], moves, strict=False):
+            ramp = key["acc_deg_s2"]
+            assert ramp >= ACC_UNIT_DEG_S2 - 1e-9
+            assert ramp <= max(ACC_UNIT_DEG_S2, GLIDE * needed_acc(travel, seconds)) + 0.01
+            speed = move_speed(travel, seconds, ramp)
+            assert key["speed_deg_s"] == pytest.approx(max(HEAD_MIN_SPEED_DEG_S, speed), abs=0.01)
+        overlay = overlay_from_json(dict(look["target"]), BOUNDS)
+        assert not isinstance(overlay, str) and all(k.acc_deg_s2 for k in overlay.keys)
+    nod = clip_look(head_clip(((0.0, 0.0, 0.0), (0.2, 0.0, 3.0), (0.4, 0.0, 0.0)), 0.2), GESTURE)
+    assert nod is not None and all("acc_deg_s2" not in k for k in nod["target"]["keys"])
+
+
+def test_the_glide_s_ramp_reaches_the_neck_with_each_key() -> None:
+    """The arbiter writes each key of an idle overlay with its own ramp beside its speed (the
+    board's neck_target takes both); the idle layer's breath through the door, end to end."""
+    clock = Clock()
+    driver = TargetHead()
+    arbiter = Arbiter(driver, home_aim(NECK), GazeSettings(), None)
+    door = OverlayDoor(client=lambda s, a=arbiter, c=clock: ArbiterClient(s, a, c))
+    head = HeadPart(door, run=inline)
+    breath = RENDERER.render_atom("breath", 5)
+    clock.now = 1.0
+    assert head.play(breath).ok
+    while clock.now < 1.0 + breath.duration_s:
+        clock.now += 0.05
+        arbiter.step(clock.now)
+    look = clip_look(breath, IDLE_LOOK)
+    assert look is not None
+    ramps = {k["acc_deg_s2"] for k in look["target"]["keys"]}
+    written = [r for r in driver.ramps if r is not None]
+    assert written and set(written) <= ramps
 
 
 # -- authoring: nothing the arbiter refuses for a reason known in advance -----------------------
@@ -411,6 +460,7 @@ class TargetHead:
 
     def __init__(self) -> None:
         self.writes: list[tuple[Aim | None, float, float | None]] = []
+        self.ramps: list[float | None] = []
 
     def blocked(self, now: float) -> Refusal | None:
         return None
@@ -423,8 +473,10 @@ class TargetHead:
         hold: bool,
         now: float,
         speed_deg_s: float | None = None,
+        acc_deg_s2: float | None = None,
     ) -> None:
         self.writes.append((aim, now, speed_deg_s))
+        self.ramps.append(acc_deg_s2)
 
     def take_refusal(self) -> Refusal | None:
         return None

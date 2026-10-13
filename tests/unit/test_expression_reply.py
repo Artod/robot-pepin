@@ -32,6 +32,7 @@ from pepin.expression.fakes import (
     FakePlaces,
     FakePlayout,
 )
+from pepin.expression.head import IDLE_LOOK
 from pepin.expression.listeners import (
     ARM_SWAY,
     LAUGHING,
@@ -42,7 +43,7 @@ from pepin.expression.listeners import (
     alive_knobs,
 )
 from pepin.expression.markers import Marker, Part, parse
-from pepin.expression.parts import ArmPart
+from pepin.expression.parts import ArmPart, clip_look
 from pepin.expression.prosody import ProsodyListener
 from pepin.expression.speaker import Attention
 from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
@@ -733,3 +734,36 @@ def test_the_raised_arm_breathes_a_slow_wrist_sway_while_nothing_else_moves_it(
     times = [t for name, t, tr in c.link.times if name == "send" and tr in sways]
     for t, sway in zip(times, sways, strict=True):
         assert t + 0.06 + sway.knots[-1].t_s + sway.hold_s <= end + 1.0
+
+
+def test_the_melody_s_keys_come_half_a_second_apart_and_glide(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The voice's pitch as the head's still tilt, on the real prosody listener: its overlays'
+    keys at least melody_key_gap_s (0.5 s) apart, within melody_max_deg (0.9), each written with
+    a speed cap and its own ramp (the glide), within the arbiter's still bound (never blinds)."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation()
+    text = "Мы долго шли по берегу большой и очень тихой реки, и было хорошо."
+    words = ["долго", "берегу", "большой", "очень", "тихой", "реки", "хорошо"]
+    reply = Spoken(c, 1, [text], [words[1::3]], [[w for w in words if w not in words[1::3]]])
+    try:
+        c.engine.start()
+        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
+        c.run(0.5, {0.2: lambda: reply.text(0), 0.3: lambda: reply.start(0)})
+        c.run(reply.lengths[0] + 0.5)
+        c.both("reply_done", 1)
+        c.run(0.3)
+    finally:
+        c.engine.close()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    melody = played(c, "head", "melody")
+    assert melody, "the melody plays"
+    for clip in melody:
+        (track,) = clip.tracks
+        assert min(np.diff(track.times)) >= 0.5 - 1e-9
+        assert max(abs(v) for v in track.values) <= 0.9 + 1e-9
+        look = clip_look(clip, IDLE_LOOK)
+        assert look is not None and look["target"].get("idle") is True
+        for key in look["target"]["keys"]:
+            assert key["speed_deg_s"] > 0.0 and key["acc_deg_s2"] > 0.0  # a cap and a glide
