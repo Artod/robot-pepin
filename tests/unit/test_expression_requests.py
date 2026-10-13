@@ -984,3 +984,26 @@ def test_a_word_mark_s_wheels_are_fitted_loosely_and_left_out_alone_without_the_
     first.say(1, 0, text, "rocky", 0)
     (row,) = first.rows("ladder")
     assert row["parts"] == ["head"] and "the wheels need" in row["why"]
+
+
+def test_a_mark_takes_the_arm_from_the_held_arm_s_sway_at_once() -> None:
+    """The arm held up and swaying (the idle layer's arm_sway): a mark mid-sentence plans from
+    the held pose with the sway still playing (the idle layer holds nothing back) and its
+    stroke lands on its word."""
+    rig = Ladder()
+    hold_arm(rig, 1, hold_s=12.0)
+    rig.tick(0.7)
+    lifted = rig.sent()[-1]
+    rig.engine.request(Request("arm_sway", None, Priority.IDLE, "idle", parts=frozenset({"arm"})))
+    rig.tick(0.3)
+    sway = rig.sent()[-1]
+    assert sway is not lifted and sway.then == "hold"
+    text = "Принтер вон там, у стены."
+    rig.say(1, 0, text, "point", text.index("вон"))
+    (row,) = rig.rows("ladder")
+    assert row["base"] == "unit", row
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(2.0)
+    (arm,) = rig.rows("send", part="arm")
+    assert -0.3 <= arm["error_s"] <= 0.15 and arm["base"] == "unit"

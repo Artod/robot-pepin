@@ -997,11 +997,12 @@ class Scheduler:
         pose a unit holds (the latest arm motion's: a waiting clip's it will be held after,
         else a sent clip's, after its stroke; the arm passes through no earlier one), then
         returning to rest after the last motion, then at rest once every motion known has ended
-        and gone back."""
+        and gone back. The idle layer's clip (the held arm's sway) holds nothing back: a mark
+        takes the arm from it at once, from the pose the unit holds."""
         hold_s, strokes = self.timing.unit_hold_s, self.timing.unit_strokes
         froms: list[ArmFrom] = []
         playing = self.reservations.held.get("arm")
-        moving = playing is not None and now < playing.ends
+        moving = playing is not None and now < playing.ends and playing.priority < Priority.IDLE
         free = playing.ends if playing is not None and moving else now
         waiting = [w for w in self.waiting if w.clip.part == "arm" and w.fit is not None
                    and w.fit.final is not None]  # fmt: skip
