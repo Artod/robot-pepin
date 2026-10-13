@@ -1,12 +1,13 @@
-"""How to face a bearing: the head alone within its comfortable pan, the wheels for the rest;
-and where a seek looks when nobody is seen at the bearing (:func:`sweep`).
+"""How to face a bearing: the head alone within the forward arc, the body turned toward a person
+past it; and where a seek looks when nobody is seen at the bearing (:func:`sweep`).
 
-A person within ``comfort_pan_deg`` (60) of the cart's nose is faced by the head alone. Past it
-the wheels turn the rest in place, at most ``max_turn_deg`` (30) per request, and the head looks
-the remaining way relative to the turned cart; when the wheels may not move (a drive, the stub)
-or turn less than asked, the head looks as far as it reaches. The head never needs the wheels to
-SEE a person (its reach is about +-156 deg); the wheels only bring a person far round back toward
-the head's comfortable range.
+A person within the forward arc (``arc_deg``, 160: +-80 deg of the cart's nose) is faced by the
+head alone. Past it the wheels turn the body toward them in place, at most ``max_turn_deg`` (30)
+per request, while the head already looks there (it is the fast one): the person comes back into
+the arc, and well inside it, so a person at its edge does not set the body hunting. When the
+wheels may not move (a drive, the stub, a refused check) or turn less than asked, the head looks
+as far as it reaches. The head never needs the wheels to SEE a person (its reach is about +-156
+deg); the wheels only bring a person far round back into the arc.
 
 :class:`BoundedTurn` is the wheels' retry made concrete over :class:`TurnSteps` (the board's
 measured motion, :class:`pepin.expression.wheels.WheelsExecutor`): one continuous turn per
@@ -41,12 +42,13 @@ class BodyLimits:
 
 
 def split(
-    bearing_rad: float, tilt_rad: float, *, comfort_rad: float, max_turn_rad: float
+    bearing_rad: float, tilt_rad: float, *, half_arc_rad: float, max_turn_rad: float
 ) -> GazePlan:
-    """The wheels' share (the part past ``comfort_rad``, at most ``max_turn_rad``) and the head's
-    aim relative to the cart once they have turned it."""
-    excess = abs(bearing_rad) - comfort_rad
-    body = math.copysign(min(excess, max_turn_rad), bearing_rad) if excess > 0.0 else 0.0
+    """The wheels' share (none within ``half_arc_rad`` of the nose; past it the turn that faces
+    the person, at most ``max_turn_rad``) and the head's aim relative to the cart once they have
+    turned it."""
+    past = abs(bearing_rad) > half_arc_rad
+    body = math.copysign(min(abs(bearing_rad), max_turn_rad), bearing_rad) if past else 0.0
     return GazePlan(body, Aim(bearing_rad - body, tilt_rad))
 
 
@@ -72,7 +74,7 @@ class Step:
     """One motion as the wheels made it: how far (degrees of a turn, + left; metres of a
     back-off) and why it stopped short: ``blocked`` (a stall, a blocked arc: worth a back-off and
     another try) or ``stopped`` (a halt, someone else's command, a drive, a precondition: final);
-    ``cut`` when a halt cut it (the person spoke, a drive began), so it is worth finishing later."""
+    ``cut`` when a halt cut it (a drive began, a newer motion), so it is worth finishing later."""
 
     amount: float
     blocked: str = ""

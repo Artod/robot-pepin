@@ -16,8 +16,11 @@ in it says one of the neutral hums, but for the backchannel, which then stays si
 the person's words reads as doubt). ``tool``, ``thinking`` and ``again`` speak at most once a
 reply; each context has a cooldown and a chance to let its moment pass in silence (a game's "no
 bark"), and a moment passed in silence counts as one spoken; no line comes again while it is
-among the last :data:`RECENT` picked, as far as the lines allow; and only a line whose clip is
-made is picked (synthesised on the spot it would hold the voice ahead of the reply).
+among the last :data:`RECENT` picked, as far as the lines allow; only a line whose clip is
+made is picked (synthesised on the spot it would hold the voice ahead of the reply), and none
+whose clip plays longer than its context's ``filler_max_s`` (the thinking filler is a short
+sound: a whole phrase may still be playing when the reply is ready, and the player queues the
+reply behind it).
 """
 
 from __future__ import annotations
@@ -125,11 +128,14 @@ class FillerEngine(FillerPicker):
         silent_p: float = 0.0,
         cooldown_s: float = 0.0,
         ready: Callable[[str], bool] | None = None,
+        max_s: float | None = None,
+        seconds: Callable[[str], float | None] | None = None,
     ) -> str | None:
         """The line for a moment of ``context`` (of reply ``turn``, for ``tool``), or None:
         the reply has had it already (``tool``, ``thinking``, ``again``), it comes within
         ``cooldown_s`` of the context's last one, it passes in silence (``silent_p``), or no
-        line has a clip yet (``ready``: none then, and the moment is not spent)."""
+        line has a clip yet (``ready``) that plays at most ``max_s`` (by ``seconds``, the
+        clip's length): none then, and the moment is not spent."""
         if turn is not None and context in ONCE_PER_REPLY and context in self.spent.get(turn, ()):
             return None
         last = self.last_s.get(context)
@@ -138,6 +144,9 @@ class FillerEngine(FillerPicker):
         lines, spare = self.lines(book, context, tool)
         if ready is not None:
             lines, spare = tuple(filter(ready, lines)), tuple(filter(ready, spare))
+        if max_s is not None and seconds is not None:
+            short = _within(seconds, max_s)
+            lines, spare = tuple(filter(short, lines)), tuple(filter(short, spare))
         if not (lines or spare):
             return None
         self._spend(context, turn, now)
@@ -152,6 +161,16 @@ class FillerEngine(FillerPicker):
         self.spent.setdefault(turn, set()).add(context)
         for old in [t for t in self.spent if t <= turn - KEPT_REPLIES]:
             del self.spent[old]
+
+
+def _within(seconds: Callable[[str], float | None], max_s: float) -> Callable[[str], bool]:
+    """Whether a line's clip plays at most ``max_s`` (a line without a clip does not)."""
+
+    def short(line: str) -> bool:
+        length = seconds(line)
+        return length is not None and length <= max_s + EPSILON_S
+
+    return short
 
 
 def script_language(text: str) -> str | None:

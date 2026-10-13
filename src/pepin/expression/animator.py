@@ -99,7 +99,7 @@ class EngineConfig:
     seed: int | None = None
     face_hold_s: float = 2.0
     arm_speed_scale: float = 0.2
-    body_speed_scale: float = 0.2
+    body_speed_scale: float = 0.4
     caps: Caps = field(default_factory=Caps)
 
 

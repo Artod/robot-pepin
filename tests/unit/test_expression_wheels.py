@@ -44,7 +44,7 @@ from pepin.neck import NeckConfig
 from pepin.odometry import Pose2D
 
 REPO = Path(__file__).resolve().parents[2]
-FULL = WheelsSettings(speed_scale=1.0)
+FULL = WheelsSettings(speed_scale=1.0, yaw_acc_deg_s2=90.0)  # the caps these tests pin
 RATE, RAMP = math.radians(30.0), math.radians(90.0)  # the caps at speed 1
 BLOCKER = (0.13, -0.06)  # ahead-right: a 20 deg left turn's front corner comes within 0.04 m
 # A caller's thread is never held: milliseconds here, bounded far under the 0.6 s a stuck goal
@@ -424,17 +424,74 @@ def test_the_wheels_answer_every_call_at_once_while_their_thread_waits_on_the_go
     took = time.perf_counter() - began
     assert took < CALLER_S and reports == [], f"{took * 1000:.1f} ms on the caller's thread"
     began = time.perf_counter()
-    guard.speech_started(1.5)  # the person speaks: the waiting motion is cut at once
-    guard.drive(True)
+    guard.speech_started(1.5)  # the person speaks: a gesture's motion stops, the turn goes on
+    assert reports == [], "the turn toward the speaker is not the person's to stop"
+    guard.drive(True)  # a drive: every motion is cut at once
     guard.closed("idle")
     assert time.perf_counter() - began < CALLER_S
     for _ in range(200):
         if reports:
             break
         time.sleep(0.005)
-    assert reports and reports[0].cut and "the person speaks" in reports[0].why
+    assert reports and reports[0].cut and "a drive starts" in reports[0].why
     assert base.sent == [], "no twist: it never got past the goal server"
     wheels.close()
+
+
+def test_the_person_speaking_stops_a_gesture_s_motion_and_never_the_turn_toward_them() -> None:
+    """Artem called from behind and spoke on: the body stopped half way (2026-10-12, -14.7 of
+    -30 deg, "halted: the person speaks"). The turn toward the person speaking is the speaker
+    gaze's base layer and goes on; a gesture's motion stops."""
+
+    def held(r: Rig) -> tuple[threading.Event, threading.Event]:
+        started, release = threading.Event(), threading.Event()
+
+        def mid(base: FakeBase) -> None:  # the wheels' thread, held here mid-motion
+            started.set()
+            release.wait(2.0)
+
+        r.base.at(r.clock.now + 0.2, mid)
+        return started, release
+
+    gesture = rig()
+    started, release = held(gesture)
+    assert gesture.wheels.play(book_clip("body_rock", amp_m=0.01, period_s=1.0)).ok
+    assert started.wait(2.0)
+    gesture.wheels.hush("the person speaks")
+    release.set()
+    for _ in range(400):
+        if gesture.said:
+            break
+        time.sleep(0.005)
+    assert gesture.said and "halted: the person speaks" in gesture.said[-1]
+    gaze = rig()
+    started, release = held(gaze)
+    reports: list[WheelReport] = []
+    gaze.wheels.start(WheelMove(turn_deg=20.0), reports.append)
+    assert started.wait(2.0)
+    gaze.wheels.hush("the person speaks")
+    release.set()
+    for _ in range(400):
+        if reports:
+            break
+        time.sleep(0.005)
+    assert reports and reports[0].done, reports
+    gaze.wheels.close()
+    gesture.wheels.close()
+
+
+def test_the_executor_keeps_every_state_line_s_heading_on_the_board_s_clock() -> None:
+    """The speaker gaze's frame follows the odometry's heading whoever turns the cart: every
+    state line the base link hears is kept by its board stamp."""
+    r = rig()
+    assert r.wheels.headings().latest() is None, "no link before a motion"
+    report = turn(r, 20.0)
+    assert report.done
+    stamp, heading = r.wheels.headings().latest() or (0.0, 0.0)
+    assert heading == pytest.approx(r.base.pose.theta) and stamp == r.base.lines[-1][0]
+    first = r.base.lines[0][0]
+    assert r.wheels.headings().at(first) == pytest.approx(0.0), "before the turn"
+    r.wheels.close()
 
 
 def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
@@ -536,7 +593,7 @@ def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     # shipped at 0 until the first supervised motion (2026-10-12); the design bounds are 30 / 0.02
     assert (lim.max_turn_deg, lim.max_rock_m, lim.attempts) == (30.0, 0.02, 3)
     assert (lim.backoff_m, lim.max_backoff_m) == (0.03, 0.06)
-    assert settings.speed_scale == 0.2
+    assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})

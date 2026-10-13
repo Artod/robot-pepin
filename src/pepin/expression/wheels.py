@@ -1,13 +1,15 @@
 """The wheels' expressive motions: small turns in place and the rock, on a thread of their own.
 
-The speaker gaze turns the body toward a person past the head's comfortable pan (at most
-``max_turn_deg`` per request), and the gesture engine's body atoms rock the cart (at most
-``max_rock_m``) or sway it. :class:`WheelsExecutor` is both doors (the gaze's
-:class:`pepin.expression.executors.Wheels`, the gestures' ``body``
-:class:`pepin.expression.executors.Executor`) and the one owner of the wheels in the voice
-cascade. NOTHING HERE EVER WAITS ON THE CALLER'S THREAD: every request is queued for the
-wheels' thread and answered through a callback, and :meth:`WheelsExecutor.halt` is a flag and
-one non-blocking line to the base, so the voice (ears, brain, voice) never waits on the wheels.
+The speaker gaze turns the body toward a person past its forward arc (at most ``max_turn_deg``
+per request), and the gesture engine's body atoms rock the cart (at most ``max_rock_m``) or sway
+it. Every state line's heading is kept (:class:`pepin.expression.executors.Headings`, on the
+board's clock): the speaker gaze's frame follows it, whoever turned the cart.
+:class:`WheelsExecutor` is both doors (the gaze's :class:`pepin.expression.executors.Wheels`,
+the gestures' ``body`` :class:`pepin.expression.executors.Executor`) and the one owner of the
+wheels in the voice cascade. NOTHING HERE EVER WAITS ON THE CALLER'S THREAD: every request is
+queued for the wheels' thread and answered through a callback, and :meth:`WheelsExecutor.halt`
+is a flag and one non-blocking line to the base, so the voice (ears, brain, voice) never waits
+on the wheels.
 
 THE PATH is the measured motions' method (``ros/tools/move.py``, ``ros/goto.sh round/move``)
 run from this Mac, not their process: ``twist`` lines to the board's base server on :3336
@@ -67,7 +69,14 @@ from pepin.expression.clearance import (
     drive_blocker,
     turn_blocker,
 )
-from pepin.expression.executors import Outcome, WheelMove, WheelReport, WheelsDone, WheelsMoved
+from pepin.expression.executors import (
+    Headings,
+    Outcome,
+    WheelMove,
+    WheelReport,
+    WheelsDone,
+    WheelsMoved,
+)
 from pepin.expression.mix import track_value
 from pepin.expression.parts import move_speed, needed_acc
 from pepin.expression.plan import BodyLimits, BoundedTurn, Step
@@ -109,9 +118,9 @@ class WheelsSettings:
     motion's caps at full speed and ``speed_scale``, the tolerances and the checks."""
 
     limits: BodyLimits = field(default_factory=BodyLimits)
-    speed_scale: float = 0.2
+    speed_scale: float = 0.4
     yaw_rate_deg_s: float = 30.0
-    yaw_acc_deg_s2: float = 90.0
+    yaw_acc_deg_s2: float = 360.0
     speed_m_s: float = 0.10
     acc_m_s2: float = 0.5
     settle_deg: float = 2.0
@@ -356,6 +365,7 @@ class WheelsExecutor:
         self._first_at: float | None = None  # when this job's first twist went
         self._foreign_stop_at: float | None = None
         self._settling = threading.Event()  # never set: a settle waits its ticks out
+        self._headings = Headings()  # every state line's heading, whoever turns the cart
         self.counts: dict[str, int] = {}
 
     # ---- the gaze's door (Wheels) --------------------------------------------------------------
@@ -381,6 +391,16 @@ class WheelsExecutor:
             if self._current is not None:
                 self._halt_locked(self._current, why)
         self._answer(dropped, WheelReport(False, why=f"dropped: {why}", cut=True))
+
+    def hush(self, why: str) -> None:
+        """Stop a gesture's motion at once and drop a gesture's waiting one (the person
+        speaks); a turn toward the speaker goes on. Never blocks."""
+        self._halt_source("gesture", why)
+
+    def headings(self) -> Headings:
+        """The cart's heading from every state line since the link opened (at the first
+        motion), whoever turned it."""
+        return self._headings
 
     def preview(self, request: WheelMove) -> str | None:
         """Why ``request`` would be refused now, checked without moving (the knobs, the base's
@@ -442,7 +462,8 @@ class WheelsExecutor:
     # ---- the base's word -----------------------------------------------------------------------
     def heard(self, state: BaseState, at: float) -> None:
         """One state line (the base link's reader thread, ``at`` its arrival): the motion ends
-        at once when it carries a twist this executor did not send."""
+        at once when it carries a twist this executor did not send; its heading is kept."""
+        self._headings.add(state.stamp_s, state.pose.theta)
         with self._lock:
             job = self._current
             if job is None or self._first_at is None or job.cancel.is_set():
@@ -997,9 +1018,10 @@ def standing(state: BaseState) -> str | None:
 
 class WheelsGuard:
     """The cascade's moments that stop the wheels at once (a :class:`pepin.expression.
-    conversation.ConversationObserver`): the person starting to speak, a drive, the close. Each
-    is :meth:`WheelsExecutor.halt` on the cascade's own loop: a flag and at most one
-    non-blocking line."""
+    conversation.ConversationObserver`): a drive and the close stop every motion; the person
+    starting to speak stops a gesture's (the body's turn toward the person speaking goes on: it
+    is the speaker gaze's base layer, as the head's tracking is). Each is one call on the
+    cascade's own loop: a flag and at most one non-blocking line."""
 
     def __init__(self, wheels: WheelsExecutor) -> None:
         """The executor it halts."""
@@ -1009,8 +1031,8 @@ class WheelsGuard:
         """Nothing."""
 
     def speech_started(self, t: float) -> None:
-        """The person speaks: the wheels stop where they are."""
-        self.wheels.halt("the person speaks")
+        """The person speaks: a gesture's motion stops where it is."""
+        self.wheels.hush("the person speaks")
 
     def speech_ended(self, heard: Any) -> None:
         """Nothing."""

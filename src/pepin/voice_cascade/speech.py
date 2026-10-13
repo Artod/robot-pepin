@@ -182,8 +182,17 @@ class SpeechWorker:
     def has_clip(self, line: str) -> bool:
         """The current voice says ``line`` as an aside from memory: its clip is made (read
         from any thread)."""
+        return self.clip_s(line) is not None
+
+    def clip_s(self, line: str) -> float | None:
+        """How long the clip of ``line`` plays (seconds); None while it has none (read from
+        any thread)."""
         voice, clips = self._slot
-        return aside_voice(voice) is not None and clip_key(speakable(line)) in clips
+        maker = aside_voice(voice)  # who made the clips, at its own rate
+        if maker is None:
+            return None
+        pcm = clips.get(clip_key(speakable(line)))
+        return None if pcm is None else len(pcm) / 2 / maker.rate
 
     def start(self) -> None:
         """Load the voice on the worker's thread, then serve jobs; :attr:`ready` is set when

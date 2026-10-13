@@ -18,7 +18,14 @@ from pepin.base_link import BaseState, StateListener
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.clearance import View
 from pepin.expression.conversation import Heard
-from pepin.expression.executors import Outcome, WheelMove, WheelReport, WheelsDone, WheelsMoved
+from pepin.expression.executors import (
+    Headings,
+    Outcome,
+    WheelMove,
+    WheelReport,
+    WheelsDone,
+    WheelsMoved,
+)
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
 from pepin.expression.speaker import (
@@ -328,30 +335,56 @@ class FakeDoa:
 @dataclass
 class FakeWheels:
     """Wheel motions recorded and left running: a test moves them on (:meth:`move_on`) and ends
-    them (:meth:`finish`) when it wants, so a caller is seen to return before any of it."""
+    them (:meth:`finish`) when it wants, so a caller is seen to return before any of it. The
+    cart's heading follows (:meth:`headings`), stamped on ``board`` (the board's clock the test
+    keeps; a hair after the newest heading when it says nothing newer), or where a test puts it
+    (:meth:`turn_to`)."""
 
     calls: list[Call] = field(default_factory=list)
     running: list[tuple[WheelMove, WheelsDone, WheelsMoved | None]] = field(default_factory=list)
+    yaw_deg: float = 0.0  # the cart's heading now (+ left)
+    board: Callable[[], float] | None = None
+    log: Headings = field(default_factory=Headings)
+    began_deg: float = 0.0  # the heading the newest motion began at
 
     def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
-        """Recorded; it runs until :meth:`finish`."""
+        """Recorded (the heading it begins at told); it runs until :meth:`finish`."""
         self.calls.append(("start", (request,)))
         self.running.append((request, done, moved))
+        self.began_deg = self.yaw_deg
+        self.turn_to(self.yaw_deg)
 
     def halt(self, why: str) -> None:
         """Recorded (the running motion ends when the test finishes it)."""
         self.calls.append(("halt", (why,)))
 
+    def headings(self) -> Headings:
+        """The headings told so far."""
+        return self.log
+
+    def turn_to(self, yaw_deg: float, stamp_s: float | None = None) -> None:
+        """The cart's heading is ``yaw_deg`` at ``stamp_s`` (board clock; default: now)."""
+        self.yaw_deg = yaw_deg
+        latest = self.log.latest()
+        stamp = stamp_s
+        if stamp is None:
+            now = self.board() if self.board is not None else 0.0
+            stamp = now if latest is None else max(now, latest[0] + 1e-3)
+        self.log.add(stamp, math.radians(yaw_deg))
+
     def move_on(self, deg: float) -> None:
         """The newest motion has turned ``deg`` so far."""
         _, _, moved = self.running[-1]
+        self.turn_to(self.began_deg + deg)
         if moved is not None:
             moved(deg)
 
     def finish(self, report: WheelReport | None = None) -> None:
         """The newest motion ends (in full unless ``report`` says otherwise)."""
         request, done, _ = self.running.pop()
-        done(report if report is not None else WheelReport(True, request.turn_deg, attempts=1))
+        report = report if report is not None else WheelReport(True, request.turn_deg, attempts=1)
+        self.turn_to(self.began_deg + report.turned_deg)
+        done(report)
 
 
 class FakeClock:

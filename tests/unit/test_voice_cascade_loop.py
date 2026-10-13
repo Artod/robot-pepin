@@ -664,6 +664,32 @@ def test_a_brain_late_to_its_first_token_gets_one_thinking_filler(tmp_path: Path
     rows = [json.loads(line) for line in events.read_text().splitlines()]
     (filler,) = [r for r in rows if r["event"] == "filler"]
     assert (filler["context"], filler["language"], filler["text"]) == ("thinking", "ru", said[1][0])
+    assert filler["clip_s"] == pytest.approx(rig.speech.clip_s(said[1][0]), abs=0.01)
+
+
+def test_a_thinking_clip_over_filler_max_s_is_never_said_and_the_lengths_are_told_once(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The tone voice says 10 ms a character: every thinking clip is over a 10 ms cap, so the
+    late brain gets no thinking filler, and the run says once which clips and how long."""
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("where_am_i", {}), "Я дома."]]
+    rig = Rig(tmp_path, ["Пепин, где ты?"], script, tool=blocked_tool(release), clock=clock,
+              clips=True, filler_thinking_s=1.2, filler_again_s=0.0,
+              filler_max_s={"thinking": 0.01})  # fmt: skip
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and rig.loop.current.acted)
+        clock.skew = 1.3
+        await asyncio.sleep(0.2)
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert rig.loop.turns[0].get("fillers") is None and rig.voice.spoken == ["Я дома."]
+    told = [line for line in capsys.readouterr().out.splitlines() if "filler_max_s" in line]
+    assert len(told) == 1 and "filler thinking: every clip is over filler_max_s 0.01 s" in told[0]
 
 
 def test_no_thinking_filler_once_the_first_token_came_in_time(tmp_path: Path) -> None:

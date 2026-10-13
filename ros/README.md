@@ -606,15 +606,34 @@ interpolated between them (the array sits off the cart's centre). Then `scripts/
 switch --flag speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without
 the calibration the head looks up where it points and finds the face by the camera alone.
 
-**Past the head's comfort** (`speaker.comfort_pan_deg`, 60°: a call from the side or behind) the
-head turns at once as far as it reaches and the robot answers at once; the wheels then turn the
-rest in place, at most `wheels.max_turn_deg` (30°) per call, on their own thread while it speaks
-("Gestures" below for how they move and what stops them). Every `wheels.step_deg` (10°) they have
-turned, the head re-centres on the person by as much, slowly, and once more at their end; no
-frame is taken while the body turns. Wheels that turn less (refused, a blocked arc after three
-tries, halted because the person spoke or a drive began) leave the head as far as it reaches,
-and a turn cut by the person's voice is finished at the next utterance. Nothing on the voice's
-path waits for any of it: the wake's turn is a request answered by a callback.
+**The forward arc and the body** (`speaker.arc_deg`, 160°). One rule: the head alone serves any
+bearing within ±80° of the cart's nose; a person engaged past it (a call from the side or
+behind, someone walking round) turns the body toward them in place, at most `wheels.max_turn_deg`
+(30°) per request and again while they are still past it (a call from 150° is three turns of
+30°). The wheels are started before the head's aim is asked, since their checks take longer than
+the head's turn, and neither waits for the other: the head arrives first and the robot answers
+at once ("Gestures" below for how the wheels move and what stops them). A check of an unknown
+voice turns the head alone. Wheels that cannot turn (a refused check, a stall or a blocked arc after three
+tries, the caps) leave the head alone on the person, as far as it reaches: a refusal is asked
+again at the person's next utterance, a turn that moved the cart and still fell short is not
+asked again for that person in the conversation. The person speaking does not stop the turn
+toward them; a drive or the close does. Nothing on the voice's path waits for any of it: the
+wake's turn is a request answered by a callback.
+
+**The frame.** The people's bearings are kept in the cart's frame at the newest heading of the
+wheels' odometry (the base server's 50 Hz state lines, stamped on the board's clock, whoever
+turned the cart: the gaze, a gesture). While the body turns, the head re-centres on the person
+as the heading comes round (read ten times a second; a seek's stop keeps its place in the room)
+and no frame is taken. The microphone array turns with the cart, so each of its readings is
+turned by how far the cart has turned since its own stamp (one clock, the board's) before an
+utterance's readings are averaged: a person who speaks across a turn is heard where they are
+now, not at the average of a sweep. `gaze_doa` rows then carry the degrees taken off each
+reading.
+
+**The tilt's source.** A face gives the head's aim, a body box an estimate of it; the tilt
+changes from one source to the other only when the two differ by more than
+`speaker.tilt_hysteresis_deg` (12°), so the head does not nod between a face and a body box as
+the face comes and goes in the frames, while sitting down or standing up still moves it.
 
 ## Gestures: the body as one animated character
 
@@ -642,8 +661,10 @@ lines from this Mac straight to the base server on :3336 (the measured motions' 
 their 8-15 s ROS start), judged by the base server's own wheel odometry in its 50 Hz state lines
 (the least latency: the same connection; the EKF is ROS's), at most 30° of turn or 2 cm of rock
 per request, a trapezoid at `wheels.yaw_rate_deg_s`/`yaw_acc_deg_s2` (straight:
-`speed_m_s`/`acc_m_s2`) times `speed_scale` (0.2 as shipped; the gesture engine stretches the
-body's clips by its inverse, as the arm's; a clip faster than the caps is refused). Before a
+`speed_m_s`/`acc_m_s2`) times `speed_scale` (ramps times its square; 0.4 as shipped: a turn at
+12°/s reached in 0.21 s, 30° in about 2.7 s plus 0.1-0.6 s of checks; the gesture engine
+stretches the body's clips by its inverse, as the arm's; a clip faster than the caps is
+refused). Before a
 motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
 the wheels still), the bus answering, the arm not mid-gesture (a twist sends it to rest), no
 stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
@@ -651,9 +672,9 @@ times a second only while a motion runs): nothing navigates, its newest lidar sc
 old, and the footprint swept from here to the target keeps `clearance_m` (0.10 m) from every
 return it moves toward. Returns below the lidar's plane (0.38 m) are not seen. A stall (a third
 of the commanded motion in `stall_s`) or a blocked arc backs the cart off 3 cm (its rear checked)
-and turns the rest again: three tries and 6 cm at most, then the head alone. The person speaking,
-a drive or the conversation's close halts it at once (a flag and one stop line from the voice's
-own loop). Nothing new runs on the board; the goal server decodes one scan per request on this
+and turns the rest again: three tries and 6 cm at most, then the head alone. A drive or the
+conversation's close halts every motion at once, the person speaking a gesture's (a flag and one
+stop line from the voice's own loop); the turn toward the person speaking goes on. Nothing new runs on the board; the goal server decodes one scan per request on this
 Mac (it already receives every scan for `where`). An older goal server answers `clearance` with
 an error and every motion is refused: `ros/laptop.sh kick goal_server`.
 

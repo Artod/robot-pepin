@@ -20,6 +20,12 @@ its clean part (:func:`utterance_voice`: the last ``window_s`` of its clean read
 live stream is the clean speech of the last moments (:func:`recent_voice`): what the head
 follows while a person speaks and no face is seen.
 
+The array turns with the cart. While the wheels turn the body, a voice that stays where it is
+reads at a bearing that sweeps the other way, so each reading is brought into the cart's frame of
+now by how far the cart has turned since its stamp (``turned``: the wheels' odometry on the
+board's clock, the array's own) before the readings are averaged: an utterance spoken across a
+turn, or before it, gives the bearing the person has now.
+
 :func:`fit_doa_map` is the calibration: the readings of a voice in front of, left of, behind and
 right of the cart give ``front_deg``, ``sign`` and the three other quarters. The array sits off the
 cart's centre (at its front-left), so the four are not a quarter turn apart (2026-10-12: front 170,
@@ -31,7 +37,7 @@ its own.
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 
 from pepin.audio_link import DoaReading
@@ -40,6 +46,7 @@ from pepin.expression.conversation import Heard
 from pepin.expression.speaker import DoaMap, DoaSource
 
 ECHO_S = 0.3  # the robot's voice rings this long in the room after its span ends
+Turned = Callable[[float], float]  # how far the cart has turned since a board stamp (rad, + left)
 QUARTER_TOL_DEG = 45.0  # a calibration reading further than this off its quarter is nearer the next
 QUARTERS_DEG = (0.0, 90.0, 180.0, 270.0, 360.0)  # front, left, behind, right, front again
 
@@ -100,14 +107,25 @@ class VoiceBearing:
 
 
 def voice_of(
-    readings: Sequence[DoaReading], doa_map: DoaMap | None, min_speech: int = 1
+    readings: Sequence[DoaReading],
+    doa_map: DoaMap | None,
+    min_speech: int = 1,
+    turned: Turned | None = None,
 ) -> VoiceBearing:
-    """The bearing of the speech-flagged ``readings`` (fewer than ``min_speech``: unknown)."""
-    speech = [float(r.deg) for r in readings if r.speech]
-    mean = circular_mean_deg(speech) if len(speech) >= max(min_speech, 1) else None
+    """The bearing of the speech-flagged ``readings`` (fewer than ``min_speech``: unknown); with
+    ``turned``, each reading's bearing less how far the cart has turned since it was read."""
+    speech = [r for r in readings if r.speech]
+    mean = None
+    if len(speech) >= max(min_speech, 1):
+        mean = circular_mean_deg([float(r.deg) for r in speech])
     bearing = None
     if mean is not None and doa_map is not None:
-        bearing = math.radians(bearing_deg(mean, doa_map))
+        if turned is None:
+            bearing = math.radians(bearing_deg(mean, doa_map))
+        else:
+            now = [bearing_deg(r.deg, doa_map) - math.degrees(turned(r.stamp_s)) for r in speech]
+            centre = circular_mean_deg(now)
+            bearing = None if centre is None else math.radians(wrap_deg(centre))
     return VoiceBearing(mean, bearing, len(readings), len(speech))
 
 
@@ -150,10 +168,11 @@ def utterance_voice(
     doa_map: DoaMap | None,
     min_speech: int,
     spans: Sequence[Span] = (),
+    turned: Turned | None = None,
 ) -> UtteranceDoa:
     """``heard``'s bearing from its clean readings: the robot's own voice cut out, the last
     ``window_s`` of what is left (the last ``window_s`` of the utterance when nothing was cut),
-    with every reading of the utterance for the log."""
+    each turned with the cart (``turned``), with every reading of the utterance for the log."""
     offset = board_offset(doa, now)
     if offset is None:
         return UtteranceDoa((), (), VoiceBearing(None, None, 0, 0))
@@ -166,7 +185,7 @@ def utterance_voice(
     else:
         last = clean[-1].stamp_s if clean else end
         window = [r for r in clean if r.stamp_s >= last - window_s]
-    voice = voice_of(window, doa_map, min_speech)
+    voice = voice_of(window, doa_map, min_speech, turned)
     dropped = sum(1 for r, mine in zip(every, mask, strict=True) if mine and r.speech)
     return UtteranceDoa(tuple(every), tuple(mask), replace(voice, robot=dropped))
 
@@ -179,15 +198,17 @@ def recent_voice(
     doa_map: DoaMap | None,
     min_speech: int,
     spans: Sequence[Span] = (),
+    turned: Turned | None = None,
 ) -> VoiceBearing:
-    """The live voice: the clean speech readings of the last ``window_s`` up to the newest."""
+    """The live voice: the clean speech readings of the last ``window_s`` up to the newest,
+    each turned with the cart (``turned``)."""
     latest = doa.latest_doa()
     if latest is None:
         return VoiceBearing(None, None, 0, 0)
     every = doa.doa_between(latest.stamp_s - window_s, latest.stamp_s)
     mask = robot_readings(every, spans, latest.stamp_s - now)
     clean = [r for r, mine in zip(every, mask, strict=True) if not mine]
-    return voice_of(clean, doa_map, min_speech)
+    return voice_of(clean, doa_map, min_speech, turned)
 
 
 def utterance_readings(

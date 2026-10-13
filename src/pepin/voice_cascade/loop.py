@@ -317,6 +317,7 @@ class CascadeLoop:
         self.ears = Ears(config, player.playback, turn, early, detector, judge, self._on_words)
         rng = None if seed is None else random.Random(seed)
         self.fillers = FillerEngine(rng, language=config.conversation_language)
+        self._told_long: set[str] = set()  # contexts whose clips were all over their max_s
         self.conversation: Conversation | None = None
         self.last_log: CascadeLog | None = None  # the conversation that closed last
         self.replies: dict[int, Reply] = {}
@@ -655,14 +656,27 @@ class CascadeLoop:
         self, context: Context, turn: int | None, tool: str | None = None
     ) -> str | None:
         """A line for a filler's moment of reply ``turn`` (None: of no reply), by the engine's
-        rules with this config's knobs, among the lines the voice has a clip of."""
+        rules with this config's knobs, among the lines the voice has a clip of within the
+        context's ``filler_max_s`` (every clip made over it: said once, with their lengths)."""
         cfg = self.config
-        return self.fillers.choose(
+        max_s = cfg.filler_max_s.get(context)
+        line = self.fillers.choose(
             cfg.fillers, context, self.clock(), turn=turn, tool=tool,
             silent_p=cfg.filler_silent_p.get(context, 0.0),
             cooldown_s=cfg.filler_cooldown_s.get(context, 0.0),
             ready=self.speech.has_clip,
+            max_s=max_s,
+            seconds=self.speech.clip_s,
         )  # fmt: skip
+        if line is None and max_s is not None and context not in self._told_long:
+            lines, spare = self.fillers.lines(cfg.fillers, context, tool)
+            made = {x: s for x in (*lines, *spare) if (s := self.speech.clip_s(x)) is not None}
+            if made and min(made.values()) > max_s:
+                self._told_long.add(context)
+                lengths = ", ".join(f"{x} {s:.2f} s" for x, s in made.items())
+                print(f"  (filler {context}: every clip is over filler_max_s {max_s:g} s:"
+                      f" {lengths})", flush=True)  # fmt: skip
+        return line
 
     def _say_filler(
         self, reply: Reply, line: str, context: Context, tool: str | None = None
@@ -674,8 +688,10 @@ class CascadeLoop:
         self.speech.say(SpeechJob(reply.id, -1, line, "backchannel"))
         reply.filler_s = self.clock()
         reply.fillers.append(line)
+        length = self.speech.clip_s(line)
         self._event("filler", turn=reply.id, context=context, tool=tool, text=line,
-                    language=self.fillers.language)  # fmt: skip
+                    language=self.fillers.language,
+                    clip_s=None if length is None else round(length, 2))  # fmt: skip
         print(f"  (filler{'' if context == 'tool' else ' ' + context}: {line})", flush=True)
 
     def _waiting(self, reply: Reply | None) -> bool:

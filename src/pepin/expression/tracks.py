@@ -11,6 +11,10 @@ hook for person recognition: a face the finder knows by name).
   box's top), so a person standing, sitting, slouching or lying gives a tilt without a sweep; a
   face inside the box speaks for it instead. A body seen while the face was seen within
   ``seen_fresh_s`` keeps the face's aim (the box is the rougher of the two).
+* The TILT changes its source (a face's to a box's, or back) only past ``tilt_hold_deg``: a box
+  whose head estimate is that close to the face's height keeps the face's tilt, and a face that
+  close to the box's keeps the box's (the pan follows the newest sighting either way). Without it
+  the head nodded between the two whenever the face came and went in the frames.
 * A VOICE gives a bearing only, and FRESHNESS DECIDES: a track seen (face or body) within
   ``seen_fresh_s`` keeps its place (the array is the noisier sense: on 2026-10-12 5-14 deg off the
   face at a normal level, 28-76 deg on quiet speech); an older track takes the voice's pan and
@@ -111,6 +115,7 @@ class Track:
     distance_m: float | None = None
     face: FaceSighting | None = field(default=None, repr=False)
     who: str | None = None
+    tilt_source: Source | None = None  # what placed the head's tilt (a voice keeps a default)
 
     def fresh(self, now: float, within_s: float) -> bool:
         """Whether a face or a body placed it within ``within_s``."""
@@ -138,9 +143,11 @@ class Tracks:
         forget_s: float = 300.0,
         max_tracks: int = 4,
         min_new_px: float = 40.0,
+        tilt_hold_deg: float = 0.0,
     ) -> None:
         """The association's angles in degrees, the times in seconds."""
         self.default_tilt_rad = default_tilt_rad
+        self.tilt_hold_rad = math.radians(tilt_hold_deg)
         self.match_rad = math.radians(match_deg)
         self.voice_match_rad = math.radians(voice_match_deg)
         self.seen_fresh_s, self.forget_s = seen_fresh_s, forget_s
@@ -185,6 +192,7 @@ class Tracks:
             now,
             heard_s=now,
             voice_pan=bearing,
+            tilt_source="voice",
         )
         self._add(track, keep)
         return track, True
@@ -274,7 +282,16 @@ class Tracks:
             track.velocity = wrap(p.pan - track.pan) / (now - then)
         else:
             track.velocity = 0.0
-        track.pan, track.head, track.source, track.seen_s = p.pan, p.head, p.source, now
+        tilt, tilt_source = p.head.tilt_rad, p.source
+        held = track.tilt_source
+        if (
+            held in ("face", "body")
+            and held != p.source
+            and abs(tilt - track.head.tilt_rad) <= self.tilt_hold_rad
+        ):
+            tilt, tilt_source = track.head.tilt_rad, held  # within the hysteresis: kept
+        track.pan, track.source, track.seen_s = p.pan, p.source, now
+        track.head, track.tilt_source = Aim(p.head.pan_rad, tilt), tilt_source
         if p.face is not None:
             track.face_s, track.face, track.distance_m = now, p.face, p.distance_m
             track.who = p.face.who or track.who
