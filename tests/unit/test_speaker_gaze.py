@@ -1408,8 +1408,8 @@ class Arm:
 
 
 def test_a_wake_from_behind_rests_the_arm_first_then_turns_the_body() -> None:
-    """«Пепин, привет!» from behind while the hand is up (a greeting the engine started): the
-    board refuses the wheels while the arm moves, so the turn asks for the arm first and starts
+    """«Пепин, привет!» from behind while the hand is up (a greeting the engine started): no
+    arm while the body turns (attention's rule), so the turn asks for the arm first and starts
     once it has had the seconds the engine answered; frames wait meanwhile."""
     r = rig(wheels=FakeWheels())
     arm = Arm(0.9)

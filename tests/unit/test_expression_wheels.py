@@ -199,7 +199,6 @@ def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_
         (lambda r: r.base.foreign(Twist(0.2, 0.0)), "the wheels are commanded (v +0.20"),
         (lambda r: setattr(r.base, "travel", (0.002, 0.002)), "the cart is rolling"),
         (lambda r: setattr(r.base, "bus_ok", False), "the servo bus did not answer"),
-        (lambda r: setattr(r.base, "arm_phase", "moving"), "the arm is mid-gesture (moving)"),
     ],
 )  # fmt: skip
 def test_every_precondition_refuses_with_its_reason_before_any_twist(
@@ -587,8 +586,9 @@ def test_the_gaze_worker_s_moments_never_wait_on_the_wheels() -> None:
 def test_standing_names_what_keeps_the_cart_from_an_expressive_motion() -> None:
     still = BaseState(Pose2D(0, 0, 0), 0, 0, 0, 0, False, True, False, True, 1, 0, 0)
     assert standing(still) is None
-    assert standing(replace(still, arm_phase="resting")) is None, "on its way to rest: fine"
-    assert "holding" in str(standing(replace(still, arm_phase="holding")))
+    for phase in ("moving", "holding", "resting"):  # the arm and the wheels move together
+        assert standing(replace(still, arm_phase=phase)) is None, phase
+    assert "commanded" in str(standing(replace(still, v=0.1)))
 
 
 def test_the_swept_footprint_blocks_what_the_motion_approaches_not_what_it_leaves() -> None:

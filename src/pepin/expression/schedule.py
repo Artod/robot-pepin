@@ -15,22 +15,21 @@ ON THE WORD (a request anchored on a character of a part):
 
 * Decided at TEXT, when the part goes to the voice: the word's time comes from the word clock
   (:class:`pepin.expression.forecast.WordClock`), the stroke aimed ``stroke_bias_s`` before the
-  word's vowel is heard. THE LADDER (§7.6) picks the first version whose computed preparation
-  fits the lead less the forecast's spread (at most 0.3 s): as drawn, the arm from where it will
-  be (rest, or the pose a unit holds); its preparation compressed to 0.9 of the caps; for a
-  PHRASE mark the same on one of the next two words (no pause between, at most ``phrase_slide_s``
-  later); another, smaller variant; the floor (the book's head-and-face variant, else the drawn
-  one without the arm and the wheels); else dropped "no time". The arm's preparation is its plan
-  (:meth:`pepin.expression.parts.ArmPart.plan`: the board's approach and the stretched stroke);
-  for a WORD or PHRASE mark a plan stretched past the caps is a step down, never a silent late
-  stroke. A head or face clip that cannot make it is left out, the rest keeps its time (one
-  composition, many parts: each anchored on the word). The arm's parts and the wheels' never
-  play together: with the arm in a version the wheels' step is left out; the wheels never bind
-  to a word. A version whose arm or wheels run longer than ``short_s`` plays only when the
-  speech after its stroke covers the motion after it, up to 0.5 s past (the fed audio as it is,
-  0.7 of the forecast of the rest: the stroke's own time is that same forecast, so the share
-  is taken of what follows it, not of the reply from its start), a ``long`` one (hello, bye) up
-  to 1 s past it.
+  word's vowel is heard. THE LADDER (§7.6) picks the first version whose computed preparation fits
+  the lead less the forecast's spread (at most 0.3 s): as drawn, the arm from where it will be
+  (rest, or the pose a unit holds); its preparation compressed to 0.9 of the caps; for a PHRASE mark
+  the same on one of the next two words (no pause between, at most ``phrase_slide_s`` later);
+  another, smaller variant; the floor (the book's head-and-face variant, else the drawn one without
+  the arm and the wheels); else dropped "no time". The arm's preparation is its plan
+  (:meth:`pepin.expression.parts.ArmPart.plan`: the board's approach and the stretched stroke); for
+  a WORD or PHRASE mark a plan stretched past the caps is a step down, never a silent late stroke. A
+  head or face clip that cannot make it is left out, the rest keeps its time (one composition, many
+  parts: each anchored on the word). The arm and the wheels play together (one body, each part
+  within its own caps); the wheels never bind to a word. A version whose arm or wheels run longer
+  than ``short_s`` plays only when the speech after its stroke covers the motion after it, up to 0.5
+  s past (the fed audio as it is, 0.7 of the forecast of the rest: the stroke's own time is that
+  same forecast, so the share is taken of what follows it, not of the reply from its start), a
+  ``long`` one (hello, bye) up to 1 s past it.
 * Never in a pause: a WORD or PHRASE mark after its part's last word is dropped (a sentence's
   end is 0.40-1.01 s of silence, MEASURED: no slide crosses it); an UTTERANCE one there takes
   the part's last word; a mark before punctuation already belongs to the word after it.
@@ -881,8 +880,8 @@ class Scheduler:
         cannot make it (a head or face clip that cannot is left out alone)."""
         bind = _word_bind(request.bind)
         clips = list(candidate.performance.clips)
-        if any(c.part == "arm" for c in clips) or bind != "utterance":
-            clips = [c for c in clips if c.part != "body"]  # never with the arm, never on a word
+        if bind != "utterance":
+            clips = [c for c in clips if c.part != "body"]  # never on a word
         allowance = self.timing.late_s if bind == "utterance" else 0.0
         held_only = self._held_only(candidate.performance)
         fitted: list[Waiting] = []

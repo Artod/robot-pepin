@@ -919,7 +919,7 @@ per request, a trapezoid at `wheels.yaw_rate_deg_s`/`yaw_acc_deg_s2` (straight:
 stretches the body's clips by its inverse, as the arm's; a clip faster than the caps is
 refused). Before a
 motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
-the wheels still), the bus answering, the arm not mid-gesture (a twist sends it to rest), no
+the wheels still), the bus answering (the arm moves with them: neither waits for the other), no
 stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
 times a second only while a motion runs): nothing navigates, depth_fusion's newest obstacle marks
 (`/depth_marks`) under `wheels.marks_age_s` (1.5 s) old by their own stamp, and the footprint

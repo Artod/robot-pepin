@@ -962,15 +962,6 @@ class GestureEngine:
                 refusal = arm_refusal(view)
                 if refusal is not None:
                     return refusal
-                cart = self.scheduler.reservations.holder("body", now)
-                if cart is not None:  # the board refuses the arm while the wheels move
-                    return f"the cart moves ({cart.performance.intent})"
-            if clip.part == "body":  # the board refuses the wheels while the arm moves or holds
-                arm = self.scheduler.reservations.holder("arm", now)
-                if arm is not None:
-                    return f"the arm moves ({arm.performance.intent})"
-                if _holds(self.parts.get("arm")):
-                    return "the arm holds a pose"
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
 
     def _view(self) -> Attention:

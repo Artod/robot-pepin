@@ -6,8 +6,8 @@ nothing: it never needs a word after the trajectory, which is finite (a lease th
 its end). It refuses, never clamps: a knot outside the limits (config/arm.json's ``limits_deg``
 within the servos' own EEPROM range), a step faster than the caps (``max_speed_deg_s``,
 ``max_acc_deg_s2``, scaled by the trajectory's ``speed``: speeds by it, accelerations by its
-square), a trajectory longer than ``max_duration_s``, anything while the wheels are commanded
-to move; a twist arriving while the arm moves or holds sends it to rest.
+square), a trajectory longer than ``max_duration_s``. The wheels are not its business: the arm
+and the wheels move together (a gesture is one body), each within its own caps.
 
 A motion, tick by tick:
 
@@ -181,9 +181,9 @@ class ArmDriver:
 
     # -- the tick --------------------------------------------------------------------------------
 
-    def step(self, now: float, wheels_moving: bool) -> None:
-        """One tick after the shared read: the servos' check when they (re)appear, the drive
-        rule, the motion's progress and its one write."""
+    def step(self, now: float) -> None:
+        """One tick after the shared read: the servos' check when they (re)appear, the motion's
+        progress and its one write."""
         encoders = self.encoders
         if encoders.take_appeared():
             self._mode_ok, self._ranges, self._checked_at = None, None, float("-inf")
@@ -202,8 +202,6 @@ class ArmDriver:
             now - self._checked_at >= self.motion.retry_s
         ):
             self._check_servos(now)
-        if wheels_moving and self._phase in ("moving", "holding", "halted"):
-            self._to_rest(now, "halted", "the wheels moved: to rest")
         self._advance(now)
         encoders.eager = self._phase != "off"
         self._write()

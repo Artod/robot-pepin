@@ -805,8 +805,9 @@ class SpeakerGaze:
 
     def _start_wheels(self, deg: float, track: int, now: float) -> None:
         """The wheels' turn of ``deg`` toward ``track``: the gesture engine's arm sent to rest
-        first (the board refuses the wheels while the arm moves), started on their thread once
-        it is there: this returns at once, their word comes back through :attr:`post`."""
+        first (no arm while the body turns: :class:`pepin.expression.speaker.ArmRelease`),
+        started on their thread once it is there: this returns at once, their word comes back
+        through :attr:`post`."""
         turn = Turning(next(self._turn_ids), track, deg)
         self.turning = turn
         self.counts["wheel_turns"] += 1

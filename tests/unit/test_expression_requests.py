@@ -841,24 +841,23 @@ def test_a_held_unit_rests_when_the_person_speaks_at_its_reply_s_end_and_for_the
     assert rests(rig) == 4, "a clip moving the arm ends as it was sent"
 
 
-def test_the_arm_never_starts_while_the_cart_rocks_nor_the_cart_while_the_arm_is_up() -> None:
-    """The board refuses the arm while the wheels move and the wheels while the arm moves or
-    holds: the engine refuses them first, with the reason in the cue row."""
-    rig = Ladder(body=FakeExecutor("body", 0.15))
+def test_the_arm_and_the_cart_move_together() -> None:
+    """One body: the arm starts while the cart rocks, and the cart rocks while the arm holds a
+    pose; each part keeps its own caps (no part waits for the other)."""
+    body = FakeExecutor("body", 0.15)
+    rig = Ladder(body=body)
     rock = Clip("body", 0.0, 0.5, 1.0, (Track("x_m", "additive", (0.0, 0.5, 1.0), (0, 0.01, 0)),))
     rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
     rig.engine.step()
     hold_arm(rig, 1)
     rig.tick(0.2)
-    assert not rig.sent()
-    assert rig.rows("cue", part="arm", ok=False)[0]["why"] == "the cart moves (rock)"
+    assert rig.sent() and rig.rows("cue", part="arm", ok=True)
     rig.tick(1.0)
-    hold_arm(rig, 1)
-    rig.tick(0.7)
-    assert rig.sent() and rig.arm.holding() is not None
+    assert rig.arm.holding() is not None
     rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
     rig.engine.step()
-    assert rig.rows("cue", part="body", ok=False)[-1]["why"] == "the arm holds a pose"
+    assert [c for c in body.calls if c[0] == "play"][1:], "the cart rocks under the held arm"
+    assert not rig.rows("cue", ok=False)
 
 
 def test_a_mark_s_last_stroke_stays_up_while_the_listeners_want_the_arm_up() -> None:
