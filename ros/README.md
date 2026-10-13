@@ -786,6 +786,55 @@ starts from there. An arm motion longer than `short_s` (1 s) plays only when the
 covers it (hello and bye may run 1 s past it). A marker on a reply's first words, seen in the
 token stream, may send the arm to `ready` and hold it there first: a preparation, never a stroke.
 
+**Meaning** (`pepin.expression.markers`, the resolver in `pepin.expression.render`,
+`pepin.expression.places`; `config/animation.json` `space` and `aliases`; it rides `gestures`).
+The brain marks the word that carries the meaning, inside the sentence (the persona's examples
+stand at least 11 characters in, where the arm has its lead from rest): `{!}` this word (a head
+nod; a wrist flick inside an arm unit), `{point:you|me|NAME}`, `{arc:up|down|out|in|side}`,
+`{size:big|small}`, `{weigh}`, `{count:1|2|3}`, `{draw:round|line|wave}`, `{stop}`, `{offer}`.
+Other spellings are the book's `aliases` (`{beat}` and `{emphasis}` are `{!}`, `{point:i}` is
+`{point:me}`, `{size:huge}` is `{size:big}`); a NAME is any short name in any script, read
+lower-case (`{point:План А}` is `план а`). A mark that names nothing (`{nod}`, `{wave:hi}`,
+`{arc:sideways}`, `{point}` without its argument) is dropped and printed, never taken for a voice
+manner. The same mark with the same argument twice in one reply plays once (`repeat`); pointing
+back and the accent may repeat. Each primitive has a head-and-face floor for each argument,
+plans within the arm's caps at speed 1 from rest and from every cell (a test), and holds the arm
+at most 2 s.
+
+The arm draws in a GESTURE SPACE of ten cells in front of the robot's right side, the viewer's
+left: three columns (the middle, y -0.06 m; the right, -0.13; the outer side, -0.22: 16 cm end
+to end), three rows (0.97, 1.03, 1.12 m: the high ones 7-22 % in the camera's level view, brief
+strokes only), far and, in the right column, near; authored by FK with the hand at least 4 cm
+from the body and from the head's whole reach. A way from rest (or from a held cell) to the
+middle column, to `stop` and to `tucked` goes through home (`ready`): straight, the hand would
+pass the speaker box at 1.1 cm, and the ways between `stop`, `tucked` and the sweep's top pass
+the head; a gesture that ends in the middle goes back home after its hold (the board's own
+straight way to rest from there would pass the speaker box): every primitive's way, from rest
+and from every cell, keeps the hand 1.7 cm from the body. `{point:you}` turns the open hand (palm up) at the person engaged by the attention
+view's bearing and distance; `{point:printer}`, a place of the goal server's book (matched by
+case, spaces and transliteration: `принтер` is `printer`), turns the shut hand toward it from
+where the robot stands, for directions -52..+41 deg of the nose (shoulder pan -68..+25), and the
+head glances its way as an overlay of at most 25 deg on attention's aim (never a change of whom
+it looks at); past the arm's directions the glance alone, a place more than 90 deg from the
+person nothing. Without the attention view the person is taken to stand ahead; without the
+places (a renderer whose resolver has no `room`) a NAME is neither a place nor a referent and
+gets a nod.
+
+CATCHMENTS: any other NAME is a referent (`{point:план А}`), given a spot when the brain's mark
+is first rendered and pointed at there for the rest of the conversation, in one order for
+referents and counted items, `space.loci`: the middle, the outer side, then the right (the
+widest pair first). `{count:n}` takes the n-th spot and overwrites what sat there; a fourth
+referent takes the least recently pointed spot; both are logged (`catchment`: referent, cell,
+new / again / evicted / overwritten), and an evicted referent mentioned again is placed anew,
+the one moved spot there is. A first mention whose arm did not play (its floor) leaves the spot
+unseen: the next mention is then its first showing, never a contradiction. Every spot is
+forgotten at the conversation's close (`Resolver.forget`).
+
+```bash
+uv run python scripts/gesture.py play point --dry-run    # a tool's ask: the first argument (you)
+grep -h '"catchment"\|"repeat"' data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl | tail
+```
+
 **The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
 `body_rock`, `body_wiggle`, `body_turn`; each behind its own flag, no third). Never Nav2: twist
 lines from this Mac straight to the base server on :3336 (the measured motions' method, without
