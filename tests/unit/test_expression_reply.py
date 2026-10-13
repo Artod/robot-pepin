@@ -21,16 +21,23 @@ import pytest
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import PartName
 from pepin.expression.animator import GestureEngine, engine_config
-from pepin.expression.book import load_book, with_rest
+from pepin.expression.book import load_book, vocabulary, with_rest
 from pepin.expression.conversation import LISTENER_PAUSE, Heard, VoiceChunk
 from pepin.expression.executors import Executor
-from pepin.expression.fakes import FakeArmLink, FakeAttention, FakeClock, FakeExecutor, FakePlayout
+from pepin.expression.fakes import (
+    FakeArmLink,
+    FakeAttention,
+    FakeClock,
+    FakeExecutor,
+    FakePlaces,
+    FakePlayout,
+)
 from pepin.expression.listeners import Alive, alive_knobs
-from pepin.expression.markers import Marker, Part
+from pepin.expression.markers import Marker, Part, parse
 from pepin.expression.parts import ArmPart
 from pepin.expression.prosody import ProsodyListener
 from pepin.expression.speaker import Attention
-from pepin.expression.trajectory import ArmStatus
+from pepin.expression.trajectory import JOINTS, ArmStatus
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 MOTION = load_arm_motion(CONFIG / "arm.json")
@@ -202,3 +209,102 @@ def test_one_reply_end_to_end_through_the_engine_s_thread_the_listeners_and_the_
         assert [name for name, _ in c.link.calls].count("send") >= 1
     sends = [f for k, f in c.records if k == "send" and f["intent"] == "greeting"]
     assert sends and all(-0.3 <= f["error_s"] <= 0.5 for f in sends)
+
+
+def played(c: Conversation, part: PartName, intent: str) -> list[Any]:
+    """What ``part`` played of ``intent``, in order (its ok cue rows are its plays)."""
+    if part == "arm":
+        plays = [args[0] for name, args in c.link.calls if name == "send"]
+    else:
+        executor = c.parts[part]
+        assert isinstance(executor, FakeExecutor)
+        plays = [args[0] for name, args in executor.calls if name == "play"]
+    rows = [f for k, f in c.records if k == "cue" and f["part"] == part and f["ok"]]
+    return [x for x, f in zip(plays, rows, strict=True) if f["intent"] == intent]
+
+
+def test_a_reply_pointing_at_a_place_and_counting_two_items_through_the_engine_s_resolver(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The persona's examples as one reply (the printer pointed at, then two counted items),
+    parsed as the loop parses the brain's sentences, on the engine's own
+    thread with its resolver lent the room (the printer at +30 deg) and the attention view (the
+    person at -10): the shut hand turns toward the printer (the arm's pan inward of straight
+    ahead, as a place on the left is), the head glances its way by at most 25 deg though it
+    stands 40 deg from the person, each item takes its spot (two catchment rows, new and new,
+    in the record and the conversation's journal), every mark's ladder row names its variant,
+    nothing raises on the thread, the spots are forgotten at the close and the thread stops."""
+    broken: list[threading.ExceptHookArgs] = []
+    hook = threading.excepthook
+    threading.excepthook = broken.append
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation()
+    c.view.be(bearing_deg=-10.0, distance_m=1.5)
+    c.engine.resolver.room = FakePlaces({"printer": 30.0})
+    c.engine.journal = lambda kind, now, **f: c.events.append((kind, f))
+    words = vocabulary(BOOK, frozenset())
+    written = ("Принтер стоит {point:printer} вон там.", "Во-первых, {count:1} батарея.",
+               "Во-вторых, {count:2} колёса.")  # fmt: skip
+    parts = [parse(sentence, words).parts[0] for sentence in written]
+    lengths = [0.09 * len(p.text) for p in parts]
+    begins = [sum(lengths[:k]) for k in range(len(parts))]
+    stressed = (("Принтер", "вон", "там"), ("первых", "батарея"), ("вторых", "колёса"))
+
+    def text() -> None:
+        for k, part in enumerate(parts):
+            c.both("part_queued", 1, k, part)
+
+    def start(k: int) -> None:
+        text, length = parts[k].text, lengths[k]
+        c.playout.marks[(1, k)] = (begins[k], begins[k] + length)
+        c.both("part_started", 1, k, begins[k])
+        spec = []
+        for word in stressed[k]:
+            char = text.index(word) + next(i for i, ch in enumerate(word) if ch in "аеёиоуыэюя")
+            spec.append((0.16 + char / len(text) * (length - 0.16), 300.0, 0.12))
+        c.feed(1, k, begins[k], vowels(spec, length))
+        c.both("part_spoken", 1, k)
+        c.playing = True
+
+    try:
+        c.engine.start()
+        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
+        at: dict[float, Any] = {
+            0.3: lambda: c.both("speech_started", c.clock.now),
+            1.5: lambda: c.both("speech_ended", Heard(c.clock.now - 1.2, c.clock.now,
+                                                      "Где принтер?")),
+            1.8: text,
+            1.95: lambda: start(0),
+        }  # fmt: skip
+        for k in (1, 2):
+            at[round(1.95 + begins[k] - 0.6, 2)] = lambda k=k: start(k)
+        c.run(1.95 + sum(lengths) + 0.8, at)
+        c.both("reply_done", 1)
+        c.run(0.4)
+        c.both("closed", "goodbye")
+        c.run(0.2)
+    finally:
+        c.engine.close()
+        threading.excepthook = hook
+    assert c.engine._thread is not None and not c.engine._thread.is_alive()
+    assert not broken and not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    (glance,) = played(c, "head", "point")
+    pans = next(t.values for t in glance.tracks if t.dof == "pan_deg")
+    assert 0.0 < max(pans) <= 25.0 and min(pans) >= 0.0  # toward the printer, on the left
+    (pointing,) = played(c, "arm", "point")
+    pan = JOINTS.index("shoulder_pan")
+    ahead = BOOK.poses[BOOK.space.shut_hand or ""]["shoulder_pan"]  # the shut hand straight ahead
+    turned = min(k.deg[pan] for k in pointing.knots)
+    assert 20.0 <= ahead - turned <= 40.0  # inward: the printer is 30 deg left of the nose
+    loci = BOOK.space.loci
+    rows = [f for k, f in c.records if k == "catchment"]
+    assert rows == [{"referent": "#1", "cell": loci[0], "how": "new"},
+                    {"referent": "#2", "cell": loci[1], "how": "new"}]  # fmt: skip
+    assert [f for k, f in c.events if k == "catchment"] == rows
+    ladder = {(f["intent"], f["part"]): f for k, f in c.records if k == "ladder"}
+    assert set(ladder) == {("point", 0), ("count", 1), ("count", 2)}
+    variants = BOOK.compositions["point"].variants
+    place = next(k for k, v in enumerate(variants) if v.needs == {"arg": "place"} and not v.floor)
+    assert ladder[("point", 0)]["variant"] == place and "arm" in ladder[("point", 0)]["parts"]
+    assert all(ladder[("count", k)]["variant"] == 0 for k in (1, 2))  # the arm's, not the floor
+    assert not c.engine.resolver.loci  # forgotten at the close

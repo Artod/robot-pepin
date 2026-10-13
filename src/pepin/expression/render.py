@@ -44,11 +44,11 @@ change of where attention looks; a place more than 90 deg from the person gets n
 CATCHMENTS v1 (DESIGN.md §4.6, critic_architecture #9). A ``{point:NAME}`` whose NAME is no place
 is a referent: it takes the first free cell of ``space.loci`` when the brain's marker is first
 rendered, and every later mention points there again; with every cell taken, the least recently
-pointed one is evicted for it; ``{count:n}`` takes the n-th cell, overwriting what sat there.
-Forgotten at the conversation's close (:meth:`Resolver.forget`). Logged as ``catchment`` rows
-(referent, cell, new / again / evicted / overwritten). A mark the brain repeats in one reply with
-the same argument plays once (``repeat`` rows), but those of ``space.again`` (pointing back at a
-referent, the accent).
+pointed one is evicted for it; ``{count:n}`` takes the n-th cell for its item (``#n``),
+overwriting what sat there. Forgotten at the conversation's close (:meth:`Resolver.forget`).
+Logged as ``catchment`` rows (referent or item, cell, new / again / evicted / overwritten). A
+mark the brain repeats in one reply with the same argument plays once (``repeat`` rows), but
+those of ``space.again`` (pointing back at a referent, the accent).
 
 Owners after slice 0: B (the chooser, the scenes, the ladder's renderings), C (the resolver).
 """
@@ -248,7 +248,11 @@ class Resolver:
         if ref == "@count":
             cell = self._count_cell(ctx)
             if cell is not None and ctx.commit:
-                self._take(cell, f"#{meaning.arg}", "overwritten")
+                item = f"#{meaning.arg}"
+                old = self.loci.get(cell)
+                self._take(cell, item, "overwritten")
+                how = "again" if old is not None and old.referent == item else "new"
+                self.record("catchment", {"referent": item, "cell": cell, "how": how})
             return None if cell is None else book.poses.get(cell)
         return None
 

@@ -347,6 +347,7 @@ def test_a_referent_takes_a_spot_on_first_mention_keeps_it_and_count_takes_over(
     assert ("catchment", {"referent": "план б", "cell": loci[1], "how": "evicted"}) in rows
     renderer.render("count", EVERYTHING, 6, cue("count", "1", 5))
     assert ("catchment", {"referent": "план а", "cell": loci[0], "how": "overwritten"}) in rows
+    assert ("catchment", {"referent": "#1", "cell": loci[0], "how": "new"}) in rows
     assert point("план а", 6) == spot[loci[2]]  # placed anew (logged), never two at once
     thing = next(k for k, v in enumerate(BOOK.compositions["point"].variants)
                  if v.needs == {"arg": "thing"})  # fmt: skip
