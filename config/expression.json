@@ -7,10 +7,9 @@
   },
   "timing": {
     "audio_lag_s": 0.15,
-    "char_s": 0.07,
     "late_s": 0.5,
     "poll_s": 0.02,
-    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. char_s: seconds per spoken character while a part's audio is still being made (Player.heard's estimate). late_s: a clip whose time has passed by at most this is sent at once, a later one is dropped and logged (a stroke shifted 0.5 s still looks natural on a word; the first part of a reply plays as soon as it is made, so its preparations are late by their length). poll_s: how often the engine looks at the player's clock while a clip waits for its word."
+    "note": "audio_lag_s: how much later the speaker sounds than the player's clock says a block plays (the board's aplay start, config/face.json's lipsync start_latency_s 0.12, unmeasured, plus the WiFi hop): a cue fires this much later. A part's length before all its audio is made: pepin.expression.markers.CHAR_S, the one estimate (Player.heard reads it too). late_s: a clip whose time has passed by at most this is sent at once, a later one is dropped and logged (a stroke shifted 0.5 s still looks natural on a word; the first part of a reply plays as soon as it is made, so its preparations are late by their length). poll_s: how often the engine looks at the player's clock while a clip waits for its word."
   },
   "layers": {
     "fade_s": {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35},

@@ -55,11 +55,11 @@ def test_a_style_marker_leads_a_sentence_and_is_never_read_aloud() -> None:
         part = parse(sentence).parts[0]
         return part.style, part.text
 
-    assert first("{шёпотом} Я тут.") == ("шёпотом", "Я тут.")
+    assert first("{whispering} Я тут.") == ("whispering", "Я тут.")
     assert first("{style: грустно,  тихо}Ну вот.") == ("грустно, тихо", "Ну вот.")
     assert first("{} Как обычно.") == ("", "Как обычно.")
     assert first("Без стиля.") == (None, "Без стиля.")
-    assert first("Слово {в середине}.") == (None, "Слово.")  # it waits for the next sentence
+    assert first("Слово {calm}.") == (None, "Слово.")  # it waits for the next sentence
     assert speakable("{радостно} Привет!") == "Привет!"
     assert speakable("{шёпотом}") == ""
 

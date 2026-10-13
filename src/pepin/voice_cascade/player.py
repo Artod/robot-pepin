@@ -29,6 +29,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from pepin.audio_link import SAMPLE_BYTES, Speaker
+from pepin.expression.markers import CHAR_S
 from pepin.voice_cascade.stages import Played
 from pepin.voice_live.wake import rms_db
 
@@ -263,7 +264,7 @@ class Player:
                 continue
             if start < played:
                 words = text.split()
-                share = (played - start) / max(end - start, 0.07 * len(text))
+                share = (played - start) / max(end - start, CHAR_S * len(text))
                 partial = " ".join(words[: round(len(words) * min(1.0, share))])
             break
         return Played(whole, partial)

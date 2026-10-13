@@ -460,7 +460,7 @@ def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: 
         brain="first",
         voice="first-voice",
     )
-    script: list[list[Step]] = [["{грустно} Мне жаль.", "Но всё пройдёт.", "{} Ладно."]]
+    script: list[list[Step]] = [["{sad} Мне жаль.", "Но всё пройдёт.", "{} Ладно."]]
     rig = Rig(tmp_path, ["Пепин, грустно", "Пепин, а теперь?"], script, switchboard=board)
 
     async def scenario(rig: Rig) -> None:
@@ -478,8 +478,8 @@ def test_a_style_holds_for_the_reply_and_a_switch_takes_the_next_turn(tmp_path: 
     asyncio.run(rig.run(scenario))
     first, second = rig.loop.turns
     assert rig.voice.spoken == ["Мне жаль.", "Но всё пройдёт.", "Ладно."]  # markers unsaid
-    assert rig.voice.styles == ["грустно", "грустно", ""]  # sticky until {} resets it
-    assert first["styles"] == ["грустно", ""] and first["brain"] == "first"
+    assert rig.voice.styles == ["sad", "sad", ""]  # sticky until {} resets it
+    assert first["styles"] == ["sad", ""] and first["brain"] == "first"
     assert built == ["second"] and late_brain.heard == ["Пепин, а теперь?"]
     assert second["brain"] == "second" and second["voice"] == "second-voice"
     assert late_voice.spoken[-1] == "Теперь я другой." and rig.loop.allowed == {"where_am_i"}
@@ -505,7 +505,7 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
         voice="first-voice",
     )
     observer, flag = RecordingObserver(), FakeFlag(GESTURES)
-    script: list[list[Step]] = [[("look", {"pan_deg": 10.0}), "{тихо} Вижу стол.", "Всё."]]
+    script: list[list[Step]] = [[("look", {"pan_deg": 10.0}), "{quiet} Вижу стол.", "Всё."]]
     rig = Rig(tmp_path, ["Пепин, что там?"], script, switchboard=board,
               observers=[BrokenObserver(), observer], flags=[flag], clips=True,
               fillers=FillerBook({"ru": ("Секунду.",)}, {}, {}, {}, {}, ()))  # fmt: skip
@@ -538,7 +538,7 @@ def test_observers_hear_every_moment_and_a_flag_switches_live(tmp_path: Path) ->
     assert ("moment", (SLOW_TOOL,)) in observer.calls
     parts = [args for name, args in observer.calls if name == "part_queued"]
     assert [(turn, index, part.text, part.style) for turn, index, part in parts] == [
-        (1, 0, "Вижу стол.", "тихо"), (1, 1, "Всё.", None),
+        (1, 0, "Вижу стол.", "quiet"), (1, 1, "Всё.", None),
     ]  # fmt: skip
     assert observer.calls[-1] == ("closed", ("stopped",))
 
@@ -934,7 +934,7 @@ def test_the_speaker_is_named_in_front_of_the_words_only_while_the_switch_is_on(
 
 def test_markers_ride_their_parts_to_the_body_and_never_reach_the_voice(tmp_path: Path) -> None:
     observer = RecordingObserver()
-    script: list[list[Step]] = [["Ну {laugh} да, {тихо} все спят.", "{gesture:nope} Ладно."]]
+    script: list[list[Step]] = [["Ну {laugh} да, {quiet} все спят.", "{gesture:nope} Ладно."]]
     rig = Rig(tmp_path, ["Пепин, привет"], script, observers=[observer],
               vocabulary=Vocabulary(frozenset({"laugh"}), frozenset()))  # fmt: skip
 
@@ -944,13 +944,13 @@ def test_markers_ride_their_parts_to_the_body_and_never_reach_the_voice(tmp_path
 
     asyncio.run(rig.run(scenario))
     assert rig.voice.spoken == ["Ну да,", "все спят.", "Ладно."]
-    assert rig.voice.styles == ["", "тихо", "тихо"]
+    assert rig.voice.styles == ["", "quiet", "quiet"]
     parts = [args for name, args in observer.calls if name == "part_queued"]
     assert [(index, part.text, [m.name for m in part.markers]) for _, index, part in parts] == [
         (0, "Ну да,", ["laugh"]), (1, "все спят.", []), (2, "Ладно.", []),
     ]  # fmt: skip
     (turn,) = rig.loop.turns
-    assert turn["reply"] == "Ну {laugh} да, {тихо} все спят. {gesture:nope} Ладно."  # as written
+    assert turn["reply"] == "Ну {laugh} да, {quiet} все спят. {gesture:nope} Ладно."  # as written
     (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
     rows = [json.loads(line) for line in events.read_text().splitlines()]
     sentences = [r for r in rows if r["event"] == "sentence"]

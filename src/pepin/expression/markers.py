@@ -8,7 +8,9 @@ A marker is one pair of braces with no brace inside::
     {face:smile}          one expression of config/face.json, on its own
     {style:whispering}    the voice's manner from here on, in free words as the voice takes them
     {}                    the plain voice again
-    {whispering}          a bare name that is no intent is a style (the grammar before markers)
+    {whispering}          a bare name that is no intent is a style when it is made of the
+                          persona's style words (:data:`STYLE_WORDS`: ``{happy, excited}``);
+                          any other bare name (``{nod}``, ``{arc:up}``) is dropped
 
 A marker is never spoken: the voice gets the text without it. Its place is the character offset
 in its part's spoken text where it stood, so it belongs to the word that FOLLOWS it: that word's
@@ -20,6 +22,13 @@ A marker that names nothing the :class:`Vocabulary` knows is dropped (kept in
 
 The parser needs every marker whole: the sentence splitter must not end or cut a sentence inside
 an open brace.
+
+:data:`CHAR_S` is the one estimate of a spoken character's seconds before a part's audio is all
+fed: the body's cues (:func:`sync_s`) and what a barge-in says was heard
+(:meth:`pepin.voice_cascade.player.Player.heard`) both read it. Owners after slice 0
+(gesticulation DESIGN.md §11): C owns the grammar here (``{name:arg}``, aliases, ``{!}``);
+B replaces :func:`sync_s` with its word clock; :class:`Marker`, :class:`Cue` and
+:class:`Playout` are the contract.
 """
 
 from __future__ import annotations
@@ -40,9 +49,17 @@ CLAUSE_END = re.compile(r"(?:^|[,;:\u2013\u2014-])\s*$")
 # The next clause boundary after a style marker that stood elsewhere: its punctuation and the
 # space after it (a hyphen inside a word is none).
 CLAUSE_BOUNDARY = re.compile(r"[,;:\u2013\u2014-]\s+")
-# Seconds a spoken character takes while a part's audio is still being made (the same estimate
-# as pepin.voice_cascade.player.Player.heard): a part's length before its last chunk is fed.
+# Seconds a spoken character takes while a part's audio is still being made: a part's length
+# before its last chunk is fed (the one place this estimate lives; Player.heard reads it too).
 CHAR_S = 0.07
+# The persona's words for the voice's manner: a bare marker of these alone (in any number,
+# commas or spaces between) is a style; config/voice_cascade_persona.md lists the same words.
+STYLE_WORDS = frozenset(
+    ("whispering", "quiet", "sad", "tired", "happy", "excited", "calm", "slow", "warm")
+)
+_STYLE_SPLIT = re.compile(r"[\s,]+")
+_VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001 -- Cyrillic vowels
+_WORD = re.compile(r"\w+")
 _SPACES = re.compile(r"\s+")
 _PUNCTUATION = frozenset(".,!?;:…»)]")  # the end of a sentence or a clause
 
@@ -51,7 +68,7 @@ _PUNCTUATION = frozenset(".,!?;:…»)]")  # the end of a sentence or a clause
 class Vocabulary:
     """The names a marker may carry: the intents (config/animation.json's compositions) and the
     face's expressions (config/face.json). A bare name is an intent when it is one, else a
-    style."""
+    style when it is made of :data:`STYLE_WORDS`."""
 
     intents: frozenset[str]
     faces: frozenset[str]
@@ -60,12 +77,14 @@ class Vocabulary:
 @dataclass(frozen=True)
 class Marker:
     """One marker: its channel, its name (a style's words; "" with ``style``: the plain voice),
-    the character offset in its part's spoken text it stands before, and the text as written."""
+    the character offset in its part's spoken text it stands before, the text as written, and
+    its argument (``{point:you}``: ``"you"``; None: none)."""
 
     channel: Channel
     name: str
     at: int
     raw: str = ""
+    arg: str | None = None
 
 
 @dataclass(frozen=True)
@@ -92,12 +111,15 @@ class ParsedSentence:
 class Cue:
     """A marker placed on a reply's audio: in part ``index`` of reply ``turn`` (the player's mark
     key), ``share`` of the way through that part's audio (the marker's offset over the part's
-    spoken length)."""
+    spoken length); ``word`` is the anchor word's character span in the part's spoken text
+    (start, end) and ``vowel`` the offset of its first vowel (its end when it has none)."""
 
     marker: Marker
     turn: int
     index: int
     share: float
+    word: tuple[int, int] = (0, 0)
+    vowel: int = 0
 
 
 class Playout(Protocol):
@@ -119,7 +141,8 @@ EMPTY = Vocabulary(frozenset(), frozenset())  # no intents, no faces: every bare
 
 def classify(inner: str, vocabulary: Vocabulary) -> tuple[Channel, str] | None:
     """What a marker's inside names: ``(channel, name)``, a style's words with their spaces
-    collapsed (``""``: the plain voice); None for a gesture or a face the vocabulary lacks."""
+    collapsed (``""``: the plain voice); None for a gesture or a face the vocabulary lacks, and
+    for a bare name that is neither an intent nor made of :data:`STYLE_WORDS`."""
     text = inner.strip()
     if not text:
         return "style", ""
@@ -133,7 +156,9 @@ def classify(inner: str, vocabulary: Vocabulary) -> tuple[Channel, str] | None:
         return "style", _SPACES.sub(" ", name).strip()
     if text.lower() in vocabulary.intents:
         return "gesture", text.lower()
-    return "style", _SPACES.sub(" ", text)
+    if set(_STYLE_SPLIT.split(text.lower())) - {""} <= STYLE_WORDS:
+        return "style", _SPACES.sub(" ", text)
+    return None
 
 
 def parse(sentence: str, vocabulary: Vocabulary = EMPTY) -> ParsedSentence:
@@ -199,20 +224,37 @@ def _joined(text: str, segment: str) -> str:
     return text + segment
 
 
-def part_length_s(mark: tuple[float, float], chars: int, spoken: bool, char_s: float) -> float:
+def part_length_s(
+    mark: tuple[float, float], chars: int, spoken: bool, char_s: float = CHAR_S
+) -> float:
     """How long a part lasts on the player's clock: its mark's length once all its audio is
     fed (``spoken``), else at least ``char_s`` a character of its text."""
     length = mark[1] - mark[0]
     return length if spoken else max(length, char_s * chars)
 
 
-def sync_s(cue: Cue, mark: tuple[float, float], chars: int, spoken: bool, char_s: float) -> float:
+def sync_s(
+    cue: Cue, mark: tuple[float, float], chars: int, spoken: bool, char_s: float = CHAR_S
+) -> float:
     """The stream second a cue's word starts: its part's start plus its share of the part's
     length (:func:`part_length_s`), the timing law of Player.heard."""
     return mark[0] + cue.share * part_length_s(mark, chars, spoken, char_s)
 
 
 def cues(turn: int, index: int, part: Part) -> list[Cue]:
-    """The part's gesture and face markers as cues on its audio, in order."""
+    """The part's gesture and face markers as cues on its audio, in order, each with its anchor
+    word's span and first vowel."""
     size = max(1, len(part.text))
-    return [Cue(m, turn, index, min(1.0, m.at / size)) for m in part.markers]
+    return [
+        Cue(m, turn, index, min(1.0, m.at / size), *anchor(part.text, m.at)) for m in part.markers
+    ]
+
+
+def anchor(text: str, at: int) -> tuple[tuple[int, int], int]:
+    """The word a marker at ``at`` belongs to (the first at or after it): its span in ``text``
+    and the offset of its first vowel; ``((len, len), len)`` when no word follows."""
+    word = _WORD.search(text, at)
+    if word is None:
+        return (len(text), len(text)), len(text)
+    vowel = _VOWELS.search(text, word.start(), word.end())
+    return (word.start(), word.end()), vowel.start() if vowel is not None else word.end()

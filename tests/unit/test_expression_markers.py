@@ -22,14 +22,19 @@ from pepin.voice_cascade.stages import Played
 WORDS = Vocabulary(frozenset({"laugh", "greeting"}), frozenset({"smile", "sad"}))
 
 
-def test_a_bare_intent_is_a_gesture_and_any_other_bare_name_a_style() -> None:
+def test_a_bare_intent_is_a_gesture_a_bare_style_word_a_style_and_any_other_name_dropped() -> None:
     assert classify("laugh", WORDS) == ("gesture", "laugh")
     assert classify(" Laugh ", WORDS) == ("gesture", "laugh")
     assert classify("whispering", WORDS) == ("style", "whispering")  # the grammar before markers
     assert classify("happy,   excited", WORDS) == ("style", "happy, excited")
-    assert classify("шёпотом", WORDS) == ("style", "шёпотом")
-    assert classify("smile", WORDS) == ("style", "smile")  # a face is spelled out: {face:smile}
+    assert classify("calm slow", WORDS) == ("style", "calm slow")
+    assert classify("шёпотом", WORDS) is None  # the persona's style words are English
+    assert classify("smile", WORDS) is None  # a face is spelled out: {face:smile}
+    assert classify("nod", WORDS) is None and classify("arc:up", WORDS) is None  # no voice manner
+    assert classify("happy, nod", WORDS) is None
     assert classify("", WORDS) == ("style", "")
+    parsed = parse("{nod} Да, {arc:up} выросли.", WORDS)
+    assert parsed.parts == (Part("Да, выросли."),) and parsed.dropped == ("{nod}", "{arc:up}")
 
 
 def test_a_spelled_out_name_the_vocabulary_lacks_is_dropped() -> None:
@@ -57,21 +62,21 @@ def test_a_marker_belongs_to_the_word_after_it_and_is_never_said() -> None:
 def test_a_style_at_a_clause_boundary_cuts_the_sentence_into_two_voice_calls() -> None:
     parts = parse("Ну да, {style: whispering} все уже спят.", WORDS).parts
     assert parts == (Part("Ну да,"), Part("все уже спят.", "whispering"))
-    parts = parse("{} Как обычно — {тихо} и тише.", WORDS).parts
-    assert parts == (Part("Как обычно —", ""), Part("и тише.", "тихо"))
+    parts = parse("{} Как обычно — {quiet} и тише.", WORDS).parts
+    assert parts == (Part("Как обычно —", ""), Part("и тише.", "quiet"))
 
 
 def test_a_style_anywhere_else_waits_for_the_next_boundary_or_sentence() -> None:
-    parts = parse("Хм, ну {тихо} ладно, давай.", WORDS).parts
-    assert parts == (Part("Хм, ну ладно,"), Part("давай.", "тихо"))
-    parts = parse("Слово {в середине} и конец.", WORDS).parts
-    assert parts == (Part("Слово и конец."), Part("", "в середине"))  # for the next sentence
+    parts = parse("Хм, ну {quiet} ладно, давай.", WORDS).parts
+    assert parts == (Part("Хм, ну ладно,"), Part("давай.", "quiet"))
+    parts = parse("Слово {calm} и конец.", WORDS).parts
+    assert parts == (Part("Слово и конец."), Part("", "calm"))  # for the next sentence
 
 
 def test_a_sentence_of_markers_alone_is_a_silent_part_or_only_a_style() -> None:
     laugh = Marker("gesture", "laugh", 0, "{laugh}")
     assert parse("{laugh}", WORDS).parts == (Part("", None, (laugh,)),)
-    assert parse("{шёпотом}", WORDS).parts == (Part("", "шёпотом"),)
+    assert parse("{whispering}", WORDS).parts == (Part("", "whispering"),)
     assert parse("", WORDS).parts == ()
 
 
