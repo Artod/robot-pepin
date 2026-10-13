@@ -758,7 +758,7 @@ sleepy style, 23:00-08:00, or the person's voice under -30 dBFS): the melody, th
 face only. Each conversation's events.jsonl gets `pulse` (per sentence: its nuclei's z, the
 accent and why others were skipped), `moment` (each decision, played or why not), `quiet` and,
 at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a minute,
-the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.6 accent
+the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.7 accent
 nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel
 of a content word against 44 % for any syllable, every head clip within the arbiter's rules.
 
