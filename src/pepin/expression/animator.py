@@ -249,7 +249,8 @@ class GestureEngine:
         self.resolver = Resolver(attention=attention, record=self._meaning)
         self._attention = attention
         self.taps: list[AudioTap] = []  # the voice's chunks, on the voice's thread (prosody)
-        self.scene_hooks: list[SceneHook] = []  # each rendering's scene refined, in order
+        # each rendering's scene refined, in order: the arm's place first (the scheduler's)
+        self.scene_hooks: list[SceneHook] = [self._arm_scene]
         self.scheduler = Scheduler(
             playout, self._latency, lambda kind, fields: self.record(kind, fields)
         )
@@ -737,7 +738,7 @@ class GestureEngine:
             "intent": intent, "source": source, "seed": performance.seed,
             "variant": performance.variant, "parts": [c.part for c in clips],
             "turn": cue.turn if cue else None, "part": cue.index if cue else None,
-            "share": round(cue.share, 3) if cue else None,
+            "share": round(cue.share, 3) if cue else None, "arm_at": scene.arm_at,
         })  # fmt: skip
         return performance
 
@@ -875,6 +876,11 @@ class GestureEngine:
     def _latency(self, part: PartName) -> float:
         executor = self.parts.get(part)
         return executor.latency_s if executor is not None else 0.0
+
+    def _arm_scene(self, scene: Scene, request: Request) -> Scene:
+        """The scene hook that says where the arm is for a rendering (``arm_at``: a pose a unit
+        holds or a waiting arm clip will hold, rest, or unknown without the arm's planner)."""
+        return replace(scene, arm_at=self.scheduler.arm_at())
 
     def _meaning(self, kind: str, fields: dict[str, Any]) -> None:
         """A row of the gesture space's (a catchment, a repeat): the engine's record and the

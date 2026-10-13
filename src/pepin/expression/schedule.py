@@ -124,6 +124,7 @@ PHRASE_WORDS = 2  # a PHRASE mark may slide to one of this many next words
 HOME = "ready"  # the book's pose an arm goes to ahead of a mark it cannot reach from rest
 AHEAD_S = 0.18  # a marker's sentence reaches the voice this long after it streams in (p50)
 PREPARE = "prepare:"  # a preparation's name: the arm sent home ahead of a marker (no stroke)
+SAME_POSE_DEG = 0.5  # a held pose within this of a book's pose on every joint is that pose
 _WORD = re.compile(r"\w+")
 _VOWEL = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001 -- Cyrillic vowels
 _PAUSE = re.compile("[.,!?;:\u2013\u2014\u2026]")  # a pause between two words
@@ -378,7 +379,8 @@ class Fit:
     at render (to its aimed stroke, its part's latency off), when its part's text went to the
     voice, its preparation (send to stroke, latency apart; the arm's plan), the first heard
     time of each moment of the word clock, where the arm starts it from, the waiting clip a unit
-    chains it to, and its predicted window on the engine's clock."""
+    chains it to, its predicted window on the engine's clock, the pose it leaves the arm in, and
+    whether it plays only from a pose a unit holds (a variant that needs the arm up)."""
 
     bind: Bind
     step: str
@@ -394,6 +396,7 @@ class Fit:
     stroke: float = 0.0
     end: float = 0.0
     final: dict[str, float] | None = None
+    held_only: bool = False
 
 
 @dataclass(eq=False)
@@ -599,6 +602,31 @@ class Scheduler:
         char = min(max(0, at.char), len(spoken.text))
         share = min(1.0, char / max(1, len(spoken.text)))
         return Cue(Marker(channel, name, char), at.turn, at.part, share, *anchor(spoken.text, char))
+
+    def arm_at(self) -> str | None:
+        """Where a rendering finds the arm (:attr:`pepin.expression.animation.Scene.arm_at`):
+        the pose a unit holds now, else the one a waiting arm clip will leave held for a next
+        stroke (by the book's name when it is one of its poses, ``held`` otherwise); ``rest``
+        when neither; None when no arm planner was lent (unknown)."""
+        arm = self._arm_part()
+        if arm is None:
+            return None
+        strokes = self.timing.unit_strokes
+        pose = arm.holding() if self._unit < strokes else None
+        if pose is None:
+            chained = [w.fit.final for w in self.waiting
+                       if w.clip.part == "arm" and w.fit is not None and w.fit.final is not None
+                       and w.fit.chain + 1 < strokes]  # fmt: skip
+            pose = chained[-1] if chained else None
+        if pose is None:
+            return "rest"
+        rendering = self._rendering()
+        poses: Mapping[str, Mapping[str, float]] = rendering.book.poses if rendering else {}
+        return next(
+            (name for name, known in poses.items()
+             if all(abs(known.get(j, math.inf) - pose[j]) < SAME_POSE_DEG for j in JOINTS)),
+            "held",
+        )  # fmt: skip
 
     # -- placing ---------------------------------------------------------------------------------
 
@@ -839,6 +867,7 @@ class Scheduler:
         if any(c.part == "arm" for c in clips) or bind != "utterance":
             clips = [c for c in clips if c.part != "body"]  # never with the arm, never on a word
         allowance = self.timing.late_s if bind == "utterance" else 0.0
+        held_only = self._held_only(candidate.performance)
         fitted: list[Waiting] = []
         for clip in clips:
             cue = mark if clip.part == "face" else candidate.cue  # the face leads, on the mark
@@ -853,6 +882,7 @@ class Scheduler:
             fit.heard[forecast.stage] = forecast.heard
             if clip.part == "arm":
                 deadline = now + latency + room
+                fit.held_only = held_only
                 planned = self._arm(clip, fit, aim, deadline, candidate.compress, now)
                 if isinstance(planned, str):
                     reasons.append(f"{candidate.step}: {planned}")
@@ -880,19 +910,27 @@ class Scheduler:
         self, clip: Clip, fit: Fit, aim: float, deadline: float, compress: bool, now: float
     ) -> Clip | str:
         """The arm's clip planned from where the arm is when the board takes it (a unit's held
-        pose, returning to rest, or at rest: the first whose window lets it start in time), its
-        preparation compressed when asked, its stroke at ``aim`` or as soon after it as it can,
-        never after ``deadline``; ``fit`` filled in. Why it cannot, as a string."""
+        pose, returning to rest, or at rest: the first whose window lets it start in time; a
+        unit's alone for ``fit.held_only``), its preparation compressed when asked, its stroke
+        at ``aim`` or as soon after it as it can, never after ``deadline``; ``fit`` filled in.
+        Why it cannot, as a string."""
         arm = self._arm_part()
         earliest = now + self.latency("arm")
         if arm is None:  # no planner lent: the clip's own time from rest
+            if fit.held_only:
+                return "the arm: no unit to play it from"
             if earliest + clip.stroke_s > deadline:
                 return f"the arm needs {clip.stroke_s:.2f} s, {deadline - earliest:.2f} s ahead"
             fit.start = max(aim - clip.stroke_s, earliest)
             fit.stroke, fit.end = fit.start + clip.stroke_s, fit.start + clip.duration_s
             return clip
         whys: list[str] = []
-        for base in self._arm_froms(arm, now):
+        froms = self._arm_froms(arm, now)
+        if fit.held_only:
+            froms = [base for base in froms if base.kind == "unit"]
+            if not froms:
+                return "the arm: no unit to play it from"
+        for base in froms:
             first = max(base.after, earliest)
             limit = deadline - first  # the most preparation this start leaves
             planned = arm.plan(clip, base=base.pose, start=base.knot)
@@ -1175,6 +1213,8 @@ class Scheduler:
         fit = waiting.fit
         assert arm is not None and fit is not None
         held = arm.holding()
+        if held is None and fit.held_only:
+            return "no unit holds it any more"
         planned = arm.plan(waiting.clip, base=held, start=None if held is None else _knot(held))
         if isinstance(planned, str):
             return planned
@@ -1362,6 +1402,14 @@ class Scheduler:
         rendering = self._rendering()
         found = rendering.book.compositions.get(intent) if rendering is not None else None
         return found if isinstance(found, Composition) else None
+
+    def _held_only(self, performance: Performance) -> bool:
+        """Whether the performance's variant needs the arm up (the accent's flick): its arm
+        plays only from the pose a unit holds."""
+        composition = self._composition(performance.intent)
+        if composition is None or not 0 <= performance.variant < len(composition.variants):
+            return False
+        return composition.variants[performance.variant].needs.get("arm") == "up"
 
     def _arm_part(self) -> ArmPart | None:
         arm = self.parts.get("arm")

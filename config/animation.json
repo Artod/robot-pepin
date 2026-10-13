@@ -419,13 +419,13 @@
     },
     "accent": {
       "bind": "word",
-      "note": "{!}: this word carries the point (beat, accent, emphasis are its other spellings). Inside an open arm unit a flick of the wrist at the caps on the word, else a head nod of 2-4 deg; never opens a unit; the floor: the nod",
+      "note": "{!}: this word carries the point (beat, accent, emphasis are its other spellings). Inside an open arm unit (the arm up: the scene's arm_at) a flick of the wrist at the caps on the word, from the held pose only, else a head nod of 2-4 deg; never opens a unit; the floor: the nod",
       "variants": [
         {"needs": {"arm": "up"}, "steps": [
           {"atom": "arm_beat", "at_s": [-0.05, 0.0], "params": {"amp_deg": [8.0, 10.0], "period_s": [0.5, 0.55]}},
           {"atom": "head_nod", "at_s": [-0.1, 0.0], "p": 0.5, "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}}
         ]},
-        {"steps": [
+        {"needs": {"arm": "rest"}, "steps": [
           {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 4.0], "period_s": [0.4, 0.45]}}
         ]},
         {"floor": true, "steps": [

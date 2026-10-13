@@ -430,16 +430,18 @@ class WeightedChooser:
 
 
 def allowed(variant: Variant, scene: Scene) -> bool:
-    """Whether ``scene`` allows ``variant``: every part it needs is ready, and the arm is where
-    it needs it (``any``: anywhere; ``rest``: at rest or unknown; ``up``: holding a pose)."""
+    """Whether ``scene`` allows ``variant``: the arm is where it needs it (``rest``: at rest or
+    unknown, ready or not: a variant that leaves it alone; ``up``: holding a pose; ``any``:
+    anywhere) and every other part it needs is ready."""
     for part, state in variant.needs.items():
         if part == ARG_NEED:
             continue
-        if part not in scene.ready:
-            return False
-        if part == "arm" and state == "rest" and scene.arm_at not in (None, "rest"):
-            return False
-        if part == "arm" and state == "up" and scene.arm_at in (None, "rest"):
+        down = part != "arm" or scene.arm_at in (None, "rest")
+        if state == "rest":
+            if not down:
+                return False
+            continue
+        if part not in scene.ready or (state == "up" and down):
             return False
     return True
 

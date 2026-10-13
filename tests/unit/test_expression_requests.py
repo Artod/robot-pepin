@@ -481,6 +481,38 @@ def test_two_arm_marks_1_5_s_apart_are_one_unit_the_second_from_the_held_pose() 
     assert [r["base"] for r in rig.rows("send", part="arm")] == ["rest", "unit"]
 
 
+def test_an_accent_inside_an_open_unit_is_the_wrist_flick_from_the_held_pose() -> None:
+    """{count:1} before «батарея», then «Это {!} очень важно.»: the count opens a unit; the
+    accent, rendered after it, finds the arm up (the scene's ``arm_at``: the pose the count's
+    clip will hold), so it is the wrist's flick, planned from that pose and sent while it
+    holds. Alone (the arm at rest) the accent is the nod and the arm stays still."""
+    rig = Ladder()
+    first, second = "Во-первых, батарея.", "Это очень важно."
+    count = Marker("gesture", "count", first.index("батарея"), "", "1")
+    rig.engine.part_queued(1, 0, Part(first, None, (count,)))
+    rig.engine.part_queued(1, 1, Part(second, None, (Marker("gesture", "accent", 4),)))
+    rig.engine.step()
+    shown = {r["intent"]: r for r in rig.rows("performance")}
+    assert shown["count"]["arm_at"] == "rest" and shown["accent"]["arm_at"] != "rest"
+    assert shown["accent"]["variant"] == 0  # the flick: the variant that needs the arm up
+    (row,) = rig.rows("ladder", intent="accent")
+    assert row["base"] == "unit" and "arm" in row["parts"]
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(first))
+    rig.tick(0.09 * len(first) - 0.2)
+    rig.start(1, 1, 0.09 * len(second))
+    rig.tick(3.0)
+    opened, flick = rig.sent()
+    assert opened.then == "hold" and flick.then == "rest"
+    assert flick.knots[0].deg == pytest.approx(opened.knots[-1].deg, abs=0.01)  # the held pose
+    assert [r["base"] for r in rig.rows("send", part="arm")] == ["rest", "unit"]
+    alone = Ladder()
+    alone.engine.part_queued(1, 0, Part(second, None, (Marker("gesture", "accent", 4),)))
+    alone.engine.step()
+    (nod,) = alone.rows("performance")
+    assert nod["arm_at"] == "rest" and nod["variant"] == 1 and nod["parts"] == ["head"]
+
+
 def test_a_unit_s_next_stroke_takes_the_arm_during_the_last_one_s_hold() -> None:
     """Marks 1.0 s apart (at TEXT, part 1 forecast after part 0's characters): the second
     stroke's preparation (from the held ``ready`` to ``near``) is compressed to start inside the
