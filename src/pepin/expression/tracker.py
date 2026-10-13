@@ -50,8 +50,10 @@ TTL ``ttl_s``, renewed every ``renew_s`` (an aim renews it too); a renewal that 
 gone (a ``look`` the person asked for took the head) asks again, queued behind it. A frame counts
 only while the head is ours, still and carries no gesture (the idle layer's breath aside); a
 frame skipped for any of these is no look (no seek's stop spent, no check ended) and is counted
-by its cause, a gesture's tried again ``BLIND_RETRY_S`` later. The smile goes through the head
-server's face owner (source ``expression``), once a conversation, at the first clear face.
+by its cause, a gesture's tried again ``BLIND_RETRY_S`` later. The first clear face of a
+conversation is told in the snapshot (``first_face_s``): the gesture engine smiles at it, the
+face's one writer; ``speaker.smile`` (null as shipped) naming a face brings back this machine's
+own smile through the head server's face owner (source ``expression``), once a conversation.
 
 The gesture engine reads this machine's :class:`pepin.expression.speaker.Attention` (the phase:
 seek, check, turning, track, voice; when the person engaged was last seen; whether they stand
@@ -213,7 +215,7 @@ class SpeakerSettings:
     ttl_s: float = 6.0
     renew_s: float = 2.0
     aim_wait_s: float = 2.0
-    smile: str = "smile"
+    smile: str = ""  # "": the gesture engine smiles at the first face (the face's one writer)
     smile_hold_s: float = 2.0
     smile_unseen: bool = False
     body: BodyLimits = field(default_factory=BodyLimits)
@@ -246,7 +248,8 @@ class SpeakerSettings:
             if name in ("doa_map", "body", "window_s", "min_speech"):
                 continue
             if name in speaker:
-                values[name] = type(default)(speaker[name])
+                value = speaker[name]
+                values[name] = "" if name == "smile" and value is None else type(default)(value)
         body_block = data.get("wheels", {})
         body = BodyLimits(
             **{
@@ -1522,7 +1525,7 @@ def robot_gaze(
             doa=doa,
             finder=looks,
             wheels=wheels if wheels is not None else NoWheels(),
-            face=HeadClient(host, source=FACE_SOURCE).start(),
+            face=HeadClient(host, source=FACE_SOURCE).start() if settings.smile else None,
             reach=Reach.of(NeckConfig.from_json(config_file("neck.json"))),
             on_face=on_face,
         )

@@ -615,7 +615,9 @@ def test_the_wake_is_one_eased_motion_of_pan_and_tilt_and_the_face_is_found_with
     """Artem: "при «Пепин» он поднимает голову, потом направляет — как терминатор". Now the
     name from 60 deg left is ONE aim, pan and tilt together, on the turn's ease (the head from
     home, 24 deg down, to the voice at +3: no -5, -15, -5 steps); the first frame finds his face
-    2 deg off, close enough: no second move; one smile."""
+    2 deg off, close enough: no second move; the first clear face is told to the gesture
+    engine (which smiles: the face's one writer), and the gaze smiles only with speaker.smile
+    set."""
     r = rig()
     r.person(60.0, tilt_deg=2.0)
     read = r.wake(60.0)
@@ -625,10 +627,16 @@ def test_the_wake_is_one_eased_motion_of_pan_and_tilt_and_the_face_is_found_with
     assert turn["why"] == "wake" and turn["speed"] == "turn"
     r.machine.tick(read)
     assert r.machine.phase == "track" and r.aimed() == [(60.0, 3.0)], "within refine: no move"
-    assert r.face.calls == [("express", ("smile", 1.0, 2.0, None))]
+    assert r.face.calls == [] and r.machine.attention(read).first_face_s is not None
     r.run(4.0, read)
     assert r.scene.looks == 28 and len(r.door.aims()) == 1, "ten frames a second, no aim"
     assert r.kinds()[:4] == ["gaze_doa", "gaze_wake", "gaze_reaim", "gaze_face"]
+    smiling = rig(settings=replace(RULES, smile="smile"))
+    smiling.person(60.0, tilt_deg=2.0)
+    read = smiling.wake(60.0)
+    smiling.machine.tick(read)
+    smiling.run(4.0, read)
+    assert smiling.face.calls == [("express", ("smile", 1.0, 2.0, None))]
 
 
 def test_the_wake_turns_to_the_bearing_even_near_where_the_head_points() -> None:

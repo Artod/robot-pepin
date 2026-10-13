@@ -50,7 +50,11 @@ def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets
         reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
         report=lambda line: None,
     )
-    gaze = SpeakerGazeWorker(lambda settings: machine, on=False, load=SpeakerSettings)
+
+    def own_smile() -> SpeakerSettings:  # the gaze's own smile (speaker.smile, null as shipped)
+        return SpeakerSettings(smile="smile")
+
+    gaze = SpeakerGazeWorker(lambda settings: machine, on=False, load=own_smile)
     board = Switchboard(
         ControlFile(tmp_path),
         configure=lambda brain, voice: CascadeConfig(),
