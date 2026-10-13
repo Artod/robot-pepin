@@ -4,5 +4,6 @@
   "side_m": {"default": 0.7, "range": [0.5, 1.5], "note": "right_of, left_of, beside: metres from the target's point to base_link, sideways in the target's frame"},
   "person_min_m": {"default": 0.6, "range": [0.5, 1.0], "note": "never nearer a person than this plus two sigma of the depth they were measured at (a spoken distance included)"},
   "ring_deg": {"default": 30.0, "range": [10.0, 90.0], "note": "the two alternatives turn the stand point this far about the target either way, same distance, when the planner refuses the first"},
-  "head_moved_deg": {"default": 2.0, "range": [0.5, 10.0], "note": "a box of the last see() picture is refused when the head has turned more than this since: the box would point at something else"}
+  "head_moved_deg": {"default": 2.0, "range": [0.5, 10.0], "note": "a box of the last see() picture is refused when the head has turned more than this since: the box would point at something else; so is the person when the head turned more than this between their frame and the depth pair"},
+  "near_m": {"default": 0.15, "range": [0.0, 0.5], "note": "to: a robot already within its stand distance plus this of the target turns where it stands to face it instead of driving, so \"come closer\" never backs it away (0.15: a drive shorter than this is a shuffle inside the goal checker's 0.10 m)"}
 }

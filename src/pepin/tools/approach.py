@@ -21,7 +21,7 @@ from typing import TYPE_CHECKING, Any
 from pepin.stand_pose import Distances, Relation, Stand, Target, facing_from, stands
 from pepin.tools.clients import HeadPose
 from pepin.tools.drive import drive, pose_on_map
-from pepin.tools.registry import Result, ToolError, fail, tool
+from pepin.tools.registry import Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Robot
 
 if TYPE_CHECKING:  # numpy's module, loaded when a target is located
@@ -29,6 +29,7 @@ if TYPE_CHECKING:  # numpy's module, loaded when a target is located
 
 SPEAKER = ("me", "speaker", "person")  # the target words that mean the person speaking
 STILL_POLL_S = 0.05  # the head asked this often while it is still on its way (as see asks)
+FACING_DEG = 10.0  # a turn in place smaller than this is no turn: the goal checker's 11.5 deg
 
 
 @dataclass(frozen=True)
@@ -46,20 +47,24 @@ class Resolved:
 def approach(
     robot: Robot, target: str, relation: Relation = "to", distance_m: float | None = None
 ) -> Result:
-    """Drive up to a person, a named place or a thing in the picture and stand in relation to
-    it, then turn the head to it: "come to me", "stand to my right", "go behind the chair", "go
-    and look at the board". The robot measures where the target is, picks a free spot and makes
-    ONE drive (up to 4 minutes), reported when it ends as go_to's is. Never nearer than 0.6 m
-    to a person. For a plain named place go_to is enough.
+    """Go up to a person, a named place or a thing in the picture and stand in a relation to it,
+    facing it: the tool for "come here", "come closer", "stand beside me", "stand to my right",
+    "turn to me", "go to the printer and face it", "go and look at the board". Never use
+    go_to_pose to reach or face a person: this tool measures where they are, keeps its distance
+    (never nearer than 0.6 m) and takes only a spot the planner accepts; when there is none it
+    says why and nothing moves. One drive (up to 4 minutes), reported when it ends as go_to's
+    is; already near enough, it only turns. For a plain named place go_to is enough.
 
     Args:
         target: "me" for the person speaking (the one the robot looks at; if it sees nobody,
             ask them to step into view or face it); a place name exactly as list_places gives
             it; or a thing in the picture of your last see() as its box "x0,y0,x1,y1" in pixels
             of that picture (call see() again first if the head has turned since).
-        relation: to (about 0.8 m away, facing it), right_of or left_of (a person's own right
+        relation: to (about 0.8 m away, facing it; already that near, it only turns to it),
+            face (turn where it stands to face it), right_of or left_of (a person's own right
             or left; a thing's as the robot sees it), in_front_of, beside (the nearer side),
-            behind.
+            behind. A place's own pose already faces its thing: "go to the printer and face
+            it" is to.
         distance_m: only when the person names a distance, in metres.
     """
     distances = Distances.load()
@@ -68,20 +73,25 @@ def approach(
     here = _pose(robot)
     resolved = resolve(robot, target, here, distances)
     candidates = stands(resolved.target, relation, here, distances, distance_m)
-    index, stand, refusals = first_plannable(robot, candidates)
-    if stand is None:
-        return fail(
-            f"nowhere to stand {relation} {resolved.label}: " + "; ".join(refusals) + "."
-            " Nothing moved; the person may say where to stand instead",
-            found=resolved.found,
-        )
-    request = {
-        "cmd": "go",
-        "x": round(stand.x, 3),
-        "y": round(stand.y, 3),
-        "yaw_deg": round(stand.yaw_deg, 1),
-    }
-    result = drive(robot, request, f"{relation} {resolved.label}")
+    if candidates[0].in_place and abs(_turn_deg(here, candidates[0])) <= FACING_DEG:
+        index, stand = 0, candidates[0]
+        result = ok(arrived=True, moved=False, detail="already there, facing it")
+    else:
+        index, chosen, refusals = first_plannable(robot, candidates)
+        if chosen is None:
+            return fail(
+                f"nowhere to stand {relation} {resolved.label}: " + "; ".join(refusals) + "."
+                " Nothing moved; the person may say where to stand instead",
+                found=resolved.found,
+            )
+        stand = chosen
+        request = {
+            "cmd": "go",
+            "x": round(stand.x, 3),
+            "y": round(stand.y, 3),
+            "yaw_deg": round(stand.yaw_deg, 1),
+        }
+        result = drive(robot, request, f"{relation} {resolved.label}")
     result["found"] = resolved.found
     result["stand"] = {
         "x": round(stand.x, 2),
@@ -92,6 +102,12 @@ def approach(
     if result.get("ok") and resolved.point is not None:
         result["look"] = look_at(robot, resolved.point)
     return result
+
+
+def _turn_deg(here: Pose2D, stand: Stand) -> float:
+    """How far the robot would turn to the stand's heading, degrees (-180, 180]."""
+    turn = stand.yaw_rad - here.yaw_rad
+    return math.degrees(math.atan2(math.sin(turn), math.cos(turn)))
 
 
 def resolve(robot: Robot, target: str, here: Pose2D, distances: Distances) -> Resolved:

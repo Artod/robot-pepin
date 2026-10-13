@@ -112,5 +112,42 @@ def test_a_person_s_facing_is_toward_the_robot_turned_by_their_head() -> None:
     assert facing_from(3.0, 0.0, AT_ORIGIN, 20.0) == pytest.approx(math.pi + math.radians(20.0))
 
 
+def test_face_is_a_turn_where_the_robot_stands() -> None:
+    for target in (Target("person", 0.0, 2.0, FACING_ROBOT), Target("thing", 0.0, 2.0),
+                   Target("place", 0.0, 2.0, 0.0)):  # fmt: skip
+        (turn,) = stands(target, "face", Pose2D(0.0, 0.0, 1.0))
+        assert (xy(turn), turn.yaw_deg, turn.in_place) == ((0.0, 0.0), pytest.approx(90.0), True)
+
+
+def test_come_closer_from_near_enough_turns_and_never_backs_away() -> None:
+    """At 0.9 m (the stand distance 0.8 plus near_m) or nearer than the person minimum, "to" is
+    a turn where the robot stands: a drive would back it away from the person who called it."""
+    for gap in (0.95, 0.9, 0.5):
+        person = Target("person", gap, 0.0, FACING_ROBOT)
+        (turn,) = stands(person, "to", Pose2D(0.0, 0.0, 0.3))
+        assert (xy(turn), turn.yaw_deg, turn.in_place) == ((0.0, 0.0), pytest.approx(0.0), True)
+        assert f"already {gap:.2f} m" in turn.note
+    far = stands(Target("person", 1.0, 0.0, FACING_ROBOT), "to", AT_ORIGIN)
+    assert xy(far[0]) == pytest.approx((0.2, 0.0)) and not far[0].in_place
+    beside = stands(Target("person", 0.9, 0.0, FACING_ROBOT), "right_of", AT_ORIGIN)
+    assert not beside[0].in_place, "only 'to' stays: a side is somewhere else"
+
+
+def test_no_stand_point_is_nearer_a_person_than_the_minimum_plus_two_sigma() -> None:
+    """Every relation, every alternative, any facing, any spoken distance: the stand point keeps
+    the person minimum (0.6 m plus two sigma of their depth) from the person's point."""
+    for sigma in (0.0, 0.05, 0.2):
+        for facing in (0.0, 1.0, 2.5, -2.0):
+            person = Target("person", 2.0, 1.0, facing, sigma)
+            floor = Distances().person_min_m + 2.0 * sigma
+            for relation in RELATIONS:
+                for spoken in (None, 0.2, 0.65):
+                    for stand in stands(person, relation, AT_ORIGIN, distance_m=spoken):  # type: ignore[arg-type]
+                        if stand.in_place:
+                            continue
+                        gap = math.hypot(stand.x - person.x, stand.y - person.y)
+                        assert gap >= floor - 1e-9, (sigma, facing, relation, spoken, gap)
+
+
 def test_the_config_file_holds_the_code_s_defaults() -> None:
     assert Distances.load(REPO / "config" / "approach.json") == Distances()

@@ -6,7 +6,9 @@ THING has no front of its own, so its front is the side the robot sees and its r
 viewer's right. A relation turns that frame into a standing pose, and two alternatives turn the
 stand point about the target by the ring step either way at the same distance, for the planner
 to refuse one by one. Distances are config/approach.json's (:class:`Distances`); a person is never
-stood nearer than ``person_min_m`` plus two sigma of where they were measured.
+stood nearer than ``person_min_m`` plus two sigma of where they were measured. ``face`` is a turn
+where the robot stands, and ``to`` is one too when the robot already stands within ``near_m`` of
+its stand distance: "come closer" never backs the robot away.
 """
 
 from __future__ import annotations
@@ -20,7 +22,7 @@ from typing import TYPE_CHECKING, Literal
 if TYPE_CHECKING:  # numpy's module: the chooser itself is plain arithmetic
     from pepin.pixel_to_map import Pose2D
 
-Relation = Literal["to", "right_of", "left_of", "in_front_of", "beside", "behind"]
+Relation = Literal["to", "right_of", "left_of", "in_front_of", "beside", "behind", "face"]
 RELATIONS: tuple[str, ...] = typing.get_args(Relation)
 Kind = Literal["person", "place", "thing"]
 CONFIG = "approach.json"
@@ -41,13 +43,15 @@ class Target:
 @dataclass(frozen=True)
 class Distances:
     """How far to stand: in front/behind (``front_m``), at a side (``side_m``), never nearer a
-    person than ``person_min_m``, and the alternatives ``ring_deg`` either way."""
+    person than ``person_min_m``, the alternatives ``ring_deg`` either way, and ``to`` a turn in
+    place when the robot already stands within ``near_m`` of its stand distance."""
 
     front_m: float = 0.8
     side_m: float = 0.7
     person_min_m: float = 0.6
     ring_deg: float = 30.0
     head_moved_deg: float = 2.0
+    near_m: float = 0.15
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Distances:
@@ -65,12 +69,14 @@ class Distances:
 
 @dataclass(frozen=True)
 class Stand:
-    """One standing pose on the map and what it is (for the refusal's words)."""
+    """One standing pose on the map, what it is (for the refusal's words), and whether it is
+    where the robot already stands (a turn in place)."""
 
     x: float
     y: float
     yaw_rad: float
     note: str
+    in_place: bool = False
 
     @property
     def yaw_deg(self) -> float:
@@ -90,6 +96,8 @@ def stands(
     side, then the nearer side's ring). ``distance_m`` is a spoken distance;
     ``distances`` None are the defaults."""
     distances = distances or Distances()
+    if relation == "face":
+        return [_turn(target, robot, "turn where it stands to face it")]
     if target.kind == "place":
         return _place(target, relation, distances, distance_m)
     if relation == "beside":  # both sides, the nearer first: a thing's two tie, so right first
@@ -103,6 +111,9 @@ def stands(
     d = distance_m if distance_m is not None else distances.side_m if lateral else distances.front_m
     if target.kind == "person":
         d = max(d, distances.person_min_m + 2.0 * target.sigma_m)
+    now = math.hypot(robot.x - target.x, robot.y - target.y)
+    if relation == "to" and now <= d + distances.near_m:  # never backs away from "come closer"
+        return [_turn(target, robot, f"already {now:.2f} m from it: turn where it stands")]
     angle, heading = _frame(target, relation, toward)
     return _ring(target, angle, d, heading, distances.ring_deg, relation)
 
@@ -111,6 +122,14 @@ def facing_from(person_x: float, person_y: float, robot: Pose2D, head_yaw_deg: f
     """A person's facing on the map: toward the robot, turned by their head's yaw (degrees,
     positive when they look to their own left)."""
     return math.atan2(robot.y - person_y, robot.x - person_x) + math.radians(head_yaw_deg)
+
+
+def _turn(target: Target, robot: Pose2D, note: str) -> Stand:
+    """Where the robot stands, turned to face the target (its heading kept when it stands on
+    the target's point)."""
+    dx, dy = target.x - robot.x, target.y - robot.y
+    yaw = math.atan2(dy, dx) if math.hypot(dx, dy) > 1e-6 else robot.yaw_rad
+    return Stand(robot.x, robot.y, yaw, note, in_place=True)
 
 
 def _toward(target: Target, robot: Pose2D) -> float:

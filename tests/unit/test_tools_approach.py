@@ -252,6 +252,33 @@ def test_a_spoken_distance_is_kept_but_never_nearer_than_the_minimum() -> None:
     assert "between 0.2 and 3" in call(fake_robot(), target="me", distance_m=5.0)["why"]
 
 
+def test_come_closer_when_already_near_and_facing_does_not_move() -> None:
+    """The person 0.85 m ahead (within the 0.8 m stand distance plus near_m), the robot facing
+    them: nothing is planned or driven, and the answer says it is there."""
+    robot = fake_robot()
+    eyes(robot).point = (0.95, 0.05, 1.55)
+    result = call(robot, target="me")
+    assert result["ok"] and result["moved"] is False and result["arrived"] is True
+    assert result["stand"]["choice"].startswith("1 of 1: already 0.85 m from it")
+    assert not sent(robot) and not planned(robot)
+
+
+def test_turn_to_me_is_a_turn_where_the_robot_stands() -> None:
+    """The person to the robot's left: one plan and one goal at the robot's own spot, turned
+    toward them (the goal server's go turns in place)."""
+    robot = fake_robot()
+    eyes(robot).point = (0.1, 1.6, 1.55)
+    result = call(robot, target="me", relation="face")
+    assert result["ok"], result
+    (goal,) = sent(robot)
+    assert (goal["x"], goal["y"], goal["yaw_deg"]) == pytest.approx((0.1, 0.05, 90.0))
+    assert len(planned(robot)) == 1
+    near = fake_robot()
+    eyes(near).point = (0.6, 0.6, 1.55)  # 0.74 m off at 48 deg: "come closer" only turns
+    assert call(near, target="me")["stand"]["heading_deg"] == 48
+    assert [(g["x"], g["y"]) for g in sent(near)] == [(0.1, 0.05)]
+
+
 def test_approach_is_a_drive_of_the_registry() -> None:
     assert TOOLS["approach"].moves
     assert [p.name for p in TOOLS["approach"].params] == ["target", "relation", "distance_m"]
