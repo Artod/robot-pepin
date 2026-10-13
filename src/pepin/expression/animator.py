@@ -718,7 +718,8 @@ class GestureEngine:
     ) -> list[Outcome]:
         """``request`` capped, rendered and placed (on the engine's thread); a word's anchor
         becomes a cue on its part. Markers and moments are capped (and logged ``capped``); a
-        tool's, the pulse's and the idle layer's are not."""
+        tool's, the pulse's, the idle layer's and the engine's own compositions (the book's
+        callable-false ensembles, the listeners' by name) are not, and count under none."""
         if not self._on:
             return []
         if cue is None and isinstance(request.anchor, AtWord):
@@ -728,7 +729,11 @@ class GestureEngine:
                                          "why": "its part is not with the voice"})  # fmt: skip
                 return []
         turn, index = (cue.turn, cue.index) if cue is not None else (None, None)
-        capped = request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips
+        composition = self.book.compositions.get(request.intent)
+        own = composition is not None and not composition.callable
+        capped = (
+            request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips and not own
+        )
         tally = self._tally(request.intent, turn) if capped else "counted"
         if capped:
             refusal = self._capped(request.intent, cue, tally)
@@ -740,7 +745,7 @@ class GestureEngine:
             performance = Performance(request.intent, 0, 0, request.clips, cue)
         else:
             rendered = self._render(request.intent, request.source, cue, request,
-                                    counted=tally == "counted")  # fmt: skip
+                                    counted=capped and tally == "counted")  # fmt: skip
             if rendered is None:
                 return []
             performance = rendered
@@ -794,13 +799,15 @@ class GestureEngine:
         counted: bool = True,
         arg: str | None = None,
     ) -> Performance | None:
-        """``intent`` rendered for the parts ready now (``arg``: an ask's argument), the arm's
-        and the body's clips stretched to their speed scales (the arm left out past
-        ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
+        """``intent`` rendered for the parts ready now that the request may use (``arg``: an ask's
+        argument), the arm's and the body's clips stretched to their speed scales (the arm left out
+        past ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
         later item); logged with its seed. None when it cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
+        if request.parts is not None:
+            ready &= request.parts
         scene = Scene(ready, speaking=bool(self._replying), conversation=self._conversation,
                       distance_m=self._view().distance_m)  # fmt: skip
         for hook in self.scene_hooks:

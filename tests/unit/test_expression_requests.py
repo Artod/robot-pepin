@@ -16,7 +16,7 @@ import pytest
 
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Range, Scene, Track
-from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
+from pepin.expression.animator import ARM_REST_S, Caps, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
 from pepin.expression.executors import Executor
@@ -908,3 +908,79 @@ def test_a_mark_s_last_stroke_stays_up_while_the_listeners_want_the_arm_up() -> 
     mark(3)
     rig.tick(2.5)
     assert rig.sent()[-1].then == "rest"
+
+
+# -- one body: the engine's own ensembles, by name ------------------------------------------------
+
+
+def test_a_request_s_parts_bound_its_rendering_and_the_engine_s_own_pass_the_caps() -> None:
+    """The listeners ask for the book's own ensembles by name with the parts they found free:
+    the rendering uses those alone; they are never capped and never count, so a mark of the
+    brain's still plays under a per-minute cap of one."""
+    rig = Rig(caps=Caps(per_minute=1))
+    for _ in range(3):
+        rig.engine.request(Request("pulse_strong", None, Priority.PULSE, "pulse",
+                                   parts=frozenset({"head"})))  # fmt: skip
+        rig.engine.request(Request("listen_nod", None, Priority.MOMENT, "moment",
+                                   parts=frozenset({"head"})))  # fmt: skip
+        rig.tick(1.0)
+    shown = [f for k, f in rig.records if k == "performance"]
+    assert [f["parts"] for f in shown] == [["head"]] * 6
+    assert not [f for k, f in rig.records if k == "capped"]
+    rig.engine.request(Request("agreement", None, Priority.MARK, "marker"))
+    rig.tick(0.05)
+    assert [f for k, f in rig.records if k == "performance"][-1]["intent"] == "agreement"
+
+
+def test_a_pulse_s_arm_beat_rides_the_held_unit_and_keeps_its_hold() -> None:
+    """The arm held up for reply 1 (a posture's way): the strong accent's wrist beat starts from
+    the held pose and ends held for the rest of the unit's hold; once the unit has gone to rest
+    a beat still waiting is dropped, never played from rest."""
+    rig = Ladder()
+    hold_arm(rig, 1, hold_s=6.0)
+    rig.tick(0.7)
+    lifted = rig.sent()[-1]
+    until = rig.arm.held_until
+    rig.engine.request(Request("pulse_strong", AtStream(rig.playout.now + 1.0, 1), Priority.PULSE,
+                               "pulse", bind="word", parts=frozenset({"arm"})))  # fmt: skip
+    rig.tick(1.5)
+    beat = rig.sent()[-1]
+    assert beat is not lifted and beat.knots[0].deg == pytest.approx(lifted.knots[-1].deg)
+    assert beat.then == "hold" and rig.arm.held_until == pytest.approx(until, abs=0.02)
+    flex = JOINTS.index("wrist_flex")
+    assert 16.0 - 0.01 <= max(k.deg[flex] for k in beat.knots) - lifted.knots[-1].deg[flex] <= 20.01
+    rig.engine.request(Request("pulse_strong", AtStream(rig.playout.now + 1.0, 1), Priority.PULSE,
+                               "pulse", bind="word", parts=frozenset({"arm"})))  # fmt: skip
+    rig.tick(0.05)
+    rig.engine.hush("the person speaks")
+    rig.tick(1.5)
+    assert rig.sent()[-1] is beat
+    assert rig.rows("late", intent="pulse_strong")[-1]["why"] == "no unit holds the arm any more"
+
+
+def test_a_word_mark_s_wheels_are_fitted_loosely_and_left_out_alone_without_the_time() -> None:
+    """A word-bound mark with a nod and the cart's rock: mid-sentence the rock is fitted as an
+    utterance's (its stroke within late_s of the word) and sent with the nod; on the reply's
+    first word there is no time for the wheels: they are left out, the nod still lands."""
+    data = json.loads((CONFIG / "animation.json").read_text())
+    nod = {"atom": "head_nod", "params": {"amp_deg": 3.0, "period_s": 0.4}}
+    rock = {"atom": "body_rock", "params": {"amp_m": 0.01, "period_s": 0.75}}
+    variants = [{"steps": [nod, rock]}, {"floor": True, "steps": [nod]}]
+    data["compositions"]["rocky"] = {"bind": "word", "variants": variants}
+    book = with_rest(book_from(data), MOTION.rest_deg)
+    body = FakeExecutor("body", 0.15)
+    rig = Ladder(book, body=body)
+    text = "Мы поехали на дачу, и там было очень тихо и спокойно весь вечер."
+    rig.say(1, 0, text, "rocky", text.index("дачу"))
+    (row,) = rig.rows("ladder")
+    assert row["step"] == "authored" and set(row["parts"]) == {"head", "body"}
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(4.0)
+    assert [c for c in body.calls if c[0] == "play"] and rig.rows("send", part="head")
+    (sent,) = rig.rows("send", part="body")
+    assert sent["bind"] == "utterance" and sent["error_s"] <= 0.5
+    first = Ladder(book, body=FakeExecutor("body", 0.15))
+    first.say(1, 0, text, "rocky", 0)
+    (row,) = first.rows("ladder")
+    assert row["parts"] == ["head"] and "the wheels need" in row["why"]

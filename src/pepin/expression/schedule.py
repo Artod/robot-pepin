@@ -183,10 +183,11 @@ class Request:
     """Something to perform: ``intent`` (a composition of the book, or the name its ready
     ``clips`` are logged under), its ``anchor`` (None: now), its place in the table
     (``priority``, then ``rank``: lower first), who asked (``source``: "marker", "moment",
-    "tool", "pulse", "idle", ...), how its stroke binds to its word (or ``after`` it: a tail)
-    and the family a marker of the same kind absorbs it into. A request is itself:
-    :meth:`Scheduler.withdraw` and :meth:`pepin.expression.animator.GestureEngine.release` find
-    its clips by identity."""
+    "tool", "pulse", "idle", ...), how its stroke binds to its word (or ``after`` it: a tail),
+    the family a marker of the same kind absorbs it into, and the parts its rendering may use
+    (``parts``, None: any ready; the listeners leave out a part they find busy or without the
+    time). A request is itself: :meth:`Scheduler.withdraw` and
+    :meth:`pepin.expression.animator.GestureEngine.release` find its clips by identity."""
 
     intent: str
     anchor: Anchor | None = None
@@ -196,6 +197,7 @@ class Request:
     family: str | None = None
     rank: int = 0
     clips: tuple[Clip, ...] = ()
+    parts: frozenset[PartName] | None = None
 
 
 @dataclass(frozen=True)
@@ -681,8 +683,9 @@ class Scheduler:
             if not self._book(waiting, now):
                 continue
             if not isinstance(anchor_, AtStream) and waiting.due <= now:
-                self.reservations.unbook(id(waiting))
-                at_once.append(waiting)
+                checked = self._check(waiting, now)
+                if isinstance(checked, Due):
+                    at_once.append(checked.waiting)
                 continue
             self.waiting.append(waiting)
         return at_once
@@ -876,12 +879,12 @@ class Scheduler:
         now: float,
         reasons: list[str],
     ) -> list[Waiting]:
-        """The candidate's clips fitted to the time there is, or none when its arm or wheels
-        cannot make it (a head or face clip that cannot is left out alone)."""
+        """The candidate's clips fitted to the time there is, or none when its arm cannot make
+        it (a head, face or wheels clip that cannot is left out alone; the wheels never bind to a
+        word: fitted as an utterance's, their stroke within ``late_s`` of the aim, inside the
+        speech, and left out when they alone would run past what the speech covers)."""
         bind = _word_bind(request.bind)
         clips = list(candidate.performance.clips)
-        if bind != "utterance":
-            clips = [c for c in clips if c.part != "body"]  # never on a word
         allowance = self.timing.late_s if bind == "utterance" else 0.0
         held_only = self._held_only(candidate.performance)
         fitted: list[Waiting] = []
@@ -893,8 +896,11 @@ class Scheduler:
             aim = forecast.heard + self.timing.stroke_bias_s
             latency = self.latency(clip.part)
             lead = aim - now - latency
-            room = lead + allowance - min(forecast.spread, MARGIN_S)
-            fit = Fit(bind, candidate.step, "", lead, text_s, clip.stroke_s)
+            loose = clip.part == "body"
+            room = lead + (self.timing.late_s if loose else allowance)
+            room -= min(forecast.spread, MARGIN_S)
+            fit = Fit("utterance" if loose else bind, candidate.step, "", lead, text_s,
+                      clip.stroke_s)  # fmt: skip
             fit.heard[forecast.stage] = forecast.heard
             if clip.part == "arm":
                 deadline = now + latency + room
@@ -907,7 +913,6 @@ class Scheduler:
             elif fit.prep_s > room:
                 if clip.part == "body":
                     reasons.append(f"{candidate.step}: the wheels need {fit.prep_s:.2f} s")
-                    return []
                 continue  # this part alone cannot make it: the rest keeps its time
             else:  # an utterance-bound one may land late: it starts as soon as it can
                 fit.start = max(aim - fit.prep_s, now + latency)
@@ -917,6 +922,11 @@ class Scheduler:
             reasons.append(f"{candidate.step}: no part in time")
             return []
         why = self._too_long(fitted, mark, composition, now)
+        rest = [w for w in fitted if w.clip.part != "body"]
+        shorter = why is not None and rest and len(rest) < len(fitted)
+        if shorter and self._too_long(rest, mark, composition, now) is None:
+            reasons.append(f"{candidate.step}: the wheels left out ({why})")
+            fitted, why = rest, None
         if why is not None:
             reasons.append(f"{candidate.step}: {why}")
             return []
@@ -1153,10 +1163,15 @@ class Scheduler:
         when it was dropped."""
         anchor_ = waiting.request.anchor
         if waiting.cue is None and not isinstance(anchor_, AtStream):
-            if waiting.due <= now:
-                self.reservations.unbook(id(waiting))
-                return Due(waiting)
-            return waiting.due - now
+            if waiting.due > now:
+                return waiting.due - now
+            self.reservations.unbook(id(waiting))
+            ridden = self._ride(waiting, now)
+            if isinstance(ridden, str):
+                self._late(waiting, ridden)
+                return None
+            waiting.clip = ridden
+            return Due(waiting)
         if waiting.cue is None:
             return self._check_stream(waiting)
         fit, cue = waiting.fit, waiting.cue
@@ -1235,12 +1250,46 @@ class Scheduler:
             stroke = self._now + self.latency(waiting.clip.part) + waiting.clip.stroke_s
             if end is not None and stroke > end:
                 why = "past the speech"
-        if why is not None:
+        ridden = self._ride(waiting, self._now) if why is None else why
+        if isinstance(ridden, str):
             self.record("late", {"intent": waiting.performance.intent,
                                  "part": waiting.clip.part, "planned": round(target, 3),
-                                 "played": round(played, 3), "why": why})  # fmt: skip
+                                 "played": round(played, 3), "why": ridden})  # fmt: skip
             return None
+        waiting.clip = ridden
         return Due(waiting, (target, played))
+
+    def _ride(self, waiting: Waiting, now: float) -> Clip | str:
+        """A pulse's or the idle layer's arm clip as sent (any other clip as it is): over the pose
+        a unit holds, keeping the rest of that hold (its reply's posture's, when the listeners
+        keep the arm up for it, as a mark's last stroke does), else back to rest; or why it may
+        not go: its variant needs the arm up and no unit holds it any more, or the plan."""
+        clip, request = waiting.clip, waiting.request
+        arm = self._arm_part()
+        if clip.part != "arm" or request.priority < Priority.PULSE or arm is None:
+            return clip
+        held = arm.holding()
+        if held is None and self._held_only(waiting.performance):
+            return "no unit holds the arm any more"
+        planned = arm.plan(clip, base=held, start=None if held is None else _knot(held))
+        if isinstance(planned, str):
+            return f"the arm: {planned}"
+        if held is None:
+            return replace(clip, then="rest", hold_s=0.0)
+        ends = now + self.latency("arm") + planned.seconds
+        keep = arm.held_until - ends
+        turn = waiting.turn
+        if turn is not None and self._stays_up(turn):
+            hold = keep if keep > POST_STROKE_S else self.timing.unit_hold_s
+            speech = self._speech_end(turn, now)  # never far past the reply's sure speech
+            if speech is not None:
+                hold = min(hold, max(POST_STROKE_S, speech + SHORT_PAST_S - ends))
+        elif keep > POST_STROKE_S:
+            hold = keep
+        else:
+            return replace(clip, then="rest", hold_s=0.0)
+        self._arm_last = None
+        return replace(clip, then="hold", hold_s=round(hold, 3))
 
     def _late(self, waiting: Waiting, why: str) -> None:
         """A word's clip that can no longer land in its window: dropped and logged, the rest of
@@ -1478,6 +1527,8 @@ class Scheduler:
         """What a rendering of another variant may use: the parts ready now, refined by the
         engine's scene hooks for ``request``."""
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
+        if request.parts is not None:
+            ready &= request.parts
         scene = Scene(ready, speaking=True, conversation=True)
         for hook in self._hooks:
             scene = hook(scene, request)
