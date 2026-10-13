@@ -692,7 +692,7 @@ refused: `ros/laptop.sh kick goal_server`.
 
 ```bash
 uv run python scripts/gesture.py turn 10 --dry-run          # every check, nothing moves
-uv run python scripts/gesture.py turn 10 --speed 0.2        # 10 deg left in place; Ctrl-C halts
+uv run python scripts/gesture.py turn 10                    # 10 deg left at wheels.speed_scale; Ctrl-C halts
 uv run python scripts/gesture.py rock 2 --times 1           # 2 cm forward and back
 uv run python scripts/voice_cascade.py switch --flag speaker_gaze=on   # the turn toward a call
 ```
