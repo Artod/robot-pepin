@@ -422,9 +422,10 @@ def marked(text: str, name: str, at: int) -> Part:
     return Part(text, None, (Marker("gesture", name, at),))
 
 
-def test_a_marker_s_clips_go_when_the_player_reaches_their_word() -> None:
-    """The word starts at its share of the part; each clip goes its offset earlier, later by
-    the audio's lag, earlier by its part's latency."""
+def test_a_marker_s_clips_go_when_their_stroke_lands_on_its_word_s_vowel() -> None:
+    """The word's first vowel is heard after the part's leading silence at its share of the
+    rest, the speaker's lag later; each clip goes its preparation (and its part's latency)
+    before the stroke, aimed stroke_bias_s before the vowel (the word clock)."""
     rig = Rig(seed=7)
     text = "Ну что ж, привет всем!"
     rig.engine.part_queued(1, 0, marked(text, "agreement", 10))
@@ -433,32 +434,36 @@ def test_a_marker_s_clips_go_when_the_player_reaches_their_word() -> None:
     assert performance["seed"] == 7
     assert performance["share"] == pytest.approx(10 / len(text), abs=1e-3)
     rig.tick(0.5)
-    assert rig.played("head") == []  # no audio of the part yet: it waits
-    rig.playout.marks[(1, 0)] = (1.0, 1.0 + 0.07 * len(text))  # its first chunk is fed
+    assert rig.played("head") == []  # no audio of the part yet: the vowel is still >1 s away
+    length = 0.07 * len(text)
+    rig.playout.marks[(1, 0)] = (1.0, 1.0 + length)  # its first chunk is fed
     rig.engine.part_spoken(1, 0)
     rig.tick(3.0)
     (cue,) = [c for c in rig.kinds("cue") if c["part"] == "head"]
     clip = rig.played("head")[0]
-    word = 1.0 + 10 / len(text) * 0.07 * len(text)
-    assert cue["planned"] == pytest.approx(word + clip.offset_s + 0.15, abs=1e-3)
+    vowel = 1.0 + 0.16 + text.index("и") / len(text) * (length - 0.16)
+    assert cue["planned"] == pytest.approx(vowel + 0.15 - 0.05 - clip.stroke_s, abs=1e-3)
     assert 0.0 <= cue["late_s"] <= 0.011
 
 
-def test_a_clip_past_its_time_goes_at_once_and_a_much_later_one_is_dropped() -> None:
-    rig = Rig(seed=3)
-    rig.playout.now = 5.3
-    rig.playout.marks[(2, 0)] = (4.6, 6.0)  # the word was at 4.6 + 0.4 x 1.4 = 5.16
-    rig.engine.part_queued(2, 0, marked("Да да да.", "emphasis", 4))
-    rig.engine.part_spoken(2, 0)
-    rig.engine.step()
-    assert rig.played("head") or rig.played("arm")  # within late_s: sent at once
-    late = Rig(seed=3)
-    late.playout.now = 9.0
-    late.playout.marks[(2, 0)] = (4.6, 6.0)
-    late.engine.part_queued(2, 0, marked("Да да да.", "emphasis", 4))
-    late.engine.part_spoken(2, 0)
-    late.engine.step()
-    assert late.kinds("late") and not late.played("head") and not late.played("arm")
+def test_a_feeling_just_past_goes_at_once_a_word_s_never_late_one_long_past_dropped() -> None:
+    """The word's vowel was heard at 4.6 + 0.16 + 4/9 x (1.4 - 0.16) + the 0.15 lag = 5.46 on
+    the player's clock, aimed 0.05 earlier: at 5.6 an UTTERANCE feeling is 0.2 s past it,
+    inside late_s, and goes at once; a WORD mark is never late, so it is dropped at render
+    ("no time"), as is anything long past."""
+    for intent, now, played in (("agreement", 5.6, True), ("emphasis", 5.6, False),
+                                ("agreement", 9.0, False)):  # fmt: skip
+        rig = Rig(seed=3)
+        rig.playout.now = now
+        rig.playout.marks[(2, 0)] = (4.6, 6.0)
+        rig.engine.part_queued(2, 0, marked("Да да да.", intent, 4))
+        rig.engine.part_spoken(2, 0)
+        rig.engine.step()
+        moved = bool(rig.played("head") or rig.played("face") or rig.played("arm"))
+        assert moved == played, (intent, now)
+        if not played:
+            (dropped,) = rig.kinds("dropped")
+            assert dropped["why"] == "no time"
 
 
 def test_a_part_with_no_audio_plays_its_cues_once_the_voice_is_past_it() -> None:

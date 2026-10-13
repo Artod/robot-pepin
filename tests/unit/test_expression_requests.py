@@ -1,6 +1,9 @@
 """The gesture engine's contract for co-speech gesticulation: requests on every anchor, one
 priority table per part, the idle layer's states, attention first, the arm's planned stroke,
-the close that lets a farewell finish, and the book's new fields read with defaults."""
+the close that lets a farewell finish, and the book's new fields; then ON THE WORD: the ladder
+by the computed lead, the last-moment send, never a late word stroke, never in a pause, units,
+long compositions only with the speech to cover them, barge-in, the token stream's lead, the
+bookings, and the feelings' arm lengths."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -11,13 +14,15 @@ from typing import Any
 import pytest
 
 from pepin.arm_motion import load_arm_motion
-from pepin.expression.animation import Book, Clip, Idle, Performance, Range, Track
+from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Range, Scene, Track
 from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
 from pepin.expression.fakes import FakeArmLink, FakeAttention, FakeExecutor, FakePlayout
 from pepin.expression.markers import Marker, Part, cues
+from pepin.expression.mix import PREP_CAPS, prep_min_s
 from pepin.expression.parts import Absent, ArmPart
+from pepin.expression.render import BookRenderer
 from pepin.expression.schedule import (
     AtStream,
     AtTime,
@@ -26,9 +31,11 @@ from pepin.expression.schedule import (
     Request,
     Reservation,
     Reservations,
+    Timing,
+    timing_from,
 )
 from pepin.expression.speaker import Attention
-from pepin.expression.trajectory import ArmStatus
+from pepin.expression.trajectory import JOINTS, ArmStatus
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 MOTION = load_arm_motion(CONFIG / "arm.json")
@@ -144,12 +151,12 @@ def test_requests_go_at_their_word_their_stream_second_and_their_time() -> None:
     melody = Request("melody", AtStream(2.0, turn=1), Priority.IDLE, "pulse", clips=(NOD,))
     rig.engine.request(melody)
     rig.engine.request(Request("agreement", AtWord(1, 0, 10), Priority.MARK, "marker"))
-    rig.engine.request(Request("nod", AtTime(rig.now + 1.0), Priority.PULSE, "pulse", clips=(NOD,)))
+    rig.engine.request(Request("nod", AtTime(rig.now + 0.8), Priority.PULSE, "pulse", clips=(NOD,)))
     rig.engine.request(Request("early", AtWord(9, 0, 0), Priority.MARK, "marker"))
     rig.engine.step()
     unplaced = [f["why"] for k, f in rig.records if k == "unplaced"]
     assert unplaced == ["its part is not with the voice"]
-    rig.tick(0.68)  # the nod's stroke at +1.0: it starts 0.2 before, sent 0.1 earlier still
+    rig.tick(0.48)  # the nod's stroke at +0.8: it starts 0.2 before, sent 0.1 earlier still
     assert not rig.cues("head")
     rig.tick(0.03)
     (timed,) = rig.cues("head")
@@ -282,3 +289,379 @@ def test_the_arm_s_plan_says_when_its_stroke_lands_and_a_unit_plans_from_the_hel
     (_, (last,)) = link.calls[-1]
     assert last.knots[0].deg[1] == pytest.approx(lifted) and last.then == "rest"
     assert arm.held is None
+
+
+# -- on the word: the ladder, the last moment, units, the token stream (slice 2) ------------------
+
+
+def gesture_book() -> Book:
+    """Today's book and test intents of known timing: the arm to a pose with a co-stroke nod
+    (``point`` 0.6 s from rest, ``slow`` 1.4 s, ``near`` to a pose 15 deg of the wrist from
+    ``ready``, ``offer_it``), one over the caps with a smaller wrist version (``fast``), and a
+    long one (``long``: 3 s of arm), each with its head-and-face floor."""
+    data = json.loads((CONFIG / "animation.json").read_text())
+    ready = data["poses"]["ready"]
+    data["poses"]["near"] = {**ready, "wrist_flex": ready["wrist_flex"] - 15.0}
+    nod = {"atom": "head_nod", "params": {"amp_deg": 3.0, "period_s": 0.4}}
+    face = {"atom": "face", "params": {"name": "happy", "hold_s": 2.0}}
+    floor = {"floor": True, "steps": [nod]}
+
+    def pose(name: str, period: float, hold: float = 0.3) -> dict[str, Any]:
+        return {"atom": "arm_pose", "params": {"pose": name, "period_s": period, "hold_s": hold}}
+
+    data["compositions"].update({
+        "point": {"bind": "word", "variants": [{"steps": [pose("ready", 0.6), nod]}, floor]},
+        "point_hold": {"bind": "word", "variants": [
+            {"steps": [pose("ready", 0.6, 0.8), nod]}, floor]},
+        "slow": {"bind": "word", "variants": [{"steps": [pose("ready", 1.4), nod]}, floor]},
+        "near": {"bind": "word", "variants": [{"steps": [pose("near", 0.6), nod]}, floor]},
+        "offer_it": {"bind": "word", "variants": [{"steps": [pose("offer", 0.6), nod]}, floor]},
+        "fast": {"bind": "word", "variants": [
+            {"steps": [pose("ready", 0.33), nod]},
+            {"weight": 1e-6, "steps": [
+                {"atom": "arm_beat", "params": {"amp_deg": 10.0, "period_s": 0.6}}, nod]},
+            floor,
+        ]},
+        "long": {"bind": "utterance", "variants": [
+            {"steps": [pose("raised", 1.0, 2.0), face]},
+            {"floor": True, "steps": [face, nod]},
+        ]},
+    })  # fmt: skip
+    return with_rest(book_from(data), MOTION.rest_deg)
+
+
+GESTURES = gesture_book()
+
+
+class Ladder:
+    """An engine over the arm's real planner on a fake board, fake head and face, a fake player
+    and a fake clock; the scheduler is lent the engine's parts and renderer (the seam)."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+        self.playout = FakePlayout(now=1.0)
+        self.link = FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"))
+        self.arm = ArmPart(self.link, MOTION, latency_s=0.06, clock=lambda: self.now)
+        self.head, self.face = FakeExecutor("head", 0.1), FakeExecutor("face", 0.05)
+        self.records: list[tuple[str, dict[str, Any]]] = []
+        config = EngineConfig(arm_speed_scale=1.0, audio_lag_s=0.15, seed=7)
+        parts = {"arm": self.arm, "head": self.head, "face": self.face,
+                 "body": Absent("body", "no wheels")}  # fmt: skip
+        self.engine = GestureEngine(
+            parts, self.playout, lambda: (GESTURES, config), on=True,  # type: ignore[arg-type]
+            clock=lambda: self.now, record=lambda kind, fields: self.records.append((kind, fields)),
+        )  # fmt: skip
+        self.engine.scheduler.attach(self.engine.parts, lambda: self.engine.renderer)
+
+    def rows(self, kind: str, **match: Any) -> list[dict[str, Any]]:
+        rows = [f for k, f in self.records if k == kind]
+        return [r for r in rows if all(r.get(k) == v for k, v in match.items())]
+
+    def sent(self) -> list[Any]:
+        return [args[0] for name, args in self.link.calls if name == "send"]
+
+    def tick(self, seconds: float) -> None:
+        for _ in range(round(seconds / 0.01)):
+            self.now += 0.01
+            self.playout.now += 0.01
+            self.engine.step()
+
+    def say(self, turn: int, index: int, text: str, marker: str | None = None, at: int = 0) -> None:
+        markers = (Marker("gesture", marker, at),) if marker else ()
+        self.engine.part_queued(turn, index, Part(text, None, markers))
+        self.engine.step()
+
+    def start(self, turn: int, index: int, fed: float, *, spoken: bool = True) -> None:
+        """The part's first chunk is fed now (all of it, ``fed`` seconds, when ``spoken``), in
+        the stream where the part before it ends (or at the second playing)."""
+        before = self.playout.marks.get((turn, index - 1))
+        at = before[1] if before is not None else self.playout.now
+        self.playout.marks[(turn, index)] = (at, at + fed)
+        self.engine.part_started(turn, index, at)
+        if spoken:
+            self.engine.part_spoken(turn, index)
+
+    def heard(self, turn: int, index: int, char: int) -> float:
+        """When character ``char`` is heard by the clock's law, on the engine's clock."""
+        forecast = self.engine.scheduler.words.at(turn, index, char, self.now)
+        assert forecast is not None
+        return forecast.heard
+
+
+def first_vowel(text: str, word: str) -> int:
+    at = text.index(word)
+    return at + next(i for i, c in enumerate(word) if c.lower() in "аеёиоуыэюя")
+
+
+def test_a_first_word_mark_gets_what_the_computed_ladder_gives() -> None:
+    """«{point} Принтер вон там.»: at TEXT the first vowel is heard 0.10 (the voice's first chunk,
+    p10) + 0.16 (its leading silence) + its share + 0.15 (the speaker) after it, 0.4 s of lead
+    to the aimed stroke: the arm's least preparation from rest (0.41 s at 0.9 of the caps) does
+    not fit, the head nod does: the floor, on its word."""
+    rig = Ladder()
+    text = "Принтер вон там."
+    rig.say(1, 0, text, "point", 0)
+    (row,) = rig.rows("ladder")
+    aim = rig.heard(1, 0, first_vowel(text, "Принтер")) - 0.05
+    forecast = rig.engine.scheduler.words.at(1, 0, first_vowel(text, "Принтер"), rig.now)
+    assert forecast is not None
+    room = aim - rig.now - 0.06 - min(forecast.spread, 0.3)
+    drawn = rig.engine.renderer.render("point", Scene(frozenset(PARTS)), 7, variant=0)
+    clip = next(c for c in drawn.clips if c.part == "arm")
+    least = prep_min_s(clip, rig.arm.base, JOINTS, *rig.arm.caps(PREP_CAPS))
+    assert (row["step"] == "floor") == (least > room)
+    assert row["step"] == "floor" and row["parts"] == ["head"]
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(1.0)
+    (head,) = rig.rows("send", part="head")
+    assert -0.01 <= head["error_s"] <= 0.01 and not rig.sent()
+
+
+def test_the_same_mark_mid_sentence_with_0_9_s_takes_the_arm_from_rest() -> None:
+    rig = Ladder()
+    text = "Принтер вон там, у стены."
+    rig.say(1, 0, text, "point", text.index("вон"))
+    (row,) = rig.rows("ladder")
+    assert 0.8 <= row["lead_s"] <= 1.2 and row["step"] == "authored" and row["base"] == "rest"
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(2.0)
+    (arm,) = rig.rows("send", part="arm")
+    (trajectory,) = rig.sent()
+    assert -0.3 <= arm["error_s"] <= 0.15 and arm["stage"] == "start"
+    assert trajectory.knots[0].deg == pytest.approx(MOTION.rest(), abs=0.01)
+    assert trajectory.then == "rest"
+    (head,) = rig.rows("send", part="head")
+    assert abs(head["stroke"] - arm["stroke"]) < 0.02  # the co-stroke
+
+
+def test_a_preparation_too_slow_for_its_lead_is_compressed_and_still_lands() -> None:
+    rig = Ladder()
+    text = "Принтер вон там, у стены."
+    rig.say(1, 0, text, "slow", text.index("вон"))
+    (row,) = rig.rows("ladder")
+    assert row["step"] == "compressed" and "slow" not in row["why"]
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(2.0)
+    (arm,) = rig.rows("send", part="arm")
+    assert -0.3 <= arm["error_s"] <= 0.15
+    held = rig.engine.scheduler.reservations.last("arm")
+    assert held is not None and held.stroke - held.started < 1.0  # authored 1.4 s, now faster
+
+
+def test_two_arm_marks_1_5_s_apart_are_one_unit_the_second_from_the_held_pose() -> None:
+    rig = Ladder()
+    first, second = "Есть план и ещё.", "Второй."
+    rig.say(1, 0, first, "point", first.index("план"))
+    rig.say(1, 1, second, "offer_it", 0)
+    rig.playout.marks[(1, 0)] = (2.0, 4.0)
+    rig.playout.marks[(1, 1)] = (4.0, 5.0)
+    for index in (0, 1):
+        rig.engine.part_started(1, index, rig.playout.marks[(1, index)][0])
+        rig.engine.part_spoken(1, index)
+    rig.tick(0.02)
+    gap = rig.heard(1, 1, first_vowel(second, "Второй")) - rig.heard(
+        1, 0, first_vowel(first, "план")
+    )
+    assert 1.3 <= gap <= 1.7
+    rig.tick(5.0)
+    opened, closed = rig.sent()
+    assert opened.then == "hold" and 0.15 <= opened.hold_s <= 2.5
+    assert closed.knots[0].deg == pytest.approx(opened.knots[-1].deg, abs=0.01)  # the held pose
+    assert closed.then == "rest"
+    assert [r["base"] for r in rig.rows("send", part="arm")] == ["rest", "unit"]
+
+
+def test_a_unit_s_next_stroke_takes_the_arm_during_the_last_one_s_hold() -> None:
+    """Marks 1.0 s apart (at TEXT, part 1 forecast after part 0's characters): the second
+    stroke's preparation (from the held ``ready`` to ``near``) is compressed to start inside the
+    first clip's own 0.8 s hold, and the board takes it there (the hold waits for it)."""
+    rig = Ladder()
+    first, second = "Есть план и ещё.", "Второй."
+    rig.say(1, 0, first, "point_hold", first.index("план"))
+    rig.say(1, 1, second, "near", 0)
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(first))
+    rig.tick(0.5)
+    rig.start(1, 1, 0.09 * len(second))
+    rig.tick(3.0)
+    opened, closed = rig.sent()
+    assert opened.then == "hold" and closed.knots[0].deg == pytest.approx(opened.knots[-1].deg)
+    first_send, second_send = rig.rows("send", part="arm")
+    assert second_send["step"] == "compressed" and second_send["base"] == "unit"
+    assert second_send["send"] - first_send["send"] < opened.knots[-1].t_s  # inside the hold
+    assert all(c["ok"] for c in rig.rows("cue", part="arm"))
+
+
+def test_w_moving_later_never_makes_an_arm_stroke_late_and_the_head_still_lands() -> None:
+    """Part 1's word is forecast where part 0's characters end; the arm commits on that (TEXT);
+    part 0 then runs 0.5 s longer: the arm's stroke comes early (free), never late, and the
+    head, sent at its last moment on part 1's own audio, lands on the word."""
+    rig = Ladder()
+    first, second = "Есть план.", "Второй план дешевле."
+    rig.say(1, 0, first)
+    rig.say(1, 1, second, "slow", 0)
+    rig.tick(0.1)
+    rig.start(1, 0, 0.3, spoken=False)  # part 0 starts as forecast, its length still unknown
+    rig.tick(0.3)
+    (arm,) = rig.rows("send", part="arm")
+    assert arm["stage"] == "text"  # committed before part 1 had any audio
+    rig.playout.marks[(1, 0)] = (rig.playout.marks[(1, 0)][0], rig.playout.marks[(1, 0)][0] + 1.4)
+    rig.engine.part_spoken(1, 0)  # 1.4 s instead of the 0.9 forecast: the word 0.5 s later
+    rig.tick(0.6)
+    rig.start(1, 1, 0.09 * len(second))
+    aim = rig.heard(1, 1, first_vowel(second, "Второй")) - 0.05 - 1000.0  # after TEXT
+    rig.tick(2.0)
+    assert arm["stroke"] <= aim + 0.15 and aim - arm["stroke"] > 0.3  # early, never late
+    (head,) = rig.rows("send", part="head")
+    assert abs(head["error_s"]) <= 0.01 and abs(head["stroke"] - aim) <= 0.01
+    early = Ladder()  # the other way: part 0 shorter before the arm went: the arm is left out
+    early.say(1, 0, first)
+    early.say(1, 1, second, "slow", 0)
+    early.tick(0.1)
+    early.start(1, 0, 0.5)  # all of part 0 at once, 0.4 s shorter than its characters
+    early.tick(2.5)
+    early.start(1, 1, 0.09 * len(second))
+    early.tick(2.0)
+    assert not early.sent() and early.rows("late", part="arm")
+    (late_head,) = early.rows("send", part="head")
+    assert abs(late_head["error_s"]) <= 0.01
+
+
+def test_a_mark_before_a_pause_takes_the_next_word_or_is_dropped() -> None:
+    rig = Ladder()
+    rig.say(1, 0, "Это очень важно.", "emphasis", len("Это очень важно"))
+    assert rig.rows("dropped", why="in a pause: no word after it")
+    feeling = Ladder()
+    text = "Это очень важно."
+    feeling.say(1, 0, text, "agreement", len("Это очень важно"))
+    (waiting,) = [w for w in feeling.engine.scheduler.waiting if w.clip.part == "head"]
+    assert waiting.cue is not None and waiting.cue.word == (text.index("важно"), len(text) - 1)
+    comma = Ladder()
+    text = "Цены выросли вдвое, но потом упали."
+    comma.say(1, 0, text, "point", text.index(","))
+    head = next(w for w in comma.engine.scheduler.waiting if w.clip.part == "head")
+    assert head.cue is not None and head.cue.word[0] == text.index("но")  # after the pause
+
+
+def test_a_long_composition_is_refused_with_short_speech_ahead() -> None:
+    short, long = Ladder(), Ladder()
+    short.say(1, 0, "Ну ладно, давай.", "long", 3)
+    long.say(1, 0, "Ну ладно, давай поговорим об этом подробнее, у нас много времени.", "long", 3)
+    (refused,) = short.rows("ladder")
+    assert refused["step"] == "floor" and "of speech ahead" in refused["why"]
+    (played,) = long.rows("ladder")
+    assert played["step"] in ("authored", "compressed") and "arm" in played["parts"]
+
+
+def test_a_clip_over_the_caps_steps_down_and_its_stroke_is_never_later_than_planned() -> None:
+    rig = Ladder()
+    text = "Принтер вон там, у стены, слева."
+    rig.say(1, 0, text, "fast", text.index("стены"))
+    (row,) = rig.rows("ladder")
+    drawn = rig.engine.renderer.render("fast", Scene(frozenset(PARTS)), 7, variant=0)
+    planned = rig.arm.plan(next(c for c in drawn.clips if c.part == "arm"))
+    assert not isinstance(planned, str) and 1.05 <= planned.stretch <= 1.15  # 1.1x the caps
+    assert row["step"] == "smaller" and f"{planned.stretch:.2f}x the caps" in row["why"]
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(3.0)
+    (arm,) = rig.rows("send", part="arm")
+    held = rig.engine.scheduler.reservations.last("arm")
+    assert held is not None
+    # the stroke the scheduler sent it for is the arm's plan (the engine's, from the send; the
+    # arm's 0.06 s latency on top): never later than planned, inside the word's window
+    assert held.stroke + 0.06 == pytest.approx(held.started + arm["stroke"] - arm["send"])
+    assert -0.3 <= arm["error_s"] <= 0.15
+    assert all(t.knots[-1].t_s <= 1.5 for t in rig.sent())
+
+
+def test_barge_in_drops_the_reply_s_forecasts_and_a_flushed_stream_does_not_revive_them() -> None:
+    rig = Ladder()
+    rig.say(1, 0, "Принтер вон там, у стены.", "point", 8)
+    assert rig.engine.scheduler.waiting
+    rig.engine.reply_cut(1)
+    rig.engine.step()
+    scheduler = rig.engine.scheduler
+    assert not scheduler.waiting and not [k for k in scheduler.spoken if k[0] == 1]
+    assert scheduler.words.at(1, 0, 3, rig.now) is None and rig.rows("dropped", why="cut")
+    rig.start(1, 0, 1.0)  # the flushed stream's seconds come back
+    rig.tick(2.0)
+    assert not rig.sent() and not rig.head.calls
+
+
+def test_a_token_stream_mark_gains_its_lead() -> None:
+    """«{near} Держи.»: at TEXT the first word's stroke is 0.38 s off, too soon for the arm from
+    rest (0.35 s at 0.9 of the caps, with the latency and the spread); from the token stream
+    0.35 s earlier (the measured p50 is 0.18, p90 0.70) the arm goes home (``ready``, 0.41 s)
+    and holds, and the stroke at TEXT goes from there (0.17 s)."""
+    without = Ladder()
+    without.say(1, 0, "Держи.", "near", 0)
+    assert without.rows("ladder")[0]["step"] == "floor"
+    rig = Ladder()
+    rig.engine.text_ahead(1, 0, "{near} Держи")
+    rig.engine.step()
+    (prepared,) = rig.rows("prepared")
+    (home,) = rig.sent()
+    assert home.then == "hold" and prepared["pose"] == "ready"
+    ready = tuple(GESTURES.poses["ready"][j] for j in JOINTS)
+    assert home.knots[-1].deg == pytest.approx(ready, abs=0.01)
+    rig.tick(0.35)
+    rig.say(1, 0, "Держи.", "near", 0)
+    (row,) = rig.rows("ladder")
+    assert row["step"] != "floor" and row["base"] == "unit"
+    rig.tick(0.1)
+    rig.start(1, 0, 0.54)
+    rig.tick(1.0)
+    stroke = rig.sent()[-1]
+    assert stroke.knots[0].deg == pytest.approx(ready, abs=0.01)  # from the held home pose
+    (arm,) = rig.rows("send", part="arm")
+    assert -0.3 <= arm["error_s"] <= 0.15
+
+
+def test_a_lower_request_is_refused_a_part_promised_to_a_mark_and_a_tool_takes_it() -> None:
+    rig = Ladder()
+    text = "Принтер вон там, у стены."
+    rig.say(1, 0, text, "point", text.index("вон"))
+    head = next(w for w in rig.engine.scheduler.waiting if w.clip.part == "head")
+    assert head.fit is not None
+    when = head.fit.stroke
+    rig.engine.request(Request("nod", AtTime(when), Priority.PULSE, "pulse", clips=(NOD,)))
+    rig.engine.step()
+    assert rig.rows("refused", intent="nod", part="head")
+    rig.tick(round(head.fit.start - rig.now - 0.2, 2))  # the person asks just before it
+    assert rig.engine.perform("agreement", source="tool").ok
+    assert rig.rows("displaced", part="head", by="agreement")
+
+
+def test_every_feeling_holds_the_arm_at_most_2_5_s_before_the_board_s_return() -> None:
+    """The utterance-bound compositions' arm clips (the board's return to rest comes after), at
+    the corners of their draws; evil_click keeps its live-tuned 3-4 s (Artem's tuning)."""
+    renderer = BookRenderer(BOOK)
+    arm = ArmPart(FakeArmLink(), MOTION)
+    scene = Scene(frozenset(PARTS))
+    for name, composition in BOOK.compositions.items():
+        if composition.bind != "utterance" or name == "evil_click":
+            continue
+        longest: Clip | None = None
+        for k in range(len(composition.variants)):
+            for seed in range(60):
+                performance = renderer.render(name, scene, seed, variant=k)
+                for clip in performance.clips:
+                    if clip.part == "arm" and (
+                        longest is None or clip.duration_s > longest.duration_s
+                    ):
+                        longest = clip
+        if longest is None:
+            continue
+        planned = arm.plan(longest)
+        assert not isinstance(planned, str), name
+        assert planned.trajectory.knots[-1].t_s <= 2.5, name
+
+
+def test_the_scheduler_s_knobs_are_config_expression_json_s() -> None:
+    data = json.loads((CONFIG / "expression.json").read_text())
+    assert timing_from(data) == Timing()
+    assert timing_from({}) == Timing()
