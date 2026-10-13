@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -16,6 +17,7 @@ from pepin.perception.fakes import FakePerception
 from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT, Face, Person, Record
 from pepin.perception.source import SNAPSHOT, VisionSource
 from pepin.pixel_to_map import Box
+from pepin.stand_pose import RELATIONS
 from pepin.tools import TOOLS, Result, Robot, ToolError
 from pepin.tools.clients import (
     MATCH_DEG,
@@ -34,6 +36,8 @@ from pepin.tools.fakes import (
     FakeSightings,
     fake_robot,
 )
+
+REPO = Path(__file__).resolve().parents[2]
 
 
 def call(robot: Robot, /, **arguments: Any) -> Result:
@@ -239,7 +243,7 @@ def test_a_goal_server_without_the_plan_check_is_told_to_restart() -> None:
     robot = fake_robot()
     goals(robot).plan_error = "unknown command 'plan'"
     result = call(robot, target="me")
-    assert "restart Nav2" in result["why"]
+    assert "ros/laptop.sh kick goal_server" in result["why"]
     assert not sent(robot)
 
 
@@ -282,6 +286,28 @@ def test_turn_to_me_is_a_turn_where_the_robot_stands() -> None:
 def test_approach_is_a_drive_of_the_registry() -> None:
     assert TOOLS["approach"].moves
     assert [p.name for p in TOOLS["approach"].params] == ["target", "relation", "distance_m"]
+    relation = TOOLS["approach"].input_schema()["properties"]["relation"]
+    assert relation["enum"] == list(RELATIONS) and "face" in relation["enum"]
+
+
+def test_the_brain_is_told_approach_and_never_go_to_pose_for_a_person() -> None:
+    """The morning of 2026-10-13: "подъедь ко мне поближе" became go_to_pose 0.7 m toward
+    Artem, a goal inside his footprint, and a minute of backing up and spinning. The tool's
+    description, go_to_pose's and the persona each say which tool a person's request is."""
+    said = " ".join(TOOLS["approach"].description.split())
+    for request in (
+        "come closer",
+        "stand beside me",
+        "turn to me",
+        "go to the printer and face it",
+    ):
+        assert request in said, request
+    assert "Never use go_to_pose to reach or face a person" in said
+    pose = " ".join(TOOLS["go_to_pose"].description.split())
+    assert "Never for a person" in pose and "call approach" in pose
+    persona = (REPO / "config" / "voice_cascade_persona.md").read_text()
+    (line,) = [row for row in persona.splitlines() if "call approach" in row]
+    assert "подъедь поближе" in line and "never call go_to_pose toward a person" in line
 
 
 # -- the speaker as the camera channel's records and the speaker gaze give it --------------------

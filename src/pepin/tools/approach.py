@@ -5,10 +5,12 @@ The target becomes a map point through :mod:`pepin.pixel_to_map` (``robot.eyes``
 in the box's own pixel space) — the person the robot talks with (``robot.sightings``: the one the
 speaker gaze holds, their face or body box on the camera channel's newest still frame), a place
 from the goal server's book, or a box of the last ``see`` picture — and the relation a
-standing pose with two alternatives (:mod:`pepin.stand_pose`). Each is asked of the goal server's
-``plan`` (RTAB-Map's map cell and one plan: never motion, because the navigator answers a refused
-goal by turning and backing up) until one would be driven, and that ONE goal is driven by
-:func:`pepin.tools.drive.drive` exactly as ``go_to``'s. On arrival the head turns to the target
+standing pose with two alternatives (:mod:`pepin.stand_pose`: never nearer a person than the
+social minimum). Each is asked of the goal server's ``plan`` (RTAB-Map's map cell, Nav2's costmap
+under the cart's whole hull standing there, then one plan: never motion, because the navigator
+answers an unreachable goal by turning and backing up beside the person) until one would be
+driven, and that ONE goal is driven by :func:`pepin.tools.drive.drive` exactly as ``go_to``'s;
+when none would, the tool says why and nothing moves. On arrival the head turns to the target
 through the ``look`` path. Nothing here follows anyone: one goal per call.
 """
 
@@ -112,8 +114,8 @@ def _turn_deg(here: Pose2D, stand: Stand) -> float:
 
 def resolve(robot: Robot, target: str, here: Pose2D, distances: Distances) -> Resolved:
     """The model's target as a :class:`Resolved`: a place of the book (matched first, so a name
-    is never read as a box), a box of the last ``see`` picture, or the speaker's face;
-    :class:`ToolError` naming the three when it is none of them."""
+    is never read as a box), a box of the last ``see`` picture, or the person the robot talks
+    with; :class:`ToolError` naming the three when it is none of them."""
     from pepin.pixel_to_map import Box as Rectangle
 
     words = target.strip()
@@ -236,8 +238,9 @@ def first_plannable(robot: Robot, candidates: list[Stand]) -> tuple[int, Stand |
             detail = str(answer.get("detail", ""))
             if "unknown command" in detail:
                 raise ToolError(
-                    "the goal server cannot check a spot without driving to it (a build from"
-                    " before the approach tool): restart Nav2 (ros/laptop.sh nav); nothing moved"
+                    "the goal server cannot check a spot without driving to it (started before"
+                    " its plan command): restart it (ros/laptop.sh kick goal_server); nothing"
+                    " moved"
                 )
             raise ToolError(f"the goal server could not check the spot: {detail}; nothing moved")
         if answer.get("ok"):

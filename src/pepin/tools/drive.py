@@ -116,7 +116,10 @@ def go_to(robot: Robot, place: str) -> Result:
 @tool(moves=True)
 def go_to_pose(robot: Robot, x: float, y: float, yaw_deg: float) -> Result:
     """Drive to a point of the map and wait until the drive ends, as go_to does. Prefer go_to
-    with a named place; this is for a position read off the map (map_tree, recall).
+    with a named place; this is for a position read off the map (map_tree, recall). Never for
+    a person: to come to someone, closer, beside them or to turn to them, call approach, which
+    measures where they are and keeps its distance (a point at a person is a goal inside their
+    footprint, and the robot backs up and spins beside them).
 
     Args:
         x: map x in metres.

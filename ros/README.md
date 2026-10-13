@@ -114,6 +114,28 @@ false`.
 `where` also says `lidar`: `ok`, or how long no scan has reached Nav2. A lidar plugged in after
 the board's stack started needs that stack restarted (`ros/restart.sh board`).
 
+**Coming to a person: the `approach` tool** (`src/pepin/tools/approach.py`, the voice brain's and
+the MCP server's). "Подъедь ко мне", "подъедь поближе", "встань рядом", "повернись ко мне",
+"подъедь к принтеру и повернись к нему" are `approach(target, relation)`, never `go_to_pose` at
+a person (2026-10-13: a goal 0.7 m toward Artem sat inside his footprint, and Nav2 backed up and
+spun for a minute). The target: `me` is the person the speaker gaze holds, their face (else their
+body) box on the camera channel's newest frame taken since the head stopped, measured by the
+depth host's stereo (Depth-Anything's mono where stereo is blank) in that frame's own rectified
+pixels (`pepin.pixel_to_map`); a place is the goal server's book; a box `x0,y0,x1,y1` is in the
+pixels of the last `see` picture (the channel's rectified eye as drawn, a snapshot's raw eye
+rectified once), refused once the head has turned. Where to stand (`pepin.stand_pose`, the
+numbers in `config/approach.json`, read at each call): `to` 0.8 m, the sides 0.7 m, never nearer
+a person than 0.6 m plus two sigma of their depth, two alternatives 30 deg either way about the
+target; `face`, and a `to` from already within 0.15 m of the stand distance, are a turn where the
+robot stands ("come closer" never backs it away). Each candidate goes to the goal server's `plan`
+(never motion): RTAB-Map's `/map` cell under it (unknown, occupied, outside: refused), Nav2's
+global costmap under the cart's whole hull standing there (a lethal cell, a person's legs among
+them: refused), one ComputePathToPose. The first that plans is the ONE `go`; when none does, the
+tool says why and nothing moves. On arrival the head turns to the target. A goal server started
+before `plan` answers "unknown command" and the tool says so (`ros/laptop.sh kick goal_server`).
+It needs the depth host (`ros/depth_host.sh stereo`) and the perception service;
+`vision.source snapshot` refuses `me` (a `see` box still works).
+
 **The red button**, `ros/stop.sh` (the tray's first item runs it): the base server's own stop at
 once, every goal cancelled through the goal server (confirmed by a navigator within 3 s), and the
 base's stop again, believed only from its state stream: the last state lines of a one-second
