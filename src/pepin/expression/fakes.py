@@ -28,6 +28,7 @@ from pepin.expression.executors import (
 )
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
+from pepin.expression.places import match
 from pepin.expression.schedule import Nucleus
 from pepin.expression.speaker import (
     NO_ATTENTION,
@@ -446,13 +447,26 @@ class FakeNuclei:
 
 @dataclass
 class FakePlaces:
-    """The robot's places as bearings from where it stands (degrees, + left), as scripted."""
+    """The room's places (:class:`pepin.expression.places.Room`) as scripted: each a bearing
+    from where the robot stands (degrees, + left) ``distance_m`` away, names matched as the goal
+    server's are; ``read`` False: the places book not read yet."""
 
     bearings: dict[str, float] = field(default_factory=dict)
+    distance_m: float = 3.0
+    read: bool = True
 
-    def bearing_deg(self, name: str) -> float | None:
-        """As scripted; None for a place it lacks."""
-        return self.bearings.get(name)
+    def known(self) -> bool:
+        """As scripted."""
+        return self.read
+
+    def find(self, name: str) -> str | None:
+        """The scripted place ``name`` means; None for one it lacks."""
+        return match(name, self.bearings) if self.read else None
+
+    def where(self, name: str) -> tuple[float, float] | None:
+        """Its bearing and distance; None for a place it lacks."""
+        found = self.find(name)
+        return None if found is None else (self.bearings[found], self.distance_m)
 
 
 @dataclass
@@ -677,12 +691,14 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
     def _contract(engine: GestureEngine, gaze: SpeakerGazeWorker) -> None:
         """The gesticulation contract's seams: the fakes, the engine and the gaze fit them."""
         from pepin.expression.conversation import AudioTap
-        from pepin.expression.schedule import Nuclei, Places
+        from pepin.expression.places import GoalPlaces, Room
+        from pepin.expression.schedule import Nuclei
         from pepin.expression.speaker import ArmRelease, AttentionView
+        from pepin.tools.clients import GoalServerLink
 
         attention: list[AttentionView] = [FakeAttention(), gaze]
         arms: list[ArmRelease] = [engine]
         taps: list[AudioTap] = [RecordingTap(), engine]
         nuclei: Nuclei = FakeNuclei()
-        places: Places = FakePlaces()
+        places: list[Room] = [FakePlaces(), GoalPlaces(GoalServerLink())]
         del attention, arms, taps, nuclei, places

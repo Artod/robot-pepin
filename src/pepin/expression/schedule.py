@@ -1425,12 +1425,3 @@ class Nuclei(Protocol):
     def complete(self, turn: int, index: int) -> bool:
         """Whether the part's whole audio has been analysed."""
         ...
-
-
-class Places(Protocol):
-    """The robot's places (list_places) as directions from where it stands (C)."""
-
-    def bearing_deg(self, name: str) -> float | None:
-        """Place ``name``'s bearing in the cart's frame (degrees, + left), from the robot's map
-        pose; None for no such place or no pose."""
-        ...

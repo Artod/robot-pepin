@@ -148,7 +148,8 @@ class Resolver:
         record: Record | None = None,
     ) -> None:
         """``attention``: the person's bearing and distance (None: ahead, ``space.person_m``
-        away); ``room``: the places (None: no place is known); ``record(kind, fields)``: the
+        away); ``room``: the places (None, or a room whose book was never read: a name is
+        neither a place nor a referent, its floor plays); ``record(kind, fields)``: the
         ``catchment`` and ``repeat`` rows (the log by default)."""
         self.attention = attention
         self.room = room
@@ -172,8 +173,8 @@ class Resolver:
         turn = cue.turn if cue is not None else None
         if arg is None or "*" not in composition.args or arg in composition.args:
             return Meaning(arg, arg, None, turn)
-        if self.room is None:  # no places to ask: neither a place nor a referent for sure
-            return Meaning(arg, NAME, None, turn)
+        if self.room is None or not self.room.known():  # no places to ask (yet): neither a
+            return Meaning(arg, NAME, None, turn)  # place nor a referent for sure
         place = self.room.find(arg)
         return Meaning(arg, THING if place is None else PLACE, place, turn)
 

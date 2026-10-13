@@ -7,12 +7,14 @@ socket, :class:`pepin.tools.clients.GoalServer`): nothing here holds a truth of 
 gesture engine's thread never waits on a socket, so :class:`GoalPlaces` keeps a snapshot that a
 thread of its own refreshes (the pose every ``every_s``, the book every ``book_s``); a pose older
 than ``stale_s``, or none, gives no direction (wrong localisation points wrong: no gate beyond
-that).
+that). Until the book has been read once (the goal server never answered), the room knows no
+names at all (:meth:`Room.known` False): a name is then neither a place nor a referent.
 
 A name is matched leniently, the brain being told the book's names exactly: as written; then
 case, spaces, hyphens and underscores aside; then Cyrillic letters transliterated
-(``принтер`` is ``printer``). Owner: C (gesticulation DESIGN.md §11.3); the resolver
-(:mod:`pepin.expression.render`) reads it through :class:`Room`.
+(``принтер`` is ``printer``). :class:`Room` is the one seam to the places: the resolver
+(:mod:`pepin.expression.render`) reads it, :class:`GoalPlaces` and
+:class:`pepin.expression.fakes.FakePlaces` are it.
 """
 
 from __future__ import annotations
@@ -42,6 +44,10 @@ _SEPARATORS = re.compile(r"[\s_\-]+")
 
 class Room(Protocol):
     """The room's places as the gesture space needs them (any thread, never blocking)."""
+
+    def known(self) -> bool:
+        """Whether the places book has been read (False: no name can be told apart yet)."""
+        ...
 
     def find(self, name: str) -> str | None:
         """The places book's name that ``name`` means; None: no such place."""
@@ -150,6 +156,10 @@ class GoalPlaces:
             measured = now - float(here.get("age_s", 0.0))
         self.snapshot = Snapshot(places, pose, measured)
 
+    def known(self) -> bool:
+        """Whether the goal server's book has been read once."""
+        return math.isfinite(self._book_read)
+
     def find(self, name: str) -> str | None:
         """The book's name ``name`` means."""
         return match(name, self.snapshot.places)
@@ -161,11 +171,6 @@ class GoalPlaces:
         if found is None or snap.pose is None or self.clock() - snap.measured > self.stale_s:
             return None
         return bearing(snap.pose, snap.places[found])
-
-    def bearing_deg(self, name: str) -> float | None:
-        """The place's bearing alone (:class:`pepin.expression.schedule.Places`)."""
-        found = self.where(name)
-        return None if found is None else found[0]
 
     def start(self) -> GoalPlaces:
         """Refresh on a daemon thread every ``every_s``; returns self so it chains."""

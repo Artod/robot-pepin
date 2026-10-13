@@ -21,11 +21,11 @@ from pepin.arm_motion import load_arm_motion
 from pepin.body import BodyModel, OrientedBox
 from pepin.expression.animation import Book, Clip, Performance, Range, Scene
 from pepin.expression.book import book_from, load_book, with_rest
-from pepin.expression.fakes import FakeArmLink, FakeAttention
+from pepin.expression.fakes import FakeArmLink, FakeAttention, FakePlaces
 from pepin.expression.markers import Cue, Marker
 from pepin.expression.mix import track_value
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
-from pepin.expression.places import GoalPlaces, bearing, latin, match
+from pepin.expression.places import GoalPlaces, bearing, latin
 from pepin.expression.render import CAPS_DEG_S, CAPS_DEG_S2, BookRenderer, Resolver
 from pepin.expression.trajectory import JOINTS
 from pepin.gaze import GazeSettings, overlay_from_json
@@ -42,18 +42,9 @@ ARM_S = 2.0  # the most a primitive holds the arm (DESIGN.md §7.9; critic_feasi
 HAND = ("wrist_link", "gripper_link", "moving_jaw_so101_v1_link")
 
 
-class Room:
+def scripted(**bearings: float) -> FakePlaces:
     """Places at bearings (degrees, + left) from where the robot stands, 3 m away."""
-
-    def __init__(self, **bearings: float) -> None:
-        self.bearings = bearings
-
-    def find(self, name: str) -> str | None:
-        return match(name, self.bearings)
-
-    def where(self, name: str) -> tuple[float, float] | None:
-        found = self.find(name)
-        return None if found is None else (self.bearings[found], 3.0)
+    return FakePlaces(dict(bearings), distance_m=3.0)
 
 
 def cue(name: str, arg: str | None, turn: int = 1, part: int = 0) -> Cue:
@@ -164,7 +155,7 @@ def _pinned(book: Book, end: str) -> Book:
     return replace(book, compositions=comps)
 
 
-ROOM = Room(east=-40.0, west=30.0, ahead=0.0)
+ROOM = scripted(east=-40.0, west=30.0, ahead=0.0)
 
 
 def _arguments(name: str) -> list[str | None]:
@@ -265,7 +256,7 @@ def test_toward_turns_the_open_hand_at_the_person_and_an_edge_falls_to_the_floor
 
 def test_a_place_gets_the_shut_hand_and_a_glance_past_the_pans_the_glance_behind_none() -> None:
     attention = FakeAttention().be(bearing_deg=10.0, distance_m=1.5)
-    room = Room(printer=-30.0, door=70.0, shelf=170.0)
+    room = scripted(printer=-30.0, door=70.0, shelf=170.0)
     renderer = BookRenderer(BOOK, resolver=Resolver(attention=attention, room=room))
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "принтер"))
     arm, head = arm_of(performance), head_of(performance)
@@ -286,7 +277,7 @@ def test_every_head_clip_of_the_space_plays_whole_through_the_arbiter() -> None:
                           clip_max_hz=knobs["clip_max_hz"]["default"],
                           clip_still_deg=knobs["clip_still_deg"]["default"])  # fmt: skip
     limits = NeckLimits.of(NeckConfig.from_json(CONFIG / "neck.json").motion)
-    room = Room(**{f"p{b}": float(b) for b in range(-90, 91, 15)})
+    room = scripted(**{f"p{b}": float(b) for b in range(-90, 91, 15)})
     for person, name in itertools.product((-30.0, 0.0, 30.0), PRIMITIVES):
         resolver = Resolver(attention=FakeAttention().be(bearing_deg=person), room=room)
         renderer = BookRenderer(BOOK, resolver=resolver)
@@ -331,7 +322,7 @@ def test_a_referent_takes_a_spot_on_first_mention_keeps_it_and_count_takes_over(
     def record(kind: str, fields: dict[str, Any]) -> None:
         rows.append((kind, fields))
 
-    resolver = Resolver(room=Room(printer=0.0), record=record)
+    resolver = Resolver(room=scripted(printer=0.0), record=record)
     renderer = BookRenderer(BOOK, resolver=resolver)
     loci = BOOK.space.loci
     spot = {name: BOOK.poses[name]["shoulder_pan"] for name in loci}
@@ -360,10 +351,12 @@ def test_a_referent_takes_a_spot_on_first_mention_keeps_it_and_count_takes_over(
 
 
 def test_a_name_with_no_places_to_ask_gets_a_nod_never_a_spot() -> None:
-    renderer = BookRenderer(BOOK)  # the engine's own today: no room wired
-    performance = renderer.render("point", EVERYTHING, 6, cue("point", "printer"))
-    assert arm_of(performance) is None and head_of(performance) is not None
-    assert not renderer.resolver.loci
+    unread = FakePlaces({"printer": 0.0}, read=False)  # the goal server never answered
+    for resolver in (Resolver(), Resolver(room=unread)):
+        renderer = BookRenderer(BOOK, resolver=resolver)
+        performance = renderer.render("point", EVERYTHING, 6, cue("point", "printer"))
+        assert arm_of(performance) is None and head_of(performance) is not None
+        assert not renderer.resolver.loci
 
 
 # -- the room's places ---------------------------------------------------------------------------
@@ -383,6 +376,8 @@ class Goals:
         return {**self.here, "age_s": 0.1} if self.here.get("pose") == "tf" else self.here
 
     def places(self) -> dict[str, dict[str, float]]:
+        if self.down:
+            raise OSError("refused")
         return self.book
 
 
@@ -390,13 +385,18 @@ def test_the_room_s_places_are_the_goal_server_s_seen_from_where_the_robot_stand
     now = [100.0]
     goals = Goals()
     room = GoalPlaces(goals, stale_s=5.0, clock=lambda: now[0])
-    assert room.where("printer") is None  # nothing read yet
+    assert room.where("printer") is None and not room.known()  # nothing read yet
+    goals.down = True
     room.refresh()
+    assert not room.known()  # a server down from the start: still no book
+    goals.down = False
+    room.refresh()
+    assert room.known()
     assert room.find("Printer") == "printer" and room.find("Diner Table") == "diner_table"
     assert room.find("принтер") == "printer" and latin("Принтер") == "printer"
     assert room.find("кухня") is None
     assert room.where("printer") == pytest.approx((-90.0, 2.0))
-    assert room.bearing_deg("diner_table") == pytest.approx(0.0)
+    assert room.where("diner_table") == pytest.approx((0.0, 3.0))
     goals.down = True
     room.refresh()  # the server down: the snapshot stays, and ages out
     assert room.where("printer") is not None
