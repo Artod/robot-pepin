@@ -21,8 +21,9 @@ While the robot speaks (``pulse``):
   nod must go; at most one a part, ``beat_gap_s`` after any head stroke, ``beats_per_minute``,
   never with less lead than the nod's own preparation (the arbiter lets a nod's bottom come
   0.2 s after its first move at the earliest, plus the head's latency: ``beat_lead_min_s``),
-  never within ``mark_gap_s`` of a marker's head stroke and never in a part that carries a
-  marker (the brain's gesture is that sentence's accent); inside an arm unit already open
+  never within ``mark_gap_s`` of a marker's head stroke (sent, or still waiting for its
+  word: :meth:`pepin.expression.animator.GestureEngine.pending`) and never in a part that
+  carries a marker (the brain's gesture is that sentence's accent); inside an arm unit already open
   (the arm part's ``held`` pose) a wrist beat instead, with ``wrist_beat_p``;
 * the QUESTION TILT: a part ending in "?" lifts and cocks the head at its last nucleus, held
   until half a second after its audio, once a reply;
@@ -33,11 +34,13 @@ Between turns and while the person speaks (``moments``):
 
 * the THINKING GLANCE: the turn closed and no reply audio after ``think_glance_s``: with
   ``think_p``, a look up, down or aside (``think_dirs``; never the same way twice running),
-  held until ``think_back_s`` into the reply as this conversation's waits predict it (the face
-  ``thinking`` half the time); never when the audio came first;
+  held until ``think_back_s`` into the reply as this conversation's waits predict it, or
+  ended by the engine (:meth:`pepin.expression.animator.GestureEngine.release`) that long into
+  the reply's first sound when the reply comes sooner (the face ``thinking`` half the time);
+  never when the audio came first;
 * the LISTENER NOD on the ears' ``listener_pause``: after ``listener_min_speech_s`` of their
   speech, ``listener_gap_s`` apart, with ``listener_nod_p``, never while their last words were a
-  question;
+  question (their words so far when the pause brings them, else their last utterance);
 * the ACKNOWLEDGEMENT: a statement of ``ack_min_s`` or more (not a question: ``question``) gets
   a small nod ``predict_delay_s`` after its close, with ``ack_nod_p``, once a turn;
 * GREETING and FAREWELL DUE: the person's words (``greeting``; the voice loop's goodbye rule)
@@ -45,9 +48,9 @@ Between turns and while the person speaks (``moments``):
   ``farewell_due`` to) ``predict_delay_s`` after the close, in the brain's wait, under the
   engine's caps; while the body turns toward the person it waits for the turn's end; a later
   marker of it is absorbed by its cooldown;
-* the LAUGH'S ROCK: a reply part that carries ``{laugh}`` rocks the cart once as a tail, from the
-  part's start (its stroke within ``rock_tail_s`` of speech); the laugh itself never uses the
-  arm (the wheels refuse while the arm moves);
+* the LAUGH'S ROCK: a reply part that carries ``{laugh}`` rocks the cart once as a tail bound
+  after the part's start (the scheduler's ``after``: its stroke within ``timing.after_s`` of
+  speech); the laugh itself never uses the arm (the wheels refuse while the arm moves);
 * FACE FOUND: the attention engine's first clear face of the conversation brings a smile;
 * the LISTENING SHIFT (``listen_shift_deg`` 0: off): a still shift of the head every
   ``listen_shift_s`` while the person speaks;
@@ -205,7 +208,6 @@ class MomentKnobs:
     question: str = QUESTION
     greeting: str = GREETING
     predict_delay_s: float = 0.2
-    rock_tail_s: float = 2.5
     smile_s: float = 2.0
     listen_shift_deg: float = 0.0
     listen_shift_s: tuple[float, float] = (6.0, 12.0)
@@ -283,7 +285,6 @@ def alive_knobs(data: Mapping[str, Any]) -> AliveKnobs:
         str(m.get("question", dm.question)),
         str(m.get("greeting", dm.greeting)),
         num(m, "predict_delay_s", dm.predict_delay_s),
-        num(m, "rock_tail_s", dm.rock_tail_s),
         num(m, "smile_s", dm.smile_s),
         num(m, "listen_shift_deg", dm.listen_shift_deg),
         _pair(m.get("listen_shift_s"), dm.listen_shift_s),
@@ -386,6 +387,17 @@ class _Reply:
     busy: list[tuple[float, float]] = field(default_factory=list)  # stream spans of my head moves
 
 
+@dataclass(frozen=True)
+class _Glance:
+    """A thinking glance holding the head: its request (the engine ends it by that), its draw of
+    ``think_back_s``, its span on the engine's clock and the close it follows."""
+
+    request: Request
+    back_s: float
+    span: tuple[float, float]
+    close_id: int
+
+
 class Alive:
     """The engine's listeners: see the module's notes. Observer calls and the voice's audio
     only post to its thread; :meth:`step` does one round (tests call it directly)."""
@@ -427,6 +439,7 @@ class Alive:
         self._poll_at = 0.0  # attention is read again then
         self._head_seen: Reservation | None = None  # the latest head gesture not the listeners'
         self._arm_seen: Reservation | None = None  # the arm's latest reservation
+        self._glance: _Glance | None = None  # the thinking glance holding the head
         self._reset()
 
     # -- the observer (the cascade's loop thread: post only) ---------------------------------
@@ -470,9 +483,10 @@ class Alive:
         """A reply played out."""
         self._post("reply_done", turn)
 
-    def moment(self, name: str) -> None:
-        """A moment of the loop's (the ears' pause, a slow tool)."""
-        self._post("moment", name)
+    def moment(self, name: str, text: str = "") -> None:
+        """A moment of the loop's (the ears' pause, with the person's words so far when the
+        ears have them; a slow tool)."""
+        self._post("moment", name, text)
 
     def drive(self, active: bool) -> None:
         """A drive began or ended."""
@@ -562,17 +576,17 @@ class Alive:
 
     def _remember(self) -> None:
         """The engine's latest head gesture of another's (a marker's, an ask's) and the arm's
-        latest reservation, read from what holds each part (a held entry stays after its end
-        until a fade or another takes the part)."""
-        held = self.engine.scheduler.reservations.held
-        head = held.get("head")
+        latest reservation (the reservations' own memory: an entry stays after its end and its
+        fade, until another takes the part)."""
+        reservations = self.engine.scheduler.reservations
+        head = reservations.last("head")
         if (
             head is not None
             and head.clip.layer == "gesture"
             and head.performance.intent not in MINE
         ):
             self._head_seen = head
-        arm = held.get("arm")
+        arm = reservations.last("arm")
         if arm is not None:
             self._arm_seen = arm
 
@@ -592,6 +606,7 @@ class Alive:
         self._audio_close = -1  # the close whose reply's audio came
         self._head_seen = None
         self._arm_seen = None
+        self._glance = None
         self._close_s: float | None = None
         self._awaiting = False
         self._asked = False
@@ -698,6 +713,8 @@ class Alive:
         state.start_s = stream_s
         if state.laugh:
             self._rock(turn, index, stream_s)
+        if index == 0:
+            self._glance_back(stream_s)
 
     def _part_spoken(self, turn: int, index: int) -> None:
         self.prosody.finish(turn, index)
@@ -716,9 +733,9 @@ class Alive:
         if reply is not None:
             self._log_reply(reply)
 
-    def _moment(self, name: str) -> None:
+    def _moment(self, name: str, text: str = "") -> None:
         if name == LISTENER_PAUSE:
-            self._listener_nod()
+            self._listener_nod(text)
         elif name == SLOW_TOOL:
             self._slow_tool = self._close_id  # its thinking composition takes the wait
 
@@ -1059,7 +1076,8 @@ class Alive:
         assert self._close_s is not None
         expected = statistics.median(self._waits) if self._waits else WAIT_PRIOR_S
         reply_at = max(self._close_s + expected, now + OUT_S + 0.3)
-        seconds = min(THINK_MAX_S, reply_at + self.rng.uniform(*m.think_back_s) - now)
+        back_s = self.rng.uniform(*m.think_back_s)
+        seconds = min(THINK_MAX_S, reply_at + back_s - now)
         clip = held_clip(pan, tilt, OUT_S, seconds)
         latency = self._latency("head")
         stroke = now + latency + clip.stroke_s
@@ -1081,20 +1099,53 @@ class Alive:
         if not clips:
             self._moment_log(THINK_WAIT, f"quiet: {self._quiet}")
             return
-        self.engine.request(Request("think_glance", None, Priority.MOMENT, "moment",
-                                    rank=moment_rank(THINK_WAIT), clips=tuple(clips)))  # fmt: skip
+        request = Request("think_glance", None, Priority.MOMENT, "moment",
+                          rank=moment_rank(THINK_WAIT), clips=tuple(clips))  # fmt: skip
+        self.engine.request(request)
         self._counts["think_glance"] += 1
         if any(c.part == "head" for c in clips):
             self._last_dir = direction
-            self._occupy(now + latency, now + latency + seconds, stroke, now + latency + seconds)
-            self._glance_until = now + latency + seconds
+            span = (now + latency, now + latency + seconds)
+            self._occupy(*span, stroke, span[1])
+            self._glance_until = span[1]
+            self._glance = _Glance(request, back_s, span, close_id)
         self._moment_log(THINK_WAIT, None, dir=direction, deg=round(amp, 1),
                          seconds=round(seconds, 2), parts=[c.part for c in clips])  # fmt: skip
 
-    def _listener_nod(self) -> None:
-        """A nod at the person's pause inside their utterance."""
+    def _glance_back(self, stream_s: float) -> None:
+        """The reply's first part has its place in the stream: a thinking glance still due to
+        hold past ``think_back_s`` into its first sound is ended then by the engine (its
+        requester's release), the head's ledger shortened with it."""
+        glance = self._glance
+        if glance is None or glance.close_id != self._close_id:
+            return
+        now = self.clock()
+        back = now + self._lead(stream_s) + glance.back_s
+        fade = self.engine.config.fade_s.get("head", 0.0)
+        if back + fade >= glance.span[1]:
+            return  # its own return comes first
+
+        def end() -> None:
+            if self._glance is not glance:
+                return
+            self._glance = None
+            self.engine.release(glance.request, "the reply's voice")
+            ended = self.clock() + fade
+            start, until = glance.span
+            self._spans = deque([(a, ended) if (a, b) == (start, until) else (a, b)
+                                 for a, b in self._spans], maxlen=self._spans.maxlen)  # fmt: skip
+            self._returns = deque([ended if t == until else t for t in self._returns],
+                                  maxlen=self._returns.maxlen)  # fmt: skip
+            self._glance_until = min(self._glance_until, ended)
+
+        self._at(back, end)
+
+    def _listener_nod(self, text: str = "") -> None:
+        """A nod at the person's pause inside their utterance (``text``: their words so far,
+        when the ears read them in time)."""
         m = self.knobs.moments
         now = self.clock()
+        asked = bool(re.search(m.question, text.strip(), re.IGNORECASE)) if text else self._asked
         why: str | None = None
         if not self._conversation or not self.engine.on or not self._listening:
             why = "nobody speaking, off"
@@ -1104,8 +1155,8 @@ class Alive:
             why = f"{now - self._speech_s:.1f} s of their speech"
         elif now - self._last_listener < m.listener_gap_s:
             why = f"the last {now - self._last_listener:.1f} s ago"
-        elif self._asked:
-            why = "after their question"
+        elif asked:
+            why = "their words so far are a question" if text else "after their question"
         elif self.rng.random() >= m.listener_nod_p:
             why = f"p {m.listener_nod_p:g}"
         clip = nod_clip(self.rng.uniform(*m.listener_nod_deg), self.rng.uniform(0.45, 0.5))
@@ -1193,7 +1244,7 @@ class Alive:
             why = "the laugh did not play (its caps)"
         elif any(c.part == "body" for c in last.clips):
             why = "the laugh moves the body itself"
-        if why is None:
+        if why is None:  # a tail: the scheduler keeps its stroke within after_s of speech
             period = self.rng.uniform(*ROCK_PERIOD_S)
             amp = self.rng.uniform(*ROCK_M)
             track = Track("x_m", "additive", (0.0, period / 2, period), (0.0, amp, 0.0))
@@ -1201,14 +1252,11 @@ class Alive:
             scale = self.engine.config.body_speed_scale
             clip = stretched(clip, 1.0 / scale) if 0.0 < scale < 1.0 else clip
             clip = replace(clip, offset_s=0.0)
-            if clip.stroke_s > self.knobs.moments.rock_tail_s:
-                why = f"its stroke {clip.stroke_s:.1f} s past rock_tail_s"
-            else:
-                rank = moment_rank("laugh_rock")
-                request = Request("laugh_rock", AtStream(stream_s, turn), Priority.MOMENT,
-                                  "moment", rank=rank, clips=(clip,))  # fmt: skip
-                self.engine.request(request)
-                self._counts["laugh_rock"] += 1
+            rank = moment_rank("laugh_rock")
+            request = Request("laugh_rock", AtStream(stream_s, turn), Priority.MOMENT, "moment",
+                              bind="after", rank=rank, clips=(clip,))  # fmt: skip
+            self.engine.request(request)
+            self._counts["laugh_rock"] += 1
         self._moment_log("laugh_rock", why, turn=turn, index=index)
 
     def _shift(self) -> None:
@@ -1283,8 +1331,9 @@ class Alive:
     ) -> str | None:
         """Why a discrete head move from ``start`` to ``end`` with its stroke at ``stroke``
         (engine clock) may not go: a move of the listeners' own over that time, a stroke within
-        ``gap`` (a held move's return within ``head_gap_s``), another's head move over it or its
-        stroke within ``gap`` (a marker's within ``mark_gap``); None when it may."""
+        ``gap`` (a held move's return within ``head_gap_s``), another's head move (played, or
+        waiting for its word in the engine) over it or its stroke within ``gap`` (a marker's
+        within ``mark_gap``); None when it may."""
         for a, b in self._spans:
             if start < b and end > a:
                 return f"the head is busy {b - start:.2f} s more"
@@ -1304,6 +1353,16 @@ class Alive:
             away = abs(stroke - last.stroke)
             if away < limit:
                 return f"{last.performance.intent}'s head stroke {away:.1f} s away"
+        for waiting in self.engine.pending("head"):
+            if waiting.intent in MINE or waiting.priority > Priority.MOMENT:
+                continue
+            if start < waiting.end and end > waiting.start:
+                return f"the head waits for {waiting.intent}"
+            marked = mark_gap is not None and waiting.priority <= Priority.MARK
+            limit = max(gap, mark_gap) if marked and mark_gap is not None else gap
+            away = abs(stroke - waiting.stroke)
+            if away < limit:
+                return f"{waiting.intent}'s head stroke {away:.1f} s away (waiting)"
         return None
 
     def _retry_at(self, start: float, end: float, stroke: float, gap: float) -> float:

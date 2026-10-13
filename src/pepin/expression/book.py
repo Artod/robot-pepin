@@ -316,7 +316,12 @@ def _idle(i: int, body: Mapping[str, Any], atoms: Mapping[str, Atom]) -> Idle:
         raise ValueError(f"{where}.unless: some of {', '.join(IDLE_STATES)}")
     every = _range(f"{where}.every_s", body.get("every_s"))
     states = tuple(cast(IdleState, u) for u in unless)
-    return Idle(cast(PartName, part), names, every, when, states)
+    after = body.get("after_speech_s")
+    if after is not None and (isinstance(after, bool) or not isinstance(after, (int, float))
+                              or after < 0):  # fmt: skip
+        raise ValueError(f"{where}.after_speech_s: seconds >= 0, or absent")
+    return Idle(cast(PartName, part), names, every, when, states,
+                None if after is None else float(after))  # fmt: skip
 
 
 def _aliases(raw: Any, compositions: Mapping[str, Composition]) -> dict[str, str]:

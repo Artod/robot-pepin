@@ -55,7 +55,8 @@ off, the tag line is the prosody one as before.
 The body hears the conversation through observers
 (:class:`pepin.expression.conversation.ConversationObserver`), told each moment on the event
 loop: the conversation opened, the person started and stopped speaking, paused mid-utterance
-(the moment ``listener_pause``), a part of a reply went to the voice, had its first chunk with
+(the moment ``listener_pause``, with their words so far when the early read of that very pause
+has landed), a part of a reply went to the voice, had its first chunk with
 the player and was all fed to it, a sentence before it is whole (``text_ahead``, from the
 brain's token stream), a reply was cut or played out, a slow tool's filler, a drive's start and
 end, the close. Every chunk of a reply also goes to the audio taps
@@ -159,6 +160,7 @@ UNASKED_DRIVE = (
 )
 END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
+PAUSE_SLACK_S = 0.05  # an early read started this much before its pause's start still is its
 # tools that take a while: the robot says its filler when the brain calls one before a word
 # (and the body hears the moment)
 SLOW_TOOLS = frozenset(
@@ -400,6 +402,7 @@ class CascadeLoop:
         self._continues = False  # the utterance in progress began as a continuation
         self.speculation: Speculation | None = None  # asked early, not yet settled by a close
         self._may_speculate = False  # the utterance in progress may still be asked early
+        self._partial: tuple[float, str] | None = None  # the latest early read: (its frame, words)
         self._brain_switches = 0  # brain switches asked for (an older one finishing is dropped)
         self._ears_queue: asyncio.Queue[tuple[EarEvent, float | None]] = asyncio.Queue()
         self._order = asyncio.Lock()
@@ -629,6 +632,7 @@ class CascadeLoop:
                     self.conversation.log.event("start", event.t, lead_s=lead_s)
                     self._tell("speech_started", event.t)
                 cfg = self.config
+                self._partial = None
                 self._continues = False
                 joins = (
                     cfg.continuation_s > 0 and event.t - self.last_closed_s <= cfg.continuation_s
@@ -638,11 +642,13 @@ class CascadeLoop:
                     self._continues = await self._continuation()
             elif event.kind == "pause":
                 if self.conversation is not None:
-                    self._tell("moment", LISTENER_PAUSE)
+                    words = self._pause_words(event.t)
+                    self._tell("moment", LISTENER_PAUSE, *([words] if words else []))
                 self._backchannel()
             elif event.kind == "barge_in":
                 await self._barge_in(event, played if played is not None else 0.0)
             elif event.kind == "words":
+                self._partial = (event.t, (event.text or "").strip())
                 self._speculate(event)
             elif event.kind == "segment" and event.segment is not None:
                 self.last_closed_s = event.t
@@ -650,6 +656,16 @@ class CascadeLoop:
                 self.hearing += 1
                 continues, self._continues = self._continues, False
                 self._spawn(self._hear(event, continues))
+
+    def _pause_words(self, t: float) -> str:
+        """The person's words so far at the pause the ears told at frame ``t``: the early read
+        started inside that very pause (``transcriber.early_s`` into it, the pause told at
+        ``backchannel.delay_s``) when it has landed, else ""."""
+        partial = self._partial
+        if partial is None:
+            return ""
+        started, words = partial
+        return words if started >= t - self.config.backchannel_delay_s - PAUSE_SLACK_S else ""
 
     async def _continuation(self) -> bool:
         """The person started again right after an utterance closed. A reply that has sent

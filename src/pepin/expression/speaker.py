@@ -210,7 +210,9 @@ class GazePlan:
 # switch off), a drive, looking for the person engaged (a seek's stops, or a check of a new
 # voice), the body turning toward them, the head on their face, or on their voice (nobody seen)
 AttentionPhase = Literal["idle", "paused", "seek", "check", "turning", "track", "voice"]
-HEAD_SEEN_S = 1.0  # a gesture overlay plays only on a person seen within this (DESIGN.md §8.4)
+# A gesture overlay plays only on a person seen within this (DESIGN.md §8.4; the engine's knob
+# layers.head_seen_s): frames come at 1 Hz while the robot speaks, so a second and a margin
+HEAD_SEEN_S = 1.2
 
 
 @dataclass(frozen=True)
@@ -255,16 +257,16 @@ class ArmRelease(Protocol):
         ...
 
 
-def head_refusal(view: Attention, now: float) -> str | None:
+def head_refusal(view: Attention, now: float, seen_s: float = HEAD_SEEN_S) -> str | None:
     """Why a gesture overlay may not take the head now, None when it may: while attention looks
-    for the person (a seek, a check), turns the body, or has not seen them within
-    :data:`HEAD_SEEN_S`, a gesture's skipped frames would blind it (the idle layer's still
-    overlays never do). No rule without eyes, a conversation, or during a drive."""
+    for the person (a seek, a check), turns the body, or has not seen them within ``seen_s``,
+    a gesture's skipped frames would blind it (the idle layer's still overlays never do). No
+    rule without eyes, a conversation, or during a drive."""
     if not view.eyes or view.phase in ("idle", "paused"):
         return None
     if view.phase != "track":
         return f"attention: {view.phase}"
-    if view.seen_s is None or now - view.seen_s > HEAD_SEEN_S:
+    if view.seen_s is None or now - view.seen_s > seen_s:
         unseen = "never" if view.seen_s is None else f"{now - view.seen_s:.1f} s"
         return f"attention: the person unseen for {unseen}"
     return None

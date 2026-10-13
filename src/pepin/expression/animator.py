@@ -23,38 +23,49 @@ pulse, the idle layer); the person starting to speak fades the gesture layer of 
 ``finish_s``; the conversation's close does the same and rests the rest; a drive sends every
 part to rest and drops what waits; a cut reply drops its clips. The idle layer plays an atom of
 the book's ``idle`` entries every ``every_s`` on a part no gesture holds, unless a state the
-entry excludes holds (by default either speaker: idle only while nobody speaks), from
-``idle_after_speech_s`` after those states ended and ``idle_resume_s`` after a gesture.
+entry excludes holds (by default either speaker: idle only while nobody speaks), from the
+entry's ``after_speech_s`` (else ``idle_after_speech_s``) after those states ended and
+``idle_resume_s`` after a gesture. A looping idle clip (the breath) holds its part until a
+state it excludes or another clip takes it, renewed at its owner once a period (the arbiter
+lets an overlay lapse a second after its period); the other idle entries of that part wait.
 
 Attention comes first (:class:`pepin.expression.speaker.AttentionView`, the speaker gaze's):
-a gesture overlay takes the head only while attention tracks a person seen within a second, and
-is withdrawn when attention starts a seek, a check or a body turn; no arm motion starts while
-the person stands past the forward arc or the body turns, and the gaze's turn asks for the arm
-first (:meth:`release_arm`).
+a gesture overlay takes the head only while attention tracks a person seen within
+``head_seen_s`` (1.2 s: frames come at 1 Hz while the robot speaks), and is withdrawn when
+attention starts a seek, a check or a body turn; no arm motion starts while the person stands
+past the forward arc or the body turns, and the gaze's turn asks for the arm first
+(:meth:`release_arm`).
 
 Caps (config/expression.json ``caps``) hold the markers and the moments back, never a tool or
 the command line, which a person asked for: per part (a sentence or a clause of one), per
 reply, per minute, arm gestures per minute, an intent's own per minute (``laugh``: 1, waived
-while the person's own laugh is fresh), and each composition's ``cooldown_s``.
+while the person's own laugh is fresh), and each composition's ``cooldown_s``. Arm gestures are
+counted on the final version (the ladder's: a mark that fell to its head-and-face floor used no
+arm).
+
+A requester ends its own move with :meth:`release` (what that very request holds fades, what
+it still waits for is dropped), and sees what waits with :meth:`pending` (each clip's part,
+place in the table and window: the listeners keep their nods off a mark's stroke).
 
 One thread does all of it, waking only for what waits: every ``poll_s`` while a clip waits for
-its word, at a performance's next clip, at the next idle motion, every ``ATTENTION_POLL_S``
-while a gesture holds the head; the cascade's calls only post to it and never wait. Every
-performance is logged with its seed and variant (a replay is ``scripts/gesture.py play NAME
---seed N --variant V``), every clip sent with the stream second it was planned for and the one
-it went at.
+its word, at a performance's next clip, at the next idle motion or renewal, every
+``ATTENTION_POLL_S`` while a gesture holds the head, and at least every ``MAX_WAIT_S``; the
+cascade's calls only post to it and never wait. Every performance is logged with its seed and
+variant (a replay is ``scripts/gesture.py play NAME --seed N --variant V``), every clip sent
+with the stream second it was planned for and the one it went at.
 
-Owners after slice 0 (gesticulation DESIGN.md §11): this file is the contract's and stays as it
-is; A plugs in through :meth:`GestureEngine.request`, :attr:`GestureEngine.taps`,
-:attr:`GestureEngine.scene_hooks` and the book; B through :mod:`pepin.expression.schedule`,
-:mod:`pepin.expression.render`, :mod:`pepin.expression.parts` and
-:attr:`GestureEngine.scene_hooks`.
+Owners (gesticulation DESIGN.md §11): the contract's file. A plugs in through
+:meth:`GestureEngine.request`, :meth:`GestureEngine.release`, :meth:`GestureEngine.pending`,
+:attr:`GestureEngine.taps`, :attr:`GestureEngine.scene_hooks` and the book; B through
+:mod:`pepin.expression.schedule`, :mod:`pepin.expression.render`, :mod:`pepin.expression.parts`
+and :attr:`GestureEngine.scene_hooks`.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import logging
+import math
 import random
 import re
 import threading
@@ -76,7 +87,7 @@ from pepin.expression.animation import (
     Scene,
 )
 from pepin.expression.conversation import GESTURES, AudioTap, Heard, VoiceChunk, moment_rank
-from pepin.expression.executors import Executor, Outcome
+from pepin.expression.executors import Executor, Outcome, Renewing
 from pepin.expression.markers import Cue, Part, Playout, cues
 from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart, HeadPart
@@ -84,13 +95,17 @@ from pepin.expression.render import BookRenderer, WeightedChooser
 from pepin.expression.schedule import (
     NOT_YET,
     AtWord,
+    Pending,
     Priority,
     Request,
     Reservation,
     Scheduler,
+    Timing,
     Waiting,
+    timing_from,
 )
 from pepin.expression.speaker import (
+    HEAD_SEEN_S,
     NO_ATTENTION,
     Attention,
     AttentionView,
@@ -106,6 +121,8 @@ TOOL_WAIT_S = 2.0  # a tool's perform waits this long for the engine's thread
 ATTENTION_POLL_S = 0.1  # attention is read this often while a gesture holds the head
 ARM_REST_S = 0.9  # the board's return to rest from the highest pose (raised: 0.87 at the caps)
 BUSY = ("seek", "check", "turning")  # attention's phases that take the head from a gesture
+MAX_WAIT_S = 1.0  # the thread wakes at least this often (a longer wait, or an endless one, is cut)
+RENEW_MIN_S = 0.1  # a looping clip is renewed at most this often
 
 
 @dataclass(frozen=True)
@@ -141,7 +158,9 @@ class EngineConfig:
     face_hold_s: float = 2.0
     arm_speed_scale: float = 0.2
     body_speed_scale: float = 0.4
+    head_seen_s: float = HEAD_SEEN_S
     caps: Caps = field(default_factory=Caps)
+    timing: Timing = field(default_factory=Timing)  # the scheduler's (``timing``, ``units``)
 
 
 def engine_config(data: Mapping[str, Any]) -> EngineConfig:
@@ -168,6 +187,7 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
         face_hold_s=float(layers.get("face_hold_s", d.face_hold_s)),
         arm_speed_scale=float(arm.get("speed_scale", d.arm_speed_scale)),
         body_speed_scale=float(data.get("wheels", {}).get("speed_scale", d.body_speed_scale)),
+        head_seen_s=float(layers.get("head_seen_s", d.head_seen_s)),
         caps=Caps(
             per_part=int(caps.get("per_part", c.per_part)),
             per_reply=int(caps.get("per_reply", c.per_reply)),
@@ -181,6 +201,7 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
             laughter_waives=tuple(caps.get("laughter_waives", c.laughter_waives)),
             laughter_s=float(caps.get("laughter_s", c.laughter_s)),
         ),
+        timing=timing_from(data),
     )
 
 
@@ -237,9 +258,10 @@ class GestureEngine:
         self._opened_s = float("-inf")
         self._ended: dict[IdleState, float] = {"speaking": float("-inf"),
                                                "listening": float("-inf")}  # fmt: skip
-        self._idle_next: dict[PartName, float] = {}
+        self._idle_next: dict[int, float] = {}  # each idle entry's next motion (by its place)
         self._idle_of: dict[PartName, Idle] = {}  # the idle entry a part's idle clip came from
         self._arm_free_s = float("-inf")  # the arm was released to the body's turn until then
+        self._renew_at: dict[PartName, float] = {}  # a looping clip's next renewal
 
     @property
     def _playing(self) -> dict[PartName, Reservation]:
@@ -307,6 +329,18 @@ class GestureEngine:
 
         self._post(run)
 
+    def release(self, request: Request, why: str) -> None:
+        """Let go of what ``request`` (this very one, as posted) holds and still waits for (any
+        thread): its requester ends its own held move (a thinking glance when the reply
+        comes); the parts it holds fade back over ``fade_s``."""
+        self._post(lambda: self._release(request, why))
+
+    def pending(self, part: PartName | None = None, turn: int | None = None) -> list[Pending]:
+        """What waits for its time (any thread; a snapshot), of ``part`` and of reply ``turn``
+        when given, each with its window on the engine's clock."""
+        with self._lock:
+            return self.scheduler.pending(part, turn, self.clock())
+
     def hush(self, why: str) -> None:
         """The gesture layer of every part let go (the person speaks)."""
         self._post(lambda: self._hush(why))
@@ -327,7 +361,7 @@ class GestureEngine:
             rest_s = getattr(part, "rest_s", None)
             seconds = (rest_s() if callable(rest_s) else ARM_REST_S) + part.latency_s
             part.fade("gesture", self.config.fade_s.get("arm", 0.0))
-            del self._playing["arm"]
+            self.scheduler.reservations.release("arm")
             self._arm_free_s = now + seconds
             self.record("faded", {"intent": held.performance.intent, "part": "arm", "why": why,
                                   "rest_s": round(seconds, 2)})  # fmt: skip
@@ -382,8 +416,9 @@ class GestureEngine:
         """The reply played out: whatever still waited for it is dropped."""
         self._post(lambda: self._drop_turns(turn, "done", only=True))
 
-    def moment(self, name: str) -> None:
-        """A moment of the robot the book maps to an intent (``slow_tool`` -> thinking)."""
+    def moment(self, name: str, text: str = "") -> None:
+        """A moment of the robot the book maps to an intent (``slow_tool`` -> thinking); the
+        person's words at a pause are the listeners'."""
         self._post(lambda: self._moment(name))
 
     def drive(self, active: bool) -> None:
@@ -421,7 +456,7 @@ class GestureEngine:
                     call()
                 except Exception:
                     logger.exception("gesture engine: a call broke")
-            waits = [self._fire_due(), self._idle(), self._attend()]
+            waits = [self._fire_due(), self._idle(), self._attend(), self._renew()]
         known = [w for w in waits if w is not None]
         return min(known) if known else None
 
@@ -432,7 +467,7 @@ class GestureEngine:
                 if self._stop:
                     return
                 if not self._inbox:
-                    self._wake.wait(wait)
+                    self._wake.wait(bounded(wait))
 
     def _post(self, call: Callable[[], None]) -> None:
         with self._lock:
@@ -453,7 +488,7 @@ class GestureEngine:
             entry = self._idle_of.get(part)
             if playing.clip.layer == "idle" and (entry is None or "listening" in entry.unless):
                 self.parts[part].fade("idle", self.config.fade_s.get(part, 0.0))
-                del self._playing[part]
+                self.scheduler.reservations.release(part)
 
     def _speech_ended(self, heard: Heard) -> None:
         self._listening = False
@@ -490,8 +525,11 @@ class GestureEngine:
         intent = self.book.moments.get(name)
         if intent is None or not self._on:
             return
-        self._request(Request(intent, None, Priority.MOMENT, "moment", rank=moment_rank(name)),
-                      moment=name)  # fmt: skip
+        request = Request(intent, None, Priority.MOMENT, "moment", rank=moment_rank(name))
+        composition = self.book.compositions.get(intent)
+        if composition is not None:
+            request = replace(request, bind=composition.bind, family=composition.family)
+        self._request(request, moment=name)
 
     def _drive(self, active: bool) -> None:
         self._driving = active
@@ -512,7 +550,8 @@ class GestureEngine:
         now = self.clock()
         kept = {p: r for p, r in self._playing.items() if finishing and self._finishing(r, now)}
         self.scheduler.clear()
-        self._playing.update(kept)
+        for name, held in kept.items():
+            self.scheduler.reservations.reserve(name, held, now)
         for name, part in self.parts.items():
             if name in kept:
                 continue
@@ -537,8 +576,20 @@ class GestureEngine:
             if self._finishing(playing, now):
                 continue
             self.parts[part].fade("gesture", self.config.fade_s.get(part, 0.0))
-            del self._playing[part]
+            self.scheduler.reservations.release(part)
             self.record("faded", {"intent": playing.performance.intent, "part": part, "why": why})
+
+    def _release(self, request: Request, why: str) -> None:
+        for waiting in self.scheduler.withdraw(request):
+            self.record("dropped", {"intent": waiting.performance.intent,
+                                    "part": waiting.clip.part, "why": why})  # fmt: skip
+        now = self.clock()
+        for part, held in list(self._playing.items()):
+            if held.request is not request or now >= held.ends:
+                continue
+            self.parts[part].fade(held.clip.layer, self.config.fade_s.get(part, 0.0))
+            self.scheduler.reservations.release(part)
+            self.record("faded", {"intent": held.performance.intent, "part": part, "why": why})
 
     # -- performing ------------------------------------------------------------------------------
 
@@ -559,7 +610,7 @@ class GestureEngine:
             performance = self._render(intent, source, None, request)
             if performance is None:
                 return Outcome(False, "no part can play it now")
-            outcomes = self._place(request, performance, None)
+            outcomes = self._place(request, performance, None, rendered=True)
         played = [o for o in outcomes if o.ok]
         if not played:
             return Outcome(False, "; ".join(o.why for o in outcomes) or "nothing played")
@@ -600,21 +651,34 @@ class GestureEngine:
         if capped and turn is not None and index is not None:
             self._per_part[(turn, index)] = self._per_part.get((turn, index), 0) + 1
             self._per_reply[turn] = self._per_reply.get(turn, 0) + 1
-        return self._place(request, performance, cue)
+        return self._place(request, performance, cue, rendered=not request.clips)
 
-    def _place(self, request: Request, performance: Performance, cue: Cue | None) -> list[Outcome]:
-        """The performance's clips to the scheduler; the ones due now sent at once."""
+    def _place(
+        self, request: Request, performance: Performance, cue: Cue | None, *, rendered: bool
+    ) -> list[Outcome]:
+        """The performance's clips to the scheduler (a word's fitted by its ladder); the ones
+        due now sent at once. A ``rendered`` one counts under ``arm_per_minute`` as its final
+        version (the ladder's, the bookings'): with the arm only when an arm clip was placed;
+        it is the latest performance (:meth:`last`) as placed."""
         now = self.clock()
         at_once = self.scheduler.place(performance, request, cue, now)
+        placed = at_once + [w for w in self.scheduler.waiting if w.request is request]
+        if rendered:
+            arm = any(w.clip.part == "arm" for w in placed)
+            started = self._started[-1] if self._started else None
+            if started is not None and started[1] == performance.intent and started[2] != arm:
+                self._started[-1] = (started[0], started[1], arm)  # rendered just before
+            if placed:
+                self._last = replace(placed[0].performance, clips=tuple(w.clip for w in placed))
         outcomes = [self._send(waiting, now, None) for waiting in at_once]
-        waiting = len(performance.clips) - len(at_once)
-        return outcomes + [Outcome(True, "waiting")] * waiting
+        return outcomes + [Outcome(True, "waiting")] * (len(placed) - len(at_once))
 
     def _render(
         self, intent: str, source: str, cue: Cue | None, request: Request
     ) -> Performance | None:
         """``intent`` rendered for the parts ready now, the arm's and the body's clips stretched
-        to their speed scales; logged with its seed. None when it cannot be played."""
+        to their speed scales (the arm left out past ``arm_per_minute``); logged with its seed.
+        None when it cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
@@ -637,7 +701,7 @@ class GestureEngine:
             return None
         performance = replace(performance, clips=clips)
         now = self.clock()
-        self._started.append((now, intent, any(c.part == "arm" for c in clips)))
+        self._started.append((now, intent, any(c.part == "arm" for c in clips)))  # see _place
         self._used[intent] = now
         self._last = performance
         self.record("performance", {
@@ -723,10 +787,15 @@ class GestureEngine:
         if outcome.ok:
             seconds = outcome.seconds if outcome.seconds > 0 else clip.duration_s
             ends = NOT_YET if clip.loop else now + seconds
-            self._playing[clip.part] = Reservation(
-                performance, clip, now, now + stroke_s, ends, request.priority, request.rank,
-                waiting.source,
-            )  # fmt: skip
+            held = Reservation(performance, clip, now, now + stroke_s, ends, request.priority,
+                               request.rank, waiting.source, request)  # fmt: skip
+            refusal = self.scheduler.reservations.reserve(clip.part, held, now)
+            if refusal is not None:  # the table was asked just before: never, unless it changed
+                logger.warning("gesture engine: %s played but not held: %s", clip.part, refusal)
+            if clip.loop:
+                self._renew_at[clip.part] = now + max(RENEW_MIN_S, clip.duration_s)
+            else:
+                self._renew_at.pop(clip.part, None)
         return outcome
 
     def _withheld(self, clip: Clip, request: Request, now: float) -> str | None:
@@ -735,7 +804,7 @@ class GestureEngine:
         if request.priority > Priority.STATE:
             view = self._view()
             if clip.part == "head" and clip.layer == "gesture":
-                refusal = head_refusal(view, now)
+                refusal = head_refusal(view, now, self.config.head_seen_s)
                 if refusal is not None:
                     return refusal
             if clip.part == "arm":
@@ -769,7 +838,7 @@ class GestureEngine:
         if phase not in BUSY:
             return ATTENTION_POLL_S
         self.parts["head"].fade("gesture", self.config.fade_s.get("head", 0.0))
-        del self._playing["head"]
+        self.scheduler.reservations.release("head")
         self.record("faded", {"intent": playing.performance.intent, "part": "head",
                               "why": f"attention: {phase}"})  # fmt: skip
         return None
@@ -782,38 +851,45 @@ class GestureEngine:
 
     def _idle(self) -> float | None:
         """An idle motion on each free part whose time has come; the seconds to the next. An
-        entry waits while a state it excludes holds; its looping clip fades then."""
+        entry waits while a state it excludes holds; its looping clip fades then. While a loop
+        holds a part (until a state it excludes, or another clip, takes it) nothing more is
+        planned there."""
         if not self._on or self._driving or not self.book.idle:
             return None
         now = self.clock()
         states: dict[IdleState, bool] = {"speaking": bool(self._replying),
                                           "listening": self._listening}  # fmt: skip
         wait: float | None = None
-        for idle in self.book.idle:
+        for key, idle in enumerate(self.book.idle):
             if idle.when == "conversation" and not self._conversation:
                 continue
             playing = self._playing.get(idle.part)
             if any(states[s] for s in idle.unless):
-                self._idle_next.pop(idle.part, None)
+                self._idle_next.pop(key, None)
                 mine = playing is not None and self._idle_of.get(idle.part) is idle
                 if mine and playing is not None and playing.clip.loop:
                     self.parts[idle.part].fade("idle", self.config.fade_s.get(idle.part, 0.0))
-                    del self._playing[idle.part]
+                    self.scheduler.reservations.release(idle.part)
                 continue
+            if playing is not None and not math.isfinite(playing.ends):
+                self._idle_next.pop(key, None)
+                continue  # a loop holds the part until it is let go (renewed meanwhile)
             busy_until = playing.ends if playing is not None else float("-inf")
             if playing is not None and playing.clip.layer == "gesture":
                 busy_until += self.config.idle_resume_s
             quiet_since = max([self._opened_s, *(self._ended[s] for s in idle.unless)])
-            earliest = max(busy_until, quiet_since + self.config.idle_after_speech_s)
-            planned = self._idle_next.get(idle.part)
+            after = idle.after_speech_s
+            after = self.config.idle_after_speech_s if after is None else after
+            earliest = max(busy_until, quiet_since + after)
+            planned = self._idle_next.get(key)
             if planned is None or planned < earliest:
                 planned = earliest + self.seeds.uniform(idle.every_s.lo, idle.every_s.hi)
-                self._idle_next[idle.part] = planned
+                self._idle_next[key] = planned
             if now < planned:
                 wait = planned - now if wait is None else min(wait, planned - now)
                 continue
             part = self.parts.get(idle.part)
-            del self._idle_next[idle.part]
+            del self._idle_next[key]
             if part is None or part.ready() is not None:
                 continue
             seed = self.seeds.randrange(2**31)
@@ -823,6 +899,28 @@ class GestureEngine:
             request = Request(performance.intent, None, Priority.IDLE, "idle")
             if self._send(Waiting(performance, clip, request), now, None).ok:
                 self._idle_of[idle.part] = idle
+        return wait
+
+    def _renew(self) -> float | None:
+        """Each looping clip still holding its part renewed at its owner once a period (the
+        arbiter lets an overlay lapse a second after its period); the seconds to the next."""
+        now = self.clock()
+        wait: float | None = None
+        for part, due in list(self._renew_at.items()):
+            held = self._playing.get(part)
+            if held is None or not held.clip.loop:
+                del self._renew_at[part]
+                continue
+            if now >= due:
+                executor = self.parts.get(part)
+                if isinstance(executor, Renewing):
+                    try:
+                        executor.renew(held.clip.layer)
+                    except Exception:
+                        logger.exception("gesture engine: %s would not renew", part)
+                due = now + max(RENEW_MIN_S, held.clip.duration_s)
+                self._renew_at[part] = due
+            wait = due - now if wait is None else min(wait, due - now)
         return wait
 
     def _apply_knobs(self) -> None:
@@ -835,4 +933,16 @@ class GestureEngine:
         if isinstance(head, HeadPart):
             head.fade_s = self.config.fade_s.get("head", head.fade_s)
         c = self.config
-        self.scheduler.configure(audio_lag_s=c.audio_lag_s, late_s=c.late_s, poll_s=c.poll_s)
+        self.scheduler.configure(
+            audio_lag_s=c.audio_lag_s, late_s=c.late_s, poll_s=c.poll_s, timing=c.timing
+        )
+
+
+def bounded(wait: float | None) -> float | None:
+    """A wait the engine's thread may sleep: None (until a call), else 0..:data:`MAX_WAIT_S`
+    (an endless or a longer one cut there: the thread never sleeps past it)."""
+    if wait is None:
+        return None
+    if not math.isfinite(wait):
+        return MAX_WAIT_S
+    return min(max(0.0, wait), MAX_WAIT_S)

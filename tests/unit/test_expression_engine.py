@@ -53,7 +53,9 @@ def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     assert set(BOOK.compositions) == RESEARCH_NAMES | PRIMITIVES
     assert len(BOOK.atoms) >= 19
     assert not BOOK.atoms["breath"].callable and not BOOK.atoms["head_drift"].callable
-    assert BOOK.moments == {"slow_tool": "thinking"}
+    assert BOOK.moments["slow_tool"] == "thinking"  # the listeners' moments name compositions too
+    assert (BOOK.moments["greeting_due"], BOOK.moments["farewell_due"]) == ("greeting", "farewell")
+    assert set(BOOK.moments.values()) <= set(BOOK.compositions)
     words = vocabulary(BOOK, face_names(CONFIG / "face.json"))
     assert words.intents == frozenset(RESEARCH_NAMES | PRIMITIVES) and "smile" in words.faces
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps

@@ -151,13 +151,15 @@ class Idle:
     during a conversation only or always, unless one of ``unless`` holds (the robot speaking,
     the person speaking; by default either: idle only while nobody speaks). A clip of it plays
     on while a state it allows begins (a breath while the person speaks) and fades when one it
-    excludes does."""
+    excludes does. ``after_speech_s``: how long after such a state ended it waits (None: the
+    engine's ``layers.idle_after_speech_s``; 0: a breath right after a reply)."""
 
     part: PartName
     atoms: tuple[str, ...]
     every_s: Range
     when: Literal["conversation", "always"] = "conversation"
     unless: tuple[IdleState, ...] = IDLE_STATES
+    after_speech_s: float | None = None
 
 
 @dataclass(frozen=True)

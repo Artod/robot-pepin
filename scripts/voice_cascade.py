@@ -644,6 +644,14 @@ def main() -> int:
     alive = Alive(body.engine, prosody, say=lambda line: print(line, flush=True))
     body.engine.taps.append(prosody)
     body.engine.scene_hooks.append(alive.scene)
+    # On the word: the ladder plans with the arm's planner and units, renders the book's other
+    # versions and floors through the engine's renderer and scene hooks, and takes the voice's
+    # nuclei as the word clock's AUDIO moment; a barge-in's record reads the same clock.
+    body.engine.scheduler.attach(
+        body.engine.parts, lambda: body.engine.renderer, nuclei=prosody,
+        hooks=body.engine.scene_hooks,
+    )  # fmt: skip
+    player.words = body.engine.scheduler.words
     switchboard = Switchboard(
         control,
         configure=lambda brain, voice: configure(brain, voice),

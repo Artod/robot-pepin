@@ -1304,7 +1304,9 @@ def test_the_person_s_pause_is_a_moment_of_the_body_whatever_the_backchannel_s_f
         await until(lambda: rig.loop.person_turns == 2 and rig.loop.quiet())
 
     asyncio.run(rig.run(scenario))
-    assert ("moment", (LISTENER_PAUSE,)) in observer.calls
+    pauses = [a for name, a in observer.calls if name == "moment" and a[0] == LISTENER_PAUSE]
+    # the person's words so far ride with it once the early read of that pause has landed
+    assert pauses and all(a[1:] in ((), ("послушай меня",)) for a in pauses)
     (events,) = tmp_path.glob("*/cascade_*/events.jsonl")
     rows = [json.loads(line) for line in events.read_text().splitlines()]
     assert not [r for r in rows if r["event"] == "backchannel"]  # its flag is off

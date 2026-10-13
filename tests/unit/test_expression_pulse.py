@@ -63,7 +63,7 @@ from pepin.expression.prosody import (
     pin_second,
     snap,
 )
-from pepin.expression.schedule import Nucleus, Priority, Request
+from pepin.expression.schedule import AtWord, Nucleus, Priority, Request
 from pepin.gaze import GazeSettings, overlay_from_json
 
 REPO = Path(__file__).resolve().parents[2]
@@ -524,6 +524,66 @@ def test_a_listener_nod_after_two_seconds_of_their_speech_one_per_five_and_never
     rig.alive.moment(LISTENER_PAUSE)
     rig.tick(0.1)
     assert rig.moments(LISTENER_PAUSE)[-1]["why"] == "after their question"
+
+
+def test_the_listener_nod_reads_the_person_s_words_so_far_when_the_pause_brings_them() -> None:
+    """The ears' early read of the pause rides with it: a question so far gets no nod, and a
+    statement so far gets one even right after their question closed."""
+    rig = Rig(listener_nod_p=1.0, ack_nod_p=0.0, think_p=0.0)
+    rig.open()
+    rig.alive.speech_started(rig.clock.now)
+    rig.tick(2.5)
+    rig.alive.moment(LISTENER_PAUSE, "А где у нас принтер?")
+    rig.tick(0.1)
+    assert rig.moments(LISTENER_PAUSE)[-1]["why"] == "their words so far are a question"
+    rig.heard("Где у нас принтер?")
+    rig.alive.speech_started(rig.clock.now)
+    rig.tick(6.0)
+    rig.alive.moment(LISTENER_PAUSE, "Ну я тебе так скажу")
+    rig.tick(0.1)
+    assert rig.moments(LISTENER_PAUSE)[-1]["played"] and len(rig.sent("listen_nod")) == 1
+
+
+def test_a_reply_sooner_than_the_waits_predict_ends_the_thinking_glance_through_the_engine(
+) -> None:  # fmt: skip
+    """The glance holds until think_back_s into the reply as the waits predict it (1.95 s at
+    first); a reply that starts 1.05 s after the close ends it think_back_s into its first
+    sound: the listeners release their own request and the head eases back."""
+    rig = Rig(ack_nod_p=0.0, think_p=1.0)
+    rig.open()
+    rig.heard("Расскажи что-нибудь.")
+    rig.tick(0.85)
+    (glance,) = rig.moments("think_wait")
+    assert glance["played"] and len(rig.sent("think_glance")) == 1
+    rig.tick(0.2)
+    rig.say(1, 0, "Ну вот.")
+    rig.alive.part_started(1, 0, rig.playout.now)
+    rig.tick(1.6)
+    faded = [f for k, f in rig.records if k == "faded" and f["intent"] == "think_glance"]
+    assert "head" in {f["part"] for f in faded}  # and its thinking face, when it has one
+    assert all(f["why"] == "the reply's voice" for f in faded)
+    assert ("fade", ("gesture", 0.35)) in rig.parts["head"].calls
+
+
+def test_a_nod_keeps_its_gap_from_a_mark_still_waiting_for_its_word_in_the_next_sentence(
+) -> None:  # fmt: skip
+    """A mark of the next sentence waits for its word in the engine; a nod of this sentence
+    whose bottom would come 0.5 s before the mark's head stroke yields (the engine's pending)."""
+    rig = Rig()
+    rig.open()
+    rig.say(1, 0, "Первая фраза у нас тут.")
+    rig.say(1, 1, "Вторая.")
+    rig.engine.request(Request("agreement", AtWord(1, 1, 0), Priority.MARK, "marker",
+                               clips=(nod_clip(3.0, 0.4),)))  # fmt: skip
+    rig.tick(0.02)
+    (mark,) = rig.engine.pending("head", turn=1)
+    second = rig.playout.now + (mark.stroke - 0.5 - rig.clock.now) - 0.15 + 0.05
+    rig.news(1, 0, [(second, 3.0)])
+    rig.tick(0.05)
+    pulse = next(f for k, f in rig.events if k == "pulse")
+    assert not pulse["accent"] and "agreement's head stroke 0.5 s away (waiting)" in " ".join(
+        pulse["skipped"]
+    )
 
 
 def test_an_acknowledgement_after_a_statement_never_after_a_question() -> None:

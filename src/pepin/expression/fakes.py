@@ -109,9 +109,9 @@ class RecordingObserver:
         """Recorded."""
         self.calls.append(("reply_done", (turn,)))
 
-    def moment(self, name: str) -> None:
-        """Recorded."""
-        self.calls.append(("moment", (name,)))
+    def moment(self, name: str, text: str = "") -> None:
+        """Recorded (the words only when there are some)."""
+        self.calls.append(("moment", (name, text) if text else (name,)))
 
     def drive(self, active: bool) -> None:
         """Recorded."""
@@ -156,6 +156,10 @@ class FakeExecutor:
         if self.why_not is not None:
             return Outcome(False, self.why_not)
         return Outcome(True, seconds=clip.duration_s)
+
+    def renew(self, layer: Layer) -> None:
+        """Recorded (a looping clip kept alive)."""
+        self.calls.append(("renew", (layer,)))
 
     def fade(self, layer: Layer, seconds: float) -> None:
         """Recorded."""
@@ -256,6 +260,10 @@ class FakeHeadDoor:
         """Recorded; plays, unless a refusal is scripted."""
         self.calls.append(("look", (request,)))
         return self.refusals.popleft() if self.refusals else None
+
+    def renew(self, source: str) -> None:
+        """Recorded."""
+        self.calls.append(("renew", (source,)))
 
     def withdraw(self, source: str, fade_s: float) -> None:
         """Recorded."""

@@ -472,8 +472,33 @@ class ArbiterClient:
             return {"status": "denied", "reason": look}
         return self.arbiter.submit(look, self.clock()).as_dict()
 
+    def renew(self) -> int:
+        return self.arbiter.renew(self.source, self.clock())
+
     def release(self, fade_s: float = 0.0) -> int:
         return self.arbiter.withdraw(self.source, self.clock(), "its source's release", fade_s)
+
+
+def test_a_looping_breath_plays_on_while_renewed_and_lapses_without_it() -> None:
+    """The arbiter's TTL of a looped overlay is one period and a second: renewed once a period
+    through the door it plays on; left alone it lapses."""
+    for renewed in (True, False):
+        clock = Clock()
+        arbiter = Arbiter(TargetHead(), home_aim(NECK), GazeSettings(), None)
+        door = OverlayDoor(client=lambda s, a=arbiter, c=clock: ArbiterClient(s, a, c))
+        head = HeadPart(door, run=inline)
+        breath = RENDERER.render_atom("breath", 5)
+        clock.now = 1.0
+        assert head.play(breath).ok
+        due = clock.now + breath.duration_s
+        while clock.now < 1.0 + 3 * breath.duration_s:
+            clock.now += 0.1
+            if renewed and clock.now >= due:
+                head.renew("idle")
+                due = clock.now + breath.duration_s
+            arbiter.step(clock.now)
+        playing = arbiter.overlay()
+        assert (playing is not None and playing.source == IDLE_LOOK) == renewed
 
 
 def _speaker_holds(arbiter: Arbiter, aim: Aim) -> list[Outcome]:

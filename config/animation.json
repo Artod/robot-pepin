@@ -595,7 +595,9 @@
   ],
   "moments": {
     "slow_tool": "thinking",
-    "note": "a moment of the robot (pepin.expression.conversation) -> the composition it performs, under the caps"
+    "greeting_due": "greeting",
+    "farewell_due": "farewell",
+    "note": "a moment of the robot (pepin.expression.conversation) -> the composition it performs, under the caps; greeting_due and farewell_due: the person's hello and bye, played in the brain's wait by the engine's listeners"
   },
   "aliases": {
     "note": "another spelling of a marker -> its canonical name or name:arg (pepin.expression.markers): the brain is shown the canonical ones, these catch what it writes instead",

@@ -730,7 +730,13 @@ and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a
 so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
 the gesture plays without its head. The wheels: below. The person starting to speak fades
 the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
-conversation sends every part to rest; markers are capped (`config/expression.json` `caps`).
+conversation sends every part to rest; markers are capped (`config/expression.json` `caps`; an
+arm gesture counts against `arm_per_minute` only when the arm made it into what was placed). A
+gesture takes the head only while the speaker gaze tracks a person it saw within
+`layers.head_seen_s` (1.2 s: its frames come at 1 Hz while the robot speaks). A looping idle
+clip holds its part until a state it excludes or another clip takes it, renewed at the arbiter
+once a period (an overlay's TTL is one period and a second); an idle entry of the book may set
+its own `after_speech_s` (0: a breath right after a reply) over `layers.idle_after_speech_s`.
 
 **The alive layer** (`pepin.expression.prosody`, `pepin.expression.listeners`; it rides
 `gestures`, no flag of its own). The prosody listener hears every chunk of a reply as the player
@@ -745,15 +751,21 @@ an accent nod of 2-4° on the first nucleus of a sentence with z >= `pulse.beat_
 most prominent once the sentence's audio is all in (at most one a sentence, 2 s apart, 12 a
 minute, never with less lead than the nod needs: 0.30 s with the head's latency, since the
 arbiter lets a nod's bottom come 0.2 s after its first move at the earliest; none in a sentence
-that carries the brain's own marker); a lift and cock of the head at a question's last syllable;
+that carries the brain's own marker, none within 2 s of a marker's head stroke, played or still
+waiting for its word); a lift and cock of the head at a question's last syllable;
 one look away in a reply with 6 s of audio. Between turns: the breath (`moments.breath_deg`, 1°
 at 0.25 Hz) in every free moment of the head while the robot is silent; a thinking glance up,
 down or aside 0.8 s into the brain's wait (p 0.75, never the same way twice, back 0.5-1.3 s into
-the reply); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart, never after
-their question); a small nod after a statement (p 0.3); hello and bye played in the brain's wait
-from the person's own words (after the body's turn toward them); one rock of the cart after a
-`{laugh}` (the laugh never uses the arm then); a smile at the first face. Every discrete head
-move keeps `moments.head_gap_s` (1 s) from the one before. Quiet (`quiet`: a whispering or
+the reply as the waits predict it, or that long into the reply's first sound when it comes
+sooner); a nod at the person's pause after 2 s of their speech (p 0.6, 5 s apart, never while
+their words so far, when the ears read them in time, or else their last utterance were a
+question); a small nod after a statement (p 0.3); hello and bye played in the brain's wait from
+the person's own words (after the body's turn toward them; the book's `moments` name them); one
+rock of the cart after a `{laugh}`, a tail whose stroke lands within `timing.after_s` (2.5 s) of
+its sentence's start and inside the speech (the laugh never uses the arm then); a smile at the
+first face (the face's one writer: the speaker gaze's own smile is off, `speaker.smile` null).
+Every discrete head move keeps `moments.head_gap_s` (1 s)
+from the one before. Quiet (`quiet`: a whispering or
 sleepy style, 23:00-08:00, or the person's voice under -30 dBFS): the melody, the breath and the
 face only. Each conversation's events.jsonl gets `pulse` (per sentence: its nuclei's z, the
 accent and why others were skipped), `moment` (each decision, played or why not), `quiet` and,
@@ -785,6 +797,10 @@ board's `then: hold`; with nothing after it the board rests the arm by itself) a
 starts from there. An arm motion longer than `short_s` (1 s) plays only when the speech ahead
 covers it (hello and bye may run 1 s past it). A marker on a reply's first words, seen in the
 token stream, may send the arm to `ready` and hold it there first: a preparation, never a stroke.
+The voice loop lends the scheduler the arm's planner, the engine's renderer and scene hooks and
+the prosody listener's nuclei (the AUDIO moment), and the player tells the clock what is queued
+ahead of the speaker (a thinking filler holds a reply's first word back only by what was sent
+and its fade); a barge-in's record of what the person heard reads the same clock.
 
 **Meaning** (`pepin.expression.markers`, the resolver in `pepin.expression.render`,
 `pepin.expression.places`; `config/animation.json` `space` and `aliases`; it rides `gestures`).
