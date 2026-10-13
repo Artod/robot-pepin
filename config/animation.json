@@ -76,9 +76,9 @@
     },
     "breath": {
       "part": "head", "mode": "additive", "stroke": 0.25, "callable": false, "loop": true,
-      "params": {"amp_deg": 0.6, "period_s": 4.0, "repeats": 3},
+      "params": {"amp_deg": 1.0, "period_s": 4.0, "repeats": 3},
       "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "tilt_deg": "-$amp_deg"}, {"at": 0.75, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
-      "note": "+-0.6 deg at 0.25 Hz (config/face.json's breathe_hz), a looped overlay (loop: the arbiter repeats it until released or lapsed); within the arbiter's clip_still_deg (1 deg) it never blinds the head; not in the idle list below"
+      "note": "+-1.0 deg at 0.25 Hz (config/face.json's breathe_hz; the amplitude the alive layer's breath was tuned to), a looped overlay (loop: the arbiter repeats it until released or lapsed, the engine renews it once a period); within the arbiter's clip_still_deg (1 deg) it never blinds the head; the idle list's breath while the robot is silent"
     },
     "body_turn": {
       "part": "body", "mode": "additive", "stroke": 0.6,
@@ -591,7 +591,8 @@
     }
   },
   "idle": [
-    {"part": "head", "atoms": ["head_drift"], "every_s": [20.0, 60.0], "when": "conversation"}
+    {"part": "head", "atoms": ["head_drift"], "every_s": [20.0, 60.0], "when": "conversation"},
+    {"part": "head", "atoms": ["breath"], "every_s": 0.2, "when": "conversation", "unless": "speaking", "after_speech_s": 0}
   ],
   "moments": {
     "slow_tool": "thinking",

@@ -889,6 +889,7 @@ class GestureEngine:
                 self._renew_at[clip.part] = now + max(RENEW_MIN_S, clip.duration_s)
             else:
                 self._renew_at.pop(clip.part, None)
+            self._idle_of.pop(clip.part, None)  # an idle entry's own send names it again
         return outcome
 
     def _withheld(self, clip: Clip, request: Request, now: float) -> str | None:
@@ -961,8 +962,9 @@ class GestureEngine:
     def _idle(self) -> float | None:
         """An idle motion on each free part whose time has come; the seconds to the next. An
         entry waits while a state it excludes holds; its looping clip fades then. While a loop
-        holds a part (until a state it excludes, or another clip, takes it) nothing more is
-        planned there."""
+        holds a part (until a state it excludes, or another clip, takes it) no other loop is
+        planned there; a finite entry (the drift) plays over it as over a free part, and the
+        loop's entry sends it again after that clip, as after any other."""
         if not self._on or self._driving or not self.book.idle:
             return None
         now = self.clock()
@@ -981,8 +983,10 @@ class GestureEngine:
                     self.scheduler.reservations.release(idle.part)
                 continue
             if playing is not None and not math.isfinite(playing.ends):
-                self._idle_next.pop(key, None)
-                continue  # a loop holds the part until it is let go (renewed meanwhile)
+                if any(self.book.atoms[name].loop for name in idle.atoms):
+                    self._idle_next.pop(key, None)
+                    continue  # a loop holds the part until it is let go (renewed meanwhile)
+                playing = None  # a finite entry over a loop: the loop yields, comes back after
             busy_until = playing.ends if playing is not None else float("-inf")
             if playing is not None and playing.clip.layer == "gesture":
                 busy_until += self.config.idle_resume_s

@@ -135,7 +135,6 @@ PAUSE_GAP_S = 0.35  # two nuclei this far apart have a pause between them
 DEFER_MAX_S = 3.0  # a greeting waits for the body's turn at most this long
 DEFER_STEP_S = 0.1
 POLL_S = 0.2  # the head's holder and attention read this often in a conversation
-BREATH_PERIOD_S, BREATH_CYCLES = 4.0, 2  # the breath: 0.25 Hz (config/face.json's breathe_hz)
 IDLE_WAIT_S = 1.0  # the thread's longest sleep with nothing due
 DECIDE_MARGIN_S = 0.05  # a causal beat is decided this long before its lead runs out
 SHIFT_MOVE_S, SHIFT_HOLD_S = 0.6, (1.5, 3.0)  # the listening shift's way and hold
@@ -146,7 +145,7 @@ WRIST_PERIOD_S = (0.3, 0.35)  # a wrist flick inside a unit, at the caps
 DUE = {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
 MINE = frozenset(
     ("accent", "wrist_beat", "melody", "question", "think_glance", "aversion", "listen_nod",
-     "ack_nod", "smile", "laugh_rock", "listen_shift", "breath")
+     "ack_nod", "smile", "laugh_rock", "listen_shift")
 )  # fmt: skip
 QUESTION = (  # a question: its mark, or a question word first
     r"\?|^\W*(?:(?:а|и|ну)\W+)?"  # noqa: RUF001
@@ -183,9 +182,9 @@ class PulseKnobs:
 
 @dataclass(frozen=True)
 class MomentKnobs:
-    """config/expression.json's ``moments``: between turns and while the person speaks."""
+    """config/expression.json's ``moments``: between turns and while the person speaks (the
+    breath is the book's idle layer, the engine's)."""
 
-    breath_deg: float = 1.0
     head_gap_s: float = 1.0
     think_glance_s: float = 0.8
     think_p: float = 0.75
@@ -264,7 +263,6 @@ def alive_knobs(data: Mapping[str, Any]) -> AliveKnobs:
     )
     dirs = m.get("think_dirs", dm.think_dirs)
     moments = MomentKnobs(
-        num(m, "breath_deg", dm.breath_deg),
         num(m, "head_gap_s", dm.head_gap_s),
         num(m, "think_glance_s", dm.think_glance_s),
         num(m, "think_p", dm.think_p),
@@ -567,7 +565,6 @@ class Alive:
                 logger.exception("alive: a timer broke")
         if self._conversation and now >= self._poll_at:
             self._poll_at = now + POLL_S
-            self._breathe(now)
             self._attend(now)
         waits = [self._timers[0][0] - now] if self._timers else []
         if self._conversation:
@@ -1281,25 +1278,6 @@ class Alive:
             self._counts["listen_shift"] += 1
         self._shift_at = now + self.rng.uniform(*m.listen_shift_s)
         self._at(self._shift_at, self._shift)
-
-    def _breathe(self, now: float) -> None:
-        """The breath while the robot is silent: a still nod of ``breath_deg`` at 0.25 Hz on
-        the idle source, sent whenever the head is free (after a gesture, the drift, the
-        melody, the fade at the person's start), finite so it never holds the head unseen."""
-        amp = self.knobs.moments.breath_deg
-        if amp <= 0.0 or not self.engine.on or self._driving or self._speaking:
-            return
-        if self.engine.scheduler.reservations.holder("head", now) is not None:
-            return
-        p = BREATH_PERIOD_S
-        frames: list[tuple[float, float, float]] = []
-        for cycle in range(BREATH_CYCLES):
-            t = cycle * p
-            frames += [(t, 0.0, 0.0), (t + 0.25 * p, 0.0, -amp), (t + 0.75 * p, 0.0, amp)]
-        frames.append((BREATH_CYCLES * p, 0.0, 0.0))
-        clip = head_clip(frames, 0.0, layer="idle")
-        self.engine.request(Request("breath", None, Priority.IDLE, "idle", clips=(clip,)))
-        self._counts["breath"] += 1
 
     def _attend(self, now: float) -> None:
         """Attention read: the first clear face of the conversation brings a smile."""

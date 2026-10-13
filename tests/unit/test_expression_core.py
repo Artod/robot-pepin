@@ -88,17 +88,18 @@ class Rig:
 
 
 def breathing(after: float | None = 0.0) -> Book:
-    """The book with the breath as a looping idle entry of the head (no breath while the robot
-    speaks) beside the drift."""
+    """The book with its breath (a looping idle entry of the head, no breath while the robot
+    speaks) drawn every 0.5 s and given ``after``, beside the drift."""
     breath = Idle("head", ("breath",), Range(0.5, 0.5), "conversation", ("speaking",), after)
-    return Book(BOOK.atoms, BOOK.compositions, BOOK.poses, (breath, *BOOK.idle), BOOK.moments)
+    others = tuple(i for i in BOOK.idle if "breath" not in i.atoms)
+    return Book(BOOK.atoms, BOOK.compositions, BOOK.poses, (breath, *others), BOOK.moments)
 
 
 def test_a_looping_idle_clip_holds_the_head_renewed_once_a_period_until_the_robot_speaks() -> None:
     """The breath loops at the arbiter, whose TTL is one period and a second: the engine sends it
-    once, renews it every period (its three breaths, 12 s) while it holds the head (the drift
-    waits meanwhile, 20-60 s), never plans an endless wait, and fades it when the robot
-    speaks."""
+    once, renews it every period (its three breaths, 12 s) while it holds the head, never plans
+    an endless wait, lets the drift (20-60 s) play over it and sends it again after, and fades
+    it when the robot speaks."""
     rig = Rig(breathing())
     rig.engine.opened(Heard(0.0, 1.0))
     rig.tick(1.0)
@@ -109,7 +110,12 @@ def test_a_looping_idle_clip_holds_the_head_renewed_once_a_period_until_the_robo
     rig.tick(2 * loop.duration_s + 0.1, step_s=0.05)
     assert rig.calls("head", "renew") == [("idle",), ("idle",)]
     rig.tick(60.0, step_s=0.05)
-    assert len(rig.played("head")) == 1, "a loop is sent once; the drift waits while it holds"
+    played = rig.played("head")
+    drifts = [k for k, clip in enumerate(played) if not clip.loop]
+    assert drifts, "the drift plays over the breath"
+    assert all(played[k + 1].loop for k in drifts if k + 1 < len(played)), "and the breath after"
+    while not rig.played("head")[-1].loop:  # end on the breath
+        rig.tick(0.5, step_s=0.05)
     rig.engine.part_queued(1, 0, Part("Да."))
     rig.tick(0.05)
     assert ("idle", 0.35) in rig.calls("head", "fade")

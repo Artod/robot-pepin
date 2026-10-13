@@ -696,23 +696,29 @@ def test_the_first_clear_face_brings_one_smile() -> None:
 
 def test_the_breath_fills_the_silent_head_survives_the_person_s_start_and_stops_for_the_voice(
 ) -> None:  # fmt: skip
+    """The book's breath (the engine's looping idle entry, 1.0 deg at 0.25 Hz, as the alive
+    layer's own breath was): within the arbiter's still overlays, through the person's start,
+    faded while the robot speaks, back right after its reply."""
     rig = Rig()
     rig.open()
+    rig.engine.opened(Heard(rig.clock.now - 1.0, rig.clock.now, "Пепин"))
     rig.tick(0.3)
     (first,) = [c for c in rig.clips() if c.layer == "idle"]
-    assert refusal(first) is None and max(first.tracks[0].values) == pytest.approx(1.0)
+    assert first.loop and refusal(first) is None
+    assert max(first.tracks[0].values) == pytest.approx(1.0)
     rig.alive.speech_started(rig.clock.now)
     rig.engine.speech_started(rig.clock.now)
     rig.tick(0.5)
-    breaths = rig.sent("breath")
-    assert len(breaths) == 2, "faded at the person's start, and back"
+    assert len(rig.sent("idle:breath")) == 1, "it plays on through the person's start"
+    assert not [c for c in rig.parts["head"].calls if c[0] == "fade"]
     rig.say(1, 0, "Да.")
     rig.tick(9.0)
-    assert len(rig.sent("breath")) == 2, "none while the robot's voice is out"
+    assert ("fade", ("idle", 0.35)) in rig.parts["head"].calls, "the robot speaks: it fades"
+    assert len(rig.sent("idle:breath")) == 1, "none while the robot's voice is out"
     rig.alive.reply_done(1)
     rig.engine.reply_done(1)
     rig.tick(0.3)
-    assert len(rig.sent("breath")) == 3
+    assert len(rig.sent("idle:breath")) == 2
 
 
 def test_quiet_leaves_the_melody_and_the_face() -> None:
@@ -808,7 +814,10 @@ def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_composit
     data = json.loads((CONFIG / "expression.json").read_text())
     knobs_ = alive_knobs(data)
     assert knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.9
-    assert knobs_.moments.breath_deg == 1.0 and knobs_.moments.head_gap_s == 1.0
+    assert knobs_.moments.head_gap_s == 1.0 and "breath_deg" not in data["moments"]
+    (breath,) = [i for i in BOOK.idle if "breath" in i.atoms]  # the breath is the book's
+    assert breath.unless == ("speaking",) and breath.after_speech_s == 0.0
+    assert BOOK.atoms["breath"].loop and BOOK.atoms["breath"].params["amp_deg"].hi == 1.0
     assert knobs_.pulse.voice_stats == VoiceStats() and knobs_.quiet.hours == (23, 8)
     assert alive_knobs({}) == AliveKnobs()
     assert DUE == {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
