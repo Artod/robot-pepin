@@ -135,7 +135,7 @@
     "settle_deg": 2.0,
     "settle_m": 0.005,
     "clearance_m": 0.04,
-    "marks_age_s": 1.5,
+    "marks_age_s": 3.0,
     "stall_s": 0.5,
     "stop_hold_s": 30.0,
     "latency_s": 0.15,
