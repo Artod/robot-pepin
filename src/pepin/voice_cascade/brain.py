@@ -24,6 +24,7 @@ from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
     CUT,
     FOLLOW_UP,
+    Ahead,
     Emit,
     FirstToken,
     Played,
@@ -232,6 +233,8 @@ class ClaudeBrain:
                                 emit(FirstToken())
                             for sentence in splitter.feed(event.text):
                                 say(sentence)
+                            for early in splitter.ahead():
+                                emit(Ahead(early, round_index))
                         elif kind == "content_block_stop":
                             rest = splitter.flush()  # a text block ends before a tool call
                             if rest:

@@ -195,12 +195,13 @@ def test_a_tool_round_says_its_announcement_first_then_answers_with_the_result()
     brain.begin(None)
     events = run_turn(brain, "что видишь?", {"see": {"ok": True, "objects": ["стол"]}})
     kinds = [type(e).__name__ for e in events]
-    assert kinds == [
-        "FirstToken", "Sentence", "Usage", "ToolUse", "ToolDone", "Sentence", "Usage",
+    assert kinds == [  # each round's first word is told ahead of its sentence (text_ahead)
+        "FirstToken", "Ahead", "Sentence", "Usage", "ToolUse", "ToolDone", "Ahead", "Sentence",
+        "Usage",
     ]  # fmt: skip
     assert [e.round for e in events if isinstance(e, Sentence)] == [0, 1]
-    assert isinstance(events[3], ToolUse) and events[3].name == "see"
-    assert isinstance(events[4], ToolDone) and "стол" in events[4].result
+    assert isinstance(events[4], ToolUse) and events[4].name == "see"
+    assert isinstance(events[5], ToolDone) and "стол" in events[5].result
     second = messages.requests[1]["messages"]
     assert [m["role"] for m in second] == ["user", "assistant", "user"]
     assert second[2]["content"][0]["tool_use_id"] == "t1"
