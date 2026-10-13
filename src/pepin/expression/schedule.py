@@ -739,6 +739,8 @@ class Scheduler:
                 if variant.floor:
                     floors.append(other)
                     continue
+                if not arm and any(c.part == "arm" for c in other.clips):
+                    continue  # the engine's own version had no arm (its cap, its scene): none
                 yield Candidate("smaller", other, cue)
                 if any(c.part == "arm" for c in other.clips):
                     yield Candidate("smaller, compressed", other, cue, compress=True)
