@@ -28,6 +28,12 @@ additive tracks add to it; the idle layer adds only while no gesture plays on th
 performance on a part takes it from the one playing (the newest wins), and every change between
 layers fades over the ``fade_s`` knob. The person starting to speak fades the gesture layer out
 on every part; the base layer (the head on the person) stays.
+
+Owners of what this file declares (co-speech gesticulation, DESIGN.md §11): ``Composition.bind,
+args, family, long`` and ``Variant.needs, floor`` are authored by C (the book's primitives) and
+read by B (the ladder); ``Idle.unless`` by A (the breath, the melody); ``Scene``'s
+``lead_s``/``arm_at`` are filled by B, ``quiet``/``energy`` by A, ``distance_m`` from the
+attention view; ``Clip.then``/``hold_s`` by B (arm units).
 """
 
 from __future__ import annotations
@@ -38,12 +44,20 @@ from dataclasses import dataclass, field
 from typing import Literal, Protocol
 
 from pepin.expression.markers import Cue
+from pepin.expression.trajectory import Then
 
 PartName = Literal["arm", "head", "face", "body"]
 PARTS: tuple[PartName, ...] = ("arm", "head", "face", "body")
 Layer = Literal["base", "gesture", "idle"]
 Mode = Literal["absolute", "additive"]
 Value = float | str  # a number, "$param" or "-$param"; on the face's ``expression`` a name
+# How tightly a composition's stroke is bound to its marker's word (DESIGN.md §4.4): on the
+# word's stressed vowel, there or on one of the next two words of the phrase, or anywhere in
+# the utterance (today's intents)
+Bind = Literal["word", "phrase", "utterance"]
+BINDS: tuple[Bind, ...] = ("word", "phrase", "utterance")
+IdleState = Literal["speaking", "listening"]  # who speaks: the robot, the person
+IDLE_STATES: tuple[IdleState, ...] = ("speaking", "listening")
 
 PERIOD, REPEATS, HOLD = "period_s", "repeats", "hold_s"  # the reserved parameters
 
@@ -101,32 +115,47 @@ class Step:
 
 @dataclass(frozen=True)
 class Variant:
-    """One way to perform an intent, and how often it is drawn against the others."""
+    """One way to perform an intent, how often it is drawn against the others, what it needs of
+    the body (``needs``: a part -> a state, e.g. ``{"arm": "any"}``; none: anything) and whether
+    it is the floor (``floor``: the head and face version that always fits)."""
 
     steps: tuple[Step, ...]
     weight: float = 1.0
+    needs: Mapping[str, str] = field(default_factory=dict)
+    floor: bool = False
 
 
 @dataclass(frozen=True)
 class Composition:
-    """An intent: its variants, and the least time between two of its performances (a second
-    one sooner is skipped)."""
+    """An intent: its variants, the least time between two of its performances (a second one
+    sooner is skipped), how its stroke binds to its word (:data:`Bind`), the arguments a marker
+    may give it (``{point:you}``; ``"*"`` any), the family a moment of the same kind is
+    absorbed into, and whether it is long (over ``short_s``: played only when the speech ahead
+    covers it)."""
 
     name: str
     variants: tuple[Variant, ...]
     cooldown_s: float = 0.0
     note: str = ""
+    bind: Bind = "utterance"
+    args: tuple[str, ...] = ()
+    family: str | None = None
+    long: bool = False
 
 
 @dataclass(frozen=True)
 class Idle:
     """The idle layer of one part: atoms drawn every ``every_s`` while nothing else plays on it,
-    during a conversation only or always."""
+    during a conversation only or always, unless one of ``unless`` holds (the robot speaking,
+    the person speaking; by default either: idle only while nobody speaks). A clip of it plays
+    on while a state it allows begins (a breath while the person speaks) and fades when one it
+    excludes does."""
 
     part: PartName
     atoms: tuple[str, ...]
     every_s: Range
     when: Literal["conversation", "always"] = "conversation"
+    unless: tuple[IdleState, ...] = IDLE_STATES
 
 
 @dataclass(frozen=True)
@@ -176,6 +205,8 @@ class Clip:
     events: tuple[Event, ...] = ()
     layer: Layer = "gesture"
     loop: bool = False
+    then: Then = "rest"  # the arm: rest after it, or hold its last pose ``hold_s`` (a unit)
+    hold_s: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -192,12 +223,20 @@ class Performance:
 
 @dataclass(frozen=True)
 class Scene:
-    """What a rendering may use: the parts ready to play now, and whether the robot is
-    speaking and whether a conversation is open."""
+    """What a rendering may use: the parts ready to play now, whether the robot is speaking and
+    whether a conversation is open; the seconds until the anchor word is heard (``lead_s``,
+    None: unknown or now), where the arm is (``arm_at``: ``"rest"``, a pose's name, None:
+    unknown), the person's rough distance (None: unknown), whether the moment is quiet (head
+    and face only) and the reply's energy (amplitude x, 1 as authored)."""
 
     ready: frozenset[PartName]
     speaking: bool = False
     conversation: bool = False
+    lead_s: float | None = None
+    arm_at: str | None = None
+    distance_m: float | None = None
+    quiet: bool = False
+    energy: float = 1.0
 
 
 class Chooser(Protocol):

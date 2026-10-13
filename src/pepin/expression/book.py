@@ -1,7 +1,8 @@
 """config/animation.json read into a :class:`pepin.expression.animation.Book`, checked whole.
 
 The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, loop, note),
-``compositions`` (name -> cooldown_s, variants of steps, note), ``poses`` (name -> joint ->
+``compositions`` (name -> cooldown_s, bind, args, family, long, variants of steps with their
+weight, needs and floor, note), ``poses`` (name -> joint ->
 degrees and an optional note; taught by hand with ``scripts/gesture.py teach`` or authored
 from the URDF), ``idle`` (the idle layers) and
 ``moments`` (a moment of the robot -> a composition). A parameter is a number or ``[lo, hi]``;
@@ -12,6 +13,9 @@ naming where it is, at load: a book that loads plays.
 
 The arm's ``rest`` pose is not the book's: it is config/arm.json's ``motion.rest_deg``, the pose
 the board returns to by itself (:func:`with_rest`).
+
+Owners after slice 0: C (``space``, poses, compositions, ``aliases``), A (``moments``,
+``idle``); a new block is read here by its owner, with defaults, so an older book still loads.
 """
 
 from __future__ import annotations
@@ -23,14 +27,18 @@ from pathlib import Path
 from typing import Any, cast
 
 from pepin.expression.animation import (
+    BINDS,
     HOLD,
+    IDLE_STATES,
     PARTS,
     PERIOD,
     REPEATS,
     Atom,
+    Bind,
     Book,
     Composition,
     Idle,
+    IdleState,
     Key,
     PartName,
     Range,
@@ -237,11 +245,27 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
         weight = float(raw.get("weight", 1.0))
         if weight <= 0:
             raise ValueError(f"{where}.variants[{v}].weight: above 0")
-        variants.append(Variant(tuple(steps), weight))
+        needs = raw.get("needs", {})
+        if not isinstance(needs, dict) or not set(needs) <= set(PARTS):
+            raise ValueError(f"{where}.variants[{v}].needs: part -> state, parts of {PARTS}")
+        needs = {str(k): str(x) for k, x in needs.items()}
+        variants.append(Variant(tuple(steps), weight, needs, bool(raw.get("floor", False))))
     if not variants:
         raise ValueError(f"{where}.variants: at least one")
-    return Composition(name, tuple(variants), float(body.get("cooldown_s", 0.0)),
-                       str(body.get("note", "")))  # fmt: skip
+    bind = body.get("bind", "utterance")
+    if bind not in BINDS:
+        raise ValueError(f"{where}.bind: one of {', '.join(BINDS)}")
+    family = body.get("family")
+    return Composition(
+        name,
+        tuple(variants),
+        float(body.get("cooldown_s", 0.0)),
+        str(body.get("note", "")),
+        cast(Bind, bind),
+        tuple(str(a) for a in body.get("args", [])),
+        None if family is None else str(family),
+        bool(body.get("long", False)),
+    )
 
 
 def _named_params(atom: Atom) -> set[str]:
@@ -271,4 +295,10 @@ def _idle(i: int, body: Mapping[str, Any], atoms: Mapping[str, Atom]) -> Idle:
     when = body.get("when", "conversation")
     if when not in ("conversation", "always"):
         raise ValueError(f"{where}.when: conversation or always")
-    return Idle(cast(PartName, part), names, _range(f"{where}.every_s", body.get("every_s")), when)
+    unless = body.get("unless", list(IDLE_STATES))
+    unless = [unless] if isinstance(unless, str) else unless
+    if not isinstance(unless, list) or not set(unless) <= set(IDLE_STATES):
+        raise ValueError(f"{where}.unless: some of {', '.join(IDLE_STATES)}")
+    every = _range(f"{where}.every_s", body.get("every_s"))
+    states = tuple(cast(IdleState, u) for u in unless)
+    return Idle(cast(PartName, part), names, every, when, states)
