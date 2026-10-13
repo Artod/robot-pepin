@@ -973,6 +973,8 @@ class Alive:
         nod, the arm's beat over a held unit, the wheels' rock); None when sent, else why not,
         part by part."""
         p = self.knobs.pulse
+        if self._driving:
+            return "a drive is under way"
         stroke_s = nucleus.second + STROKE_BIAS_S
         lead = self._lead(stroke_s)
         stroke = now + lead

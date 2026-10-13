@@ -451,11 +451,13 @@ def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_th
     assert moment["played"] and moment["sentences"] == 2 and moment["base"] == "rest"
     beats = [tr for intent in ACCENTS for tr in played(c, "arm", intent)]
     assert beats, "the accent's wrist beat"
-    flex = JOINTS.index("wrist_flex")
+    flex, roll = JOINTS.index("wrist_flex"), JOINTS.index("wrist_roll")
     for beat in beats:
         assert beat.knots[0].deg == pytest.approx(up.knots[-1].deg, abs=0.01)  # the held pose
-        lift = max(k.deg[flex] for k in beat.knots) - READY["wrist_flex"]
-        assert 12.0 - 0.01 <= lift <= 24.0 + 0.01 and beat.then == "hold"
+        lift = max(k.deg[flex] for k in beat.knots) - READY["wrist_flex"]  # the flex beat
+        turn = max(abs(k.deg[roll] - READY["wrist_roll"]) for k in beat.knots)  # or the roll
+        assert 12.0 - 0.01 <= lift <= 24.01 or 8.0 - 0.01 <= turn <= 20.01, (lift, turn)
+        assert beat.then == "hold"
     assert all(tr.then == "hold" for _, tr in sends)
     for t, tr in sends:  # every hold ends within 1 s of the last sound (the board rests it then)
         assert t + 0.06 + tr.knots[-1].t_s + tr.hold_s <= end + 1.0

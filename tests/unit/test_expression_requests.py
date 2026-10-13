@@ -947,8 +947,11 @@ def test_a_pulse_s_arm_beat_rides_the_held_unit_and_keeps_its_hold() -> None:
     beat = rig.sent()[-1]
     assert beat is not lifted and beat.knots[0].deg == pytest.approx(lifted.knots[-1].deg)
     assert beat.then == "hold" and rig.arm.held_until == pytest.approx(until, abs=0.02)
-    flex = JOINTS.index("wrist_flex")
-    assert 16.0 - 0.01 <= max(k.deg[flex] for k in beat.knots) - lifted.knots[-1].deg[flex] <= 20.01
+    flex, roll = JOINTS.index("wrist_flex"), JOINTS.index("wrist_roll")
+    held = lifted.knots[-1].deg
+    down = max(k.deg[flex] for k in beat.knots) - held[flex]  # the flex beat, 16-20 deg
+    turn = max(abs(k.deg[roll] - held[roll]) for k in beat.knots)  # or the roll, 12-16
+    assert 16.0 - 0.01 <= down <= 20.01 or 12.0 - 0.01 <= turn <= 16.01, (down, turn)
     rig.engine.request(Request("pulse_strong", AtStream(rig.playout.now + 1.0, 1), Priority.PULSE,
                                "pulse", bind="word", parts=frozenset({"arm"})))  # fmt: skip
     rig.tick(0.05)

@@ -637,11 +637,16 @@
     "pulse_weak": {
       "callable": false,
       "bind": "word",
-      "note": "the engine's own (pepin.expression.listeners), never a mark: an accent of the robot's voice from pulse.beat_z to pulse.strong_z: the head's nod, with the arm up its wrist's beat (pulse.wrist_beat_p of them), the cart's 0.5 cm sway (pulse.wheel_accent_share of them, steady); the listeners leave out a part that is busy or has no time, the book draws the rest",
+      "note": "the engine's own (pepin.expression.listeners), never a mark: an accent of the robot's voice from pulse.beat_z to pulse.strong_z: the head's nod, with the arm up the wrist's beat (a flex down-stroke or a roll there and back: the dice between the two variants; pulse.wrist_beat_p of them), the cart's 0.5 cm sway (pulse.wheel_accent_share of them, steady); the listeners leave out a part that is busy or has no time, the book draws the rest",
       "variants": [
         {"needs": {"arm": "up"}, "steps": [
           {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
           {"atom": "arm_beat", "params": {"amp_deg": [12.0, 16.0], "period_s": [0.75, 0.85]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
+        ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [8.0, 12.0], "period_s": [0.8, 0.9], "repeats": 1}},
           {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
         ]},
         {"needs": {"arm": "rest"}, "steps": [
@@ -660,6 +665,11 @@
           {"atom": "arm_beat", "params": {"amp_deg": [16.0, 20.0], "period_s": [0.85, 0.95]}},
           {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
         ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [12.0, 16.0], "period_s": [0.85, 0.95], "repeats": 1}},
+          {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
+        ]},
         {"needs": {"arm": "rest"}, "steps": [
           {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
           {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
@@ -674,6 +684,11 @@
         {"needs": {"arm": "up"}, "steps": [
           {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
           {"atom": "arm_beat", "params": {"amp_deg": [20.0, 24.0], "period_s": [0.95, 1.05]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.012, 0.015], "period_s": [0.85, 0.95]}}
+        ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [16.0, 20.0], "period_s": [1.0, 1.1], "repeats": 1}},
           {"atom": "body_rock", "params": {"amp_m": [0.012, 0.015], "period_s": [0.85, 0.95]}}
         ]},
         {"needs": {"arm": "rest"}, "steps": [
