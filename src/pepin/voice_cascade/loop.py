@@ -84,7 +84,14 @@ from pepin.voice_cascade.brain import END_CONVERSATION
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
 from pepin.voice_cascade.control import FLAG, Request, Switchboard
 from pepin.voice_cascade.ears import EarEvent, Ears
-from pepin.voice_cascade.fillers import Context, FillerEngine, again_due, thinking_due
+from pepin.voice_cascade.fillers import (
+    Context,
+    FillerEngine,
+    again_due,
+    thinking_chance,
+    thinking_due,
+    word_count,
+)
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
 from pepin.voice_cascade.player import FillerFade, Player
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
@@ -654,16 +661,17 @@ class CascadeLoop:
             self._event("backchannel", text=line, language=self.fillers.language)
 
     def _filler_line(
-        self, context: Context, turn: int | None, tool: str | None = None
+        self, context: Context, turn: int | None, tool: str | None = None, speak_p: float = 1.0
     ) -> str | None:
         """A line for a filler's moment of reply ``turn`` (None: of no reply), by the engine's
         rules with this config's knobs, among the lines the voice has a clip of within the
-        context's ``filler_max_s`` (every clip made over it: said once, with their lengths)."""
+        context's ``filler_max_s`` (every clip made over it: said once, with their lengths);
+        ``speak_p`` multiplies the context's own chance to speak (1 - its silent chance)."""
         cfg = self.config
         max_s = cfg.filler_max_s.get(context)
         line = self.fillers.choose(
             cfg.fillers, context, self.clock(), turn=turn, tool=tool,
-            silent_p=cfg.filler_silent_p.get(context, 0.0),
+            silent_p=1.0 - speak_p * (1.0 - cfg.filler_silent_p.get(context, 0.0)),
             cooldown_s=cfg.filler_cooldown_s.get(context, 0.0),
             ready=self.speech.has_clip,
             max_s=max_s,
@@ -726,7 +734,8 @@ class CascadeLoop:
     def _filler_thinking(self, now: float) -> None:
         """The thinking filler: the reply in flight has said nothing and its brain's first
         token is not in ``filler_thinking_s`` after the turn closed (never when its first token
-        came early, a turn asked before its close)."""
+        came early, a turn asked before its close); wanted by the question's length (the book's
+        ``thinking_min_words`` and ``thinking_chance``), decided once with its silent chance."""
         reply = self.current
         if reply is None or reply.fillers or not self._waiting(reply) or self.player.speaking():
             return
@@ -734,7 +743,10 @@ class CascadeLoop:
         first_token = timeline.has("first_token")
         if not thinking_due(timeline.at("closed"), first_token, now, self.config.filler_thinking_s):
             return
-        line = self._filler_line("thinking", reply.id)
+        book = self.config.fillers
+        words = word_count(reply.input.words)
+        wanted = thinking_chance(words, book.thinking_min_words, book.thinking_chance)
+        line = self._filler_line("thinking", reply.id, speak_p=wanted)
         if line is not None:
             self._say_filler(reply, line, "thinking")
 

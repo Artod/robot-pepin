@@ -13,6 +13,7 @@ import copy
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -230,7 +231,8 @@ DEFAULT_FILLERS_BY_TOOL: Mapping[str, Phrases] = {
 class FillerBook:
     """The fillers' phrase book (:mod:`pepin.voice_cascade.fillers`): per context, each
     ``{language: lines}`` (:attr:`common` is the file's ``any``: a slow tool's lines when it has
-    none of its own), and :attr:`neutral` hums that need no language."""
+    none of its own), :attr:`neutral` hums that need no language, and how much a thinking filler
+    is wanted by the question's length (:func:`pepin.voice_cascade.fillers.thinking_chance`)."""
 
     common: Phrases = field(default_factory=lambda: dict(DEFAULT_COMMON))
     again: Phrases = field(default_factory=lambda: dict(DEFAULT_AGAIN))
@@ -240,6 +242,9 @@ class FillerBook:
         default_factory=lambda: {tool: dict(own) for tool, own in DEFAULT_FILLERS_BY_TOOL.items()}
     )
     neutral: tuple[str, ...] = DEFAULT_NEUTRAL
+    thinking_min_words: int = 4  # a question of fewer words gets no thinking filler
+    # (words, probability) points, the words rising: interpolated, held beyond the ends
+    thinking_chance: tuple[tuple[float, float], ...] = ((4.0, 0.3), (10.0, 0.7), (20.0, 1.0))
 
     def for_tool(self, tool: str, language: str) -> tuple[str, ...]:
         """The lines a filler for ``tool`` is chosen from in ``language``: its own, else the
@@ -563,6 +568,16 @@ class CascadeConfig:
             raise ValueError(
                 "conversation.filler_fade_ms from 0 (the reply waits for the filler) to 500"
             )
+        book = self.fillers
+        points = book.thinking_chance
+        rising = all(w0 < w1 for (w0, _), (w1, _) in pairwise(points))
+        if book.thinking_min_words < 0 or not points or not rising:
+            raise ValueError(
+                "conversation.fillers: thinking_min_words >= 0, thinking_chance a list of"
+                " [words, probability] points with the words rising"
+            )
+        if any(not 0.0 <= p <= 1.0 for _, p in points):
+            raise ValueError("conversation.fillers.thinking_chance: probabilities from 0 to 1")
         for key, table, top in (
             ("filler_silent_p", self.filler_silent_p, 1.0),
             ("filler_cooldown_s", self.filler_cooldown_s, None),
@@ -680,6 +695,11 @@ def filler_book(
                 str(tool): phrases(own, language) for tool, own in block.get("by_tool", {}).items()
             },
             neutral=tuple(str(x) for x in block.get("neutral", ()) if x),
+            thinking_min_words=int(block.get("thinking_min_words", default.thinking_min_words)),
+            thinking_chance=tuple(
+                (float(words), float(p))
+                for words, p in block.get("thinking_chance", default.thinking_chance)
+            ),
         )
     old = backchannel.get("lines")
     return book if old is None else replace(book, backchannel=phrases(old, language))

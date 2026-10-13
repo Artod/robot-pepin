@@ -11,6 +11,7 @@ import json
 import threading
 import time
 from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -102,8 +103,11 @@ class Rig:
     ) -> None:
         """``clips``: the voice makes the fillers' clips before the scenario (the only way a
         filler is said; what it made is then cleared from its log); without them, no filler.
-        The thinking filler is off and no filler's moment passes in silence unless asked."""
-        config = {"filler_thinking_s": 0.0, "filler_silent_p": {}, **config}
+        The thinking filler is off, wanted whatever the question's length, and no filler's
+        moment passes in silence unless asked."""
+        every_length = replace(FillerBook(), thinking_min_words=0, thinking_chance=((0.0, 1.0),))
+        config = {"filler_thinking_s": 0.0, "filler_silent_p": {}, "fillers": every_length,
+                  **config}  # fmt: skip
         self.config = CascadeConfig().with_changes(
             prosody_tags=False, playback_lead_s=0.1, idle_close_s=30.0, **config
         )
@@ -671,6 +675,40 @@ def test_a_brain_late_to_its_first_token_gets_one_thinking_filler(tmp_path: Path
     (fade,) = [r for r in rows if r["event"] == "filler_fade"]
     assert (fade["turn"], fade["text"]) == (filler["turn"], said[1][0])
     assert (fade["faded_ms"], fade["cut_ms"], fade["ahead_ms"]) == (60, 200, 80)
+
+
+@pytest.mark.parametrize(
+    ("text", "fillers"),
+    [("Пепин, где ты?", 0), ("Пепин, скажи пожалуйста, где ты сейчас стоишь?", 1)],
+)
+def test_a_short_question_gets_no_thinking_filler_and_a_long_one_does(
+    tmp_path: Path, text: str, fillers: int
+) -> None:
+    """The book's minimum (4 words) holds the three-word question's moment in silence, however
+    late the brain; seven words at a chance of 1 get the filler."""
+    release, clock = threading.Event(), SkewClock()
+    script: list[list[Step]] = [[("where_am_i", {}), "Я дома."]]
+    book = replace(FillerBook(), thinking_chance=((4.0, 1.0),))
+    rig = Rig(tmp_path, [text], script, tool=blocked_tool(release), clock=clock, clips=True,
+              filler_thinking_s=1.2, filler_again_s=0.0, fillers=book)  # fmt: skip
+    said: list[list[str]] = []
+
+    async def scenario(rig: Rig) -> None:
+        await rig.say(utterance())
+        await until(lambda: rig.loop.current is not None and rig.loop.current.acted)
+        reply = rig.loop.current
+        assert reply is not None
+        clock.skew = 1.3  # the thinking filler's moment
+        if fillers:
+            await until(lambda: len(reply.fillers) == 1)
+        else:
+            await asyncio.sleep(0.3)
+        said.append(list(reply.fillers))
+        release.set()
+        await until(lambda: rig.loop.person_turns == 1 and rig.loop.quiet(), 8.0)
+
+    asyncio.run(rig.run(scenario))
+    assert len(said[0]) == fillers and rig.voice.spoken == ["Я дома."]
 
 
 def test_a_thinking_clip_over_filler_max_s_is_never_said_and_the_lengths_are_told_once(

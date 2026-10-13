@@ -6,7 +6,10 @@ Each context (:data:`pepin.voice_cascade.config.FILLER_CONTEXTS`) is a moment th
   of the common ones (:meth:`pepin.voice_cascade.config.FillerBook.for_tool`);
 - ``thinking``: the brain's first token is not in ``filler_thinking_s`` after the turn closed
   and nothing has been said (:func:`thinking_due`): a short sound that fits any answer, the
-  hums among them, since nobody knows yet what the answer is;
+  hums among them, since nobody knows yet what the answer is; wanted more the longer the
+  question (:func:`thinking_chance`: none under the book's ``thinking_min_words``, a short
+  question is answered fast anyway), and that chance multiplies the context's own chance to
+  speak (1 - its silent chance) in one draw;
 - ``again``: the reply still silent ``filler_again_s`` after its last filler (:func:`again_due`);
 - ``backchannel``: "mm" in the person's pause mid-utterance (``flags.backchannel``).
 
@@ -31,6 +34,7 @@ import random
 import re
 from collections import deque
 from collections.abc import Callable, Sequence
+from itertools import pairwise
 from typing import TYPE_CHECKING, Literal
 
 if TYPE_CHECKING:
@@ -192,6 +196,26 @@ def script_language(text: str) -> str | None:
     most = max(counts.values())
     leaders = [language for language, n in counts.items() if n == most]
     return leaders[0] if most and len(leaders) == 1 else None
+
+
+def word_count(text: str) -> int:
+    """How many words ``text`` holds (runs of letters, any script)."""
+    return len(_WORDS.findall(text))
+
+
+def thinking_chance(words: int, min_words: int, points: Sequence[tuple[float, float]]) -> float:
+    """The chance a thinking filler is wanted after an utterance of ``words`` words: none under
+    ``min_words`` (a short question is answered fast anyway), else ``points`` ((words,
+    probability), the words rising) interpolated linearly, held at the first and the last
+    point's probability beyond them."""
+    if words < min_words or not points:
+        return 0.0
+    if words <= points[0][0]:
+        return float(points[0][1])
+    for (w0, p0), (w1, p1) in pairwise(points):
+        if words <= w1:
+            return float(p0 + (p1 - p0) * (words - w0) / (w1 - w0))
+    return float(points[-1][1])
 
 
 def again_due(said_s: float | None, now: float, again_s: float) -> bool:

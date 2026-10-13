@@ -24,7 +24,9 @@ from pepin.voice_cascade.fillers import (
     again_due,
     clip_lines,
     script_language,
+    thinking_chance,
     thinking_due,
+    word_count,
 )
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import (
@@ -111,11 +113,54 @@ def test_the_old_forms_still_load() -> None:
         'conversation.filler_cooldown_s={"backchannel": -1}',
         'conversation.filler_max_s={"thinking": -0.1}',
         'conversation.filler_max_s={"pause": 1.0}',
+        "conversation.filler_fade_ms=-1",
+        'conversation.fillers={"thinking_min_words": -1}',
+        'conversation.fillers={"thinking_chance": []}',
+        'conversation.fillers={"thinking_chance": [[10, 0.7], [4, 0.3]]}',
+        'conversation.fillers={"thinking_chance": [[4, 1.5]]}',
     ],
 )
 def test_a_fillers_knob_out_of_range_is_refused(bad: str) -> None:
     with pytest.raises(ValueError, match="filler"):
         CascadeConfig.load(CONFIG, [bad])
+
+
+# -- the thinking filler by the question's length -------------------------------------------
+
+
+POINTS = ((4.0, 0.3), (10.0, 0.7), (20.0, 1.0))
+
+
+def test_the_file_wants_a_thinking_filler_by_the_question_s_length() -> None:
+    book = CascadeConfig.load(CONFIG).fillers
+    assert (book.thinking_min_words, book.thinking_chance) == (4, POINTS)
+    assert (BOOK.thinking_min_words, BOOK.thinking_chance) == (4, POINTS), "the code's defaults"
+
+
+@pytest.mark.parametrize(
+    ("text", "words", "chance"),
+    [
+        ("привет", 1, 0.0),  # under the minimum: silence, the reply comes fast anyway
+        ("Пепин, где ты?", 3, 0.0),
+        ("Пепин, а что ты сейчас видишь?", 6, 0.3 + 0.4 * 2 / 6),
+        ("Пепин, скажи пожалуйста, что ты сейчас видишь на этом столе?", 10, 0.7),
+        ("Hey, what's on the table?", 6, 0.3 + 0.4 * 2 / 6),  # what's: two runs of letters
+    ],
+)
+def test_a_question_s_words_are_runs_of_letters(text: str, words: int, chance: float) -> None:
+    assert word_count(text) == words
+    assert thinking_chance(word_count(text), 4, POINTS) == pytest.approx(chance)
+
+
+def test_the_thinking_chance_is_none_under_the_minimum_then_the_table_interpolated() -> None:
+    assert thinking_chance(0, 4, POINTS) == 0.0 and thinking_chance(3, 4, POINTS) == 0.0
+    assert thinking_chance(4, 4, POINTS) == pytest.approx(0.3), "the low end"
+    assert thinking_chance(7, 4, POINTS) == pytest.approx(0.5), "the middle of 4..10"
+    assert thinking_chance(10, 4, POINTS) == pytest.approx(0.7)
+    assert thinking_chance(15, 4, POINTS) == pytest.approx(0.85), "the middle of 10..20"
+    assert thinking_chance(20, 4, POINTS) == 1.0 and thinking_chance(60, 4, POINTS) == 1.0
+    assert thinking_chance(2, 0, POINTS) == pytest.approx(0.3), "held below the first point"
+    assert thinking_chance(30, 4, ()) == 0.0, "no table: never"
 
 
 # -- the choice -----------------------------------------------------------------------------
