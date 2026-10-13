@@ -16,9 +16,9 @@ One :class:`Executor` per body part turns a rendered clip into requests to that 
 THE WHEELS never drive for expression, and never through Nav2: a turn in place of at most
 ``max_turn_deg`` per request (30) or a rock of at most ``max_rock_m`` (0.02), by the measured
 motions' method (``ros/tools/move.py``'s: velocity commands judged by the odometry's swept
-heading and travel, the obstacle marks and the lidar, a time cap per leg, the base server's deadman
+heading and travel, depth_fusion's obstacle marks, a time cap per leg, the base server's deadman
 behind it), only while the goal server says ``"navigating": false``. When the wheels stall or the
-arc is blocked, the cart steps ``backoff_m`` away from the nearest obstacle point (or turns
+marks say the arc is blocked, the cart steps ``backoff_m`` away from the nearest mark (or turns
 ``backoff_deg`` back when it cannot), tries the rest once more, and then gives up: the speaker
 gaze then looks as far as the head reaches. Every call to the wheels returns at once: a motion
 runs on the wheels' own thread and answers through a callback, so nothing the voice waits on

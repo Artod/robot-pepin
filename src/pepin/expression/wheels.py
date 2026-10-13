@@ -25,12 +25,11 @@ EVERY MOTION IS CHECKED before it starts and at every control tick (25 Hz): the 
 state is fresh, the cart stands (no twist commanded, the wheels still), the servo bus answers,
 the arm is not mid-gesture (a twist would send it to rest), no stop of someone else's within
 ``stop_hold_s``; the goal server beside Nav2 (:class:`GoalServerView`, asked ten times a second
-while a motion runs) says nothing navigates, depth_fusion's newest obstacle marks and the
-lidar's newest scan are both fresh (``marks_age_s``, ``scan_age_s``), and the swept footprint
-keeps ``clearance_m`` from every point of either (:mod:`pepin.expression.clearance`: the marks'
-memory round the cart, the scan's 0.1 s freshness). Without either source nothing moves: a
-silent depth_fusion or lidar is a refusal with its reason, never the other source alone. A
-refusal says why; nothing is ever clamped.
+while a motion runs) says nothing navigates and depth_fusion's newest obstacle marks are fresh,
+and the swept footprint keeps ``clearance_m`` from every mark (:mod:`pepin.expression.clearance`:
+the voxel volume's slice, lidar, camera depth and ToF fused, remembered round the cart). Without
+the marks nothing moves: a silent depth_fusion is a refusal with its reason, never the raw scan
+instead. A refusal says why; nothing is ever clamped.
 
 IT NEVER FIGHTS ANOTHER DRIVER. Every state line is checked against the twists this executor
 sent within the last ``ECHO_S``: a line carrying any other twist is someone else's command (the
@@ -41,8 +40,8 @@ the state line (our twists stopped arriving: the WiFi) ends the motion too.
 
 THE ONE RECOVERY (:class:`pepin.expression.plan.BoundedTurn`): a turn the wheels could not
 finish because they stalled (less than a third of the commanded motion over ``stall_s``) or the
-arc is blocked steps ``backoff_m`` straight away from the nearest obstacle point (forward unless
-that point lies ahead of the footprint's middle; checked like any leg), or, when that step cannot
+arc is blocked steps ``backoff_m`` straight away from the nearest obstacle mark (forward unless
+that mark lies ahead of the footprint's middle; checked like any leg), or, when that step cannot
 go, turns ``backoff_deg`` back the other way; then it tries the rest of the turn once more and
 gives up if that ends short too. A halt, a foreign command, a drive or a failed precondition is
 final.
@@ -66,7 +65,6 @@ import numpy as np
 from pepin.base_link import DEADMAN_S, BaseState, StateListener
 from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.clearance import (
-    Blocker,
     Footprint,
     GoalServerView,
     Points,
@@ -134,7 +132,6 @@ class WheelsSettings:
     settle_m: float = 0.005
     clearance_m: float = 0.10
     marks_age_s: float = 1.5
-    scan_age_s: float = 0.6
     stall_s: float = 0.5
     stop_hold_s: float = 30.0
     latency_s: float = 0.15
@@ -163,7 +160,7 @@ class WheelsSettings:
                 f"wheels.speed_scale is above 0 and at most 1, not {settings.speed_scale}"
             )
         positive = ("yaw_rate_deg_s", "yaw_acc_deg_s2", "speed_m_s", "acc_m_s2", "settle_deg",
-                    "settle_m", "marks_age_s", "scan_age_s", "stall_s")  # fmt: skip
+                    "settle_m", "marks_age_s", "stall_s")  # fmt: skip
         for name in positive:
             if getattr(settings, name) <= 0.0:
                 raise ValueError(f"wheels.{name} must be above 0")
@@ -431,10 +428,10 @@ class WheelsExecutor:
             margin = self.settings.clearance_m
             if request.rocks or request.rock_m:
                 hit = drive_blocker(view.points, self.footprint, 0.0, request.rock_m, margin)
-                return blocked_text("the way", hit, "cm", view)
+                return f"the way is blocked: {hit.text('cm')}" if hit is not None else None
             turn = math.radians(request.turn_deg)
             hit = turn_blocker(view.points, self.footprint, 0.0, turn, margin)
-            return blocked_text("the arc", hit, "deg", view)
+            return f"the arc is blocked: {hit.text('deg')}" if hit is not None else None
         finally:
             self.around.watch(False)
 
@@ -652,7 +649,7 @@ class WheelsExecutor:
 
     def _view_refusal(self, view: View, now: float) -> str | None:
         """What the goal server's word refuses: no word, a recent cancel (the red button), a
-        drive, old or no obstacle marks, an old or no lidar scan."""
+        drive, old or no obstacle marks."""
         if now - view.at > VIEW_STALE_S:
             return f"the goal server's newest word is {now - view.at:.1f} s old"
         if view.why:
@@ -667,16 +664,10 @@ class WheelsExecutor:
         if view.navigating:
             return "Nav2 navigates (`ros/goto.sh where`)"
         if view.marks_age_s is None:
-            return ("no obstacle marks have reached the goal server (depth_fusion:"
-                    " ros/laptop.sh vslam)")  # fmt: skip
+            return "no obstacle marks have reached the goal server"
         age = view.marks_age_s + (now - view.at)
         if age > self.settings.marks_age_s:
             return f"the newest obstacle marks are {age:.1f} s old (wheels.marks_age_s)"
-        if view.scan_age_s is None:
-            return "no lidar scan has reached the goal server"
-        age = view.scan_age_s + (now - view.at)
-        if age > self.settings.scan_age_s:
-            return f"the newest lidar scan is {age:.1f} s old (wheels.scan_age_s)"
         return None
 
     def _held_locked(self, now: float) -> str | None:
@@ -770,7 +761,7 @@ class WheelsExecutor:
         return Step(math.degrees(end.at), end.blocked, end.stopped, job.cut)
 
     def step_away(self, job: Job, metres: float) -> Step:
-        """Straight by ``metres`` away from the nearest obstacle point in the newest view
+        """Straight by ``metres`` away from the nearest obstacle mark in the newest view
         (:func:`pepin.expression.clearance.away_from`), checked like any leg."""
         state = self._base_state()
         if state is None:
@@ -932,9 +923,9 @@ class WheelsExecutor:
         speed: float,
         now: float,
     ) -> tuple[str, str]:
-        """(stopped, blocked) from the goal server's newest word: a drive, an old or missing
-        source, the footprint swept from here to the target (and what the cart moved since the
-        older source's stamp) within ``clearance_m`` of a mark or a lidar return."""
+        """(stopped, blocked) from the goal server's newest word: a drive, old or no marks, the
+        footprint swept from here to the target (and what the cart moved since the marks' stamp)
+        within ``clearance_m`` of a mark."""
         view = self.around.latest()
         if view is None:
             return "the goal server has said nothing", ""
@@ -942,26 +933,18 @@ class WheelsExecutor:
         if refusal is not None:
             return refusal, ""
         points = in_origin_frame(view.points, pose, origin)
-        # What the cart may have moved since the older source's stamp, past the target; none on
-        # the way back toward where the motion began (the cart stood there).
+        # What the cart may have moved since the marks' stamp, past the target; none on the way
+        # back toward where the motion began (the cart stood there).
         homeward = min(0.0, here) <= target <= max(0.0, here)
-        age = max(view.marks_age_s or 0.0, view.scan_age_s or 0.0) + now - view.at
+        age = (view.marks_age_s or 0.0) + now - view.at
         lag = 0.0 if homeward else abs(speed) * (age + LEAD_S)
         end = target + math.copysign(lag, target - here)
         margin = self.settings.clearance_m
         if axis == "yaw":
             hit = turn_blocker(points, self.footprint, here, end, margin)
-            return "", blocked_text("the arc", hit, "deg", view) or ""
+            return ("", f"the arc is blocked: {hit.text('deg')}") if hit is not None else ("", "")
         hit = drive_blocker(points, self.footprint, here, end, margin)
-        return "", blocked_text("the way", hit, "cm", view) or ""
-
-
-def blocked_text(what: str, hit: Blocker | None, unit: str, view: View) -> str | None:
-    """``the arc is blocked: a lidar return at (...)``, naming the blocking point's source;
-    None when nothing blocks."""
-    if hit is None:
-        return None
-    return f"{what} is blocked: {hit.text(unit, view.source_of(hit.index))}"
+        return ("", f"the way is blocked: {hit.text('cm')}") if hit is not None else ("", "")
 
 
 class _Steps:
@@ -979,7 +962,7 @@ class _Steps:
         return step
 
     def step_away(self, metres: float) -> Step:
-        """Straight away from the nearest obstacle point."""
+        """Straight away from the nearest mark."""
         return self.wheels.step_away(self.job, metres)
 
 

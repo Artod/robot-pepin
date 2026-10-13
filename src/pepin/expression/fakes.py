@@ -16,7 +16,7 @@ import numpy as np
 from pepin.audio_link import DoaReading
 from pepin.base_link import BaseState, StateListener
 from pepin.expression.animation import Clip, Layer, PartName
-from pepin.expression.clearance import Points, View
+from pepin.expression.clearance import View
 from pepin.expression.conversation import Heard
 from pepin.expression.executors import (
     Headings,
@@ -528,9 +528,8 @@ class FakeBase:
 @dataclass
 class FakeView:
     """The goal server's word (:class:`pepin.expression.clearance.Surroundings`), always fresh
-    on the base's clock: whether Nav2 navigates, the two sources' ages, and fixed points of the
-    room (world frame) seen from where the fake base's cart stands: ``world`` in the obstacle
-    marks, ``scanned`` in the lidar's scan alone; ``why`` for a goal server away;
+    on the base's clock: whether Nav2 navigates, the marks' age, and fixed marks of the room
+    (world frame) seen from where the fake base's cart stands; ``why`` for a goal server away;
     ``cancelled_at`` the base clock's time of its last cancel (ros/stop.sh)."""
 
     base: FakeBase
@@ -541,8 +540,6 @@ class FakeView:
     silent: bool = False  # never answers
     cancelled_at: float | None = None
     watched: list[bool] = field(default_factory=list)
-    scan_age_s: float | None = 0.05
-    scanned: list[tuple[float, float]] = field(default_factory=list)
 
     def watch(self, on: bool) -> None:
         """Recorded."""
@@ -552,17 +549,15 @@ class FakeView:
         """A fresh view, the room's points in the cart's frame now."""
         if self.silent:
             return None
-        now = self.base.clock()
-        cancel = None if self.cancelled_at is None else now - self.cancelled_at
-        return View(now, self.navigating, self.marks_age_s, self._seen(self.world), self.why,
-                    cancel, self.scan_age_s, self._seen(self.scanned))  # fmt: skip
-
-    def _seen(self, world: list[tuple[float, float]]) -> Points:
         p = self.base.pose
         c, s = math.cos(-p.theta), math.sin(-p.theta)
-        points = [(c * (x - p.x) - s * (y - p.y), s * (x - p.x) + c * (y - p.y)) for x, y in world]
-        out: Points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
-        return out
+        points = [
+            (c * (x - p.x) - s * (y - p.y), s * (x - p.x) + c * (y - p.y)) for x, y in self.world
+        ]
+        array = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+        now = self.base.clock()
+        cancel = None if self.cancelled_at is None else now - self.cancelled_at
+        return View(now, self.navigating, self.marks_age_s, array, self.why, cancel)
 
 
 if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisfy their seams
