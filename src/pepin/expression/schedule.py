@@ -51,7 +51,14 @@ gives way to everything. Per part one request plays at a time (:meth:`Reservatio
 A clip anchored on a stream second goes when the stream has played up to that second + its
 offset + ``audio_lag_s`` - its part's latency, at once when that is past by at most ``late_s``
 (``stroke_late_s`` for a word- or phrase-bound one), dropped later; on the clock, at its time
-less its part's latency; now, with the performance's earliest clip at once.
+less its part's latency; now, with the performance's earliest clip at once. A TAIL (bound
+``after``: the laugh's rock) starts when its stream second is heard, its offset aside, and goes
+as long as its stroke still lands within ``after_s`` of that second and inside the reply's
+speech; one whose stroke alone is longer is dropped when placed.
+
+What waits is visible to the engine's listeners (:meth:`Scheduler.pending`: each clip's
+intent, part, place in the table and window), and a requester may withdraw its own clips
+(:meth:`Scheduler.withdraw`).
 
 Logged per clip of a word: ``ladder`` at render (binding, variant, step and why, the lead, the
 forecast's moment and spread), ``send`` at its send (the heard time at TEXT, START and AUDIO,
@@ -60,7 +67,8 @@ the send, the planned stroke and its error against the aim, all seconds after th
 
 Owners (gesticulation slices, DESIGN.md §11): B owns this file's internals; A posts requests
 (:meth:`pepin.expression.animator.GestureEngine.request`) and reads the holds
-(:meth:`Reservations.last`); the names and signatures the engine calls are the contract.
+(:meth:`Reservations.last`) and what waits (:meth:`pepin.expression.animator.GestureEngine.
+pending`); the names and signatures the engine calls are the contract.
 """
 
 from __future__ import annotations
@@ -70,7 +78,7 @@ import math
 import re
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from pepin.expression.animation import (
     Bind,
@@ -101,6 +109,9 @@ __all__ = ["Spoken"]  # the clock's part record, as the engine clears it (``spok
 
 Record = Callable[[str, dict[str, Any]], None]
 SceneHook = Callable[[Scene, "Request"], Scene]  # the engine's: what a rendering may use, refined
+# How a request's stroke binds: a word's, a phrase's, an utterance's (the book's), or a tail's
+# (``after``: within ``after_s`` of its stream second; the listeners' laugh rock)
+RequestBind = Bind | Literal["after"]
 NOT_YET = math.inf  # the end of a reservation that lasts until let go (a looping idle clip)
 MARGIN_S = 0.3  # the most a forecast's spread holds a preparation back (DESIGN.md §7.6)
 EARLY_S = 0.3  # a stroke this much before its vowel is still on it (early is free: Nirme 2024)
@@ -163,14 +174,16 @@ class Request:
     """Something to perform: ``intent`` (a composition of the book, or the name its ready
     ``clips`` are logged under), its ``anchor`` (None: now), its place in the table
     (``priority``, then ``rank``: lower first), who asked (``source``: "marker", "moment",
-    "tool", "pulse", "idle", ...), how its stroke binds to its word and the family a marker of
-    the same kind absorbs it into."""
+    "tool", "pulse", "idle", ...), how its stroke binds to its word (or ``after`` it: a tail)
+    and the family a marker of the same kind absorbs it into. A request is itself:
+    :meth:`Scheduler.withdraw` and :meth:`pepin.expression.animator.GestureEngine.release` find
+    its clips by identity."""
 
     intent: str
     anchor: Anchor | None = None
     priority: Priority = Priority.ASK
     source: str = "tool"
-    bind: Bind = "utterance"
+    bind: RequestBind = "utterance"
     family: str | None = None
     rank: int = 0
     clips: tuple[Clip, ...] = ()
@@ -190,6 +203,7 @@ class Timing:
     stroke_late_s: float = 0.15
     short_s: float = 1.0
     phrase_slide_s: float = 0.5
+    after_s: float = 2.5
     unit_hold_s: float = 2.5
     unit_strokes: int = 3
 
@@ -205,7 +219,7 @@ def timing_from(data: Mapping[str, Any]) -> Timing:
         name: float(timing.get(name, getattr(d, name)))
         for name in (
             "audio_lag_s", "late_s", "poll_s", "char_s", "tts_first_s", "lead_silence_s",
-            "stroke_bias_s", "stroke_late_s", "short_s", "phrase_slide_s",
+            "stroke_bias_s", "stroke_late_s", "short_s", "phrase_slide_s", "after_s",
         )
     }  # fmt: skip
     return Timing(
@@ -218,7 +232,8 @@ def timing_from(data: Mapping[str, Any]) -> Timing:
 @dataclass
 class Reservation:
     """What holds a part: the performance and its clip, sent at ``started`` (engine clock), its
-    stroke and its end on the same clock, and the request's place in the table."""
+    stroke and its end on the same clock, the request's place in the table, and the request
+    itself (None: an idle clip's)."""
 
     performance: Performance
     clip: Clip
@@ -228,6 +243,25 @@ class Reservation:
     priority: Priority = Priority.ASK
     rank: int = 0
     source: str = "tool"
+    request: Request | None = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class Pending:
+    """A clip waiting for its time, as a listener sees it: its intent, part, place in the table,
+    who asked, the reply's part it belongs to (None: none), and its window on the engine's clock
+    (start of motion, stroke, end) as its word's forecast says now."""
+
+    intent: str
+    part: PartName
+    priority: Priority
+    rank: int
+    source: str
+    turn: int | None
+    index: int | None
+    start: float
+    stroke: float
+    end: float
 
 
 @dataclass
@@ -591,6 +625,11 @@ class Scheduler:
         first = min((c.offset_s for c in clips), default=0.0)
         for clip in clips:
             waiting = Waiting(performance, clip, request)
+            if _tail(waiting) and clip.stroke_s > self.timing.after_s:
+                why = f"its stroke {clip.stroke_s:.2f} s after its start, past after_s"
+                self.record("dropped", {"intent": performance.intent, "part": clip.part,
+                                        "why": why})  # fmt: skip
+                continue
             if isinstance(anchor_, AtTime):
                 waiting.due = anchor_.t + clip.offset_s - self.latency(clip.part)
             elif not isinstance(anchor_, AtStream):
@@ -648,6 +687,36 @@ class Scheduler:
         self._arm_last = None
         self._unit = 0
 
+    def withdraw(self, request: Request) -> list[Waiting]:
+        """The clips of ``request`` (this very request) still waiting, let go: its requester
+        ended it."""
+        gone = [w for w in self.waiting if w.request is request]
+        for waiting in gone:
+            self.reservations.unbook(id(waiting))
+        self.waiting = [w for w in self.waiting if w.request is not request]
+        return gone
+
+    def pending(
+        self, part: PartName | None = None, turn: int | None = None, now: float | None = None
+    ) -> list[Pending]:
+        """What waits for its time (of ``part``, of reply ``turn`` when given), each with its
+        window as the forecasts say at ``now`` (the engine's clock as last told when None), in
+        the order of their strokes."""
+        at = self._now if now is None else now
+        out: list[Pending] = []
+        for waiting in self.waiting:
+            clip, request, cue = waiting.clip, waiting.request, waiting.cue
+            if (part is not None and clip.part != part) or (
+                turn is not None and waiting.turn != turn
+            ):
+                continue
+            start, stroke, end = self._window(waiting, at)
+            out.append(Pending(waiting.performance.intent, clip.part, request.priority,
+                               request.rank, request.source, waiting.turn,
+                               cue.index if cue is not None else None, start, stroke,
+                               end))  # fmt: skip
+        return sorted(out, key=lambda p: p.stroke)
+
     def target(self, waiting: Waiting) -> float | None:
         """The stream second a clip goes at: one on a stream second, or one on a word whose part
         has a place in the stream (None: not yet, or anchored on the clock)."""
@@ -655,7 +724,7 @@ class Scheduler:
         latency = self.latency(waiting.clip.part)
         lag = self.timing.audio_lag_s
         if waiting.cue is None and isinstance(anchor_, AtStream):
-            return anchor_.second + waiting.clip.offset_s + lag - latency
+            return anchor_.second + _offset(waiting) + lag - latency
         if waiting.cue is None or waiting.fit is None:
             return None
         forecast = self._forecast(waiting.cue, self._now)
@@ -686,13 +755,14 @@ class Scheduler:
         and logged)."""
         spoken = self.words.parts.get((cue.turn, cue.index))
         text_s = spoken.queued_s if spoken is not None and spoken.queued_s is not None else now
+        bind = _word_bind(request.bind)
         if spoken is None or not spoken.text:  # a part with no audio: its cues at its end
             return [
                 Waiting(performance, c, request, cue,
-                        fit=Fit(request.bind, "silent part", "", 0.0, text_s, 0.0))
+                        fit=Fit(bind, "silent part", "", 0.0, text_s, 0.0))
                 for c in performance.clips
             ]  # fmt: skip
-        target = self._in_speech(cue, request.bind)
+        target = self._in_speech(cue, bind)
         if target is None:
             why = "in a pause: no word after it"
             self.record("dropped", {"intent": performance.intent, "turn": cue.turn,
@@ -764,7 +834,7 @@ class Scheduler:
     ) -> list[Waiting]:
         """The candidate's clips fitted to the time there is, or none when its arm or wheels
         cannot make it (a head or face clip that cannot is left out alone)."""
-        bind = request.bind
+        bind = _word_bind(request.bind)
         clips = list(candidate.performance.clips)
         if any(c.part == "arm" for c in clips) or bind != "utterance":
             clips = [c for c in clips if c.part != "body"]  # never with the arm, never on a word
@@ -1070,13 +1140,23 @@ class Scheduler:
         played = self.playout.played()
         if played < target:
             return max(0.001, min(self.timing.poll_s, target - played))
-        utterance = waiting.request.bind == "utterance"
-        late = self.timing.late_s if utterance else self.timing.stroke_late_s
+        bind = waiting.request.bind
+        if bind == "after":  # a tail: its stroke within after_s of its second
+            late = self.timing.after_s - waiting.clip.stroke_s
+        else:
+            late = self.timing.late_s if bind == "utterance" else self.timing.stroke_late_s
         self.reservations.unbook(id(waiting))
-        if played - target > late:
+        why = f"{played - target:.2f} s late" if played - target > late else None
+        turn = waiting.turn
+        if why is None and bind == "after" and turn is not None:
+            end = self._speech_end(turn, self._now)
+            stroke = self._now + self.latency(waiting.clip.part) + waiting.clip.stroke_s
+            if end is not None and stroke > end:
+                why = "past the speech"
+        if why is not None:
             self.record("late", {"intent": waiting.performance.intent,
                                  "part": waiting.clip.part, "planned": round(target, 3),
-                                 "played": round(played, 3)})  # fmt: skip
+                                 "played": round(played, 3), "why": why})  # fmt: skip
             return None
         return Due(waiting, (target, played))
 
@@ -1146,16 +1226,7 @@ class Scheduler:
         request, clip, fit = waiting.request, waiting.clip, waiting.fit
         if request.priority == Priority.IDLE:
             return True
-        anchor_ = request.anchor
-        if fit is not None:
-            start, stroke, end = fit.start, fit.stroke, fit.end
-        else:
-            if isinstance(anchor_, AtStream):
-                lag = self.timing.audio_lag_s
-                start = self.words.wall(anchor_.second + clip.offset_s + lag, now)
-            else:
-                start = max(now, waiting.due) + self.latency(clip.part)
-            stroke, end = start + clip.stroke_s, start + clip.duration_s
+        start, stroke, end = self._window(waiting, now)
         booking = Booking(clip.part, start, stroke, end, request.priority, request.rank,
                           waiting.performance.intent, id(waiting))  # fmt: skip
         if fit is not None and fit.chained is not None:  # a unit's next stroke follows its last
@@ -1174,6 +1245,19 @@ class Scheduler:
                 self.record("displaced", {"intent": lost.performance.intent, "part": clip.part,
                                           "by": waiting.performance.intent})  # fmt: skip
         return True
+
+    def _window(self, waiting: Waiting, now: float) -> tuple[float, float, float]:
+        """When a waiting clip's part starts moving, its stroke and its end (engine clock): a
+        word's from its fit, a stream second's on the stream, else from its due time."""
+        fit, clip, anchor_ = waiting.fit, waiting.clip, waiting.request.anchor
+        if fit is not None:
+            return fit.start, fit.stroke, fit.end
+        if isinstance(anchor_, AtStream):
+            lag = self.timing.audio_lag_s
+            start = self.words.wall(anchor_.second + _offset(waiting) + lag, now)
+        else:
+            start = max(now, waiting.due) + self.latency(clip.part)
+        return start, start + clip.stroke_s, start + clip.duration_s
 
     def _rebook(self, waiting: Waiting, start: float, aim: float) -> None:
         """A waiting clip's window and booking moved with its word's forecast."""
@@ -1291,6 +1375,21 @@ class Scheduler:
         for hook in self._hooks:
             scene = hook(scene, request)
         return scene
+
+
+def _tail(waiting: Waiting) -> bool:
+    """Whether a clip is a tail: bound ``after`` its stream second."""
+    return waiting.request.bind == "after" and isinstance(waiting.request.anchor, AtStream)
+
+
+def _offset(waiting: Waiting) -> float:
+    """Where a clip on a stream second starts from it: its offset, a tail's at the second."""
+    return 0.0 if _tail(waiting) else waiting.clip.offset_s
+
+
+def _word_bind(bind: RequestBind) -> Bind:
+    """A word's binding (a tail on a word is fitted as an utterance's)."""
+    return "utterance" if bind == "after" else bind
 
 
 def _without(performance: Performance, *parts: PartName) -> tuple[Clip, ...]:

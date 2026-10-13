@@ -35,7 +35,7 @@ import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, runtime_checkable
 
 from pepin.expression.animation import Clip, Layer, PartName, Performance
 
@@ -82,6 +82,16 @@ class Executor(Protocol):
 
     def rest(self) -> None:
         """Every layer let go: the part at its base (a drive starts, a conversation ends)."""
+        ...
+
+
+@runtime_checkable
+class Renewing(Protocol):
+    """A part whose looping clip lapses at its owner unless renewed (the head: the arbiter's
+    TTL of one period and a second); the engine renews it once a period while it plays."""
+
+    def renew(self, layer: Layer) -> None:
+        """Keep ``layer``'s looping clip playing one more period (never blocks)."""
         ...
 
 

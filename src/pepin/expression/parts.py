@@ -334,11 +334,16 @@ def _timer(seconds: float, fn: Callable[[], None]) -> Callable[[], None]:
 
 class HeadDoor(Protocol):
     """The gaze arbiter's door for head overlays (``POST /look`` of a ``clip``, ``POST
-    /release``): :class:`pepin.expression.door.OverlayDoor` over HTTP, a fake in tests."""
+    /renew``, ``POST /release``): :class:`pepin.expression.door.OverlayDoor` over HTTP, a fake
+    in tests."""
 
     def look(self, request: ClipLook) -> str | None:
         """Start the overlay: None when it plays (or played), else why it was refused; a door
         that does not answer is a refusal in words, never an exception."""
+        ...
+
+    def renew(self, source: str) -> None:
+        """Restart the TTL of ``source``'s overlay (a loop plays on); nothing when it is gone."""
         ...
 
     def withdraw(self, source: str, fade_s: float) -> None:
@@ -444,6 +449,12 @@ class HeadPart:
             return Outcome(False, "the clip moves no head")
         self.run(lambda: self._post(request))
         return Outcome(True, seconds=clip.duration_s)
+
+    def renew(self, layer: Layer) -> None:
+        """The layer's looping overlay kept alive at the arbiter (its TTL is one period and a
+        second, :func:`clip_look`)."""
+        source = IDLE_LOOK if layer == "idle" else GESTURE
+        self.run(lambda: self.door.renew(source))
 
     def fade(self, layer: Layer, seconds: float) -> None:
         """The layer's overlay released: the head back on its holder's aim over ``seconds``."""

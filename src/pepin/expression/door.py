@@ -107,6 +107,10 @@ class OverlayClient(Protocol):
         """``POST /look`` of a clip; the answer, ``OSError`` without a door."""
         ...
 
+    def renew(self) -> int:
+        """``POST /renew``; how many of the source's requests live."""
+        ...
+
     def release(self, fade_s: float = ...) -> int:
         """``POST /release``; how many went."""
         ...
@@ -156,6 +160,15 @@ class OverlayDoor:
         if answer.get("status") == "denied":
             return str(answer.get("reason") or "denied")
         return None
+
+    def renew(self, source: str) -> None:
+        """``source``'s overlay's TTL restarted (a loop plays on; nothing when the door is
+        away: the loop then lapses at the arbiter by itself)."""
+        self.calls += 1
+        try:
+            self.client(source).renew()
+        except (OSError, ValueError):
+            return
 
     def withdraw(self, source: str, fade_s: float) -> None:
         """``source``'s overlay released over ``fade_s`` (nothing when the door is away)."""
