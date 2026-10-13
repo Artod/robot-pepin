@@ -14,8 +14,10 @@ peak speed of 1.875 d/T and a peak acceleration of 5.774 d/T^2 for a travel d in
 
 from __future__ import annotations
 
+import itertools
 import math
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 
 from pepin.expression.animation import Clip, Track
 
@@ -113,16 +115,98 @@ def stretched(clip: Clip, factor: float) -> Clip:
     tracks = tuple(
         Track(tr.dof, tr.mode, tuple(t * factor for t in tr.times), tr.values) for tr in clip.tracks
     )
-    return Clip(
-        clip.part,
-        clip.offset_s - clip.stroke_s * (factor - 1.0),
-        clip.stroke_s * factor,
-        clip.duration_s * factor,
-        tracks,
-        clip.events,
-        clip.layer,
-        clip.loop,
+    return replace(
+        clip,
+        offset_s=clip.offset_s - clip.stroke_s * (factor - 1.0),
+        stroke_s=clip.stroke_s * factor,
+        duration_s=clip.duration_s * factor,
+        tracks=tracks,
     )
+
+
+def rebased(clip: Clip, base: Mapping[str, float], rest: Mapping[str, float]) -> Clip:
+    """``clip`` started where ``base`` holds the arm instead of at ``rest``: every absolute
+    track's first key that stands on the rest pose (the book's ``arm_pose`` starts there) moves
+    to the base's value, so a unit's next stroke goes from the held pose straight to its own."""
+    tracks = []
+    for track in clip.tracks:
+        dof = track.dof
+        start = rest.get(dof)
+        if track.mode != "absolute" or start is None or dof not in base:
+            tracks.append(track)
+            continue
+        if abs(track.values[0] - start) > 1e-6:
+            tracks.append(track)
+            continue
+        tracks.append(Track(dof, track.mode, track.times, (base[dof], *track.values[1:])))
+    return replace(clip, tracks=tuple(tracks))
+
+
+def fit_preparation(clip: Clip, prep_s: float) -> Clip:
+    """``clip`` with the part before its stroke re-timed into ``prep_s`` by one factor (never
+    slowed: a ``prep_s`` at or over the stroke's time keeps it), the stroke and after untouched:
+    the clip starts later, its stroke stays on its word (Laban's "sudden", the meaning kept)."""
+    stroke = clip.stroke_s
+    if stroke <= 0.0 or prep_s >= stroke:
+        return clip
+    factor = max(0.0, prep_s) / stroke
+    saved = stroke - prep_s
+
+    def warp(t: float) -> float:
+        return t * factor if t <= stroke else t - saved
+
+    tracks = tuple(
+        Track(tr.dof, tr.mode, _increasing([warp(t) for t in tr.times]), tr.values)
+        for tr in clip.tracks
+    )
+    events = tuple(replace(e, t_s=warp(e.t_s)) for e in clip.events)
+    return replace(
+        clip,
+        offset_s=clip.offset_s + saved,
+        stroke_s=prep_s,
+        duration_s=clip.duration_s - saved,
+        tracks=tracks,
+        events=events,
+    )
+
+
+def _increasing(times: list[float]) -> tuple[float, ...]:
+    """Key times a warp may have made equal kept strictly in order (1 us apart)."""
+    out: list[float] = []
+    for t in times:
+        out.append(t if not out or t > out[-1] else out[-1] + 1e-6)
+    return tuple(out)
+
+
+def prep_min_s(
+    clip: Clip,
+    base: Mapping[str, float],
+    joints: Sequence[str],
+    max_speed: float,
+    max_acc: float,
+    hz: float = 50.0,
+) -> float:
+    """The least time from ``clip``'s start to its stroke that keeps the part before the stroke
+    within ``max_speed`` and ``max_acc`` (one factor on that part's times, as
+    :func:`fit_preparation` applies it); the clip's own time when that is already the least."""
+    stroke = clip.stroke_s
+    if stroke <= 0.0:
+        return 0.0
+    steps = max(2, math.ceil(stroke * hz))
+    dt = stroke / steps
+    poses = [pose_at(clip, k * dt, base) for k in range(steps + 1)]
+    speeds = [[(b[j] - a[j]) / dt for j in joints] for a, b in itertools.pairwise(poses)]
+    top_speed = max((abs(v) for row in speeds for v in row), default=0.0)
+    top_acc = max(
+        (abs(w - v) / dt for a, b in itertools.pairwise(speeds) for v, w in zip(a, b, strict=True)),
+        default=0.0,
+    )
+    factor = 0.0
+    if max_speed > 0:
+        factor = max(factor, top_speed / max_speed)
+    if max_acc > 0:
+        factor = max(factor, math.sqrt(top_acc / max_acc))
+    return stroke * min(1.0, factor)
 
 
 def sample(

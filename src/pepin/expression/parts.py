@@ -25,7 +25,8 @@ import logging
 import math
 import queue
 import threading
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -35,9 +36,13 @@ from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.executors import FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
 from pepin.expression.mix import (
+    PREP_CAPS,
     STRETCH_MARGIN,
     check_knots,
+    fit_preparation,
     min_jerk_time,
+    prep_min_s,
+    rebased,
     sample,
     stretch_to_caps,
     track_value,
@@ -67,7 +72,13 @@ class Planned:
 
 
 class ArmPart:
-    """The arm through the board's base server (an :class:`pepin.expression.trajectory.ArmLink`)."""
+    """The arm through the board's base server (an :class:`pepin.expression.trajectory.ArmLink`).
+
+    A UNIT (DESIGN.md §7.10): a clip sent with ``then: hold`` leaves the arm at its last knot for
+    its ``hold_s``; the next clip within it plans from that knot (:attr:`held`, the board's goal,
+    never the encoders, which sag under the torque limit), started there instead of at rest
+    (:func:`pepin.expression.mix.rebased`), with no approach. Past the hold the board has taken
+    the arm to rest by itself, and the next clip plans from rest again."""
 
     part: PartName = "arm"
 
@@ -80,23 +91,33 @@ class ArmPart:
         speed_scale: float = 1.0,
         knot_hz: float = 25.0,
         source: str = "voice.gesture",
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         """``motion``: config/arm.json's (rest pose, limits, caps); ``speed_scale`` scales the
         caps a clip is checked against and travels with each trajectory (the board's profile
-        and its way to rest); ``knot_hz``: knots a second (the board interpolates between)."""
+        and its way to rest); ``knot_hz``: knots a second (the board interpolates between);
+        ``clock``: when a hold lapses."""
         self.link, self.motion = link, motion
         self._latency_s = latency_s
         self.speed_scale = speed_scale
         self.knot_hz = knot_hz
         self.source = source
+        self.clock = clock
         self._ids = itertools.count(1)
         self.base = dict(motion.rest_deg)
         self.held: dict[str, float] | None = None  # the pose the last trajectory holds (a unit)
+        self.held_until = float("-inf")  # when the board lets that hold go (engine clock)
 
     @property
     def latency_s(self) -> float:
         """The WiFi hop and the board's next tick."""
         return self._latency_s
+
+    def caps(self, share: float = 1.0) -> tuple[float, float]:
+        """The speed and acceleration caps at the speed scale, times ``share``."""
+        scale = self.speed_scale
+        motion = self.motion
+        return motion.max_speed_deg_s * scale * share, motion.max_acc_deg_s2 * scale**2 * share
 
     def ready(self) -> str | None:
         """Why the arm cannot play: no state line has read it yet, or its servos are silent."""
@@ -107,18 +128,33 @@ class ArmPart:
             return f"the arm's servos are silent: {status.error or 'no reply'}"
         return None
 
+    def holding(self) -> dict[str, float] | None:
+        """The pose a unit holds now (None: none, or its hold has lapsed)."""
+        if self.held is not None and self.clock() > self.held_until:
+            self.held = None
+        return self.held
+
     def plan(
-        self, clip: Clip, name: str = "", *, base: dict[str, float] | None = None
+        self,
+        clip: Clip,
+        name: str = "",
+        *,
+        base: Mapping[str, float] | None = None,
+        start: Sequence[float] | None = None,
     ) -> Planned | str:
         """``clip`` as the trajectory to send over ``base`` (the rest pose by default; a unit's
-        next stroke: :attr:`held`) and when its stroke lands, or why it cannot be played."""
+        next stroke: the held pose, the clip started there) and when its stroke lands, or why it
+        cannot be played. The board's approach is from ``start`` (the arm's angles when the board
+        takes it; None: the newest state line's)."""
         if clip.part != "arm":
             return f"an {clip.part} clip is not the arm's"
         motion = self.motion
-        max_speed = motion.max_speed_deg_s * self.speed_scale
-        max_acc = motion.max_acc_deg_s2 * self.speed_scale**2
+        max_speed, max_acc = self.caps()
+        pose = dict(base) if base is not None else self.base
+        if base is not None:
+            clip = rebased(clip, pose, self.base)
         # a clip stretched by 1 / speed_scale needs no more knots than at full speed
-        sampled = sample(clip, base or self.base, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
+        sampled = sample(clip, pose, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
         knots = stretch_to_caps(sampled, max_speed * STRETCH_MARGIN, max_acc * STRETCH_MARGIN)
         # a stroke too fast for the caps takes longer rather than being refused
         if knots[-1][0] > motion.max_duration_s:
@@ -137,37 +173,77 @@ class ArmPart:
             name,
             self.speed_scale,
         )
-        approach = self.approach_s(knots[0][1])
+        approach = self.approach_s(knots[0][1], start)
         return Planned(trajectory, approach, stretch, approach + stretch * clip.stroke_s)
 
-    def approach_s(self, first: tuple[float, ...] | list[float]) -> float:
-        """The board's approach from where the arm is (its newest state line) to ``first``: none
-        within ``ARRIVED_DEG`` of it, or when the arm's place is unknown."""
-        status = self.link.status()
-        if status is None or status.deg is None:
-            return 0.0
-        travel = max(abs(a - b) for a, b in zip(status.deg, first, strict=True))
+    def approach_s(
+        self, first: tuple[float, ...] | list[float], start: Sequence[float] | None = None
+    ) -> float:
+        """The board's approach to ``first`` from ``start`` (None: where the arm is by its
+        newest state line): none within ``ARRIVED_DEG`` of it, or when the arm's place is
+        unknown."""
+        if start is None:
+            status = self.link.status()
+            if status is None or status.deg is None:
+                return 0.0
+            start = status.deg
+        travel = max(abs(a - b) for a, b in zip(start, first, strict=True))
         if travel <= ARRIVED_DEG:
             return 0.0
-        scale = self.speed_scale
-        return min_jerk_time(
-            travel, self.motion.max_speed_deg_s * scale, self.motion.max_acc_deg_s2 * scale**2
-        )
+        max_speed, max_acc = self.caps()
+        return min_jerk_time(travel, max_speed, max_acc)
 
     def rest_s(self) -> float:
         """How long the board takes the arm to rest from where it is (its newest state line)."""
         return self.approach_s(self.motion.rest())
 
+    def fit(
+        self,
+        clip: Clip,
+        prep_s: float,
+        *,
+        base: Mapping[str, float] | None = None,
+        start: Sequence[float] | None = None,
+    ) -> Clip | None:
+        """``clip`` with its preparation compressed so its planned stroke comes within
+        ``prep_s`` of the board taking it, the compressed part at :data:`PREP_CAPS` of the caps
+        at most (DESIGN.md §7.6 step 2); None when even that is too slow."""
+        pose = dict(base) if base is not None else self.base
+        planned = self.plan(clip, base=base, start=start)
+        if isinstance(planned, str):
+            return None
+        if planned.stroke_s <= prep_s:
+            return clip
+        source = rebased(clip, pose, self.base) if base is not None else clip
+        least = prep_min_s(source, pose, JOINTS, *self.caps(PREP_CAPS))
+        target = prep_s - planned.approach_s
+        if target < least - 1e-9 or target <= 0.0:
+            return None
+        fitted = fit_preparation(clip, target)
+        check = self.plan(fitted, base=base, start=start)
+        if isinstance(check, str) or check.stroke_s > prep_s + 1e-6:
+            return None
+        return fitted
+
+    def final(self, planned: Planned) -> dict[str, float]:
+        """The pose a planned trajectory ends on (a unit holds it)."""
+        return dict(zip(JOINTS, planned.trajectory.knots[-1].deg, strict=True))
+
     def play(self, clip: Clip) -> Outcome:
-        """Send ``clip`` to the board; refused here when it breaks the limits. Its stroke is the
-        plan's (approach and stretch included)."""
-        planned = self.plan(clip, base=self.held)  # from the pose a unit holds, else rest
+        """Send ``clip`` to the board, from the pose a unit holds (no approach) or from rest
+        (the board's approach from where the arm is); refused here when it breaks the limits.
+        Its stroke is the plan's (approach and stretch included)."""
+        held = self.holding()
+        planned = self.plan(clip, base=held, start=None if held is None else self._knot(held))
         if isinstance(planned, str):
             return Outcome(False, planned)
         trajectory = planned.trajectory
         self.link.send(trajectory)
-        last = trajectory.knots[-1].deg
-        self.held = dict(zip(JOINTS, last, strict=True)) if clip.then == "hold" else None
+        if clip.then == "hold":
+            self.held = self.final(planned)
+            self.held_until = self.clock() + self.latency_s + planned.seconds + trajectory.hold_s
+        else:
+            self.held = None
         return Outcome(True, f"sent as {trajectory.id}", planned.seconds, planned.stroke_s)
 
     def fade(self, layer: Layer, seconds: float) -> None:
@@ -179,6 +255,10 @@ class ArmPart:
         """To rest, then torque off (the board's)."""
         self.held = None
         self.link.rest()
+
+    @staticmethod
+    def _knot(pose: Mapping[str, float]) -> tuple[float, ...]:
+        return tuple(pose[j] for j in JOINTS)
 
 
 class FacePart:
