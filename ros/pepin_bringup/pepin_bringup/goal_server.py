@@ -107,6 +107,15 @@ OCCUPIED_AT = 65  # a /map cell at or above this is occupied (the grids' occupie
 # nav2_msgs/ComputePathToPose error codes (Jazzy) that blame the goal, not the planner: another
 # goal may plan (ros/tools/planner_check.py's GOAL_CODES).
 GOAL_CODES = {204: "goal outside the map", 206: "goal occupied", 208: "no valid path"}
+# Nav2's own global costmap (the full grid each publish: always_send_full_costmap, 2 Hz), kept raw
+# and decoded only when `plan` asks: the lidar's and the camera's marks, a person's legs and body
+# among them. A goal where the cart's hull would cover a lethal cell is inside that obstacle's
+# footprint grown by the cart's (the polygon collision check every controller makes): Nav2 cannot
+# reach it, and the tree answers it with minutes of backing up and spinning beside the person
+# (2026-10-13, "подъедь ко мне поближе"). The inscribed band (253) is left to the planner: with
+# base_link 6 cm behind the bumper it is where a bumper-to-furniture place stands.
+COSTMAP_TOPIC = "/global_costmap/costmap"
+LETHAL_AT = 100  # nav2_costmap_2d's LETHAL_OBSTACLE (254) as its OccupancyGrid carries it
 # THE ONE POSE TOPIC. This node already parses /tf for the pose; every other node beside it that
 # wants it reads this instead of starting a second listener (pepin_bringup.run_recorder). 5 Hz is
 # the rate the tape thinned its `loc` rows to anyway and the local costmap's own
@@ -234,6 +243,13 @@ def scan_message(raw: bytes) -> Any:
     return deserialize_message(raw, LaserScan)
 
 
+def costmap_message(raw: bytes) -> Any:
+    """A raw ``OccupancyGrid`` (Nav2's global costmap, as the raw subscription keeps it)."""
+    from rclpy.serialization import deserialize_message
+
+    return deserialize_message(raw, OccupancyGrid)
+
+
 # Goals that are running on an action server, by action_msgs/GoalStatus: ACCEPTED, EXECUTING and
 # CANCELING (a canceling goal still drives until its server lets it go).
 ACTIVE_STATUSES = (1, 2, 3)
@@ -280,6 +296,20 @@ class GoalServer(Node):
             MAP_TOPIC,
             self._on_map,
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
+        )
+        # Nav2's global costmap, taken raw (decoded only when `plan` asks): latched and
+        # reliable, as Nav2 publishes it and ros/tools/planner_check.py reads it.
+        self._costmap: bytes | None = None
+        self.create_subscription(
+            OccupancyGrid,
+            COSTMAP_TOPIC,
+            self._on_costmap,
+            QoSProfile(
+                depth=1,
+                reliability=ReliabilityPolicy.RELIABLE,
+                durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            ),
+            raw=True,
         )
         self._spin = ActionClient(self, Spin, "spin")
         # Every goal on either navigator, whoever sent it: the action servers' own cancel
@@ -610,6 +640,35 @@ class GoalServer(Node):
         """RTAB-Map's newest grid (latched): what ``plan`` reads a goal's cell from."""
         self._map = msg
 
+    def _on_costmap(self, raw: bytes) -> None:
+        """Nav2's newest global costmap (kept unparsed until ``plan`` asks)."""
+        self._costmap = raw
+
+    def hull_on_costmap(self, x: float, y: float, yaw_deg: float) -> tuple[str, str]:
+        """What Nav2's global costmap holds under the cart's whole hull standing at ``(x, y,
+        yaw_deg)`` (:func:`pepin.footprint.hull_cells`): ``clear``, ``lethal`` (a marked
+        obstacle under the hull: the goal is inside its footprint grown by the cart's), or ``no
+        costmap`` before one is heard; with the reason in words (empty when clear)."""
+        from pepin.footprint import hull_cells
+
+        if self._costmap is None:
+            return "no costmap", f"no global costmap heard on {COSTMAP_TOPIC}"
+        grid = costmap_message(self._costmap)
+        info = grid.info
+        width, height, data = int(info.width), int(info.height), grid.data
+        origin = (float(info.origin.position.x), float(info.origin.position.y))
+        lethal = sum(
+            1
+            for col, row in hull_cells(x, y, math.radians(yaw_deg), origin, float(info.resolution))
+            if 0 <= col < width and 0 <= row < height and int(data[row * width + col]) >= LETHAL_AT
+        )
+        if lethal:
+            return "lethal", (
+                f"the cart standing there would cover {lethal} lethal cells of Nav2's costmap:"
+                " the goal is inside an obstacle's footprint (a person, furniture)"
+            )
+        return "clear", ""
+
     def map_cell(self, x: float, y: float) -> str:
         """What RTAB-Map's grid says under map point ``(x, y)``: ``free``, ``occupied``,
         ``unknown`` (never surveyed), ``outside`` the grid, or ``no map`` before one is heard.
@@ -630,9 +689,12 @@ class GoalServer(Node):
     def plan(self, request: dict[str, Any]) -> dict[str, Any]:
         """Would a goal at ``(x, y, yaw_deg)`` be driven: never motion. RTAB-Map's cell under it
         first (unknown, occupied or outside the grid is refused before any plan: the costmap
-        cannot tell unknown from floor), then one ComputePathToPose from where the cart stands
-        with the selected planner. ``blames`` says whose the refusal is: ``goal`` (another goal
-        may plan) or ``planner`` (none will); an ``error`` event when it cannot be asked."""
+        cannot tell unknown from floor), then Nav2's global costmap under the cart's whole hull
+        standing there (:meth:`hull_on_costmap`: a goal inside a person's or a thing's inflated
+        footprint is refused, never sent to the navigator), then one ComputePathToPose from where
+        the cart stands with the selected planner. ``blames`` says whose the refusal is: ``goal``
+        (another goal may plan) or ``planner`` (none will); an ``error`` event when it cannot be
+        asked."""
         try:
             x, y = float(request["x"]), float(request["y"])
             yaw_deg = float(request.get("yaw_deg", 0.0))
@@ -656,6 +718,12 @@ class GoalServer(Node):
                 "outside": "the goal is outside the map",
             }[cell]
             return answer | {"ok": False, "blames": "goal", "reason": reason}
+        hull, why = self.hull_on_costmap(x, y, yaw_deg)
+        answer["costmap"] = hull
+        if hull == "no costmap":
+            return answer | {"ok": False, "blames": "planner", "reason": why}
+        if hull != "clear":
+            return answer | {"ok": False, "blames": "goal", "reason": why}
         if not self._planner.wait_for_server(timeout_sec=2.0):
             return {"event": "error", "detail": "the planner server is not up"}
         goal = ComputePathToPose.Goal()

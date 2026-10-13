@@ -665,6 +665,20 @@ def grid(node: Any, cells: dict[tuple[int, int], int]) -> None:
     node.subs["/map"][1](ros_stubs.OccupancyGrid(info=info, data=data))
 
 
+def costmap(node: Any, monkeypatch: Any, cells: dict[tuple[int, int], int]) -> None:
+    """Nav2's global costmap as the node keeps it (raw, decoded when asked): the same 20 x 20
+    cells of 0.1 m from (-1, -1), free unless ``cells`` (col, row) says otherwise (100 lethal,
+    99 inscribed)."""
+    data = [0] * 400
+    for (col, row), value in cells.items():
+        data[row * 20 + col] = value
+    info = ros_stubs.MapMetaData(resolution=0.1, width=20, height=20)
+    info.origin.position.x, info.origin.position.y = -1.0, -1.0
+    decoded = ros_stubs.OccupancyGrid(info=info, data=data)
+    monkeypatch.setattr(goal_server_module, "costmap_message", lambda raw: decoded)
+    node.subs[goal_server_module.COSTMAP_TOPIC][1](b"raw costmap")
+
+
 class PlanHandle:
     """The planner's goal handle: accepted, its result a path through ``poses`` or a code."""
 
@@ -687,9 +701,12 @@ def ask_plan(node: Any, **request: Any) -> dict[str, Any]:
     return dict(event)
 
 
-def test_a_plan_on_a_free_cell_asks_the_planner_and_never_drives(tmp_path: Path) -> None:
+def test_a_plan_on_a_free_cell_asks_the_planner_and_never_drives(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
     node = server(tmp_path)
     grid(node, {})
+    costmap(node, monkeypatch, {})
     node._planner.server = True
     node._planner.handle = PlanHandle([(0.0, 0.0), (0.3, 0.4), (0.3, 1.4)])
     answer = ask_plan(node, x=0.3, y=0.4, yaw_deg=90.0)
@@ -699,6 +716,7 @@ def test_a_plan_on_a_free_cell_asks_the_planner_and_never_drives(tmp_path: Path)
         "y": 0.4,
         "yaw_deg": 90.0,
         "cell": "free",
+        "costmap": "clear",
         "ok": True,
         "length_m": 1.5,
         "poses": 3,
@@ -727,9 +745,36 @@ def test_without_a_map_no_goal_is_called_free(tmp_path: Path) -> None:
     assert (answer["cell"], answer["ok"], answer["blames"]) == ("no map", False, "planner")
 
 
-def test_a_planner_refusal_says_whose_it_is(tmp_path: Path) -> None:
+def test_a_goal_inside_a_person_s_inflated_footprint_never_reaches_the_planner(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A person's legs marked lethal at (0.55, 0.45) on Nav2's costmap: the cart at (0.45, 0.45)
+    facing them would cover them with its bumper, at (0.75, 0.45) facing away with its rear
+    (0.30 m behind base_link); neither reaches the planner. At (0.15, 0.45) facing them the hull
+    is clear (an inscribed cell under it is the planner's to judge) and the plan is asked. No
+    costmap at all is the planner's refusal, not the goal's."""
     node = server(tmp_path)
     grid(node, {})
+    node._planner.server = True
+    node._planner.handle = PlanHandle([(0.0, 0.0), (0.15, 0.45)])
+    answer = ask_plan(node, x=0.45, y=0.45, yaw_deg=0.0)
+    assert (answer["costmap"], answer["ok"], answer["blames"]) == ("no costmap", False, "planner")
+    costmap(node, monkeypatch, {(15, 14): 100, (11, 14): 99})
+    for x, yaw in ((0.45, 0.0), (0.75, 0.0)):
+        answer = ask_plan(node, x=x, y=0.45, yaw_deg=yaw)
+        assert (answer["costmap"], answer["ok"], answer["blames"]) == ("lethal", False, "goal"), x
+        assert "would cover 1 lethal cells" in answer["reason"]
+        assert "inside an obstacle's footprint" in answer["reason"]
+    assert not node._planner.goals, "neither reached the planner"
+    answer = ask_plan(node, x=0.15, y=0.45, yaw_deg=0.0)
+    assert (answer["costmap"], answer["ok"]) == ("clear", True)
+    assert len(node._planner.goals) == 1
+
+
+def test_a_planner_refusal_says_whose_it_is(tmp_path: Path, monkeypatch: Any) -> None:
+    node = server(tmp_path)
+    grid(node, {})
+    costmap(node, monkeypatch, {})
     node._planner.server = True
     node._planner.handle = PlanHandle([], code=206)
     answer = ask_plan(node, x=0.3, y=0.4)
@@ -739,9 +784,10 @@ def test_a_planner_refusal_says_whose_it_is(tmp_path: Path) -> None:
     assert (answer["ok"], answer["blames"]) == (False, "planner")
 
 
-def test_no_plan_while_driving_and_none_without_a_planner(tmp_path: Path) -> None:
+def test_no_plan_while_driving_and_none_without_a_planner(tmp_path: Path, monkeypatch: Any) -> None:
     node = server(tmp_path)
     grid(node, {})
+    costmap(node, monkeypatch, {})
     assert ask_plan(node, x=0.3, y=0.4) == {
         "event": "error",
         "detail": "the planner server is not up",
