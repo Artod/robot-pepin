@@ -154,3 +154,20 @@ def test_a_part_s_length_is_its_fed_audio_once_spoken_else_at_least_its_characte
     assert part_length_s((2.0, 2.3), 20, spoken=False, sigma=0.09) == pytest.approx(1.8)
     assert part_length_s((2.0, 4.0), 20, spoken=False, sigma=0.09) == pytest.approx(2.0)
     assert part_length_s((2.0, 2.3), 20, spoken=True, sigma=0.09) == pytest.approx(0.3)
+
+
+def test_what_a_barge_in_heard_is_read_by_the_same_law() -> None:
+    """The barge-in's record asks the clock (any thread) how much of a part was heard by the
+    stream second it was cut at: the leading silence, then the rest at the part's length (its
+    fed audio once spoken, else at least sigma a character)."""
+    player = Player()
+    clock = WordClock(player, KNOBS)
+    clock.queued(1, 0, "Двадцать знаков тут.")  # 20 characters
+    assert clock.heard_share(1, 0, 3.0) is None, "no place in the stream yet"
+    player.marks[(1, 0)] = (2.0, 2.5)  # fed so far: at least 20 x 0.09 = 1.8 s long
+    assert clock.heard_share(1, 0, 2.1) == 0.0  # still in its leading silence
+    assert clock.heard_share(1, 0, 2.0 + 0.16 + 0.5 * (1.8 - 0.16)) == pytest.approx(0.5)
+    player.marks[(1, 0)] = (2.0, 4.0)
+    clock.spoken(1, 0)
+    assert clock.heard_share(1, 0, 3.08) == pytest.approx(0.5)
+    assert clock.heard_share(1, 0, 9.0) == 1.0 and clock.heard_share(2, 0, 3.0) is None

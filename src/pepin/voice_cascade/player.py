@@ -5,10 +5,13 @@ Every part of a reply (a sentence, or a piece of one a style marker cut; one voi
 is marked by where its audio sits in the stream fed to the pacer, and the speaker is wrapped
 (:class:`PlayoutClock`) so the time each block plays is known. A barge-in asks
 :meth:`Player.flush` how far the stream had played: that, against the marks, is which parts
-the person heard (:meth:`Player.heard`). The same marks place the body's cues on the reply's
-audio (:meth:`Player.mark`, :meth:`Player.played`). The same clock times the speaker's start
-and end of each turn, and keeps each block's level (:meth:`PlayoutClock.level_between`): the
-reference a barge-in detector predicts the robot's own echo from.
+the person heard (:meth:`Player.heard`, by the gesture engine's word clock when it is lent:
+:attr:`Player.words`). The same marks place the body's cues on the reply's audio
+(:meth:`Player.mark`, :meth:`Player.played`), and what is queued ahead of the speaker tells the
+word clock how long a reply's first word waits (:meth:`Player.queued_audio`). The same clock
+times the speaker's start and end of each turn, and keeps each block's level
+(:meth:`PlayoutClock.level_between`): the reference a barge-in detector predicts the robot's
+own echo from.
 
 A FILLER THE REPLY TAKES OVER. Filler and reply share the one stream, so a reply ready while a
 thinking filler still plays used to queue behind it (2026-10-12: 9 of 19 fillers, 145-1095 ms,
@@ -26,10 +29,10 @@ import time
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Literal
+from typing import Literal, Protocol
 
 from pepin.audio_link import SAMPLE_BYTES, Speaker
-from pepin.expression.markers import CHAR_S
+from pepin.expression.forecast import CHAR_S, QueuedAudio
 from pepin.voice_cascade.stages import Played
 from pepin.voice_live.wake import rms_db
 
@@ -52,6 +55,16 @@ class FillerFade:
 
 
 FadeSink = Callable[[FillerFade], None]
+
+
+class WordLaw(Protocol):
+    """When a reply's characters are heard (the gesture engine's word clock,
+    :class:`pepin.expression.forecast.WordClock`): read from the barge-in's thread."""
+
+    def heard_share(self, turn: int, index: int, played: float) -> float | None:
+        """The share of the part's characters heard by stream second ``played``; None when it
+        does not hold the part."""
+        ...
 
 
 class PlayoutClock:
@@ -158,6 +171,7 @@ class Player:
         self._fadeable: tuple[int, float] | None = None  # the queued filler's (turn, fade_s)
         self.flushed_at: float | None = None
         self.on_fade: FadeSink | None = None  # told on the feeding thread, after the reply's chunk
+        self.words: WordLaw | None = None  # the word clock :meth:`heard` reads, when lent
 
     def start(self) -> threading.Event:
         """Run the pacer on its thread; set the returned event to stop it."""
@@ -216,6 +230,17 @@ class Player:
             self.flushed_at = self.clock()
         return played
 
+    def queued_audio(self) -> QueuedAudio:
+        """What the player holds ahead of the speaker now (any thread): seconds fed and not
+        played, of them already sent to the speaker, and the fade a queued filler is taken over
+        with (0: none, or one the reply waits for whole)."""
+        with self._lock:
+            played = self.playout.played()
+            fed = max(0.0, self._fed - played)
+            sent = max(0.0, self.playout.sent_s - played)
+            fade = self._fadeable[1] if self._fadeable is not None else 0.0
+        return QueuedAudio(fed, min(sent, fed), fade)
+
     def playback(self) -> Playback:
         """What the speaker is doing: nothing, a reply, or a backchannel."""
         return self._kind if self.pacer.speaking() else "silent"
@@ -246,7 +271,9 @@ class Player:
 
     def heard(self, turn: int, played: float, texts: list[str]) -> Played:
         """Which of reply ``turn``'s sentences (``texts``, in order) had played by stream second
-        ``played``: the whole ones, then the words of the one cut, in proportion."""
+        ``played``: the whole ones, then the words of the one cut, in proportion to its
+        characters heard (the word clock's law when it holds the part: the leading silence,
+        then the rest; else the share of its fed audio, at least :data:`CHAR_S` a character)."""
         with self._lock:
             marks = {i: tuple(v) for (t, i), v in self._marks.items() if t == turn}
         whole = 0
@@ -264,7 +291,9 @@ class Player:
                 continue
             if start < played:
                 words = text.split()
+                law = self.words.heard_share(turn, index, played) if self.words else None
                 share = (played - start) / max(end - start, CHAR_S * len(text))
+                share = law if law is not None else share
                 partial = " ".join(words[: round(len(words) * min(1.0, share))])
             break
         return Played(whole, partial)

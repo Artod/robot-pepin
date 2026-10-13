@@ -1,7 +1,8 @@
 """The word clock: when a character of a reply is heard, from the moment its part's text reaches
 the engine to the moment its own audio exists (gesticulation DESIGN.md §7.4). One estimator for
 every reader: the gesture scheduler, and what a barge-in says was heard
-(:func:`part_length_s`, :data:`CHAR_S`).
+(:meth:`WordClock.heard_share`, read by :meth:`pepin.voice_cascade.player.Player.heard`; its
+fallback :func:`part_length_s` and :data:`CHAR_S`).
 
 A part of a reply (one voice call: a sentence, or a piece of one a style marker cut) passes three
 moments, and the clock answers from the best one it has, never waiting for one:
@@ -169,6 +170,7 @@ class WordClock:
         self.nuclei = nuclei
         self.parts: dict[tuple[int, int], Spoken] = {}
         self._rates: deque[float] = deque(maxlen=SIGMA_PARTS)
+        self._median: float | None = None  # the rates' running median, once enough of them
 
     # -- what the conversation says ---------------------------------------------------------------
 
@@ -201,6 +203,8 @@ class WordClock:
         chars = len(part.text)
         if mark is not None and chars >= SIGMA_MIN_CHARS and mark[1] > mark[0]:
             self._rates.append((mark[1] - mark[0]) / chars)
+            if len(self._rates) >= SIGMA_MIN_PARTS:
+                self._median = statistics.median(self._rates)
 
     def forget(self, turn: int, *, only: bool = False) -> None:
         """The parts of replies up to ``turn`` (``only``: that one) are no longer placed (a cut
@@ -212,10 +216,9 @@ class WordClock:
 
     def sigma(self) -> float:
         """Seconds a character takes: the running median of the spoken parts, ``char_s`` before
-        there are enough of them."""
-        if len(self._rates) < SIGMA_MIN_PARTS:
-            return self.knobs.char_s
-        return statistics.median(self._rates)
+        there are enough of them (a number kept as each part is spoken: any thread may read it)."""
+        median = self._median
+        return self.knobs.char_s if median is None else median
 
     def length(self, turn: int, index: int) -> float:
         """The part's length on the player's clock, as known now (:func:`part_length_s`)."""
@@ -226,6 +229,22 @@ class WordClock:
         if mark is None:
             return self.sigma() * len(part.text)
         return part_length_s(mark, len(part.text), part.spoken, self.sigma())
+
+    def heard_share(self, turn: int, index: int, played: float) -> float | None:
+        """The share of part ``index``'s characters heard once the stream has played up to
+        ``played`` (what a barge-in says the person heard): the leading silence, then the rest
+        at the part's length (:meth:`length`); None for a part the clock does not hold or one
+        with no place in the stream. Any thread: it reads the player's mark and the part's
+        record, never a collection the engine's thread changes while it iterates."""
+        part = self.parts.get((turn, index))
+        mark = self.playout.mark(turn, index)
+        if part is None or mark is None:
+            return None
+        length = part_length_s(mark, len(part.text), part.spoken, self.sigma())
+        lead = min(self.knobs.lead_silence_s, length)
+        if length - lead <= 0.0:
+            return 1.0 if played >= mark[0] + length else 0.0
+        return min(1.0, max(0.0, (played - mark[0] - lead) / (length - lead)))
 
     def wall(self, stream_s: float, now: float) -> float:
         """A stream second on the engine's clock (while the audio flows)."""

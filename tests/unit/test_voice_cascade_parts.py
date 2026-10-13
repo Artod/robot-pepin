@@ -13,6 +13,7 @@ import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.expression.forecast import QueuedAudio, filler_wait_s
 from pepin.voice_cascade.barge_in import Frame
 from pepin.voice_cascade.config import CascadeConfig, ProsodyConfig, apply_overrides
 from pepin.voice_cascade.ears import Ears
@@ -261,6 +262,46 @@ def test_the_player_says_which_sentences_were_heard() -> None:
     assert player.playout.sent_s == pytest.approx(2.0)
     player.forget(1)
     assert player.span(1) is None
+
+
+class Law:
+    """The word clock as the barge-in's record reads it: a quarter of part (1, 0) heard."""
+
+    def heard_share(self, turn: int, index: int, played: float) -> float | None:
+        return 0.25 if (turn, index) == (1, 0) else None
+
+
+def test_a_cut_sentence_is_heard_by_the_word_clock_s_law_when_it_is_lent() -> None:
+    clock = Clock()
+    player = Player(Sink(), rate=RATE, lead_s=10.0, clock=clock)
+    player.feed(pcm_s(2.0), "reply", 1, 0)
+    player.pacer.step()
+    clock.now += 1.0
+    played = player.flush()
+    texts = ["Раз два три четыре."]
+    assert player.heard(1, played, texts).partial == "Раз два"  # half its fed audio
+    player.words = Law()
+    assert player.heard(1, played, texts).partial == "Раз"  # the clock's quarter
+
+
+def test_the_player_tells_the_word_clock_what_waits_ahead_of_the_speaker() -> None:
+    """Fed and not played, of it already sent, and a queued filler's fade: the word clock's
+    filler term (a reply's first word waits for what was sent and the ramp, not the rest)."""
+    clock = Clock()
+    player = Player(Sink(), rate=RATE, lead_s=0.5, clock=clock)
+    assert player.queued_audio() == QueuedAudio(0.0, 0.0, 0.0)
+    player.feed(level(0.6, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.pacer.step()
+    queued = player.queued_audio()
+    assert queued.fed_s == pytest.approx(0.6) and queued.fade_s == 0.06
+    assert 0.0 < queued.sent_s <= 0.1 + 1e-9
+    assert filler_wait_s(queued) == pytest.approx(queued.sent_s + 0.06)
+    for _ in range(10):  # 0.2 s of it plays
+        clock.now += 0.02
+        player.pacer.step()
+    assert player.queued_audio().fed_s == pytest.approx(0.4)
+    player.feed(level(0.3, 2000), "reply", 4, 0)  # the reply takes it over: no filler queued
+    assert player.queued_audio().fade_s == 0.0
 
 
 def test_the_player_tells_a_backchannel_from_a_reply() -> None:
