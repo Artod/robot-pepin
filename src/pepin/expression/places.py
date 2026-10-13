@@ -73,7 +73,7 @@ def key(name: str) -> str:
 
 def latin(name: str) -> str:
     """``key(name)`` with its Cyrillic letters transliterated."""
-    return "".join(_LATIN.get(c, c) for c in key(name)).replace("-", "")
+    return "".join(_LATIN.get(c, c) for c in key(name))
 
 
 def match(name: str, names: Mapping[str, Any]) -> str | None:
