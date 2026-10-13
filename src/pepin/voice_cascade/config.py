@@ -175,13 +175,15 @@ Phrases = Mapping[str, tuple[str, ...]]  # a language's code ("ru", "en") -> its
 FILLER_CONTEXTS = ("tool", "thinking", "again", "backchannel")
 LANGUAGE_FROM = ("utterance", "config")
 DEFAULT_NEUTRAL = ("Хм…", "Ммм…", "Э-э…", "Хм-м…")
+# thinking: short interjections only (a phrase may still be playing when the reply is ready);
+# the whole phrases are the tools' and again's
 DEFAULT_THINKING: Phrases = {
-    "ru": ("Так…", "Ну…", "Сейчас…", "Так-так…", "Секундочку…"),  # noqa: RUF001
-    "en": ("Well…", "Let me see…", "So…", "Okay, so…", "One sec…"),
+    "ru": ("Так-с.", "Хм.", "Пум.", "Трям.", "Так.", "Ну."),  # noqa: RUF001
+    "en": ("Hmm.", "Well.", "So.", "Um.", "Okay."),
 }
 DEFAULT_COMMON: Phrases = {
-    "ru": ("Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент."),
-    "en": ("One sec.", "Just a moment.", "Hang on.", "Give me a sec."),
+    "ru": ("Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент.", "Секундочку."),
+    "en": ("One sec.", "Just a moment.", "Hang on.", "Give me a sec.", "Let me see."),
 }
 DEFAULT_AGAIN: Phrases = {
     "ru": ("Ещё секундочку.", "Уже почти.", "Почти готово.", "Сейчас-сейчас."),
@@ -342,6 +344,8 @@ class CascadeConfig:
         default_factory=lambda: {"thinking": 0.25, "backchannel": 0.25}
     )
     filler_cooldown_s: Mapping[str, float] = field(default_factory=lambda: {"backchannel": 2.0})
+    # per context: the longest clip said (seconds); a context not named says any length
+    filler_max_s: Mapping[str, float] = field(default_factory=lambda: {"thinking": 0.6})
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -445,6 +449,7 @@ class CascadeConfig:
             filler_again_s=float(conv.get("filler_again_s", d.filler_again_s)),
             filler_silent_p=by_context(conv.get("filler_silent_p"), d.filler_silent_p),
             filler_cooldown_s=by_context(conv.get("filler_cooldown_s"), d.filler_cooldown_s),
+            filler_max_s=by_context(conv.get("filler_max_s"), d.filler_max_s),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -554,6 +559,7 @@ class CascadeConfig:
         for key, table, top in (
             ("filler_silent_p", self.filler_silent_p, 1.0),
             ("filler_cooldown_s", self.filler_cooldown_s, None),
+            ("filler_max_s", self.filler_max_s, None),
         ):
             for context, value in table.items():
                 if context not in FILLER_CONTEXTS or value < 0 or (top is not None and value > top):

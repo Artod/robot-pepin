@@ -655,13 +655,16 @@ class CascadeLoop:
         self, context: Context, turn: int | None, tool: str | None = None
     ) -> str | None:
         """A line for a filler's moment of reply ``turn`` (None: of no reply), by the engine's
-        rules with this config's knobs, among the lines the voice has a clip of."""
+        rules with this config's knobs, among the lines the voice has a clip of within the
+        context's ``filler_max_s``."""
         cfg = self.config
         return self.fillers.choose(
             cfg.fillers, context, self.clock(), turn=turn, tool=tool,
             silent_p=cfg.filler_silent_p.get(context, 0.0),
             cooldown_s=cfg.filler_cooldown_s.get(context, 0.0),
             ready=self.speech.has_clip,
+            max_s=cfg.filler_max_s.get(context),
+            seconds=self.speech.clip_s,
         )  # fmt: skip
 
     def _say_filler(
@@ -674,8 +677,10 @@ class CascadeLoop:
         self.speech.say(SpeechJob(reply.id, -1, line, "backchannel"))
         reply.filler_s = self.clock()
         reply.fillers.append(line)
+        length = self.speech.clip_s(line)
         self._event("filler", turn=reply.id, context=context, tool=tool, text=line,
-                    language=self.fillers.language)  # fmt: skip
+                    language=self.fillers.language,
+                    clip_s=None if length is None else round(length, 2))  # fmt: skip
         print(f"  (filler{'' if context == 'tool' else ' ' + context}: {line})", flush=True)
 
     def _waiting(self, reply: Reply | None) -> bool:
