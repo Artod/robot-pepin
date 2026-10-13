@@ -78,13 +78,15 @@ def with_arm(intent: str) -> Rig:
     raise AssertionError(f"no variant of {intent} moves the arm")
 
 
-def test_today_s_book_loads_with_the_new_fields_at_their_defaults_and_reads_them() -> None:
+def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
     greeting = BOOK.compositions["greeting"]
     assert (greeting.bind, greeting.args, greeting.family, greeting.long) == (
-        "utterance", (), None, False,
+        "utterance", (), "greeting", True,
     )  # fmt: skip
-    variants = [v for c in BOOK.compositions.values() for v in c.variants]
-    assert all(v.needs == {} and not v.floor for v in variants)
+    assert BOOK.compositions["emphasis"].bind == "word"
+    for composition in BOOK.compositions.values():
+        assert [v.floor for v in composition.variants].count(True) == 1, composition.name
+        assert all(v.needs == {} for v in composition.variants)
     assert BOOK.idle[0].unless == ("speaking", "listening")
     data = json.loads((CONFIG / "animation.json").read_text())
     data["compositions"]["point"] = {

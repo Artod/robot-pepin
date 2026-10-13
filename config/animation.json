@@ -150,7 +150,10 @@
   "compositions": {
     "greeting": {
       "cooldown_s": 30.0,
-      "note": "hello: a happy face a little before the word, the head up, the hand raised and waved side to side, the wave starting on the way up",
+      "bind": "utterance",
+      "family": "greeting",
+      "long": true,
+      "note": "hello: a happy face a little before the word, the head up, the hand raised and waved side to side, the wave starting on the way up; long: it may run 1 s past the speech; the floor: the face and a nod",
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.3, -0.2], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
@@ -163,12 +166,19 @@
           {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
           {"atom": "head_nod", "params": {"amp_deg": [3.0, 5.0]}},
           {"atom": "gripper_click", "at_s": [0.3, 0.6], "p": 0.5, "params": {"repeats": 2}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0]}}
         ]}
       ]
     },
     "farewell": {
       "cooldown_s": 30.0,
-      "note": "bye: a smile, the hand raised and waved forward and back starting on the way up, or a nod; the head dropped a little after",
+      "bind": "utterance",
+      "family": "farewell",
+      "long": true,
+      "note": "bye: a smile, the hand raised and waved forward and back starting on the way up, or a nod; the head dropped a little after; long: it may run 1 s past the speech; the floor: the smile and a nod",
       "variants": [
         {"weight": 3.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
@@ -179,12 +189,17 @@
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
           {"atom": "head_nod", "params": {"amp_deg": [3.0, 5.0], "period_s": [0.45, 0.5]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.45, 0.5]}}
         ]}
       ]
     },
     "laugh": {
       "cooldown_s": 20.0,
-      "note": "the face first, the head thrown back on the word, then a bob of the head (or a wiggle of the body); the gripper chatters now and then",
+      "bind": "utterance",
+      "note": "the face first, the head thrown back on the word, then a bob of the head (or a wiggle of the body); the gripper chatters now and then; the floor: the grin and the head thrown back",
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": ["grin", "happy"], "hold_s": [2.0, 3.0]}},
@@ -196,42 +211,57 @@
           {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
           {"atom": "head_back", "params": {"amp_deg": [6.0, 10.0]}},
           {"atom": "body_wiggle", "at_s": [0.3, 0.5], "p": 0.5}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": ["grin", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [6.0, 10.0], "period_s": [1.2, 1.4]}}
         ]}
       ]
     },
     "doubt": {
       "cooldown_s": 15.0,
-      "note": "hmm: a skewed mouth, the hand half raised and the wrist so-so, the head cocked (or down a little and aside)",
+      "bind": "utterance",
+      "note": "hmm: a skewed mouth, the hand half raised and the wrist so-so, the head cocked (or down a little and aside); at most 2 s of arm: the raise 0.8-0.9 s, held 0.3-0.5 s, one so-so of the wrist on the word; the floor: the mouth and the cocked head",
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
-          {"atom": "wrist_turn", "at_s": [0.0, 0.3], "p": 0.6},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.1], "p": 0.6, "params": {"period_s": [0.8, 0.9], "repeats": 1}},
           {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}},
-          {"atom": "arm_pose", "at_s": [-0.7, -0.5], "p": 0.6, "params": {"pose": "ready", "period_s": [1.05, 1.15]}}
+          {"atom": "arm_pose", "at_s": [-0.2, -0.1], "p": 0.6, "params": {"pose": "ready", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.5]}}
         ]},
         {"weight": 1.0, "steps": [
           {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
-          {"atom": "wrist_turn", "at_s": [0.0, 0.3], "p": 0.6},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.1], "p": 0.6, "params": {"period_s": [0.8, 0.9], "repeats": 1}},
           {"atom": "head_drop", "p": 0.5, "params": {"amp_deg": [2.0, 3.0]}},
           {"atom": "head_glance", "at_s": [0.2, 0.4], "p": 0.5, "params": {"side_deg": [6.0, 10.0], "up_deg": 0.0}},
-          {"atom": "arm_pose", "at_s": [-0.7, -0.5], "p": 0.6, "params": {"pose": "ready", "period_s": [1.05, 1.15]}}
+          {"atom": "arm_pose", "at_s": [-0.2, -0.1], "p": 0.6, "params": {"pose": "ready", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.5]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}}
         ]}
       ]
     },
     "thinking": {
       "cooldown_s": 10.0,
-      "note": "a look away up and to a side, the thinking mouth, now and then the hand to the chin after the look has begun (also the slow tool's moment: it fills the wait)",
+      "bind": "utterance",
+      "note": "a look away up and to a side, the thinking mouth, now and then the hand to the chin after the look has begun (also the slow tool's moment: it fills the wait); at most 2 s of arm: the hand up in 0.9-1.1 s, held 0.4-0.6 s; the floor: the look and the mouth",
       "variants": [
         {"steps": [
           {"atom": "head_glance", "params": {"side_deg": [12.0, 20.0], "up_deg": [4.0, 8.0], "period_s": [2.0, 2.6]}},
           {"atom": "face", "params": {"name": "thinking", "hold_s": [2.0, 3.0]}},
-          {"atom": "arm_pose", "at_s": [1.3, 1.6], "p": 0.5, "params": {"pose": "thinking", "period_s": [1.55, 1.65], "hold_s": [1.5, 2.5]}}
+          {"atom": "arm_pose", "at_s": [0.9, 1.1], "p": 0.5, "params": {"pose": "thinking", "period_s": [0.9, 1.1], "hold_s": [0.4, 0.6]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_glance", "params": {"side_deg": [8.0, 12.0], "up_deg": [4.0, 6.0], "period_s": [1.6, 2.0]}},
+          {"atom": "face", "params": {"name": "thinking", "hold_s": [2.0, 3.0]}}
         ]}
       ]
     },
     "emphasis": {
       "cooldown_s": 5.0,
-      "note": "a single sudden nod on the stressed word; now and then a beat of the raised fist (slow at the first caps)",
+      "bind": "word",
+      "note": "a single sudden nod on the stressed word; now and then a beat of the raised fist (slow at the first caps); bound to its word (never late); the floor: the nod",
       "variants": [
         {"weight": 3.0, "steps": [
           {"atom": "head_nod", "at_s": [-0.15, 0.0], "params": {"amp_deg": [4.0, 6.0], "period_s": [0.4, 0.45]}}
@@ -240,59 +270,83 @@
           {"atom": "arm_beat", "at_s": [-0.2, 0.0]},
           {"atom": "head_nod", "at_s": [-0.15, 0.0], "p": 0.5, "params": {"amp_deg": [2.0, 4.0]}},
           {"atom": "arm_pose", "at_s": [-1.0, -0.85], "params": {"pose": "emphasis", "period_s": [1.75, 1.85], "hold_s": [1.5, 2.0]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}}
         ]}
       ]
     },
     "surprise": {
       "cooldown_s": 20.0,
-      "note": "an O mouth just before, the head lifted on the word, the arm half raised now and then, a slow settle",
+      "bind": "utterance",
+      "note": "an O mouth just before, the head lifted on the word, the arm half raised now and then, a slow settle; at most 2 s of arm: the raise 0.9-1.1 s, held 0.3-0.6 s; the floor: the mouth and the lift",
       "variants": [
         {"steps": [
           {"atom": "face", "at_s": [-0.15, -0.05], "params": {"name": "surprised", "hold_s": [1.5, 2.0]}},
           {"atom": "recoil"},
-          {"atom": "arm_pose", "at_s": [0.0, 0.3], "p": 0.3, "params": {"pose": "ready", "period_s": [1.05, 1.15], "hold_s": [1.0, 1.5]}}
+          {"atom": "arm_pose", "at_s": [0.0, 0.3], "p": 0.3, "params": {"pose": "ready", "period_s": [0.9, 1.1], "hold_s": [0.3, 0.6]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.15, -0.05], "params": {"name": "surprised", "hold_s": [1.5, 2.0]}},
+          {"atom": "recoil"}
         ]}
       ]
     },
     "agreement": {
       "cooldown_s": 8.0,
-      "note": "yes: a nod or two, a smile now and then, the open hand offered now and then",
+      "bind": "utterance",
+      "note": "yes: a nod or two, a smile now and then, the open hand offered now and then; at most 2 s of arm: the offer in 0.9-1.1 s, held 0.3-0.6 s; the floor: a nod and a smile",
       "variants": [
         {"steps": [
           {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [4.0, 6.0], "repeats": [1, 2]}},
           {"atom": "face", "p": 0.5, "params": {"name": "smile", "hold_s": [1.5, 2.0]}},
-          {"atom": "arm_pose", "at_s": [0.0, 0.3], "p": 0.3, "params": {"pose": "offer", "hold_s": [1.0, 1.5]}}
+          {"atom": "arm_pose", "at_s": [0.0, 0.3], "p": 0.3, "params": {"pose": "offer", "period_s": [0.9, 1.1], "hold_s": [0.3, 0.6]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [3.0, 5.0]}},
+          {"atom": "face", "params": {"name": "smile", "hold_s": [1.5, 2.0]}}
         ]}
       ]
     },
     "disagreement": {
       "cooldown_s": 8.0,
-      "note": "no: a shake or two, a flat mouth, now and then the hand half raised and the wrist so-so",
+      "bind": "utterance",
+      "note": "no: a shake or two, a flat mouth, now and then the hand half raised and the wrist so-so; at most 2 s of arm: the raise 0.8-0.9 s, held 0.3-0.5 s, one so-so of the wrist; the floor: the shake and the mouth",
       "variants": [
         {"steps": [
           {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 8.0]}},
           {"atom": "face", "p": 0.7, "params": {"name": "flat", "hold_s": [1.5, 2.0]}},
-          {"atom": "wrist_turn", "at_s": [0.2, 0.4], "p": 0.2},
-          {"atom": "arm_pose", "at_s": [-0.6, -0.4], "p": 0.3, "params": {"pose": "ready", "period_s": [1.05, 1.15]}}
+          {"atom": "wrist_turn", "at_s": [0.0, 0.1], "p": 0.2, "params": {"period_s": [0.8, 0.9], "repeats": 1}},
+          {"atom": "arm_pose", "at_s": [-0.2, -0.1], "p": 0.3, "params": {"pose": "ready", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.5]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 6.0], "repeats": 1}},
+          {"atom": "face", "params": {"name": "flat", "hold_s": [1.5, 2.0]}}
         ]}
       ]
     },
     "shrug": {
       "cooldown_s": 15.0,
-      "note": "who knows: the open hand offered and turned out, the head down a little and aside, a flat or thinking mouth",
+      "bind": "utterance",
+      "note": "who knows: the open hand offered and turned out, the head down a little and aside, a flat or thinking mouth; at most 2 s of arm: the offer in 0.8-0.9 s, held 0.3-0.5 s, the hand turned out in 0.9-1.0 s on the word; the floor: the head down and the mouth",
       "variants": [
         {"steps": [
-          {"atom": "arm_flourish", "at_s": [-0.1, 0.1], "p": 0.7},
+          {"atom": "arm_flourish", "at_s": [0.0, 0.1], "p": 0.7, "params": {"roll_deg": [15.0, 20.0], "period_s": [0.9, 1.0]}},
           {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
           {"atom": "head_glance", "p": 0.5, "params": {"side_deg": [4.0, 6.0], "up_deg": 0.0}},
           {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}},
-          {"atom": "arm_pose", "at_s": [-1.15, -1.0], "p": 0.7, "params": {"pose": "offer", "hold_s": [1.5, 2.0]}}
+          {"atom": "arm_pose", "at_s": [-0.2, -0.1], "p": 0.7, "params": {"pose": "offer", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.5]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
+          {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}}
         ]}
       ]
     },
     "evil_click": {
       "cooldown_s": 300.0,
-      "note": "the mischievous one (world domination): the hand raised, the gripper clacking quickly on the way up and at the top, a clenched grin, the head lowered; marker only, once in five minutes",
+      "bind": "utterance",
+      "note": "the mischievous one (world domination): the hand raised, the gripper clacking quickly on the way up and at the top, a clenched grin, the head lowered; marker only, once in five minutes; the floor: the grin and the head lowered",
       "variants": [
         {"steps": [
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
@@ -300,20 +354,29 @@
           {"atom": "body_rock", "at_s": [-0.6, -0.4]},
           {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.8, 2.4], "period_s": [0.9, 1.1]}},
           {"atom": "gripper_click", "params": {"repeats": [4, 6]}, "at_s": [-0.3, -0.1]}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "grin"], "hold_s": [3.0, 3.5]}}
         ]}
       ]
     },
     "sympathy": {
       "cooldown_s": 20.0,
-      "note": "small and slow: the head down (or cocked), a worried mouth, now and then the hand drawn in to the face (tucked)",
+      "bind": "utterance",
+      "note": "small and slow: the head down (or cocked), a worried mouth, now and then the hand drawn in to the face (tucked); at most 2 s of arm: drawn in over 0.9-1.1 s, held 0.4-0.6 s; the floor: the head down and the mouth",
       "variants": [
         {"weight": 2.0, "steps": [
           {"atom": "head_drop", "params": {"amp_deg": [4.0, 6.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}},
-          {"atom": "arm_pose", "at_s": [0.2, 0.6], "p": 0.5, "params": {"pose": "tucked", "period_s": [1.8, 2.0], "hold_s": [2.0, 2.5]}}
+          {"atom": "arm_pose", "at_s": [0.2, 0.4], "p": 0.5, "params": {"pose": "tucked", "period_s": [0.9, 1.1], "hold_s": [0.4, 0.6]}}
         ]},
         {"weight": 1.0, "steps": [
           {"atom": "head_cock", "params": {"pan_deg": [5.0, 7.0], "tilt_deg": [3.0, 4.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [3.0, 5.0], "period_s": [2.0, 2.5]}},
           {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}}
         ]}
       ]

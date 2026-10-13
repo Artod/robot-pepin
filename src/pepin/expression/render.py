@@ -9,8 +9,10 @@ of one variant repeats it, its parameters still drawn afresh). A step whose part
 or whose pose has not been taught, is left out; when every optional step is left out by chance,
 the most likely one that can play still plays.
 
-Owners after slice 0: B (the variants a scene allows by their ``needs`` and its lead, the
-ladder), then C (the resolver of ``@`` references: cells, loci, places, the person's bearing).
+The chooser draws among the variants a scene allows by their ``needs`` and never a floor; the
+lead and the ladder are the scheduler's (:mod:`pepin.expression.schedule`), which renders a
+given variant (``variant=``) for each rung. Owners after slice 0: B, then C (the resolver of
+``@`` references: cells, loci, places, the person's bearing).
 """
 
 from __future__ import annotations
@@ -34,12 +36,15 @@ from pepin.expression.animation import (
     Scene,
     Step,
     Track,
+    Variant,
 )
 from pepin.expression.markers import Cue
 
 
 class WeightedChooser:
-    """Variants drawn by weight, never the one drawn last time for the same intent."""
+    """Variants drawn by weight among those the scene allows (:func:`allowed`) and that are no
+    floor (the scheduler's last rung, :mod:`pepin.expression.schedule`), never the one drawn last
+    time for the same intent; a composition of floors alone draws among them."""
 
     def __init__(self) -> None:
         """No intent performed yet."""
@@ -47,13 +52,30 @@ class WeightedChooser:
 
     def choose(self, composition: Composition, scene: Scene, rng: random.Random) -> int:
         """The index of the variant to perform."""
-        weights = [variant.weight for variant in composition.variants]
+        variants = composition.variants
+        everyone = list(range(len(variants)))
+        able = [i for i in everyone if allowed(variants[i], scene)] or everyone
+        drawable = [i for i in able if not variants[i].floor] or able
+        weights = [variants[i].weight for i in drawable]
         last = self.last.get(composition.name)
-        if len(weights) > 1 and last is not None:
-            weights[last] = 0.0
-        pick = rng.choices(range(len(weights)), weights)[0]
+        if len(drawable) > 1 and last in drawable:
+            weights[drawable.index(last)] = 0.0
+        pick = rng.choices(drawable, weights)[0]
         self.last[composition.name] = pick
         return pick
+
+
+def allowed(variant: Variant, scene: Scene) -> bool:
+    """Whether ``scene`` allows ``variant``: every part it needs is ready, and the arm is where
+    it needs it (``any``: anywhere; ``rest``: at rest or unknown; ``up``: holding a pose)."""
+    for part, state in variant.needs.items():
+        if part not in scene.ready:
+            return False
+        if part == "arm" and state == "rest" and scene.arm_at not in (None, "rest"):
+            return False
+        if part == "arm" and state == "up" and scene.arm_at in (None, "rest"):
+            return False
+    return True
 
 
 @dataclass(frozen=True)
