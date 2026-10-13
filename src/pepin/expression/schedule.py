@@ -27,8 +27,10 @@ ON THE WORD (a request anchored on a character of a part):
   composition, many parts: each anchored on the word). The arm's parts and the wheels' never
   play together: with the arm in a version the wheels' step is left out; the wheels never bind
   to a word. A version whose arm or wheels run longer than ``short_s`` plays only when the
-  speech ahead covers it (the fed audio, 0.7 of the forecast of the rest), a ``long`` one (hello,
-  bye) up to 1 s past it.
+  speech after its stroke covers the motion after it, up to 0.5 s past (the fed audio as it is,
+  0.7 of the forecast of the rest: the stroke's own time is that same forecast, so the share
+  is taken of what follows it, not of the reply from its start), a ``long`` one (hello, bye) up
+  to 1 s past it.
 * Never in a pause: a WORD or PHRASE mark after its part's last word is dropped (a sentence's
   end is 0.40-1.01 s of silence, MEASURED: no slide crosses it); an UTTERANCE one there takes
   the part's last word; a mark before punctuation already belongs to the word after it.
@@ -606,19 +608,23 @@ class Scheduler:
 
     def arm_at(self) -> str | None:
         """Where a rendering finds the arm (:attr:`pepin.expression.animation.Scene.arm_at`):
-        the pose a unit holds now, else the one a waiting arm clip will leave held for a next
-        stroke (by the book's name when it is one of its poses, ``held`` otherwise); ``rest``
-        when neither; None when no arm planner was lent (unknown)."""
+        the pose the latest waiting arm clip will leave held for a next stroke, else the one a
+        unit holds now (by the book's name when it is one of its poses, ``held`` otherwise);
+        ``rest`` when neither; None when no arm planner was lent (unknown)."""
         arm = self._arm_part()
         if arm is None:
             return None
         strokes = self.timing.unit_strokes
-        pose = arm.holding() if self._unit < strokes else None
-        if pose is None:
-            chained = [w.fit.final for w in self.waiting
-                       if w.clip.part == "arm" and w.fit is not None and w.fit.final is not None
-                       and w.fit.chain + 1 < strokes]  # fmt: skip
-            pose = chained[-1] if chained else None
+        waiting = [
+            w.fit
+            for w in self.waiting
+            if w.clip.part == "arm" and w.fit is not None and w.fit.final is not None
+        ]
+        latest = max(waiting, key=lambda fit: fit.stroke, default=None)  # fmt: skip
+        if latest is not None:
+            pose = latest.final if latest.chain + 1 < strokes else None
+        else:
+            pose = arm.holding() if self._unit < strokes else None
         if pose is None:
             return "rest"
         rendering = self._rendering()
@@ -969,29 +975,33 @@ class Scheduler:
 
     def _arm_froms(self, arm: ArmPart, now: float) -> list[ArmFrom]:
         """Where an arm clip may start from, each with the window its start must fall in: the
-        pose a unit holds (a sent clip's, after its stroke; a waiting one's it will be held
-        after), then returning to rest after the last motion, then at rest once every motion
-        known has ended and gone back."""
+        pose a unit holds (the latest arm motion's: a waiting clip's it will be held after,
+        else a sent clip's, after its stroke; the arm passes through no earlier one), then
+        returning to rest after the last motion, then at rest once every motion known has ended
+        and gone back."""
         hold_s, strokes = self.timing.unit_hold_s, self.timing.unit_strokes
         froms: list[ArmFrom] = []
         playing = self.reservations.held.get("arm")
         moving = playing is not None and now < playing.ends
         free = playing.ends if playing is not None and moving else now
+        waiting = [w for w in self.waiting if w.clip.part == "arm" and w.fit is not None
+                   and w.fit.final is not None]  # fmt: skip
+        latest = max(waiting, key=lambda w: w.fit.stroke if w.fit else 0.0, default=None)
         held = arm.holding()
         if held is not None:
             after = now
             if playing is not None and moving:
                 post = 0.0 if playing.performance.intent.startswith(PREPARE) else POST_STROKE_S
                 after = playing.stroke + post
-            if self._unit < strokes:
+            if self._unit < strokes and latest is None:
                 froms.append(ArmFrom("unit", held, _knot(held), after, arm.held_until))
             free = max(free, arm.held_until + self._return_s(arm, held))
-        for other in self.waiting:
+        for other in waiting:
             fit = other.fit
-            if other.clip.part != "arm" or fit is None or fit.final is None:
+            if fit is None or fit.final is None:
                 continue
             post = 0.0 if fit.step == "prepare" else POST_STROKE_S
-            if fit.chain + 1 < strokes:
+            if other is latest and fit.chain + 1 < strokes:
                 froms.append(ArmFrom("unit", fit.final, _knot(fit.final), fit.stroke + post,
                                      fit.end + hold_s, id(other), fit.chain + 1))  # fmt: skip
             free = max(free, fit.end + self._return_s(arm, fit.final))
@@ -1011,22 +1021,41 @@ class Scheduler:
     def _too_long(
         self, fitted: list[Waiting], mark: Cue, composition: Composition | None, now: float
     ) -> str | None:
-        """Why the arm or the wheels would run past what the speech ahead covers (DESIGN.md
-        §7.9); None when they would not."""
+        """Why the arm or the wheels would run past what the speech after their stroke covers
+        (DESIGN.md §7.9: a motion over ``short_s``, the sure speech after the stroke against the
+        motion after it); None when they would not."""
         movers = [w.fit for w in fitted if w.clip.part in ("arm", "body") and w.fit is not None]
         if not movers:
             return None
-        first = min(f.start for f in movers)
-        span = max(f.end for f in movers) - first
-        if span <= self.timing.short_s:
+        first, last = min(f.start for f in movers), max(f.end for f in movers)
+        if last - first <= self.timing.short_s:
             return None
-        end = self._speech_end(mark.turn, now)
-        if end is None:
+        stroke = min(f.stroke for f in movers)
+        ahead = self._speech_after(mark.turn, stroke, now)
+        if ahead is None:
             return None
         long = composition is not None and composition.long
-        if end - first + (LONG_PAST_S if long else SHORT_PAST_S) >= span:
+        if ahead + (LONG_PAST_S if long else SHORT_PAST_S) >= last - stroke:
             return None
-        return f"{span:.1f} s of motion, {end - first:.1f} s of speech ahead"
+        return f"{last - stroke:.1f} s of motion after its stroke, {ahead:.1f} s of speech ahead"
+
+    def _speech_after(self, turn: int, at: float, now: float) -> float | None:
+        """The reply's speech after ``at`` (engine clock, the speaker's sound) as far as it is
+        sure: a part fed whole as it is, a forecast at :data:`SURE_SHARE` (the share applies to
+        what follows ``at`` alone: a stroke's own time comes from that same forecast); None: no
+        part placed."""
+        indices = sorted(i for t, i in self.words.parts if t == turn)
+        if not indices:
+            return None
+        wall, _, _ = self.words.start(turn, indices[0], now)
+        wall += self.timing.audio_lag_s
+        ahead = 0.0
+        for index in indices:
+            length = self.words.length(turn, index)
+            after = max(0.0, wall + length - max(wall, at))
+            ahead += after if self.words.parts[(turn, index)].spoken else SURE_SHARE * after
+            wall += length
+        return ahead
 
     def _speech_end(self, turn: int, now: float) -> float | None:
         """The reply's speech ahead as far as it is sure: the parts fed whole, then

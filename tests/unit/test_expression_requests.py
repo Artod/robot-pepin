@@ -488,6 +488,27 @@ def test_two_arm_marks_1_5_s_apart_are_one_unit_the_second_from_the_held_pose() 
     assert [r["base"] for r in rig.rows("send", part="arm")] == ["rest", "unit"]
 
 
+def test_three_arm_marks_in_a_row_are_one_unit_each_from_the_one_before() -> None:
+    """The third stroke chains to the second (the latest motion before it), never to the first:
+    the arm passes through the second's pose on its way."""
+    rig = Ladder()
+    texts = ("Есть план и ещё.", "Второй вот.", "Третий вот.")
+    rig.say(1, 0, texts[0], "point", texts[0].index("план"))
+    rig.say(1, 1, texts[1], "offer_it", 0)
+    rig.say(1, 2, texts[2], "near", 0)
+    marks = [(2.0, 4.0), (4.0, 5.0), (5.0, 6.0)]
+    for index, mark in enumerate(marks):
+        rig.playout.marks[(1, index)] = mark
+        rig.engine.part_started(1, index, mark[0])
+        rig.engine.part_spoken(1, index)
+    rig.tick(7.0)
+    first, second, third = rig.sent()
+    assert [t.then for t in (first, second, third)] == ["hold", "hold", "rest"]
+    assert second.knots[0].deg == pytest.approx(first.knots[-1].deg, abs=0.01)
+    assert third.knots[0].deg == pytest.approx(second.knots[-1].deg, abs=0.01)
+    assert [r["base"] for r in rig.rows("send", part="arm")] == ["rest", "unit", "unit"]
+
+
 def test_an_accent_inside_an_open_unit_is_the_wrist_flick_from_the_held_pose() -> None:
     """{count:1} before «батарея», then «Это {!} очень важно.»: the count opens a unit; the
     accent, rendered after it, finds the arm up (the scene's ``arm_at``: the pose the count's
@@ -600,6 +621,18 @@ def test_a_long_composition_is_refused_with_short_speech_ahead() -> None:
     assert refused["step"] == "floor" and "of speech ahead" in refused["why"]
     (played,) = long.rows("ladder")
     assert played["step"] in ("authored", "compressed") and "arm" in played["parts"]
+
+
+def test_a_motion_late_in_its_sentence_needs_the_speech_after_its_stroke_only() -> None:
+    """«Принтер стоит {point_hold} вон там.» alone: 1.4 s of arm (0.6 to the pose, 0.8 held), its
+    stroke 0.66 s before the sentence's forecast end: the 0.8 s after the stroke fit 0.7 of
+    that speech and the 0.5 s past it, though the whole motion is longer than 0.7 of the
+    sentence from its start would allow."""
+    rig = Ladder()
+    text = "Принтер стоит вон там."
+    rig.say(1, 0, text, "point_hold", text.index("вон"))
+    (row,) = rig.rows("ladder")
+    assert row["step"] == "authored" and "arm" in row["parts"], row
 
 
 def test_a_clip_over_the_caps_steps_down_and_its_stroke_is_never_later_than_planned() -> None:
