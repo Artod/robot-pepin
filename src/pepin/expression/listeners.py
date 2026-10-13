@@ -485,10 +485,13 @@ class Alive:
     # -- the engine's scene hook (the engine's thread) -----------------------------------------
 
     def scene(self, scene: Scene, request: Request) -> Scene:
-        """What a rendering may use: the laugh never the arm (its rock is the wheels', refused
-        while the arm moves); in a quiet moment the face only, for all but a person's ask."""
+        """What a rendering may use, for all but a person's ask (it plays whole): the laugh never
+        the arm (its rock is the wheels', refused while the arm moves); in a quiet moment the
+        face only."""
+        if request.priority <= Priority.ASK:
+            return scene
         ready = scene.ready - {"arm"} if request.intent == "laugh" else scene.ready
-        if self._quiet is not None and request.priority > Priority.ASK:
+        if self._quiet is not None:
             return replace(scene, ready=ready & {"face"}, quiet=True)
         return scene if ready == scene.ready else replace(scene, ready=ready)
 

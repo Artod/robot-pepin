@@ -594,6 +594,13 @@ def test_a_goodbye_waves_bye_in_the_wait_and_a_greeting_waits_for_the_body_s_tur
 
 
 def test_the_laugh_never_uses_the_arm_and_rocks_the_cart_once_from_its_part_s_start() -> None:
+    asked = []
+    for seed in range(12):  # a person's ask of the laugh plays whole, its arm included
+        rig = Rig(seed=seed)
+        assert rig.engine.perform("laugh", source="tool").ok
+        last = rig.engine.last()
+        asked += [c.part for c in last.clips] if last is not None else []
+    assert "arm" in asked
     for seed in range(12):
         rig = Rig(seed=seed)
         rig.open()
