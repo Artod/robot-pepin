@@ -136,7 +136,7 @@ def test_a_turn_reaches_its_angle_within_the_tolerance_and_the_caps() -> None:
 def test_a_stall_steps_away_from_the_nearest_mark_once_and_tries_once_more(
     world: list[tuple[float, float]], x: float
 ) -> None:
-    r = rig(world=world, marks_age_s=0.0)
+    r = rig(world=world, marks_age_s=0.0, scan_age_s=0.0)
     r.base.stalled_turns = True  # the wheels do not turn; they do drive straight
     report = turn(r, 20.0)
     assert not report.done and report.attempts == 2 and report.why.startswith("gave up: stalled")
@@ -150,7 +150,7 @@ def test_a_stall_steps_away_from_the_nearest_mark_once_and_tries_once_more(
 
 
 def test_a_stall_whose_step_cannot_go_turns_back_the_other_way_and_gives_up() -> None:
-    r = rig(marks_age_s=0.0)
+    r = rig(marks_age_s=0.0, scan_age_s=0.0)
     r.base.stalled_turns = r.base.stalled_drives = True  # wedged: nothing moves
     report = turn(r, 20.0)
     assert not report.done and report.attempts == 1 and report.turned_deg == 0.0
@@ -160,13 +160,13 @@ def test_a_stall_whose_step_cannot_go_turns_back_the_other_way_and_gives_up() ->
 
 
 def test_a_blocked_arc_steps_away_and_the_turn_goes_once_the_arc_is_clear() -> None:
-    r = rig(replace(FULL, clearance_m=0.05), world=[BLOCKER], marks_age_s=0.0)
+    r = rig(replace(FULL, clearance_m=0.05), world=[BLOCKER], marks_age_s=0.0, scan_age_s=0.0)
     report = turn(r, 20.0)
     assert report.done and report.attempts == 2
     assert report.backed_m == pytest.approx(0.02, abs=0.006)
     assert r.base.pose.x == pytest.approx(-0.02, abs=0.006), "back: the mark is ahead"
     assert report.turned_deg == pytest.approx(20.0, abs=FULL.settle_deg)
-    wide = rig(replace(FULL, clearance_m=0.10), world=[BLOCKER], marks_age_s=0.0)
+    wide = rig(replace(FULL, clearance_m=0.10), world=[BLOCKER], marks_age_s=0.0, scan_age_s=0.0)
     given_up = turn(wide, 20.0)
     assert not given_up.done and given_up.attempts == 2 and given_up.turned_deg == 0.0
     assert given_up.why.startswith("gave up: the arc is blocked: a mark at (+0.")
@@ -174,16 +174,29 @@ def test_a_blocked_arc_steps_away_and_the_turn_goes_once_the_arc_is_clear() -> N
 
 
 def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_clear_it() -> None:
-    r = rig(marks_age_s=0.0)
+    r = rig(marks_age_s=0.0, scan_age_s=0.0)
     r.base.at(r.clock.now + 0.4, lambda b: r.view.world.append((-0.30, -0.40)))  # behind right
     cleared = turn(r, 30.0)
     assert cleared.done and cleared.attempts == 2, "stopped, stepped forward, turned the rest"
     assert r.base.pose.x > 0.01
-    r = rig(marks_age_s=0.0)
+    r = rig(marks_age_s=0.0, scan_age_s=0.0)
     r.base.at(r.clock.now + 0.4, lambda b: r.view.world.append((-0.20, -0.42)))
     report = turn(r, 30.0)
     assert not report.done and report.why.startswith("gave up: the arc is blocked")
     assert 0.0 < report.turned_deg < 25.0 and report.attempts == 2
+
+
+def test_someone_only_the_scan_sees_behind_a_standing_cart_blocks_the_turn() -> None:
+    """The marks have not taken the person in yet (a standing cart's revolutions count once in
+    the volume); the scan's return blocks the arc all the same and is named as the lidar's."""
+    r = rig(marks_age_s=0.0, scan_age_s=0.0, scanned=[(-0.42, 0.10)], world=[(1.5, 0.0)])
+    report = turn(r, 30.0)  # the rear-left corner swings toward it
+    assert not report.done and report.turned_deg == pytest.approx(0.0, abs=0.5)
+    assert report.why.startswith("gave up: the arc is blocked: a lidar return at (-0.4")
+    marked = rig(marks_age_s=0.0, scan_age_s=0.0, world=[(-0.42, 0.10)])
+    assert turn(marked, 30.0).why.startswith("gave up: the arc is blocked: a mark at (-0.4")
+    clear = rig(marks_age_s=0.0, scan_age_s=0.0, world=[(1.5, 0.0)])
+    assert turn(clear, 30.0).done, "neither source holds anything in the arc"
 
 
 # ---- refusals --------------------------------------------------------------------------------
@@ -196,6 +209,8 @@ def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_
          "the goal server does not answer"),
         (lambda r: setattr(r.view, "marks_age_s", 2.0), "the newest obstacle marks are 2.0 s old"),
         (lambda r: setattr(r.view, "marks_age_s", None), "no obstacle marks"),
+        (lambda r: setattr(r.view, "scan_age_s", 0.9), "the newest lidar scan is 0.9 s old"),
+        (lambda r: setattr(r.view, "scan_age_s", None), "no lidar scan has reached"),
         (lambda r: r.base.foreign(Twist(0.2, 0.0)), "the wheels are commanded (v +0.20"),
         (lambda r: setattr(r.base, "travel", (0.002, 0.002)), "the cart is rolling"),
         (lambda r: setattr(r.base, "bus_ok", False), "the servo bus did not answer"),
@@ -629,7 +644,7 @@ def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     assert (lim.max_turn_deg, lim.max_rock_m) == (30.0, 0.02)
     assert (lim.backoff_m, lim.backoff_deg) == (0.02, 10.0), "the one recovery, within the caps"
     assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
-    assert settings.marks_age_s == 1.5
+    assert (settings.marks_age_s, settings.scan_age_s) == (1.5, 0.6)
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})
@@ -714,7 +729,7 @@ class OpenRoom:
         pass
 
     def latest(self) -> View:
-        return View(time.monotonic(), False, 0.05)
+        return View(time.monotonic(), False, 0.05, scan_age_s=0.05)
 
 
 @pytest.mark.slow
@@ -770,17 +785,23 @@ def test_on_the_real_wire_the_turn_knows_its_own_twists_and_ends_on_a_teleop_s()
 def test_the_goal_server_s_answer_becomes_a_view_and_an_older_build_refuses() -> None:
     from pepin.expression.clearance import view_of
 
-    answer = {"event": "clearance", "navigating": False, "marks": "ok", "cancel_age_s": 12.5,
-              "marks_age_s": 0.04, "points": [[0.5, 0.0], [-0.4, 0.2]]}  # fmt: skip
+    answer = {"event": "clearance", "navigating": False, "marks": "ok", "lidar": "ok",
+              "cancel_age_s": 12.5, "marks_age_s": 0.04, "scan_age_s": 0.12,
+              "points": [[0.5, 0.0], [-0.4, 0.2], [-0.6, 0.1]], "marks_points": 2}  # fmt: skip
     view = view_of(answer, 7.0)
-    assert (view.at, view.navigating, view.marks_age_s) == (7.0, False, 0.04)
-    assert view.cancel_age_s == 12.5 and view.points.shape == (2, 2) and view.why == ""
+    assert (view.at, view.navigating, view.marks_age_s, view.scan_age_s) == (7.0, False, 0.04, 0.12)
+    assert view.cancel_age_s == 12.5 and view.why == ""
+    assert view.marks.tolist() == [[0.5, 0.0], [-0.4, 0.2]] and view.scan.tolist() == [[-0.6, 0.1]]
+    assert view.points.shape == (3, 2), "one set of points: the marks', then the scan's"
+    assert [view.source_of(i) for i in range(3)] == ["a mark", "a mark", "a lidar return"]
     old = view_of({"event": "error", "detail": "unknown command 'clearance'"}, 7.0)
     assert "an older build" in old.why and "kick goal_server" in old.why
     silent = view_of({**answer, "marks": "silent 9 s (depth_fusion)"}, 7.0)
     assert silent.why == "the obstacle marks: silent 9 s (depth_fusion)"
-    unmarked = view_of({**answer, "marks_age_s": None, "points": []}, 7.0)
-    assert unmarked.why.startswith("no obstacle marks have reached the goal server")
+    deaf = view_of({**answer, "lidar": "silent 7 s"}, 7.0)
+    assert deaf.why == "the lidar: silent 7 s", "no fallback to the marks alone"
+    unscanned = view_of({**answer, "scan_age_s": None, "points": [], "marks_points": 0}, 7.0)
+    assert unscanned.scan_age_s is None and unscanned.points.shape == (0, 2)
     raw_scan = {"event": "clearance", "navigating": False, "lidar": "ok", "cancel_age_s": None,
                 "scan_age_s": 0.04, "points": [[0.5, 0.0]]}  # fmt: skip
     before = view_of(raw_scan, 7.0)
@@ -805,8 +826,9 @@ def test_the_goal_server_view_asks_only_while_watched() -> None:
                 return
             with conn:
                 asked.append(conn.makefile("r").readline())
-                line = {"event": "clearance", "navigating": True, "marks": "ok",
-                        "marks_age_s": 0.02, "points": [[0.3, 0.0]]}  # fmt: skip
+                line = {"event": "clearance", "navigating": True, "marks": "ok", "lidar": "ok",
+                        "marks_age_s": 0.02, "scan_age_s": 0.1, "points": [[0.3, 0.0]],
+                        "marks_points": 1}  # fmt: skip
                 conn.sendall((json.dumps(line) + "\n").encode())
 
     threading.Thread(target=serve, daemon=True).start()

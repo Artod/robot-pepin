@@ -669,32 +669,35 @@ refused). Before a
 motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
 the wheels still), the bus answering, the arm not mid-gesture (a twist sends it to rest), no
 stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
-times a second only while a motion runs): nothing navigates, depth_fusion's newest obstacle marks
-(`/depth_marks`) under `wheels.marks_age_s` (1.5 s) old by their own stamp, and the footprint
-swept from here to the target keeps `clearance_m` (0.10 m) from every mark it moves toward. The
-marks are the voxel volume's slice round the whole cart (the lidar, the camera's depth and the
-ToF fans fused; the nearest surface per half degree, 0.15-1.3 m above the floor, out to 3 m),
-so a table leg the camera saw before the head looked away still counts; a bearing the volume
-holds nothing on blocks nothing, and Nav2's inflated costmaps are not read. Without the marks
-(depth_fusion down: `ros/laptop.sh vslam`) every motion is refused with that reason; the raw
-scan never stands in. The marks change only when an observation is fused (the ToF fans, 15 Hz,
-keep the 5 Hz slice coming while the head turns and its frames are not fused): a standing cart's
-identical lidar revolutions count once, so something that steps in behind a standing cart, where
-neither the camera nor the ToF fans look, enters the marks only after the turn has begun, after
-about twelve revolutions on floor the volume has seen a few times and not within a 30° turn on
-floor it has seen forty times (the volume's own code against a simulated lidar). A turn that ends
-short (a stall: under a third of the commanded motion in `stall_s`; or a blocked arc) gets one
-recovery, the same rule whatever stopped it: a straight step of `wheels.backoff_m` (2 cm) away
-from the mark nearest the footprint (forward unless that mark lies ahead of the footprint's
-middle, forward when there is none), checked like any leg, or, when that step is blocked or
-stalls too, a turn of `wheels.backoff_deg` (10°) back the other way. Then the rest of the turn
-once more; if that ends short too, the head alone. The cart never ends a request more than 30°
-from the heading it began at. A drive or the
-conversation's close halts every motion at once, the person speaking a gesture's (a flag and one
-stop line from the voice's own loop); the turn toward the person speaking goes on. Nothing new
-runs on the board; the goal server keeps the newest slice and decodes it once per request on
-this Mac. An older goal server answers `clearance` without the marks and every motion is
-refused: `ros/laptop.sh kick goal_server`.
+times a second only while a motion runs): nothing navigates, both of its sources fresh by their
+own stamps, and the footprint swept from here to the target keeps `clearance_m` (0.10 m) from
+every point of either that it moves toward. The two sources come in one answer and a point of
+either blocks. depth_fusion's obstacle marks (`/depth_marks`, under `wheels.marks_age_s`, 1.5 s)
+are the memory: the voxel volume's slice round the whole cart (the lidar, the camera's depth
+and the ToF fans fused; the nearest surface per half degree, 0.15-1.3 m above the floor, out to
+3 m), so a table leg the camera saw before the head looked away still counts. The lidar's
+newest scan (`/scan`, under `wheels.scan_age_s`, 0.6 s) is the freshness: the volume changes
+only when an observation is fused, and a standing cart's identical lidar revolutions count
+once, so someone who steps in behind a standing cart, where neither the camera nor the ToF fans
+look, enters the marks only after the turn has begun (about twelve revolutions on floor the
+volume has seen a few times, not within a 30° turn on floor it has seen forty times: the
+volume's own code against a simulated lidar), while the scan has them on the next revolution.
+A bearing neither source holds anything on blocks nothing, and Nav2's inflated costmaps are
+not read. Either source missing or old (depth_fusion down: `ros/laptop.sh vslam`; the lidar
+silent) refuses every motion with that reason; neither stands in for the other. The ToF fans,
+15 Hz, keep the 5 Hz slice coming while the head turns and its frames are not fused. A turn
+that ends short (a stall: under a third of the commanded motion in `stall_s`; or a blocked arc)
+gets one recovery, the same rule whatever stopped it: a straight step of `wheels.backoff_m`
+(2 cm) away from the point nearest the footprint, of either source (forward unless that point
+lies ahead of the footprint's middle, forward when there is none), checked like any leg, or,
+when that step is blocked or stalls too, a turn of `wheels.backoff_deg` (10°) back the other
+way. Then the rest of the turn once more; if that ends short too, the head alone. The cart
+never ends a request more than 30° from the heading it began at. A drive or the conversation's
+close halts every motion at once, the person speaking a gesture's (a flag and one stop line
+from the voice's own loop); the turn toward the person speaking goes on. Nothing new
+runs on the board; the goal server keeps the newest slice and the newest scan and decodes them
+once per request on this Mac. An older goal server answers `clearance` without the marks and
+every motion is refused: `ros/laptop.sh kick goal_server`.
 
 ```bash
 uv run python scripts/gesture.py turn 10 --dry-run          # every check, nothing moves

@@ -523,64 +523,79 @@ def test_where_says_whether_any_goal_runs_on_the_navigators(tmp_path: Path) -> N
     assert not node.navigating()
 
 
-def test_clearance_tells_the_voice_s_wheels_the_drive_the_cancel_and_the_marks_near_the_cart(
+def stamped(age_s: float) -> Any:
+    """A header stamped ``age_s`` before the node's now."""
+    stamp = NOW - age_s
+    return Header(stamp=ros_stubs.Time(sec=int(stamp), nanosec=round(stamp % 1.0 * 1e9)))
+
+
+def test_clearance_answers_from_the_marks_and_the_scan_in_one_list(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """The newest /depth_marks is kept raw and decoded only when asked; its marks come back in
-    base_link as published (the slice's own frame), the far ones and the NaN bearings left out,
-    aged by the slice's own stamp; the raw lidar scan is never the source; a cancel (ros/stop.sh
-    always sends one) is told by its age."""
-    stamp = NOW - 0.25
+    """The newest /depth_marks and the newest /scan are kept raw and decoded only when asked; one
+    list of points near the cart comes back, the marks' first (in base_link as published) and
+    the scan's after them (through config/lidar.json's mount), the far ones and the NaN bearings
+    left out, each source aged by its own stamp; a cancel (ros/stop.sh always sends one) is told
+    by its age."""
+    lidar = json.loads((Path(__file__).resolve().parents[2] / "config/lidar.json").read_text())
+    forward = math.radians(-lidar["yaw_offset_deg"])  # the laser's bearing of the cart's nose
     marks = ros_stubs.LaserScan(
-        header=Header(stamp=ros_stubs.Time(sec=int(stamp), nanosec=round(stamp % 1.0 * 1e9)),
-                      frame_id="base_link"),
-        angle_min=-math.pi, angle_increment=math.pi / 2, range_min=0.05, range_max=3.0,
-        ranges=[0.6, float("nan"), 0.5, 2.5],
+        header=stamped(0.25), angle_min=-math.pi, angle_increment=math.pi / 2, range_min=0.05,
+        range_max=3.0, ranges=[0.6, float("nan"), 0.5, 2.5],
+    )  # fmt: skip
+    scan = ros_stubs.LaserScan(
+        header=stamped(0.125), angle_min=forward, angle_increment=math.pi / 2, range_min=0.05,
+        range_max=12.0, ranges=[0.4, 2.5, float("inf")],
     )  # fmt: skip
     decoded: list[bytes] = []
 
     def decode(raw: bytes) -> Any:
         decoded.append(raw)
-        return marks
+        return marks if raw == b"raw marks" else scan
 
     monkeypatch.setattr(goal_server_module, "scan_message", decode)
     node = server(tmp_path)
     wire = Wire()
     node._handle({"cmd": "clearance"}, wire)
     (empty,) = wire.events()
-    assert empty["event"] == "clearance" and empty["marks_age_s"] is None and empty["points"] == []
+    assert empty["event"] == "clearance" and empty["points"] == [] and empty["marks_points"] == 0
+    assert empty["marks_age_s"] is None and empty["scan_age_s"] is None
     assert empty["navigating"] is False and empty["cancel_age_s"] is None
     node.subs[goal_server_module.LIDAR_SCAN_TOPIC][1](b"raw scan")
-    wire = Wire()
-    node._handle({"cmd": "clearance"}, wire)
-    assert wire.events()[0]["points"] == [] and decoded == [], "the lidar's scan is not the source"
     node.subs[goal_server_module.MARKS_TOPIC][1](b"raw marks")
-    assert decoded == [], "the marks are not decoded on arrival"
+    assert decoded == [], "nothing is decoded on arrival"
     wire = Wire()
     node._handle({"cmd": "clearance", "radius_m": 1.0}, wire)
     (answer,) = wire.events()
-    assert decoded == [b"raw marks"] and answer["marks"] == "ok"
-    assert answer["marks_age_s"] == 0.25, "aged by the slice's own stamp"
-    behind, ahead = answer["points"]
-    assert abs(behind[0] + 0.6) < 1e-3 and abs(behind[1]) < 1e-3, "0.6 m behind the axle"
-    assert abs(ahead[0] - 0.5) < 1e-3 and abs(ahead[1]) < 1e-3, "0.5 m ahead"
+    assert sorted(decoded) == [b"raw marks", b"raw scan"]
+    assert (answer["marks"], answer["lidar"]) == ("ok", "ok")
+    assert (answer["marks_age_s"], answer["scan_age_s"]) == (0.25, 0.125), "their own stamps"
+    assert answer["marks_points"] == 2
+    behind, ahead, nose = answer["points"]
+    assert abs(behind[0] + 0.6) < 1e-3 and abs(behind[1]) < 1e-3, "a mark 0.6 m behind"
+    assert abs(ahead[0] - 0.5) < 1e-3 and abs(ahead[1]) < 1e-3, "a mark 0.5 m ahead"
+    assert abs(nose[0] - (0.4 + lidar["x_m"])) < 1e-3 and abs(nose[1]) < 1e-3, "the scan's"
     node._handle({"cmd": "cancel"}, Wire())
     wire = Wire()
     node._handle({"cmd": "clearance", "radius_m": 3.0}, wire)
     (after,) = wire.events()
     assert after["cancel_age_s"] is not None and after["cancel_age_s"] < 1.0
-    assert len(after["points"]) == 3, "the 2.5 m mark within a 3 m radius"
+    assert len(after["points"]) == 5 and after["marks_points"] == 3, "both 2.5 m points within 3 m"
 
 
-def test_clearance_says_depth_fusion_is_silent(tmp_path: Path) -> None:
-    """No marks for MARKS_SILENT_S: the answer names depth_fusion and how long, so the wheels
-    refuse with that reason."""
+def test_clearance_names_a_silent_source(tmp_path: Path) -> None:
+    """No marks for MARKS_SILENT_S, no scan for LIDAR_SILENT_S: the answer names the source and
+    how long, so the wheels refuse with that reason."""
     node = server(tmp_path)
     now = node._started_at + goal_server_module.MARKS_SILENT_S + 1.0
-    status = node.clearance(1.0, now)["marks"]
-    assert status.startswith("silent 6 s, none since the start") and "depth_fusion" in status
+    answer = node.clearance(1.0, now)
+    assert answer["marks"].startswith("silent 6 s, none since the start")
+    assert "depth_fusion" in answer["marks"] and answer["lidar"].startswith("silent 6 s")
     node._last_marks_at = now - 0.1
-    assert node.clearance(1.0, now)["marks"] == "ok"
+    answer = node.clearance(1.0, now)
+    assert answer["marks"] == "ok" and answer["lidar"] != "ok"
+    node._last_scan_at = now - 0.1
+    assert node.clearance(1.0, now)["lidar"] == "ok"
 
 
 def test_face_events_follow_a_drive_behind_their_flag(tmp_path: Path, monkeypatch: Any) -> None:

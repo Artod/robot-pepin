@@ -12,8 +12,8 @@ deg); the wheels only bring a person far round back into the arc.
 :class:`BoundedTurn` is the wheels' one recovery made concrete over :class:`TurnSteps` (the
 board's measured motion, :class:`pepin.expression.wheels.WheelsExecutor`), one rule for every
 way a turn can end short. A turn the wheels could not finish because they stalled or the arc is
-blocked steps ``backoff_m`` straight away from the nearest obstacle mark (forward unless that
-mark lies ahead of the footprint's middle); when that step cannot go (blocked, or stalled too)
+blocked steps ``backoff_m`` straight away from the nearest obstacle point (forward unless that
+point lies ahead of the footprint's middle); when that step cannot go (blocked, or stalled too)
 it turns ``backoff_deg`` back the other way instead. Then it tries the rest of the turn once
 more, and gives up if that ends short too. The cart never ends more than ``max_turn_deg`` from
 the heading the request began at, and never steps more than ``backoff_m``. A turn STOPPED (a
@@ -94,7 +94,7 @@ class TurnSteps(Protocol):
         ...
 
     def step_away(self, metres: float) -> Step:
-        """Straight by ``metres`` away from the nearest obstacle mark; the distance it went."""
+        """Straight by ``metres`` away from the nearest obstacle point; the distance it went."""
         ...
 
 
