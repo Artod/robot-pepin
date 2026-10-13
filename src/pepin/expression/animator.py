@@ -21,7 +21,10 @@ reservations (state, attention and a person's ask first; then the markers, the m
 pulse, the idle layer); the person starting to speak fades the gesture layer of every part
 (``fade_s`` per part) unless a greeting or a farewell already past its stroke ends within
 ``finish_s``; the conversation's close does the same and rests the rest; a drive sends every
-part to rest and drops what waits; a cut reply drops its clips. The idle layer plays an atom of
+part to rest and drops what waits; a cut reply drops its clips. An arm UNIT the board holds
+(``then: hold``: a mark's next stroke due, the listeners' posture) goes to rest when the person
+starts to speak, when its reply is cut or done, and when the body's turn asks for the arm,
+unless a clip still moves the arm (its own end decides). The idle layer plays an atom of
 the book's ``idle`` entries every ``every_s`` on a part no gesture holds, unless a state the
 entry excludes holds (by default either speaker: idle only while nobody speaks), from the
 entry's ``after_speech_s`` (else ``idle_after_speech_s``) after those states ended and
@@ -295,6 +298,7 @@ class GestureEngine:
         self._idle_next: dict[int, float] = {}  # each idle entry's next motion (by its place)
         self._idle_of: dict[PartName, Idle] = {}  # the idle entry a part's idle clip came from
         self._arm_free_s = float("-inf")  # the arm was released to the body's turn until then
+        self._held_turn: int | None = None  # the reply of the clip the arm holds (None: any)
         self._renew_at: dict[PartName, float] = {}  # a looping clip's next renewal
 
     @property
@@ -397,22 +401,45 @@ class GestureEngine:
         return self._last
 
     def release_arm(self, why: str) -> float:
-        """The speaker gaze's body turn asks for the arm (any thread): a gesture's arm goes to
-        rest now and none starts for as long as it takes; the seconds until it is there."""
+        """The body's motion asks for the arm (any thread: the speaker gaze's turn, the laugh's
+        rock): a gesture's arm, moving or held in a unit, goes to rest now and none starts for
+        as long as it takes; the seconds until it is there."""
         with self._lock:
             now = self.clock()
             part = self.parts.get("arm")
             held = self._playing.get("arm")
-            if part is None or held is None or now >= held.ends:
+            moving = held is not None and now < held.ends
+            if part is None or not (moving or _holds(part)):
                 return 0.0
             rest_s = getattr(part, "rest_s", None)
             seconds = (rest_s() if callable(rest_s) else ARM_REST_S) + part.latency_s
             part.fade("gesture", self.config.fade_s.get("arm", 0.0))
             self.scheduler.reservations.release("arm")
+            self._held_turn = None
             self._arm_free_s = now + seconds
-            self.record("faded", {"intent": held.performance.intent, "part": "arm", "why": why,
+            latest = held if moving else self.scheduler.reservations.last("arm")
+            intent = latest.performance.intent if latest is not None else "unit"
+            self.record("faded", {"intent": intent, "part": "arm", "why": why,
                                   "rest_s": round(seconds, 2)})  # fmt: skip
             return seconds
+
+    def claim(self, intent: str) -> str | None:
+        """A moment of the listeners' own that stands for ``intent`` under its
+        ``intent_per_minute`` (the laugh heard in the robot's words, for ``laugh``; waived as
+        for the brain's marker): why it may not play now, else None and it counts as one (any
+        thread)."""
+        with self._lock:
+            caps, now = self.config.caps, self.clock()
+            if not self._on:
+                return "gestures are off"
+            if self._driving:
+                return "a drive is under way"
+            waived = intent in caps.laughter_waives and now - self._laughed <= caps.laughter_s
+            limit = caps.intent_per_minute.get(intent)
+            if limit is not None and not waived and self._count(lambda arm: True, intent) >= limit:
+                return f"{intent} per minute"
+            self._started.append((now, intent, False, False))
+            return None
 
     def audio(self, chunk: VoiceChunk) -> None:
         """A chunk of the reply's audio (the voice's thread): to every tap, nothing else here."""
@@ -456,11 +483,11 @@ class GestureEngine:
         self._post(lambda: self.scheduler.text_ahead(turn, sentence, text))
 
     def reply_cut(self, turn: int) -> None:
-        """The reply stopped short: what waits for its words is dropped."""
+        """The reply stopped short: what waits for its words is dropped, the arm's unit rests."""
         self._post(lambda: self._drop_turns(turn, "cut"))
 
     def reply_done(self, turn: int) -> None:
-        """The reply played out: whatever still waited for it is dropped."""
+        """The reply played out: whatever still waited for it is dropped, its unit rests."""
         self._post(lambda: self._drop_turns(turn, "done", only=True))
 
     def moment(self, name: str, text: str = "") -> None:
@@ -565,6 +592,7 @@ class GestureEngine:
 
     def _drop_turns(self, turn: int, why: str, only: bool = False) -> None:
         self.scheduler.drop(turn, why, only=only)
+        self._rest_unit(f"the reply is {why}", turn, only=only)
         self._replying = {t for t in self._replying if not (t == turn if only else t <= turn)}
         self._ended["speaking"] = self.clock()
 
@@ -598,6 +626,7 @@ class GestureEngine:
         now = self.clock()
         kept = {p: r for p, r in self._playing.items() if finishing and self._finishing(r, now)}
         self.scheduler.clear()
+        self._held_turn = None
         for name, held in kept.items():
             self.scheduler.reservations.reserve(name, held, now)
         for name, part in self.parts.items():
@@ -626,6 +655,30 @@ class GestureEngine:
             self.parts[part].fade("gesture", self.config.fade_s.get(part, 0.0))
             self.scheduler.reservations.release(part)
             self.record("faded", {"intent": playing.performance.intent, "part": part, "why": why})
+        self._rest_unit(why)
+
+    def _rest_unit(self, why: str, turn: int | None = None, *, only: bool = False) -> bool:
+        """The arm's held unit (of reply ``turn`` and those before it, ``only`` that one, when
+        given) to rest, unless a clip still moves the arm; True when it went."""
+        part = self.parts.get("arm")
+        if part is None or not _holds(part):
+            return False
+        held_turn = self._held_turn
+        if turn is not None and held_turn is not None:
+            ours = held_turn == turn if only else held_turn <= turn
+            if not ours:
+                return False
+        now = self.clock()
+        playing = self._playing.get("arm")
+        if playing is not None and now < playing.ends:
+            return False
+        part.fade("gesture", self.config.fade_s.get("arm", 0.0))
+        self.scheduler.reservations.release("arm")
+        self._held_turn = None
+        latest = self.scheduler.reservations.last("arm")
+        self.record("faded", {"intent": latest.performance.intent if latest else "unit",
+                              "part": "arm", "why": why})  # fmt: skip
+        return True
 
     def _release(self, request: Request, why: str) -> None:
         for waiting in self.scheduler.withdraw(request):
@@ -878,6 +931,8 @@ class GestureEngine:
             fields["stroke_s"] = round(stroke_s, 3)
         self.record("cue", fields)
         if outcome.ok:
+            if clip.part == "arm":  # the reply a held unit belongs to (closed with it)
+                self._held_turn = waiting.turn if clip.then == "hold" else None
             seconds = outcome.seconds if outcome.seconds > 0 else clip.duration_s
             ends = NOT_YET if clip.loop else now + seconds
             held = Reservation(performance, clip, now, now + stroke_s, ends, request.priority,
@@ -907,6 +962,15 @@ class GestureEngine:
                 refusal = arm_refusal(view)
                 if refusal is not None:
                     return refusal
+                cart = self.scheduler.reservations.holder("body", now)
+                if cart is not None:  # the board refuses the arm while the wheels move
+                    return f"the cart moves ({cart.performance.intent})"
+            if clip.part == "body":  # the board refuses the wheels while the arm moves or holds
+                arm = self.scheduler.reservations.holder("arm", now)
+                if arm is not None:
+                    return f"the arm moves ({arm.performance.intent})"
+                if _holds(self.parts.get("arm")):
+                    return "the arm holds a pose"
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
 
     def _view(self) -> Attention:
@@ -1049,6 +1113,13 @@ class GestureEngine:
         self.scheduler.configure(
             audio_lag_s=c.audio_lag_s, late_s=c.late_s, poll_s=c.poll_s, timing=c.timing
         )
+
+
+def _holds(part: object) -> bool:
+    """Whether ``part`` holds a unit's pose (an arm that keeps one: the board's ``then:
+    hold``)."""
+    holding = getattr(part, "holding", None)
+    return callable(holding) and holding() is not None
 
 
 def _mark(intent: str, cue: Cue | None, arg: str | None = None) -> str:

@@ -15,7 +15,7 @@ import pytest
 
 from pepin.arm_motion import ArmMotion, ServoRange, arm_motion, load_arm_motion
 from pepin.expression.animation import Book, Clip, Event, Range, Scene, Track
-from pepin.expression.animator import EngineConfig, GestureEngine, engine_config
+from pepin.expression.animator import Caps, EngineConfig, GestureEngine, engine_config
 from pepin.expression.book import book_from, face_names, load_book, vocabulary, with_rest
 from pepin.expression.conversation import Heard
 from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakeFace, FakePlayout
@@ -245,7 +245,9 @@ def _every_step(book: Book, end: str | None = None) -> Book:
 
 def test_every_intent_s_arm_clip_keeps_the_caps_at_full_speed_and_at_the_first_test_s() -> None:
     """The book is sized to config/arm.json's caps and its poses: nothing it renders is
-    refused, every step playing, its ranges at either end or drawn, mirrored or not."""
+    refused, every step playing, its ranges at either end or drawn, mirrored or not (at speed
+    0.2 too, but evil_click: its live-tuned 3-4 s passes the board's 30 s there; speed 1 since
+    2026-10-12)."""
     fast, slow = ArmPart(FakeArmLink(), MOTION), ArmPart(FakeArmLink(), MOTION, speed_scale=0.2)
     books = (_every_step(BOOK, "lo"), _every_step(BOOK, "hi"), _every_step(BOOK))
     for intent, composition in BOOK.compositions.items():
@@ -256,13 +258,17 @@ def test_every_intent_s_arm_clip_keeps_the_caps_at_full_speed_and_at_the_first_t
                 if clip.part == "arm":
                     where = (intent, variant, seed)
                     assert isinstance(fast.plan(clip), Planned), (where, fast.plan(clip))
-                    assert isinstance(slow.plan(stretched(clip, 5.0)), Planned), where
+                    if intent != "evil_click":
+                        assert isinstance(slow.plan(stretched(clip, 5.0)), Planned), where
 
 
 def test_every_arm_clip_fits_the_board_s_longest_trajectory_at_the_first_test_s_speed() -> None:
     """The arm steps of a variant at their widest (the earliest start, the latest end their
-    ranges allow) last at most config/arm.json's max_duration_s once stretched to speed 0.2."""
+    ranges allow) last at most config/arm.json's max_duration_s once stretched to speed 0.2
+    (evil_click's live-tuned 3-4 s aside: the arm runs at speed 1 since 2026-10-12)."""
     for name, composition in BOOK.compositions.items():
+        if name == "evil_click":
+            continue
         for v, variant in enumerate(composition.variants):
             starts, ends = [], []
             for step in variant.steps:
@@ -301,6 +307,11 @@ def test_the_motion_block_is_checked_whole() -> None:
     broken = copy.deepcopy(data)
     broken["motion"]["torque_limit"] = 2.0
     with pytest.raises(ValueError, match="torque_limit"):
+        arm_motion(broken)
+    assert MOTION.hold_max_s == 20.0  # the voice's arm held up through a long reply
+    broken = copy.deepcopy(data)
+    broken["motion"]["hold_max_s"] = 31.0
+    with pytest.raises(ValueError, match="hold_max_s"):
         arm_motion(broken)
 
 
@@ -590,6 +601,30 @@ def test_a_laugh_once_a_minute_unless_the_person_laughed() -> None:
     assert len(rig.kinds("performance")) == 2
 
 
+def test_a_laugh_heard_in_the_robot_s_words_shares_the_laugh_s_cap_with_the_brain_s_mark(
+) -> None:  # fmt: skip
+    """The listeners' laugh heard counts as the laugh under intent_per_minute: a {laugh} after it
+    within the minute is capped, and so is a second laugh heard; the person's laugh waives it;
+    it never counts against per_minute (it moves no gesture of the brain's)."""
+    rig = Rig(caps=Caps(per_minute=1))
+    assert rig.engine.claim("laugh") is None
+    rig.clock.now += 25.0
+    rig.engine.part_queued(1, 0, marked("Ха.", "laugh", 0))
+    rig.engine.step()
+    assert rig.kinds("capped")[-1]["why"] == "laugh per minute"
+    assert rig.engine.claim("laugh") == "laugh per minute"
+    rig.engine.speech_ended(Heard(0.0, 1.0, "Ха-ха-ха, смешно"))
+    rig.engine.step()
+    assert rig.engine.claim("laugh") is None
+    rig.engine.part_queued(2, 0, marked("Привет.", "greeting", 0))
+    rig.engine.step()
+    assert [r["intent"] for r in rig.kinds("performance")] == ["greeting"]  # per_minute 1 kept
+    rig.clock.now += 61.0
+    assert rig.engine.claim("laugh") is None
+    rig.engine.switch(False)
+    assert rig.engine.claim("laugh") == "gestures are off"
+
+
 def test_off_nothing_moves_and_switching_on_reads_the_book_again() -> None:
     rig = Rig(on=False)
     rig.engine.part_queued(1, 0, marked("Привет.", "greeting", 0))
@@ -649,11 +684,7 @@ def test_the_config_file_s_knobs_are_read() -> None:
     config = engine_config(json.loads((CONFIG / "expression.json").read_text()))
     assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
     assert config.arm_speed_scale == 1.0 and config.caps.intent_per_minute == {"laugh": 1}
-    assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (
-        1,
-        4,
-        1,
-    )  # four marks a reply since 2026-10-13
+    assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (1, 4, 1)
     assert config.caps.accents == ("accent",) and config.caps.series == ("count",)
     assert config.finish == ("greeting", "farewell") and config.seed is None
 

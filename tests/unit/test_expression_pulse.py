@@ -680,6 +680,93 @@ def test_the_laugh_never_uses_the_arm_and_rocks_the_cart_once_from_its_part_s_st
             assert 0.01 <= max(clip.tracks[0].values) <= 0.02 and clip.stroke_s <= 2.5
 
 
+def test_the_accent_s_rock_takes_the_reply_s_strongest_reachable_accent_once() -> None:
+    """Nuclei over beat_z at 0.5 s (the strongest, but in the reply's first half second of
+    sound with its rock's way), 1.6, 2.4 (stronger than 1.6) and 3.0: the cart rocks 1 cm once,
+    its stroke on 2.4; a later part of the same reply rocks nothing; accent_rock_p 0 never."""
+    rig = Rig(accent_rock_p=1.0)
+    rig.open()
+    rig.say(1, 0, "Это было огромное здание, правда.")
+    rig.news(1, 0, [(0.5, 4.0), (1.6, 2.4), (2.4, 3.6), (3.0, 2.2)], start=0.2)
+    rig.tick(3.5)
+    (rock,) = rig.sent("accent_rock", "body")
+    (clip,) = rig.clips_of("accent_rock", "body")
+    assert max(clip.tracks[0].values) == pytest.approx(0.01) and clip.stroke_s == pytest.approx(
+        0.45
+    )
+    assert rock["planned"] == pytest.approx(2.4 - 0.05 - 0.45 + 0.15, abs=0.011)
+    (moment,) = rig.moments("accent_rock")
+    assert moment["played"] and moment["s"] == 2.4 and moment["z"] == 3.6
+    rig.say(1, 1, "И ещё одно.")
+    rig.news(1, 1, [(rig.playout.now + 2.0, 4.0)], start=rig.playout.now + 0.5)
+    rig.tick(3.0)
+    assert len(rig.sent("accent_rock", "body")) == 1
+    never = Rig(accent_rock_p=0.0)
+    never.open()
+    never.say(1, 0, "Это было огромное здание.")
+    never.news(1, 0, [(2.4, 3.6)], start=0.2)
+    never.tick(3.0)
+    never.alive.reply_done(1)
+    never.tick(0.1)
+    assert not never.sent("accent_rock", "body") and not never.moments("accent_rock")
+
+
+def test_the_accent_s_rock_waits_out_a_moving_arm_and_never_comes_in_quiet() -> None:
+    """While the arm plays a mark the accent at 1.6 s passes (the board refuses the wheels while
+    the arm moves); the next one, at 4.5 s, rocks the cart. In quiet hours: none, logged."""
+    rig = Rig(accent_rock_p=1.0)
+    rig.open()
+    lift = Track("shoulder_lift", "additive", (0.0, 1.5, 3.0), (0.0, 20.0, 0.0))
+    rig.engine.request(Request("mark", None, Priority.MARK, "marker",
+                               clips=(Clip("arm", 0.0, 1.5, 3.0, (lift,)),)))  # fmt: skip
+    rig.say(1, 0, "Это было огромное здание, правда, очень.")
+    rig.news(1, 0, [(1.6, 3.0), (4.5, 2.5)], start=0.2)
+    rig.tick(5.0)
+    (moment,) = rig.moments("accent_rock")
+    assert moment["played"] and moment["s"] == 4.5
+    assert len(rig.sent("accent_rock", "body")) == 1
+    quiet = Rig(hour=23, accent_rock_p=1.0)
+    quiet.open()
+    quiet.say(1, 0, "Это было огромное здание.")
+    quiet.news(1, 0, [(2.4, 3.6)], start=0.2)
+    quiet.tick(3.0)
+    assert not quiet.sent("accent_rock", "body")
+    assert quiet.moments("accent_rock")[0]["why"] == "quiet: the hours 23-08"
+
+
+def test_a_laugh_in_the_robot_s_words_rocks_the_cart_not_in_quiet_nor_while_the_body_turns(
+) -> None:  # fmt: skip
+    """No {laugh} written: a laugh spelled in the words rocks the cart from the part's start
+    (laugh_heard); in quiet, or while the body turns toward the person, it does not, and the
+    laugh's cap is left for the next."""
+    rig = Rig()
+    rig.open()
+    rig.view.be(phase="turning")
+    rig.say(1, 0, "Ха-ха, ну ты даёшь.")
+    rig.alive.part_started(1, 0, rig.playout.now)
+    rig.tick(0.1)
+    assert rig.moments("laugh_heard")[-1]["why"] == "a body turn is pending"
+    rig.view.be(phase="track")
+    rig.say(2, 0, "Ахаха, точно.")
+    rig.alive.part_started(2, 0, rig.playout.now)
+    rig.tick(1.5)
+    assert rig.moments("laugh_heard")[-1]["played"]
+    assert len(rig.sent("laugh_rock", "body")) == 1
+    quiet = Rig(hour=23)
+    quiet.open()
+    quiet.say(1, 0, "Ха-ха-ха, вот это да.")
+    quiet.alive.part_started(1, 0, quiet.playout.now)
+    quiet.tick(1.5)
+    assert not quiet.sent("laugh_rock", "body")
+    assert quiet.moments("laugh_heard")[-1]["why"] == "quiet: the hours 23-08"
+    marked = Rig()
+    marked.open()
+    marked.say(1, 0, "Ха-ха, смешно.", Marker("gesture", "laugh", 0))
+    marked.alive.part_started(1, 0, marked.playout.now)
+    marked.tick(1.5)
+    assert not marked.moments("laugh_heard") and marked.moments("laugh_rock")  # the mark's own
+
+
 def test_the_first_clear_face_brings_one_smile() -> None:
     rig = Rig()
     rig.open()
@@ -819,6 +906,8 @@ def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_composit
         knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.0
     )  # off since 2026-10-13: the +-0.9 deg melody read as jerky
     assert knobs_.moments.head_gap_s == 1.0 and "breath_deg" not in data["moments"]
+    assert knobs_.pulse.wrist_beat_deg == (15.0, 25.0)  # 2026-10-13: 6-8 deg did not show
+    assert knobs_.pulse.accent_rock_p == 0.5 and knobs_.pulse.arm_up_min_sentences == 2
     (breath,) = [i for i in BOOK.idle if "breath" in i.atoms]  # the breath is the book's
     assert breath.unless == ("speaking",) and breath.after_speech_s == 0.0
     assert (

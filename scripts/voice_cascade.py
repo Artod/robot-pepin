@@ -644,7 +644,8 @@ def main() -> int:
     room = GoalPlaces(robot.goals).start()
     body.engine.resolver.room = room
     # The alive layer (riding gestures): the voice's own nuclei and melody from every reply chunk,
-    # the listeners' requests into the engine, the quiet rule over the engine's renderings.
+    # the listeners' requests into the engine, the quiet rule over the engine's renderings, the
+    # arm kept up after a mark while a long reply's posture is due or up.
     from pepin.expression.listeners import Alive
     from pepin.expression.prosody import ProsodyListener
 
@@ -652,6 +653,7 @@ def main() -> int:
     alive = Alive(body.engine, prosody, say=lambda line: print(line, flush=True))
     body.engine.taps.append(prosody)
     body.engine.scene_hooks.append(alive.scene)
+    body.engine.scheduler.stay_up = alive.stays_up
     # On the word: the ladder plans with the arm's planner and units, renders the book's other
     # versions and floors through the engine's renderer and scene hooks, and takes the voice's
     # nuclei as the word clock's AUDIO moment; a barge-in's record reads the same clock.
