@@ -581,3 +581,13 @@ def snap(second: float, nuclei: Sequence[Nucleus], within_s: float = SNAP_S) -> 
     """``second`` moved to the nearest nucleus within ``within_s`` (unmoved when none is)."""
     near = [n.second for n in nuclei if abs(n.second - second) <= within_s]
     return min(near, key=lambda s: abs(s - second)) if near else second
+
+
+if TYPE_CHECKING:  # the listener is the voice's tap and the word clock's nuclei (the contract)
+    from pepin.expression.conversation import AudioTap
+    from pepin.expression.schedule import Nuclei
+
+    def _conforms(listener: ProsodyListener) -> None:
+        tap: AudioTap = listener
+        nuclei: Nuclei = listener
+        del tap, nuclei

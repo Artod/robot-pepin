@@ -754,7 +754,6 @@ def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_composit
 RECORDED = sorted((REPO / "data" / "voice").glob("2026101[0-2]/cascade_*/out.wav"))
 
 
-@pytest.mark.slow
 @pytest.mark.skipif(not RECORDED, reason="no recorded voice under data/voice")
 def test_a_recorded_reply_gives_nuclei_a_melody_the_arbiter_takes_and_costs_little() -> None:
     import soundfile as sf
