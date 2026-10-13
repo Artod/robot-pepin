@@ -37,6 +37,7 @@ from pepin.expression.schedule import (
 )
 from pepin.expression.speaker import Attention
 from pepin.expression.trajectory import JOINTS, ArmStatus
+from pepin.tools.gesture import GESTURES as TWELVE
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 MOTION = load_arm_motion(CONFIG / "arm.json")
@@ -93,6 +94,8 @@ def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
     )  # fmt: skip
     assert BOOK.compositions["emphasis"].bind == "word"
     for composition in BOOK.compositions.values():
+        if composition.name not in TWELVE:
+            continue  # the brain's primitives: a floor for each argument (test_expression_space)
         assert [v.floor for v in composition.variants].count(True) == 1, composition.name
         assert all(v.needs == {} for v in composition.variants)
     assert BOOK.idle[0].unless == ("speaking", "listening")
@@ -301,6 +304,7 @@ def gesture_book() -> Book:
     ``ready``, ``offer_it``), one over the caps with a smaller wrist version (``fast``), and a
     long one (``long``: 3 s of arm), each with its head-and-face floor."""
     data = json.loads((CONFIG / "animation.json").read_text())
+    data["aliases"] = {}  # the book's aliases spell its point's arguments; this point takes none
     ready = data["poses"]["ready"]
     data["poses"]["near"] = {**ready, "wrist_flex": ready["wrist_flex"] - 15.0}
     nod = {"atom": "head_nod", "params": {"amp_deg": 3.0, "period_s": 0.4}}

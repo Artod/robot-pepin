@@ -40,6 +40,8 @@ RESEARCH_NAMES = {
     "greeting", "farewell", "laugh", "doubt", "thinking", "emphasis", "surprise", "agreement",
     "disagreement", "shrug", "evil_click", "sympathy",
 }  # fmt: skip
+# the brain's co-speech marks (gesticulation DESIGN.md §4.4; test_expression_space.py)
+PRIMITIVES = {"accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer"}
 RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wrist_flex": 30.0,
           "wrist_roll": -54.1, "gripper": -0.4}  # fmt: skip
 
@@ -48,12 +50,12 @@ RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wr
 
 
 def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
-    assert set(BOOK.compositions) == RESEARCH_NAMES
+    assert set(BOOK.compositions) == RESEARCH_NAMES | PRIMITIVES
     assert len(BOOK.atoms) >= 19
     assert not BOOK.atoms["breath"].callable and not BOOK.atoms["head_drift"].callable
     assert BOOK.moments == {"slow_tool": "thinking"}
     words = vocabulary(BOOK, face_names(CONFIG / "face.json"))
-    assert words.intents == frozenset(RESEARCH_NAMES) and "smile" in words.faces
+    assert words.intents == frozenset(RESEARCH_NAMES | PRIMITIVES) and "smile" in words.faces
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps
              for n in s.choices.get("name", ())}  # fmt: skip
     assert faces <= words.faces  # every face a composition names exists
@@ -67,8 +69,9 @@ def test_every_pose_keeps_the_arm_s_limits_and_every_pose_named_exists() -> None
             low, high = limits[joint]
             assert low <= deg <= high, f"poses.{name}.{joint} {deg} outside {low}..{high}"
     named = {pose for composition in BOOK.compositions.values() for v in composition.variants
-             for s in v.steps for pose in s.choices.get("pose", ())}  # fmt: skip
-    keyed = {k.pose for a in BOOK.atoms.values() for k in a.keys if k.pose and k.pose[0] != "$"}
+             for s in v.steps for pose in s.choices.get("pose", ()) if pose[0] != "@"}  # fmt: skip
+    keys = [k for a in BOOK.atoms.values() for k in a.keys]
+    keyed = {k.pose for k in keys if k.pose and k.pose[0] not in "$@"}  # @: the space's places
     assert named and named | keyed <= set(BOOK.poses)
     assert {"raised", "ready", "offer", "emphasis", "thinking", "tucked"} <= set(BOOK.poses)
 

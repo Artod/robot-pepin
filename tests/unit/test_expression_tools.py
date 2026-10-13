@@ -22,7 +22,11 @@ BOOK = with_rest(load_book(CONFIG / "animation.json"), MOTION.rest_deg)
 
 
 def test_the_tool_s_names_are_the_book_s_intents() -> None:
-    assert tuple(BOOK.compositions) == GESTURES
+    # the book's feelings, in its order; its co-speech primitives are inline marks only
+    assert tuple(n for n in BOOK.compositions if n in GESTURES) == GESTURES
+    assert set(BOOK.compositions) - set(GESTURES) == {
+        "accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer",
+    }  # fmt: skip
     schema = TOOLS["gesture"].input_schema()
     assert schema["properties"]["name"]["enum"] == list(GESTURES)
     assert not TOOLS["gesture"].moves  # never a drive: the voice loop runs it as any tool
