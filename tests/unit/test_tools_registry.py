@@ -250,7 +250,7 @@ def test_every_provider_shape_renders_the_same_schema() -> None:
 
 def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
     """THE registry: every tool of the first set is there, each renders for every provider,
-    and the only tools that set the robot in motion are the two drives, which go through the
+    and the only tools that set the robot in motion are the three drives, which go through the
     goal server; nothing else can move the wheels."""
     names = [t.name for t in TOOLS]
     assert names == [
@@ -259,6 +259,7 @@ def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
         "go_to",
         "go_to_pose",
         "cancel",
+        "approach",
         "express",
         "show",
         "servo_temperatures",
@@ -275,7 +276,7 @@ def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
         "say",
         "status",
     ]
-    assert {t.name for t in TOOLS if t.moves} == {"go_to", "go_to_pose"}
+    assert {t.name for t in TOOLS if t.moves} == {"go_to", "go_to_pose", "approach"}
     for rendered in (
         anthropic_tools(TOOLS),
         openai_tools(TOOLS),

@@ -18,7 +18,14 @@ from typing import Any
 from pepin.expression.executors import Outcome
 from pepin.gaze import DRIVE_REFUSAL
 from pepin.people.door import Outcome as Answer
-from pepin.tools.clients import HeadMove, HeadPose, HeadReach, ServiceDownError
+from pepin.pixel_to_map import Box, Head, Located, LocateError, Pose2D
+from pepin.tools.clients import (
+    FaceSighting,
+    HeadMove,
+    HeadPose,
+    HeadReach,
+    ServiceDownError,
+)
 from pepin.tools.registry import Image, ToolError
 from pepin.tools.robot import Robot
 
@@ -76,6 +83,9 @@ class FakeGoalServer:
     (the first, ``accepted``, after ``accept_s`` when set); after a ``cancel`` the drive ends
     with Nav2's CANCELED. ``refuse`` makes a go answer only an
     error with that detail, as the server does for an unknown place or a stale pose.
+    A ``plan`` answers ok unless ``unplannable`` (goals the planner finds occupied, the first
+    that many asked) or ``plan_error`` (the server's error event, as an old build's
+    "unknown command") say otherwise.
     """
 
     clock: FakeClock
@@ -88,6 +98,8 @@ class FakeGoalServer:
     step_s: float = 1.0
     accept_s: float | None = None
     down: bool = False
+    unplannable: int = 0
+    plan_error: str | None = None
     asked: list[dict[str, Any]] = field(default_factory=list)
     cancelled: int = 0
 
@@ -143,6 +155,22 @@ class FakeGoalServer:
                 "navigate_through_poses": {"outcome": "no such goal", "cancelling": 0},
             },
         }
+
+    def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+        """``plan``: ok, a refused goal (``unplannable``) or the error event."""
+        self._ask({"cmd": "plan", "x": x, "y": y, "yaw_deg": yaw_deg})
+        if self.plan_error is not None:
+            return {"event": "error", "detail": self.plan_error}
+        answer: dict[str, Any] = {"event": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
+        planned = sum(1 for a in self.asked if a.get("cmd") == "plan")
+        if planned <= self.unplannable:
+            return answer | {
+                "ok": False,
+                "cell": "free",
+                "reason": "goal occupied",
+                "blames": "goal",
+            }
+        return answer | {"ok": True, "cell": "free", "length_m": 2.0, "poses": 40}
 
     def _ask(self, request: dict[str, Any]) -> None:
         self.asked.append(request)
@@ -449,14 +477,73 @@ class FakePeople:
         return Answer(True, payload={"forgotten": name})
 
 
+FACE = FaceSighting(box=(380.0, 210.0, 420.0, 258.0), who="artem", head_yaw_deg=0.0, faces=1,
+                    age_s=0.4)  # fmt: skip
+CAMERA_HEIGHT_M = 1.2  # the camera's height at the working pose, near enough for a fake aim
+
+
+@dataclass
+class FakeSightings:
+    """The face sensor: ``sighting`` is the face it sees (None: nobody in view)."""
+
+    sighting: FaceSighting | None = FACE
+    down: bool = False
+
+    def face(self) -> FaceSighting | None:
+        """The face, unless the sensor is down."""
+        if self.down:
+            raise ServiceDownError(
+                "face sensor", "data/face/latest.json", "no line", "Is it running?"
+            )
+        return self.sighting
+
+
+@dataclass
+class FakeEyes:
+    """Points of the picture: whatever box is asked lies at map ``point`` (x, y, z), measured
+    with ``sigma_m`` by ``source``, seen from where the fake goal server says the robot stands;
+    ``blank`` makes every box a :class:`pepin.pixel_to_map.LocateError` with that text."""
+
+    goals: FakeGoalServer
+    neck: FakeNeck
+    point: tuple[float, float, float] = (2.1, 0.05, 1.55)
+    sigma_m: float = 0.07
+    source: str = "stereo"
+    blank: str | None = None
+    boxes: list[Box] = field(default_factory=list)
+
+    def locate(self, box: Box) -> Located:
+        """The scripted point, with its range and bearing from the robot."""
+        self.boxes.append(box)
+        if self.blank is not None:
+            raise LocateError(self.blank)
+        where = self.goals.where()
+        pose = Pose2D(float(where["x"]), float(where["y"]), math.radians(where["yaw_deg"]))
+        x, y, z = self.point
+        forward, left = pose.to_base(x, y)
+        head = self.neck.pose_now
+        return Located(
+            x=x, y=y, z=z, forward=forward, left=left, depth_m=math.hypot(forward, left),
+            sigma_m=self.sigma_m, spread_m=0.02, source=self.source, pixels=400,
+            head=Head(math.radians(head.pan_deg), math.radians(head.tilt_deg)), pose=pose,
+        )  # fmt: skip
+
+    def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:
+        """Toward the point from a camera :data:`CAMERA_HEIGHT_M` up."""
+        from pepin.tools.eyes import aim_at
+
+        return aim_at(x, y, z, pose, CAMERA_HEIGHT_M)
+
+
 def fake_robot(**replace: Any) -> Robot:
     """A robot made of fakes sharing one :class:`FakeClock`; ``replace`` swaps any part
-    (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``,
-    ``animator``, ``people``) or sets ``drive_timeout_s``."""
+    (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``, ``eyes``,
+    ``sightings``, ``animator``, ``people``) or sets ``drive_timeout_s``."""
     clock = replace.pop("clock", None) or FakeClock()
     neck = replace.pop("neck", None) or FakeNeck(clock)
+    goals = replace.pop("goals", None) or FakeGoalServer(clock)
     parts: dict[str, Any] = {
-        "goals": FakeGoalServer(clock),
+        "goals": goals,
         "neck": neck,
         "world": FakeWorld(clock, neck),
         "camera": FakeCamera(),
@@ -464,6 +551,8 @@ def fake_robot(**replace: Any) -> Robot:
         "face": FakeFace(),
         "body": FakeBody(),
         "animator": FakeAnimator(),
+        "eyes": FakeEyes(goals, neck),
+        "sightings": FakeSightings(),
         "people": FakePeople(),
     }
     parts.update(replace)

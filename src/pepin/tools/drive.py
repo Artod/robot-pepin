@@ -160,6 +160,7 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
     """One drive through the goal server, reported when it has ended: the body of go_to and
     go_to_pose, and of any later tool that drives (approach, explore). When the goal server
     takes the drive, a caller that listens hears ``status: driving`` (:func:`progress`)."""
+    robot.seen = None  # the last picture does not show where the robot will stand
     deadline = robot.clock() + robot.drive_timeout_s
     accepted: dict[str, Any] | None = None
     feedback: dict[str, Any] = {}

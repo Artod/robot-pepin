@@ -534,15 +534,17 @@ def test_status_asks_every_owner_and_lists_what_is_down() -> None:
 # -- safety ---------------------------------------------------------------------------------------
 
 
-def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel() -> None:
-    """The tools compose the goal server's four commands; they never mark, re-plan or reach a
-    topic. Every tool is run once with fakes and the commands it sent are collected."""
+def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel_plan() -> None:
+    """The tools compose the goal server's five commands (plan only asks: never motion); they
+    never mark, re-plan or reach a topic. Every tool is run once with fakes and the commands it
+    sent are collected."""
     robot = fake_robot()
     world(robot).things = [FakeThing("cup")]
     world(robot).objects_known = [{"id": "o1", "label": "cup", "x": 1.0, "y": 1.0}]
     arguments = {
         "go_to": {"place": "printer"},
         "go_to_pose": {"x": 1.0, "y": 0.0, "yaw_deg": 0.0},
+        "approach": {"target": "me", "relation": "right_of"},
         "look": {"pan_deg": 10.0},
         "find": {"thing": "cup", "look_around": True},
         "recall": {"thing": "cup"},
@@ -556,7 +558,8 @@ def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel() 
     }
     for t in TOOLS:
         assert call(robot, t.name, **arguments.get(t.name, {}))["ok"], t.name
-    assert {request["cmd"] for request in goals(robot).asked} == {"where", "places", "go", "cancel"}
+    asked = {request["cmd"] for request in goals(robot).asked}
+    assert asked == {"where", "places", "go", "cancel", "plan"}
 
 
 def test_a_fake_robot_shares_one_clock() -> None:

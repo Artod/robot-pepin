@@ -21,7 +21,7 @@ import math
 from collections.abc import Iterable
 from typing import Any
 
-from pepin.tools.clients import HeadMove
+from pepin.tools.clients import HeadMove, HeadPose
 from pepin.tools.registry import Result, ToolError, fail, ok, tool
 from pepin.tools.robot import Robot
 
@@ -80,6 +80,8 @@ def see(robot: Robot) -> Result:
     with look first. Seeing keeps the head where look put it a while longer."""
     start = robot.clock()
     still_from: float | None = None
+    robot.seen = None
+    pose: HeadPose | None = None
     try:
         pose = robot.neck.pose()
         while pose.moving and robot.clock() - start < robot.still_wait_s:
@@ -91,6 +93,7 @@ def see(robot: Robot) -> Result:
         head = {"head": f"unknown: {error.why}"}
     left = max(0.0, robot.still_wait_s - (robot.clock() - start))
     picture = robot.camera.snapshot(not_before=still_from, wait_s=left)
+    robot.seen = pose  # a box drawn on this picture means something while the head stays
     with contextlib.suppress(ToolError):
         robot.neck.keep()
     extra = {"frame": picture.frame} if picture.frame else {}

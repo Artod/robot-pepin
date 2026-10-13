@@ -38,9 +38,10 @@ from pepin.gaze_link import GAZE_PORT, ask
 from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
 
-if TYPE_CHECKING:
+if TYPE_CHECKING:  # numpy's modules: loaded by the clients that use them
     from pepin.perception.client import Perception
     from pepin.perception.source import VisionSource
+    from pepin.pixel_to_map import Box, Located, Pose2D
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +88,11 @@ class GoalServer(Protocol):
         """Cancel every goal on the robot; the ``cancelled`` answer."""
         ...
 
+    def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+        """Whether a goal there would be driven, asked without motion: the ``plan`` answer
+        (``ok``, ``cell``, ``reason``, ``blames``, ``length_m``) or an ``error`` event."""
+        ...
+
 
 class GoalServerLink:
     """:class:`GoalServer` over TCP, through :mod:`pepin.goal_link`: one connection per command."""
@@ -118,6 +124,11 @@ class GoalServerLink:
     def cancel(self) -> dict[str, Any]:
         """The ``cancelled`` answer, waited for as long as the server may take to confirm it."""
         return self._ask({"cmd": "cancel"}, timeout_s=goal_link.CANCEL_CONFIRM_S + 3.0)
+
+    def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+        """The ``plan`` answer, waited for as long as the planner may take."""
+        request = {"cmd": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
+        return self._ask(request, timeout_s=goal_link.PLAN_WAIT_S + 5.0)
 
     def _ask(
         self, request: dict[str, Any], timeout_s: float = goal_link.ASK_TIMEOUT_S
@@ -842,3 +853,90 @@ class BaseBody:
             "the base server has not read the servos' temperatures yet (it does every 5 s, while"
             " the bus answers); ask again in a few seconds"
         )
+
+
+# -- sightings and the picture's points: the face sensor, and pepin.pixel_to_map's inputs ---------
+
+
+@dataclass(frozen=True)
+class FaceSighting:
+    """The nearest face the face sensor sees: its box in pixels of the raw left eye (the
+    picture ``see`` shows), who it is (a name, ``guest-N`` or None), the head's yaw when the
+    landmarker read it (degrees, positive when the person looks to their own left), and how
+    many faces were in the frame."""
+
+    box: tuple[float, float, float, float]
+    who: str | None
+    head_yaw_deg: float | None
+    faces: int
+    age_s: float
+
+
+class Sightings(Protocol):
+    """Who is in front of the robot."""
+
+    def face(self) -> FaceSighting | None:
+        """The nearest face in view now; None when the sensor sees no face."""
+        ...
+
+
+class FaceSensorSightings:
+    """:class:`Sightings` from the face sensor's ``latest.json`` (``scripts/face_sensor.py run``):
+    a missing or stale line means the sensor is not running, a fresh one without a face means
+    nobody is in view."""
+
+    HINT = "Is the face sensor running (uv run python scripts/face_sensor.py run)?"
+
+    def __init__(self, path: str | Path | None = None, max_age_s: float | None = None) -> None:
+        """The sensor's ``latest.json`` (data/face/ by default), older than ``max_age_s``
+        (the sensor's own staleness by default) counting as no sensor."""
+        from pepin.face_sensor.publish import DEFAULT_DIR, LATEST, STALE_S
+
+        self.path = Path(path) if path is not None else DEFAULT_DIR / LATEST
+        self.max_age_s = STALE_S if max_age_s is None else max_age_s
+
+    def face(self) -> FaceSighting | None:
+        """The newest line's face."""
+        import time
+
+        try:
+            record = json.loads(self.path.read_text())
+        except (OSError, ValueError) as error:
+            raise ServiceDownError("face sensor", str(self.path), error, self.HINT) from error
+        stamp = record.get("stamp") if isinstance(record, dict) else None
+        age = time.time() - float(stamp) if isinstance(stamp, (int, float)) else math.inf
+        if age > self.max_age_s:
+            raise ServiceDownError(
+                "face sensor", str(self.path), f"its newest line is {age:.0f} s old", self.HINT
+            )
+        if record.get("face_px") is None:
+            return None
+        box = record.get("box")
+        if not (isinstance(box, list) and len(box) == 4):
+            raise ToolError(
+                "the face sensor publishes no face box (a build from before the approach tool):"
+                " restart it from this checkout"
+            )
+        head = record.get("head_deg") or {}
+        yaw = head.get("yaw") if isinstance(head, dict) else None
+        who = record.get("who") or {}
+        return FaceSighting(
+            box=(float(box[0]), float(box[1]), float(box[2]), float(box[3])),
+            who=who.get("id") if isinstance(who, dict) else None,
+            head_yaw_deg=float(yaw) if isinstance(yaw, (int, float)) else None,
+            faces=int(record.get("faces") or 1),
+            age_s=age,
+        )
+
+
+class Eyes(Protocol):
+    """Points of the picture as points of the map (:class:`pepin.pixel_to_map.Locator`)."""
+
+    def locate(self, box: Box) -> Located:
+        """Where the thing under ``box`` (pixels of the raw left eye) is now;
+        :class:`pepin.pixel_to_map.LocateError` saying why not."""
+        ...
+
+    def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:
+        """The head angles that look at map point ``(x, y, z)`` from ``pose``."""
+        ...
