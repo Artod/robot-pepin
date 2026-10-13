@@ -15,7 +15,7 @@ import pytest
 
 from pepin.arm_motion import ArmMotion, ServoRange, arm_motion, load_arm_motion
 from pepin.expression.animation import Book, Clip, Event, Range, Scene, Track
-from pepin.expression.animator import Caps, EngineConfig, GestureEngine, engine_config
+from pepin.expression.animator import EngineConfig, GestureEngine, engine_config
 from pepin.expression.book import book_from, face_names, load_book, vocabulary, with_rest
 from pepin.expression.conversation import Heard
 from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakeFace, FakePlayout
@@ -599,30 +599,6 @@ def test_a_laugh_once_a_minute_unless_the_person_laughed() -> None:
     rig.engine.part_queued(3, 0, marked("Ха.", "laugh", 0))
     rig.engine.step()
     assert len(rig.kinds("performance")) == 2
-
-
-def test_a_laugh_heard_in_the_robot_s_words_shares_the_laugh_s_cap_with_the_brain_s_mark(
-) -> None:  # fmt: skip
-    """The listeners' laugh heard counts as the laugh under intent_per_minute: a {laugh} after it
-    within the minute is capped, and so is a second laugh heard; the person's laugh waives it;
-    it never counts against per_minute (it moves no gesture of the brain's)."""
-    rig = Rig(caps=Caps(per_minute=1))
-    assert rig.engine.claim("laugh") is None
-    rig.clock.now += 25.0
-    rig.engine.part_queued(1, 0, marked("Ха.", "laugh", 0))
-    rig.engine.step()
-    assert rig.kinds("capped")[-1]["why"] == "laugh per minute"
-    assert rig.engine.claim("laugh") == "laugh per minute"
-    rig.engine.speech_ended(Heard(0.0, 1.0, "Ха-ха-ха, смешно"))
-    rig.engine.step()
-    assert rig.engine.claim("laugh") is None
-    rig.engine.part_queued(2, 0, marked("Привет.", "greeting", 0))
-    rig.engine.step()
-    assert [r["intent"] for r in rig.kinds("performance")] == ["greeting"]  # per_minute 1 kept
-    rig.clock.now += 61.0
-    assert rig.engine.claim("laugh") is None
-    rig.engine.switch(False)
-    assert rig.engine.claim("laugh") == "gestures are off"
 
 
 def test_off_nothing_moves_and_switching_on_reads_the_book_again() -> None:

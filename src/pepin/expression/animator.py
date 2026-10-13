@@ -423,24 +423,6 @@ class GestureEngine:
                                   "rest_s": round(seconds, 2)})  # fmt: skip
             return seconds
 
-    def claim(self, intent: str) -> str | None:
-        """A moment of the listeners' own that stands for ``intent`` under its
-        ``intent_per_minute`` (the laugh heard in the robot's words, for ``laugh``; waived as
-        for the brain's marker): why it may not play now, else None and it counts as one (any
-        thread)."""
-        with self._lock:
-            caps, now = self.config.caps, self.clock()
-            if not self._on:
-                return "gestures are off"
-            if self._driving:
-                return "a drive is under way"
-            waived = intent in caps.laughter_waives and now - self._laughed <= caps.laughter_s
-            limit = caps.intent_per_minute.get(intent)
-            if limit is not None and not waived and self._count(lambda arm: True, intent) >= limit:
-                return f"{intent} per minute"
-            self._started.append((now, intent, False, False))
-            return None
-
     def audio(self, chunk: VoiceChunk) -> None:
         """A chunk of the reply's audio (the voice's thread): to every tap, nothing else here."""
         for tap in self.taps:

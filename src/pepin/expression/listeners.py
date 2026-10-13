@@ -68,12 +68,10 @@ Between turns and while the person speaks (``moments``):
   ``farewell_due`` to) ``predict_delay_s`` after the close, in the brain's wait, under the
   engine's caps; while the body turns toward the person it waits for the turn's end; a later
   marker of it is absorbed by its cooldown;
-* the LAUGH'S ROCK: a reply part that carries ``{laugh}`` (once its laugh played) or whose words
-  laugh (config/expression.json's ``caps.laughter``, the moment ``laugh_heard``: one a minute by
-  ``caps.intent_per_minute.laugh``, the brain's laughs and these counted together) rocks the
+* the LAUGH'S ROCK: a reply part that carries ``{laugh}`` (once its laugh played) rocks the
   cart once as a tail bound after the part's start (the scheduler's ``after``: its stroke
   within ``timing.after_s`` of speech); the laugh itself never uses the arm, and an arm up or
-  moving goes to rest first (the wheels refuse while the arm moves or holds);
+  moving goes to rest first;
 * FACE FOUND: the attention engine's first clear face of the conversation brings a smile;
 * the LISTENING SHIFT (``listen_shift_deg`` 0: off): a still shift of the head every
   ``listen_shift_s`` while the person speaks;
@@ -177,7 +175,6 @@ RENEW_AHEAD_S = 0.6  # the hold is sent again when it has less than this left...
 RENEW_GAIN_S = 0.3  # ...and the reply's audio known goes on at least this much past it
 RETURN_AFTER_S = 0.3  # the arm goes back to the posture this long after a mark's motion
 POSTURE_CAPS = 0.5  # the posture's way at this share of the arm's caps (rest to ready ~0.8 s)
-LAUGH_HEARD = "laugh_heard"  # the moment of the robot's own words laughing
 ACCENT_ROCK = "accent_rock"  # the moment of the accent's rock
 # The composition a moment due from the person's words plays, unless config/animation.json's
 # moments map it to another
@@ -420,7 +417,6 @@ class _PartState:
     text: str = ""
     marked: bool = False  # a gesture marker of the brain's in it
     laugh: bool = False  # the brain's {laugh} in it
-    laughter: bool = False  # its words laugh (caps.laughter)
     quiet: bool = False  # it went to the voice in a quiet moment
     question: bool = False
     start_s: float | None = None
@@ -791,7 +787,6 @@ class Alive:
         gestures = [m for m in part.markers if m.channel == "gesture"]
         state.marked = bool(gestures)
         state.laugh = any(m.name == "laugh" for m in gestures)
-        state.laughter = bool(re.search(self.engine.config.caps.laughter, part.text.lower()))
         state.question = part.text.rstrip().rstrip("»\"')").endswith("?")
         reply.sentences = sum(1 for s in reply.parts.values() if s.text.strip())
         self._update_quiet(reply)
@@ -815,8 +810,6 @@ class Alive:
             self._posture_end(reply, f"quiet: {self._quiet or 'the style'}")
         if state.laugh:
             self._rock(reply, index, stream_s)
-        elif state.laughter:
-            self._laugh_heard(reply, index, stream_s)
         if index == 0:
             self._glance_back(stream_s)
         self._raise(reply)
@@ -1374,20 +1367,6 @@ class Alive:
         else:
             self._laugh_rock(reply, stream_s)
         self._moment_log("laugh_rock", why, turn=turn, index=index)
-
-    def _laugh_heard(self, reply: _Reply, index: int, stream_s: float) -> None:
-        """The rock after the robot's own words laugh (``caps.laughter``) with no ``{laugh}`` of
-        the brain's: under the laugh's ``intent_per_minute``, counted with the brain's."""
-        why: str | None = None
-        if not self.engine.on or self._driving:
-            why = "off or driving"
-        elif self._quiet is not None:
-            why = f"quiet: {self._quiet}"
-        else:
-            why = self._turning() or self.engine.claim("laugh")
-        if why is None:
-            self._laugh_rock(reply, stream_s)
-        self._moment_log(LAUGH_HEARD, why, turn=reply.turn, index=index)
 
     def _laugh_rock(self, reply: _Reply, stream_s: float) -> None:
         """The laugh's rock of the cart: a tail from ``stream_s`` (the laughing part's start;

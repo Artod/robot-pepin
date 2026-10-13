@@ -36,7 +36,6 @@ from pepin.expression.listeners import Alive, alive_knobs
 from pepin.expression.markers import Marker, Part, parse
 from pepin.expression.parts import ArmPart
 from pepin.expression.prosody import ProsodyListener
-from pepin.expression.schedule import POSTURE
 from pepin.expression.speaker import Attention
 from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
 
@@ -394,40 +393,6 @@ def moments(c: Conversation, name: str) -> list[dict[str, Any]]:
     return [f for k, f in c.events if k == "moment" and f["name"] == name]
 
 
-def test_a_reply_whose_words_laugh_rocks_the_cart_without_any_mark(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A laugh spelled out at the start of the words, with no {laugh} of the brain's: the
-    laugh's rock of the cart plays from the part's start (laugh_heard), 1-2 cm, no laugh
-    composition rendered; the next reply's giggle within the minute is held back by the laugh's
-    own cap."""
-    caplog.set_level(logging.ERROR, logger="pepin.expression")
-    c = Conversation(accent_rock_p=0.0)
-    first = Spoken(c, 1, ["Ха-ха-ха, вот это номер!"], [["номер"]], [["вот"]])
-    again = Spoken(c, 2, ["Хи-хи, ну и смешно же."], [["смешно"]])
-    try:
-        c.engine.start()
-        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
-        c.run(0.6, {0.2: lambda: first.text(0), 0.3: lambda: first.start(0)})
-        c.run(first.lengths[0] + 0.5)
-        c.both("reply_done", 1)
-        c.run(2.0, {0.5: lambda: again.text(0), 0.6: lambda: again.start(0)})
-        c.both("reply_done", 2)
-        c.run(0.2)
-    finally:
-        c.engine.close()
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    (rock,) = c.sent("laugh_rock", "body")
-    assert rock["planned"] == pytest.approx(first.begins[0], abs=0.03)  # a tail from its start
-    (clip,) = played(c, "body", "laugh_rock")
-    assert 0.01 <= max(clip.tracks[0].values) <= 0.02 and clip.tracks[0].dof == "x_m"
-    heard = moments(c, "laugh_heard")
-    assert [m["played"] for m in heard] == [True, False]
-    assert heard[1]["why"] == "laugh per minute"
-    assert not [f for k, f in c.records if k == "performance" and f["intent"] == "laugh"]
-    assert not moments(c, "laugh_rock")  # the brain's mark's moment: not this one
-
-
 def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_the_wrist(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -613,58 +578,3 @@ def test_the_person_speaking_rests_the_raised_arm_at_once_and_it_stays_down() ->
     finally:
         c.engine.close()
     assert len(sends(c)) == 1  # no second rise in that reply
-
-
-def test_a_laugh_in_a_later_sentence_rests_the_arm_and_the_cart_rocks() -> None:
-    """The arm is up for a long reply; its third sentence laughs: the arm goes to rest and the
-    cart rocks (the board refuses the wheels while the arm holds), the rock after the rest."""
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
-    texts = ["Вчера мы долго гуляли по парку у реки.", "И там я упал прямо в лужу.",
-             "Ха-ха-ха, вот смеху было!"]  # fmt: skip
-    reply = Spoken(c, 1, texts, [[], [], []], [["долго"], ["лужу"], ["смеху"]])
-    try:
-        c.engine.start()
-        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
-        c.run(0.5, {0.1: lambda: reply.text(0), 0.15: lambda: reply.text(1),
-                    0.2: lambda: reply.start(0), 0.3: lambda: reply.text(2)})  # fmt: skip
-        for k in (1, 2):
-            c.run(reply.lengths[k - 1] - 0.6)
-            c.run(0.1, {0.05: lambda k=k: reply.start(k)})
-        c.run(reply.lengths[2] + 1.0)
-    finally:
-        c.engine.close()
-    assert sends(c) and moments(c, "arm_up")[0]["played"]
-    (heard,) = moments(c, "laugh_heard")
-    assert heard["played"]
-    resting = [t for name, t, _ in c.link.times if name == "rest"]
-    assert resting
-    assert len(c.sent("laugh_rock", "body")) == 1
-    faded = [f for k, f in c.records if k == "faded" and f["part"] == "arm"]
-    assert faded[0]["why"] == "the laugh rocks the cart"
-    assert c.parts["arm"].holding() is None  # type: ignore[attr-defined]
-    assert not [f for k, f in c.records if k == "cue" and f["part"] == "body" and not f["ok"]]
-
-
-def test_a_laugh_first_rocks_the_cart_then_the_arm_rises_after_it() -> None:
-    """A laughing first sentence, then two more: the rock plays from the first part's start and
-    the arm, due at the second sentence's TEXT, waits for the cart and rises after the rock."""
-    c = Conversation(accent_rock_p=0.0, wrist_beat_p=0.0)
-    texts = ["Ха-ха-ха, вот это да!", "Ты меня очень сильно насмешил сейчас.",
-             "Расскажи ещё что-нибудь такое, пожалуйста."]  # fmt: skip
-    reply = Spoken(c, 1, texts, [[], [], []], [["это"], ["очень"], ["ещё"]])
-    try:
-        c.engine.start()
-        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
-        c.run(0.5, {0.1: lambda: reply.text(0), 0.15: lambda: reply.text(1),
-                    0.2: lambda: reply.start(0), 0.3: lambda: reply.text(2)})  # fmt: skip
-        for k in (1, 2):
-            c.run(reply.lengths[k - 1] - 0.6)
-            c.run(0.1, {0.05: lambda k=k: reply.start(k)})
-        c.run(reply.lengths[2] + 1.0)
-    finally:
-        c.engine.close()
-    (rock,) = c.sent("laugh_rock", "body")
-    (up,) = c.sent(POSTURE, "arm")[:1]
-    assert rock["planned"] == pytest.approx(reply.begins[0], abs=0.03)
-    assert up["planned"] >= rock["planned"] + rock["seconds"]  # after the rock
-    assert not [f for k, f in c.records if k == "cue" and f["part"] == "arm" and not f["ok"]]

@@ -734,39 +734,6 @@ def test_the_accent_s_rock_waits_out_a_moving_arm_and_never_comes_in_quiet() -> 
     assert quiet.moments("accent_rock")[0]["why"] == "quiet: the hours 23-08"
 
 
-def test_a_laugh_in_the_robot_s_words_rocks_the_cart_not_in_quiet_nor_while_the_body_turns(
-) -> None:  # fmt: skip
-    """No {laugh} written: a laugh spelled in the words rocks the cart from the part's start
-    (laugh_heard); in quiet, or while the body turns toward the person, it does not, and the
-    laugh's cap is left for the next."""
-    rig = Rig()
-    rig.open()
-    rig.view.be(phase="turning")
-    rig.say(1, 0, "Ха-ха, ну ты даёшь.")
-    rig.alive.part_started(1, 0, rig.playout.now)
-    rig.tick(0.1)
-    assert rig.moments("laugh_heard")[-1]["why"] == "a body turn is pending"
-    rig.view.be(phase="track")
-    rig.say(2, 0, "Ахаха, точно.")
-    rig.alive.part_started(2, 0, rig.playout.now)
-    rig.tick(1.5)
-    assert rig.moments("laugh_heard")[-1]["played"]
-    assert len(rig.sent("laugh_rock", "body")) == 1
-    quiet = Rig(hour=23)
-    quiet.open()
-    quiet.say(1, 0, "Ха-ха-ха, вот это да.")
-    quiet.alive.part_started(1, 0, quiet.playout.now)
-    quiet.tick(1.5)
-    assert not quiet.sent("laugh_rock", "body")
-    assert quiet.moments("laugh_heard")[-1]["why"] == "quiet: the hours 23-08"
-    marked = Rig()
-    marked.open()
-    marked.say(1, 0, "Ха-ха, смешно.", Marker("gesture", "laugh", 0))
-    marked.alive.part_started(1, 0, marked.playout.now)
-    marked.tick(1.5)
-    assert not marked.moments("laugh_heard") and marked.moments("laugh_rock")  # the mark's own
-
-
 def test_the_first_clear_face_brings_one_smile() -> None:
     rig = Rig()
     rig.open()
