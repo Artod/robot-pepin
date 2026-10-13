@@ -40,7 +40,12 @@ ON THE WORD (a request anchored on a character of a part):
   reply's speech: past that the clip is dropped and the rest of its composition plays.
 * Units (§7.10): an arm clip with another arm stroke waiting within ``units.hold_s`` after its
   end goes ``then: hold`` until shortly after that stroke's start, which plans from the held pose
-  (at most ``units.strokes`` a unit); otherwise ``then: rest``.
+  (at most ``units.strokes`` a unit); otherwise ``then: rest``. The listeners' POSTURE (the arm
+  held at the book's ``ready`` while a long reply goes on, :data:`POSTURE`) opens a unit with no
+  stroke of its own, and each posture sent starts the unit's count of strokes again: while the
+  listeners want the arm up for a reply (:attr:`Scheduler.stay_up`: its posture due or up), its
+  last stroke ends ``then: hold`` instead of rest, for the rest of the posture's hold when that
+  outlasts it, else ``units.hold_s`` (the posture takes the arm from that pose).
 * Ahead of TEXT (§7.11): a marker the brain's token stream shows before its sentence is whole
   (``text_ahead``) may send the arm to its home pose, held, when it could not reach its stroke
   from rest otherwise: a preparation only, never a stroke.
@@ -125,6 +130,7 @@ SHORT_PAST_S = 0.5  # any other this far (DESIGN.md §7.9)
 SURE_SHARE = 0.7  # of the speech still a forecast, the share a long gesture may count on
 PHRASE_WORDS = 2  # a PHRASE mark may slide to one of this many next words
 HOME = "ready"  # the book's pose an arm goes to ahead of a mark it cannot reach from rest
+POSTURE = "arm_up"  # the listeners' posture: the arm held at HOME while a long reply goes on
 AHEAD_S = 0.18  # a marker's sentence reaches the voice this long after it streams in (p50)
 PREPARE = "prepare:"  # a preparation's name: the arm sent home ahead of a marker (no stroke)
 SAME_POSE_DEG = 0.5  # a held pose within this of a book's pose on every joint is that pose
@@ -508,6 +514,8 @@ class Scheduler:
         self._seen: set[tuple[int, int, int, str]] = set()  # token-stream marks looked at
         self._arm_last: tuple[dict[str, float], float] | None = None  # the last motion's end
         self._unit = 0  # strokes of the unit the arm holds
+        # whether the listeners want the arm up after reply ``turn``'s last stroke (its posture)
+        self.stay_up: Callable[[int], bool] = _never
 
     @property
     def spoken(self) -> dict[tuple[int, int], Spoken]:
@@ -658,6 +666,8 @@ class Scheduler:
             return at_once
         clips = sorted(performance.clips, key=lambda c: c.offset_s)
         first = min((c.offset_s for c in clips), default=0.0)
+        if request.intent == POSTURE and any(c.part == "arm" and c.then == "hold" for c in clips):
+            self._unit, self._arm_last = 0, None  # a unit opened anew
         for clip in clips:
             waiting = Waiting(performance, clip, request)
             if _tail(waiting) and clip.stroke_s > self.timing.after_s:
@@ -1191,6 +1201,11 @@ class Scheduler:
                 self._late(waiting, "past the speech")
                 return None
         if planned is not None:
+            arm = self._arm_part()  # where the arm really starts (a posture may have come since)
+            if arm is not None and arm.holding() is not None:
+                fit.base = "unit"
+            elif fit.base == "unit":
+                fit.base = "rest"
             waiting.clip = self._unit_end(waiting, now, planned)
         self.reservations.unbook(id(waiting))
         self._log_send(waiting, forecast, now, stroke, aim)
@@ -1254,10 +1269,12 @@ class Scheduler:
 
     def _unit_end(self, waiting: Waiting, now: float, planned: Planned) -> Clip:
         """The arm's clip as sent: held for the next stroke of its unit waiting to chain to it,
-        else back to rest; the unit's strokes and the arm's last pose kept."""
+        or for the rest of a posture's hold that outlasts it, else back to rest; the unit's
+        strokes and the arm's last pose kept."""
         arm = self._arm_part()
         assert arm is not None
-        self._unit = self._unit + 1 if arm.holding() is not None else 1
+        held = arm.holding()
+        self._unit = self._unit + 1 if held is not None else 1
         ends = now + self.latency("arm") + planned.seconds
         nexts = [w.fit.start for w in self.waiting
                  if w.fit is not None and w.fit.chained == id(waiting)]  # fmt: skip
@@ -1265,6 +1282,15 @@ class Scheduler:
             hold = min(
                 self.timing.unit_hold_s, max(POST_STROKE_S, min(nexts) - ends + UNIT_SLACK_S)
             )
+            self._arm_last = None
+            return replace(waiting.clip, then="hold", hold_s=round(hold, 3))
+        turn = waiting.cue.turn if waiting.cue is not None else None
+        if turn is not None and self._stays_up(turn):
+            keep = arm.held_until - ends if held is not None else 0.0
+            hold = keep if keep > POST_STROKE_S else self.timing.unit_hold_s
+            speech = self._speech_end(turn, now)  # never far past the reply's sure speech
+            if speech is not None:
+                hold = min(hold, max(POST_STROKE_S, speech + SHORT_PAST_S - ends))
             self._arm_last = None
             return replace(waiting.clip, then="hold", hold_s=round(hold, 3))
         self._arm_last = (arm.final(planned), ends)
@@ -1418,21 +1444,19 @@ class Scheduler:
         return heard + self.timing.stroke_bias_s - now, spread
 
     def _home_clip(self, arm: ArmPart, home: Mapping[str, float]) -> Clip:
-        """Rest to the home pose at :data:`PREP_CAPS` of the caps (the book's cubic: 1.5 d / T,
-        6 d / T^2), held for a unit's hold."""
-        rest = arm.base
-        speed, acc = arm.caps(PREP_CAPS)
-        joints = [j for j in JOINTS if j in home]
-        travel = max(abs(home[j] - rest[j]) for j in joints)
-        seconds = max(1.5 * travel / speed, math.sqrt(6.0 * travel / acc), 0.05)
-        tracks = tuple(Track(j, "absolute", (0.0, seconds), (rest[j], home[j])) for j in joints)
-        return Clip("arm", 0.0, seconds, seconds, tracks, then="hold",
-                    hold_s=self.timing.unit_hold_s)  # fmt: skip
+        """Rest to the home pose at :data:`PREP_CAPS` of the caps, held for a unit's hold."""
+        return pose_clip(arm, arm.base, home, self.timing.unit_hold_s)
 
     # -- what the engine lent ----------------------------------------------------------------------
 
     def _rendering(self) -> Rendering | None:
         return self._renderer() if self._renderer is not None else None
+
+    def _stays_up(self, turn: int) -> bool:
+        try:
+            return self.stay_up(turn)
+        except Exception:  # a listener's hook never breaks a send
+            return False
 
     def _composition(self, intent: str) -> Composition | None:
         rendering = self._rendering()
@@ -1459,6 +1483,30 @@ class Scheduler:
         for hook in self._hooks:
             scene = hook(scene, request)
         return scene
+
+
+def pose_clip(
+    arm: ArmPart,
+    start: Mapping[str, float],
+    pose: Mapping[str, float],
+    hold_s: float,
+    share: float = PREP_CAPS,
+) -> Clip:
+    """The arm from ``start`` to ``pose`` (absolute tracks of the joints ``pose`` names) at
+    ``share`` of its caps (the book's cubic: 1.5 d / T, 6 d / T^2; 0.05 s at least), then
+    held ``hold_s``: a preparation's way home, the listeners' posture and its renewal."""
+    speed, acc = arm.caps(share)
+    joints = [j for j in JOINTS if j in pose]
+    begin = {**arm.base, **start}
+    travel = max(abs(pose[j] - begin[j]) for j in joints)
+    seconds = max(1.5 * travel / speed, math.sqrt(6.0 * travel / acc), 0.05)
+    tracks = tuple(Track(j, "absolute", (0.0, seconds), (begin[j], pose[j])) for j in joints)
+    return Clip("arm", 0.0, seconds, seconds, tracks, then="hold", hold_s=hold_s)
+
+
+def _never(turn: int) -> bool:
+    """No posture: the arm rests after a reply's last stroke."""
+    return False
 
 
 def _tail(waiting: Waiting) -> bool:

@@ -19,6 +19,7 @@ from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Ran
 from pepin.expression.animator import ARM_REST_S, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
 from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
+from pepin.expression.executors import Executor
 from pepin.expression.fakes import (
     FakeArmLink,
     FakeAttention,
@@ -31,6 +32,7 @@ from pepin.expression.mix import PREP_CAPS, prep_min_s
 from pepin.expression.parts import Absent, ArmPart
 from pepin.expression.render import BookRenderer
 from pepin.expression.schedule import (
+    POSTURE,
     AtStream,
     AtTime,
     AtWord,
@@ -348,7 +350,7 @@ class Ladder:
     """An engine over the arm's real planner on a fake board, fake head and face, a fake player
     and a fake clock; the scheduler is lent the engine's parts and renderer (the seam)."""
 
-    def __init__(self, book: Book | None = None) -> None:
+    def __init__(self, book: Book | None = None, body: Executor | None = None) -> None:
         self.now = 1000.0
         self.playout = FakePlayout(now=1.0)
         self.link = FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"))
@@ -357,7 +359,7 @@ class Ladder:
         self.records: list[tuple[str, dict[str, Any]]] = []
         config = EngineConfig(arm_speed_scale=1.0, audio_lag_s=0.15, seed=7)
         parts = {"arm": self.arm, "head": self.head, "face": self.face,
-                 "body": Absent("body", "no wheels")}  # fmt: skip
+                 "body": body if body is not None else Absent("body", "no wheels")}  # fmt: skip
         played = book if book is not None else GESTURES
         self.engine = GestureEngine(
             parts, self.playout, lambda: (played, config), on=True,  # type: ignore[arg-type]
@@ -780,3 +782,119 @@ def test_the_scheduler_s_knobs_are_config_expression_json_s() -> None:
     data = json.loads((CONFIG / "expression.json").read_text())
     assert timing_from(data) == Timing()
     assert timing_from({}) == Timing()
+
+
+# -- the arm held up (the listeners' posture) and the cart ---------------------------------------
+
+LIFT = Track("shoulder_lift", "additive", (0.0, 0.3, 0.5), (0.0, 20.0, 20.0))
+
+
+def hold_arm(rig: Ladder, turn: int, hold_s: float = 10.0) -> Request:
+    """The arm lifted and held ``hold_s`` for reply ``turn`` (a posture's way), sent now."""
+    unit = Clip("arm", 0.0, 0.3, 0.5, (LIFT,), then="hold", hold_s=hold_s)
+    request = Request(POSTURE, AtStream(rig.playout.now - 0.15, turn), Priority.MOMENT, "moment",
+                      clips=(unit,))  # fmt: skip
+    rig.engine.request(request)
+    rig.engine.step()
+    return request
+
+
+def rests(rig: Ladder) -> int:
+    return [name for name, _ in rig.link.calls].count("rest")
+
+
+def test_a_held_unit_rests_when_the_person_speaks_at_its_reply_s_end_and_for_the_body_s_turn(
+) -> None:  # fmt: skip
+    """A unit the board holds (no clip moving the arm) goes to rest when the person starts to
+    speak, when its own reply is done or cut (not another's), and when the body's turn asks
+    for the arm (its rest's seconds returned); while a clip still moves the arm, the reply's end
+    leaves it to its own end."""
+    rig = Ladder()
+    hold_arm(rig, 1)
+    rig.tick(0.7)
+    assert rig.arm.holding() is not None and rests(rig) == 0
+    rig.engine.speech_started(rig.now)
+    rig.engine.step()
+    assert rests(rig) == 1 and rig.arm.holding() is None
+    assert rig.rows("faded")[-1] == {"intent": POSTURE, "part": "arm", "why": "the person speaks"}
+    hold_arm(rig, 2)
+    rig.tick(0.7)
+    rig.engine.reply_done(1)
+    rig.engine.step()
+    assert rests(rig) == 1, "another reply's end"
+    rig.engine.reply_done(2)
+    rig.engine.step()
+    assert rests(rig) == 2 and rig.rows("faded")[-1]["why"] == "the reply is done"
+    hold_arm(rig, 3)
+    rig.tick(0.7)
+    rig.engine.reply_cut(3)
+    rig.engine.step()
+    assert rests(rig) == 3
+    hold_arm(rig, 4)
+    rig.tick(0.7)
+    assert rig.engine.release_arm("the body turns") == pytest.approx(0.06)  # at rest: latency
+    assert rests(rig) == 4 and rig.arm.holding() is None
+    hold_arm(rig, 5)
+    rig.tick(0.1)  # still lifting
+    rig.engine.reply_done(5)
+    rig.engine.step()
+    assert rests(rig) == 4, "a clip moving the arm ends as it was sent"
+
+
+def test_the_arm_never_starts_while_the_cart_rocks_nor_the_cart_while_the_arm_is_up() -> None:
+    """The board refuses the arm while the wheels move and the wheels while the arm moves or
+    holds: the engine refuses them first, with the reason in the cue row."""
+    rig = Ladder(body=FakeExecutor("body", 0.15))
+    rock = Clip("body", 0.0, 0.5, 1.0, (Track("x_m", "additive", (0.0, 0.5, 1.0), (0, 0.01, 0)),))
+    rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
+    rig.engine.step()
+    hold_arm(rig, 1)
+    rig.tick(0.2)
+    assert not rig.sent()
+    assert rig.rows("cue", part="arm", ok=False)[0]["why"] == "the cart moves (rock)"
+    rig.tick(1.0)
+    hold_arm(rig, 1)
+    rig.tick(0.7)
+    assert rig.sent() and rig.arm.holding() is not None
+    rig.engine.request(Request("rock", None, Priority.MOMENT, "moment", clips=(rock,)))
+    rig.engine.step()
+    assert rig.rows("cue", part="body", ok=False)[-1]["why"] == "the arm holds a pose"
+
+
+def test_a_mark_s_last_stroke_stays_up_while_the_listeners_want_the_arm_up() -> None:
+    """With the reply's posture due (the scheduler's stay_up), a lone arm mark ends held
+    instead of resting, so the posture takes the arm from its pose; with the posture holding,
+    its stroke starts from the held pose and keeps the posture's hold; either hold ends no
+    later than 0.5 s past the reply's speech; for another reply it rests as before."""
+    rig = Ladder()
+    rig.engine.scheduler.stay_up = lambda turn: turn in (1, 2)
+    text = "Есть план и ещё один вот такой."
+    length = 0.09 * len(text)
+
+    def mark(turn: int) -> float:
+        """The mark on «план» in reply ``turn``; when its speech ends (heard, engine clock)."""
+        rig.say(turn, 0, text, "point", text.index("план"))
+        rig.start(turn, 0, length)
+        return rig.now + length + 0.15
+
+    end = mark(1)
+    rig.tick(2.0)
+    (alone,) = rig.sent()
+    assert alone.then == "hold" and alone.hold_s > 1.0
+    assert rig.arm.held_until <= end + 0.5 + 1e-6
+    rig.engine.reply_done(1)
+    rig.tick(0.1)
+    hold_arm(rig, 2, hold_s=20.0)
+    rig.tick(0.7)
+    lifted = rig.sent()[-1]
+    end = mark(2)
+    rig.tick(2.0)
+    kept = rig.sent()[-1]
+    assert kept.then == "hold" and kept.knots[0].deg == pytest.approx(lifted.knots[-1].deg)
+    assert rig.rows("send", intent="point", part="arm")[-1]["base"] == "unit"
+    assert rig.arm.held_until <= end + 0.5 + 1e-6
+    rig.engine.reply_done(2)
+    rig.tick(0.1)
+    mark(3)
+    rig.tick(2.5)
+    assert rig.sent()[-1].then == "rest"
