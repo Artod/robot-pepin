@@ -36,6 +36,13 @@ attention starts a seek, a check or a body turn; no arm motion starts while the 
 past the forward arc or the body turns, and the gaze's turn asks for the arm first
 (:meth:`release_arm`).
 
+The gesture space (:attr:`GestureEngine.resolver`, one :class:`pepin.expression.render.Resolver`
+for the engine's life, lent to every renderer it makes, the one a switch on makes too): the
+person's bearing from the same attention view, the room's places from its ``room`` (the voice
+loop gives it the goal server's; none, or one never read: a place's name gets its floor), the
+catchments forgotten at the conversation's close; its ``catchment`` and ``repeat`` rows go to
+the engine's record and to the conversation's events.jsonl (:attr:`GestureEngine.journal`).
+
 Caps (config/expression.json ``caps``) hold the markers and the moments back, never a tool or
 the command line, which a person asked for: per part (a sentence or a clause of one), per
 reply, per minute, arm gestures per minute, an intent's own per minute (``laugh``: 1, waived
@@ -86,12 +93,19 @@ from pepin.expression.animation import (
     Performance,
     Scene,
 )
-from pepin.expression.conversation import GESTURES, AudioTap, Heard, VoiceChunk, moment_rank
+from pepin.expression.conversation import (
+    GESTURES,
+    AudioTap,
+    EventSink,
+    Heard,
+    VoiceChunk,
+    moment_rank,
+)
 from pepin.expression.executors import Executor, Outcome, Renewing
 from pepin.expression.markers import Cue, Part, Playout, cues
 from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart, HeadPart
-from pepin.expression.render import BookRenderer, WeightedChooser
+from pepin.expression.render import BookRenderer, Resolver, WeightedChooser
 from pepin.expression.schedule import (
     NOT_YET,
     AtWord,
@@ -223,21 +237,24 @@ class GestureEngine:
     ) -> None:
         """``load`` reads the book (with the arm's rest pose) and the knobs, now and at every
         switch on; ``record(kind, fields)`` hears every performance, cue and refusal;
-        ``attention``: the speaker gaze's view (None: no attention to keep clear)."""
+        ``attention``: the speaker gaze's view (None: no attention to keep clear), the
+        resolver's person too."""
         self.parts = dict(parts)
         self.playout = playout
         self.load = load
         self.clock = clock
         self.record = record or (lambda kind, fields: logger.info("%s %s", kind, fields))
         self.seeds = seeds or random.Random()
-        self.attention = attention
+        self.journal: EventSink | None = None  # the conversation's events.jsonl, once one runs
+        self.resolver = Resolver(attention=attention, record=self._meaning)
+        self._attention = attention
         self.taps: list[AudioTap] = []  # the voice's chunks, on the voice's thread (prosody)
         self.scene_hooks: list[SceneHook] = []  # each rendering's scene refined, in order
         self.scheduler = Scheduler(
             playout, self._latency, lambda kind, fields: self.record(kind, fields)
         )
         self.book, self.config = load()
-        self.renderer = BookRenderer(self.book, WeightedChooser())
+        self.renderer = BookRenderer(self.book, WeightedChooser(), self.resolver)
         self._apply_knobs()
         self._on = on
         self._lock = threading.RLock()
@@ -268,6 +285,17 @@ class GestureEngine:
         """What holds each part (the scheduler's reservations)."""
         return self.scheduler.reservations.held
 
+    @property
+    def attention(self) -> AttentionView | None:
+        """The speaker gaze's view (None: no attention to keep clear, the person ahead)."""
+        return self._attention
+
+    @attention.setter
+    def attention(self, view: AttentionView | None) -> None:
+        """The engine's and its resolver's view at once."""
+        self._attention = view
+        self.resolver.attention = view
+
     # -- the live flag ---------------------------------------------------------------------------
 
     @property
@@ -290,7 +318,7 @@ class GestureEngine:
                 return f"the gesture book did not load: {error}"
             with self._lock:  # the engine's thread holds it for a whole step
                 self.book, self.config = book, config
-                self.renderer = BookRenderer(book, self.renderer.chooser)
+                self.renderer = BookRenderer(book, self.renderer.chooser, self.resolver)
                 self._apply_knobs()
                 self._on = True
                 self._idle_next.clear()
@@ -541,6 +569,7 @@ class GestureEngine:
         self._listening = False
         self._replying.clear()
         self.scheduler.spoken.clear()
+        self.resolver.forget()
         if self._on or self._playing:  # off and idle: no line to any owner
             self._rest_all(finishing=True)
 
@@ -846,6 +875,17 @@ class GestureEngine:
     def _latency(self, part: PartName) -> float:
         executor = self.parts.get(part)
         return executor.latency_s if executor is not None else 0.0
+
+    def _meaning(self, kind: str, fields: dict[str, Any]) -> None:
+        """A row of the gesture space's (a catchment, a repeat): the engine's record and the
+        conversation's events.jsonl."""
+        self.record(kind, fields)
+        journal = self.journal
+        if journal is not None:
+            try:
+                journal(kind, self.clock(), **fields)
+            except Exception:
+                logger.exception("gesture engine: the journal broke")
 
     # -- the idle layer --------------------------------------------------------------------------
 

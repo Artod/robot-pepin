@@ -71,6 +71,7 @@ from typing import Any
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.expression.finder import SwitchedFinder, robot_finder
+from pepin.expression.places import GoalPlaces
 from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
 from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
 from pepin.people.worker import robot_people
@@ -633,8 +634,12 @@ def main() -> int:
     )
     robot.animator = body.engine  # the gesture tool's door
     if gaze is not None:  # attention first: the engine reads it, a body turn asks for the arm
-        body.engine.attention = gaze
+        body.engine.attention = gaze  # the gesture space's person too
         gaze.arm = body.engine
+    # The gesture space's room: the goal server's places book and the robot's map pose, read on
+    # a thread of their own (a down server: a place's name gets its floor until it answers).
+    room = GoalPlaces(robot.goals).start()
+    body.engine.resolver.room = room
     # The alive layer (riding gestures): the voice's own nuclei and melody from every reply chunk,
     # the listeners' requests into the engine, the quiet rule over the engine's renderings.
     from pepin.expression.listeners import Alive
@@ -693,6 +698,7 @@ def main() -> int:
     if gaze is not None:
         gaze.journal = loop.record  # the gaze's decisions in each conversation's events.jsonl
     alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
+    body.engine.journal = loop.record  # the gesture space's catchment and repeat rows
     alive.start()
     b = config.brain
     print(
@@ -716,6 +722,7 @@ def main() -> int:
             print("halt:", robot.halt(), flush=True)
     finally:
         alive.close()
+        room.close()
         if gaze is not None:
             gaze.close()  # the head let go before the links close
         if wheels is not None:

@@ -20,9 +20,16 @@ from pepin.arm import ArmModel
 from pepin.arm_motion import load_arm_motion
 from pepin.body import BodyModel, OrientedBox
 from pepin.expression.animation import Book, Clip, Performance, Range, Scene
+from pepin.expression.animator import EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
-from pepin.expression.fakes import FakeArmLink, FakeAttention, FakePlaces
-from pepin.expression.markers import Cue, Marker
+from pepin.expression.fakes import (
+    FakeArmLink,
+    FakeAttention,
+    FakeExecutor,
+    FakePlaces,
+    FakePlayout,
+)
+from pepin.expression.markers import Cue, Marker, Part
 from pepin.expression.mix import track_value
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
 from pepin.expression.places import GoalPlaces, bearing, latin
@@ -348,6 +355,37 @@ def test_a_referent_takes_a_spot_on_first_mention_keeps_it_and_count_takes_over(
     assert all(locus.referent != "printer" for locus in resolver.loci.values())
     resolver.forget()  # the conversation closed
     assert not resolver.loci and point("план б", 8) == spot[loci[0]]
+
+
+def test_the_engine_lends_its_one_resolver_to_every_renderer_and_forgets_at_the_close() -> None:
+    """The engine's resolver: the renderer's, the one a switch on makes too; the attention view
+    set on the engine is its person; its rows go to the record and the conversation's journal;
+    the close forgets every spot."""
+    rows: list[tuple[str, dict[str, Any]]] = []
+    journal: list[tuple[str, dict[str, Any]]] = []
+    parts = {p: FakeExecutor(p) for p in ("arm", "head", "face")}
+    engine = GestureEngine(
+        parts,  # type: ignore[arg-type]
+        FakePlayout(), lambda: (BOOK, EngineConfig(arm_speed_scale=1.0)), on=True,
+        clock=lambda: 10.0, record=lambda kind, fields: rows.append((kind, fields)),
+    )  # fmt: skip
+    resolver = engine.resolver
+    assert engine.renderer.resolver is resolver and resolver.room is None
+    view = FakeAttention()
+    engine.attention = view
+    assert resolver.attention is view
+    resolver.room = scripted(printer=20.0)
+    engine.journal = lambda kind, now, **fields: journal.append((kind, fields))
+    text = "Есть один дешёвый план."
+    mark = Marker("gesture", "point", text.index("дешёвый"), "", "план а")
+    engine.part_queued(1, 0, Part(text, None, (mark,)))
+    engine.step()
+    new = ("catchment", {"referent": "план а", "cell": BOOK.space.loci[0], "how": "new"})
+    assert new in rows and new in journal and resolver.loci
+    assert engine.switch(True) is None and engine.renderer.resolver is resolver
+    engine.closed("goodbye")
+    engine.step()
+    assert not resolver.loci
 
 
 def test_a_name_with_no_places_to_ask_gets_a_nod_never_a_spot() -> None:
