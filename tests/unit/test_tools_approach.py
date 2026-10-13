@@ -72,7 +72,9 @@ def test_come_to_me_stands_on_the_line_to_the_face_and_looks_at_it() -> None:
     assert isinstance(robot.sightings, FakeSightings)
     assert robot.sightings.heads == [HeadPose(0.0, 23.8)], "asked with the still head's pose"
     (goal,) = sent(robot)
-    assert (goal["x"], goal["y"]) == pytest.approx((1.3, 0.05), abs=0.01)  # 0.8 m short of it
+    assert (goal["x"], goal["y"]) == pytest.approx(
+        (1.71, 0.05), abs=0.01
+    )  # 0.39 m short of it: the floor + 2 sigma
     assert goal["yaw_deg"] == pytest.approx(0.0, abs=0.5)
     assert len(planned(robot)) == 1, "asked before it drove, once"
     assert result["found"]["kind"] == "person"
@@ -93,7 +95,7 @@ def test_right_of_me_is_the_person_s_right_side_by_side() -> None:
     (goal,) = sent(robot)
     # The person faces the robot (west); their right is the map's +y, 0.74 m out: the side's
     # 0.7 m is under the person minimum 0.6 m plus two sigma (0.07) of the face's depth.
-    assert (goal["x"], goal["y"]) == pytest.approx((2.1, 0.05 + 0.74), abs=0.01)
+    assert (goal["x"], goal["y"]) == pytest.approx((2.1, 0.05 + 0.5), abs=0.01)  # side_m 0.5
     assert goal["yaw_deg"] == pytest.approx(180.0, abs=0.5)
     assert result["found"]["facing_deg"] == 180
 
@@ -104,7 +106,7 @@ def test_the_head_s_turn_turns_the_person_s_right() -> None:
     call(robot, target="me", relation="right_of")
     (goal,) = sent(robot)
     # Facing south now (west turned 90 deg to their left): their right is west, toward the robot.
-    assert (goal["x"], goal["y"]) == pytest.approx((2.1 - 0.74, 0.05), abs=0.01)
+    assert (goal["x"], goal["y"]) == pytest.approx((2.1 - 0.5, 0.05), abs=0.01)  # side_m 0.5
 
 
 def test_nobody_in_view_asks_for_them_and_nothing_moves() -> None:
@@ -155,7 +157,7 @@ def test_a_box_of_the_last_picture_is_a_thing_the_robot_faces() -> None:
     assert eyes(robot).asked == [(Box(412, 300, 470, 352), RAW_LEFT)], "a snapshot's raw eye"
     (goal,) = sent(robot)
     stand = (goal["x"], goal["y"])
-    assert math.dist(stand, (1.8, -1.0)) == pytest.approx(0.8, abs=0.01)
+    assert math.dist(stand, (1.8, -1.0)) == pytest.approx(0.3, abs=0.01)  # front_m 0.3
     facing = math.degrees(math.atan2(-1.0 - stand[1], 1.8 - stand[0]))
     assert goal["yaw_deg"] == pytest.approx(facing, abs=0.5)
     assert result["found"]["kind"] == "thing"
@@ -208,7 +210,7 @@ def test_a_place_is_its_own_pose_and_its_sides_are_its_own() -> None:
     robot = fake_robot()
     call(robot, target="printer", relation="right_of")
     (goal,) = sent(robot)
-    assert (goal["x"], goal["y"]) == pytest.approx((-0.5, 3.4))
+    assert (goal["x"], goal["y"]) == pytest.approx((-0.7, 3.4))  # beside: side_m 0.5
 
 
 def test_an_unknown_target_names_what_it_may_be() -> None:
@@ -227,7 +229,9 @@ def test_the_planner_refusing_the_first_spot_takes_the_next() -> None:
     assert len(planned(robot)) == 2
     assert result["stand"]["choice"].startswith("2 of 3: to turned 30 deg left")
     (goal,) = sent(robot)
-    assert math.dist((goal["x"], goal["y"]), (2.1, 0.05)) == pytest.approx(0.8, abs=0.01)
+    assert math.dist((goal["x"], goal["y"]), (2.1, 0.05)) == pytest.approx(
+        0.39, abs=0.01
+    )  # the floor + 2 sigma
 
 
 def test_nowhere_to_stand_is_said_with_every_refusal_and_nothing_moves() -> None:
@@ -252,19 +256,19 @@ def test_a_spoken_distance_is_kept_but_never_nearer_than_the_minimum() -> None:
     robot = fake_robot()
     call(robot, target="me", distance_m=0.3)
     (goal,) = sent(robot)
-    # 0.6 m plus two sigma (0.07) of the face's depth: 0.74 m short of the face.
-    assert goal["x"] == pytest.approx(2.1 - 0.74, abs=0.01)
+    # the 0.25 m floor plus two sigma (0.07 each) of the face's depth: 0.39 m short of the face.
+    assert goal["x"] == pytest.approx(2.1 - 0.39, abs=0.01)
     assert "between 0.2 and 3" in call(fake_robot(), target="me", distance_m=5.0)["why"]
 
 
 def test_come_closer_when_already_near_and_facing_does_not_move() -> None:
-    """The person 0.85 m ahead (within the 0.8 m stand distance plus near_m), the robot facing
+    """The person 0.40 m ahead (within the 0.3 m stand distance plus near_m), the robot facing
     them: nothing is planned or driven, and the answer says it is there."""
     robot = fake_robot()
-    eyes(robot).point = (0.95, 0.05, 1.55)
+    eyes(robot).point = (0.5, 0.05, 1.55)
     result = call(robot, target="me")
     assert result["ok"] and result["moved"] is False and result["arrived"] is True
-    assert result["stand"]["choice"].startswith("1 of 1: already 0.85 m from it")
+    assert result["stand"]["choice"].startswith("1 of 1: already 0.40 m from it")
     assert not sent(robot) and not planned(robot)
 
 
@@ -279,7 +283,7 @@ def test_turn_to_me_is_a_turn_where_the_robot_stands() -> None:
     assert (goal["x"], goal["y"], goal["yaw_deg"]) == pytest.approx((0.1, 0.05, 90.0))
     assert len(planned(robot)) == 1
     near = fake_robot()
-    eyes(near).point = (0.6, 0.6, 1.55)  # 0.74 m off at 48 deg: "come closer" only turns
+    eyes(near).point = (0.35, 0.325, 1.55)  # 0.37 m off at 48 deg: "come closer" only turns
     assert call(near, target="me")["stand"]["heading_deg"] == 48
     assert [(g["x"], g["y"]) for g in sent(near)] == [(0.1, 0.05)]
 
