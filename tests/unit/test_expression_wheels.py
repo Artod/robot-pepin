@@ -389,6 +389,34 @@ def test_every_body_atom_of_the_book_fits_the_caps_at_its_extremes_and_faster_is
     assert "turns and drives at once" in str(legs_of(both, FULL))
 
 
+def test_every_composition_s_wheels_keep_the_shipped_caps_as_the_engine_plays_them() -> None:
+    """Each body step of every variant at every corner of its ranges (mirrored or not),
+    stretched by 1 / speed_scale as the engine stretches the body's clips, fits the wheels' caps
+    of config/expression.json (the rock and the sway of the ensembles: the pulse, the nods, the
+    feelings' wheels)."""
+    shipped = WheelsSettings.load(REPO / "config/expression.json")
+    book = load_book(REPO / "config/animation.json")
+    renderer = BookRenderer(book)
+    played = 0
+    for name, composition in book.compositions.items():
+        for variant in composition.variants:
+            for step in variant.steps:
+                atom = book.atoms[step.atom]
+                if atom.part != "body":
+                    continue
+                ranges = sorted({**atom.params, **step.params}.items())
+                for corner in range(2 ** len(ranges)):
+                    params = {k: (r.hi if corner >> i & 1 else r.lo)
+                              for i, (k, r) in enumerate(ranges)}  # fmt: skip
+                    for mirrored in (False, True):
+                        clip = renderer.atom_clip(step.atom, params, mirrored=mirrored)
+                        slow = stretched(clip, 1.0 / shipped.speed_scale)
+                        legs = legs_of(slow, shipped)
+                        assert not isinstance(legs, str), (name, step.atom, params, legs)
+                        played += 1
+    assert played >= 40
+
+
 def test_a_gaze_turn_wins_over_a_gesture_and_a_gesture_waits_its_turn() -> None:
     r = rig()
     started, release = threading.Event(), threading.Event()

@@ -14,6 +14,7 @@ import math
 import random
 import time
 from collections import deque
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -400,7 +401,11 @@ def test_accent_nods_two_seconds_apart_and_twelve_a_minute_at_most() -> None:
 
 
 def test_a_nod_near_a_marker_s_head_stroke_yields() -> None:
-    rig = Rig(seed=4)
+    agreement = BOOK.compositions["agreement"]
+    floors = tuple(v for v in agreement.variants if v.floor)  # its head at once
+    floored = replace(agreement, variants=floors)
+    book = replace(BOOK, compositions={**BOOK.compositions, "agreement": floored})
+    rig = Rig(book=book, seed=4)
     rig.open()
     rig.engine.request(Request("agreement", None, Priority.MARK, "marker"))
     rig.tick(0.05)

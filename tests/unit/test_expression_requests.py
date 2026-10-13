@@ -53,6 +53,17 @@ BOOK = with_rest(load_book(CONFIG / "animation.json"), MOTION.rest_deg)
 NOD = Clip("head", -0.2, 0.2, 0.4, (Track("tilt_deg", "additive", (0.0, 0.2, 0.4), (0, 3, 0)),))
 
 
+def floor_only(book: Book, *names: str) -> Book:
+    """``book`` with each of ``names`` played by its floor alone (its head and face, sent at
+    once): the engine's mechanics, not the book's ensembles (whose arm or wheels go first)."""
+    compositions = dict(book.compositions)
+    for name in names:
+        composition = compositions[name]
+        floors = tuple(v for v in composition.variants if v.floor)
+        compositions[name] = replace(composition, variants=floors)
+    return replace(book, compositions=compositions)
+
+
 class Rig:
     """An engine over fake parts, a fake player, a fake clock and a fake attention."""
 
@@ -186,7 +197,7 @@ def test_requests_go_at_their_word_their_stream_second_and_their_time() -> None:
 
 
 def test_a_pulse_never_takes_the_head_from_a_marker_and_a_tool_always_does() -> None:
-    rig = Rig(seed=1)
+    rig = Rig(floor_only(BOOK, "agreement"), seed=1)
     assert rig.engine.perform("agreement", source="tool").ok
     rig.engine.request(Request("nod", None, Priority.PULSE, "pulse", clips=(NOD,)))
     rig.engine.step()
@@ -212,7 +223,7 @@ def test_an_idle_entry_plays_through_the_states_it_allows_and_fades_at_those_it_
 
 
 def test_attention_keeps_the_head_and_the_arm_clear() -> None:
-    rig = Rig(seed=2)
+    rig = Rig(floor_only(BOOK, "agreement"), seed=2)
     rig.view.be(phase="seek", eyes=True)
     rig.engine.perform("agreement", source="tool")
     assert rig.cues("head", ok=False)[-1]["why"] == "attention: seek"
@@ -743,8 +754,8 @@ def test_every_feeling_holds_the_arm_at_most_2_5_s_before_the_board_s_return() -
     arm = ArmPart(FakeArmLink(), MOTION)
     scene = Scene(frozenset(PARTS))
     for name, composition in BOOK.compositions.items():
-        if composition.bind != "utterance" or name == "evil_click":
-            continue
+        if composition.bind != "utterance" or name == "evil_click" or not composition.callable:
+            continue  # the engine's own sway rides a held unit
         longest: Clip | None = None
         for k in range(len(composition.variants)):
             for seed in range(60):

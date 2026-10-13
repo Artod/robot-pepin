@@ -164,6 +164,10 @@ def test_an_idle_entry_s_own_after_speech_s_lets_a_breath_follow_a_reply_at_once
 def test_every_hold_goes_through_the_table_and_is_remembered_after_it_lets_go() -> None:
     rig = Rig()
     assert rig.engine.perform("agreement", source="tool").ok
+    for _ in range(150):  # its head comes after the arm's or the cart's way, which start first
+        if rig.engine.scheduler.reservations.last("head") is not None:
+            break
+        rig.tick(0.01)
     reservations = rig.engine.scheduler.reservations
     head = reservations.last("head")
     assert head is not None and head.performance.intent == "agreement"

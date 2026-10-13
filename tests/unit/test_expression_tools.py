@@ -8,7 +8,7 @@ from pepin.arm_driver import trajectory_from
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animator import EngineConfig, GestureEngine
 from pepin.expression.arm_link import ArmClient
-from pepin.expression.book import load_book, with_rest
+from pepin.expression.book import intents, load_book, with_rest
 from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakePlaces, FakePlayout
 from pepin.expression.parts import ArmPart
 from pepin.expression.trajectory import ArmStatus, Knot, Trajectory
@@ -24,7 +24,7 @@ BOOK = with_rest(load_book(CONFIG / "animation.json"), MOTION.rest_deg)
 def test_the_tool_s_names_are_the_book_s_intents() -> None:
     # the book's feelings, in its order; its co-speech primitives are inline marks only
     assert tuple(n for n in BOOK.compositions if n in GESTURES) == GESTURES
-    assert set(BOOK.compositions) - set(GESTURES) == {
+    assert set(intents(BOOK)) - set(GESTURES) == {
         "accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer",
     }  # fmt: skip
     schema = TOOLS["gesture"].input_schema()

@@ -132,8 +132,10 @@ class Composition:
     """An intent: its variants, the least time between two of its performances (a second one
     sooner is skipped), how its stroke binds to its word (:data:`Bind`), the arguments a marker
     may give it (``{point:you}``; ``"*"`` any), the family a moment of the same kind is
-    absorbed into, and whether it is long (over ``short_s``: played only when the speech ahead
-    covers it)."""
+    absorbed into, whether it is long (over ``short_s``: played only when the speech ahead
+    covers it), and whether a marker may name it (``callable`` False: the engine's own ensemble,
+    which its listeners request by name: the pulse's accents, the nods, the held arm's sway;
+    never in the brain's vocabulary, never under the markers' caps)."""
 
     name: str
     variants: tuple[Variant, ...]
@@ -143,6 +145,7 @@ class Composition:
     args: tuple[str, ...] = ()
     family: str | None = None
     long: bool = False
+    callable: bool = True
 
 
 @dataclass(frozen=True)
