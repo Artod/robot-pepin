@@ -44,6 +44,17 @@ witness of it (the darkness rule, depth_stream's and sensor_pack's ``gate_dark``
 BEFORE the picture so a gate has it when the frame arrives, and recorded with the drive so the
 gate's verdicts replay.
 
+THE ONE CAMERA CHANNEL (``perception_feed``, on by default): after a frame's pictures are
+published, the left one (rectified, on a calibrated stereo head) goes to the perception service
+on this Mac (:mod:`pepin.perception_service`, ``perception_url``, host.docker.internal:8792) with
+its stamp, its optics and its brightness, through :class:`pepin.perception.feed.FrameFeed`: the
+pump only drops a reference into a one-slot mailbox, and the feed's own thread encodes the JPEG
+(``perception_quality``) and POSTs it at ``perception_hz`` at most, dropping a frame rather than
+waiting for a slow service. Everything on the laptop that wants the camera (the speaker gaze,
+person recognition, ``see``) reads that service, so the board has this one reader. The report
+line carries the feed's rate, drops and milliseconds, and the publish period's median/p95 (the
+witness that the feed costs the pump nothing).
+
 The flags keep their meaning for the mono rig. On a stereo rig the calibration's own rectifying
 replaces ``undistort`` (which is refused, with that reason) and the picture goes out at the
 calibration's own size, so ``scale`` is pinned to 1.0 — a matcher wants the size the maps were
@@ -100,11 +111,15 @@ from pepin.flags import Flag, FlagSet, load_knobs, with_knobs
 from pepin.gaze_gate import BRIGHTNESS_TOPIC, frame_brightness
 from pepin.mjpeg import STAMP_MODES, GrabPeriod, capture_time, has_grab, parts, send_lag_s
 from pepin.mounts import LASER_FRAME, load_camera_mounts, load_lidar_mount
+from pepin.perception import CONTAINER_URL
+from pepin.perception.feed import FrameFeed
+from pepin.perception.record import Optics as ChannelOptics
 from pepin.stereo import Rectifier, SideBySide, StereoCalibration
 from pepin_bringup.msgs import (
     camera_edges,
     image_from_array,
     stamp_from_seconds,
+    stamp_seconds,
     transform_from_mount,
 )
 from pepin_bringup.node_kit import STOP_PATIENCE_S, Switches, Tally, Window, spin_main
@@ -201,6 +216,24 @@ FLAGS = FlagSet(
         off_when="a calibration that covers the corners (fold_check.py finds no fold)",
     ),
     Flag(
+        "perception_feed",
+        True,
+        description="the left picture of every published frame (rectified on a calibrated"
+        " stereo head) goes to the perception service on the laptop (perception_url) as a JPEG"
+        " with its stamp, optics and brightness: the one camera channel the speaker gaze,"
+        " person recognition and see read. The pump drops a reference into a one-slot mailbox;"
+        " the feed's own thread encodes (perception_quality) and POSTs at perception_hz at"
+        " most, a slow service costing frames, never the pump's time",
+        why="on by design (2026-10-12): on this Mac's stored frames the pump's period p95 was"
+        " 56.5 ms with the feed off and 56.1 ms on (20 Hz, 300 frames each), the feed's encode"
+        " 1.2/1.4 ms and its POST 0.4/0.4 ms median/p95 on its own thread"
+        " (scratch/perception_1012/service_bench.py); the live A/B on the robot is owed",
+        on_when="whenever the perception service runs (ros/models.sh start perception)",
+        off_when="the publish period or depth_stream's frames/s worsen with it on, or a day the"
+        " voice runs on vision.source snapshot and the service is down (the feed then only"
+        " counts refusals, backing off 2 s each)",
+    ),
+    Flag(
         "static_camera_tf",
         False,
         description="base_link -> camera_link is broadcast from here (ros/laptop.sh vslam"
@@ -234,6 +267,7 @@ class Published:
     maps: tuple[Any, Any] | None = None  # cv2.remap's x and y tables, only while rectifying
     rectifier: Rectifier | None = None  # a stereo rig with a calibration: both eyes' maps
     right: CameraInfo | None = None  # and the right eye's info, P[0, 3] = -fx * baseline
+    channel: str = ""  # the perception feed's X-Optics: the pixel space's name and pinhole
 
 
 class CameraStream(Node):
@@ -259,11 +293,24 @@ class CameraStream(Node):
         self._calibration_mtime: float | None = None
         self._calibration_source = ""
         self._calibration_checked = 0.0
+        # The perception service as this container sees it (the laptop's loopback).
+        perception_url = str(
+            self.declare_parameter(
+                "perception_url", os.environ.get("PEPIN_PERCEPTION_URL") or CONTAINER_URL
+            ).value
+        )
         # Declared after every other parameter: rclpy runs the switches' callback on
         # declarations too, and it refuses everything that is not a flag.
         self._switches = Switches(
             self, with_knobs(FLAGS, load_knobs("camera_stream")), on_change=self._on_switch
         )
+        # The one camera channel's sender: its own thread, started here, idle until a frame.
+        self._feed = FrameFeed(
+            perception_url,
+            quality=int(self._switches["perception_quality"]),
+            hz=float(self._switches["perception_hz"]),
+        )
+        self._published_at: float | None = None  # the last frame's publish end (monotonic)
         rectifier = self._read_calibration()
         self._published = self._published_for(
             self._scale(), self._switches.on("undistort"), rectifier
@@ -344,6 +391,7 @@ class CameraStream(Node):
                 f"the camera pump is still in the stream after {STOP_PATIENCE_S:.0f} s;"
                 " leaving anyway"
             )
+        self._feed.close()
 
     def _break_stream(self) -> None:
         """End the read the pump is blocked in, if it has a stream open: shut the socket under
@@ -549,7 +597,17 @@ class CameraStream(Node):
         right = None
         if rectifier is not None:
             right = right_camera_info(rectifier, lens, self._cfg.optical_frame)
-        return Published(size, info, lens, maps, rectifier, right)
+        # The pixel space the perception feed names: the stereo calibration's shared pinhole,
+        # a straightened mono picture, or a raw one (its pinhole only: angles through it are
+        # approximate, the lens's distortion left in the picture).
+        if rectifier is not None:
+            space = "rectified-left"
+        elif maps is not None:
+            space = "undistorted"
+        else:
+            space = "raw-left" if self._rig is not None else "raw"
+        channel = ChannelOptics(space, lens.fx, lens.fy, lens.cx, lens.cy, size[0], size[1])
+        return Published(size, info, lens, maps, rectifier, right, channel.header())
 
     def _on_switch(self, name: str, _old: Any, new: Any) -> None:
         """A flag changed: ``scale`` and ``undistort`` rebuild the published size, its optics and
@@ -562,6 +620,12 @@ class CameraStream(Node):
         if name == "fold_mask":
             self._calibration_mtime = None  # the next calibration check rebuilds the tables
             self._calibration_checked = 0.0
+            return
+        if name == "perception_quality":
+            self._feed.quality = int(new)  # the next frame encoded
+            return
+        if name == "perception_hz":
+            self._feed.hz = float(new)
             return
         if name == "scale":
             if float(new) <= 0.0:
@@ -639,7 +703,7 @@ class CameraStream(Node):
         published = self._published
         array = np.asarray(frame)
         stamp = self._stamp(taken_at)
-        self._publish_brightness(array, stamp)
+        brightness = self._publish_brightness(array, stamp)
         if published.size != (self._cfg.width, self._cfg.height):
             array = cv2.resize(array, published.size, interpolation=cv2.INTER_AREA)
         if published.maps is not None:
@@ -651,6 +715,7 @@ class CameraStream(Node):
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
+        self._to_channel(array, stamp, brightness, published)
 
     def _publish_stereo(self, frame: Any, taken_at: float | None) -> None:
         """One side-by-side frame out as the robot's two eyes, stamped with the board's capture
@@ -670,7 +735,7 @@ class CameraStream(Node):
         """
         published, stamp = self._published, self._stamp(taken_at)
         array = np.asarray(frame)
-        self._publish_brightness(array, stamp)
+        brightness = self._publish_brightness(array, stamp)
         rig = self._rig
         if rig is not None and array.shape[:2] != (rig.frame_height, rig.frame_width):
             self._tally.count("wrong_size")
@@ -712,15 +777,31 @@ class CameraStream(Node):
         self._tally.count("frames")
         if taken_at is None:
             self._tally.count("unstamped")
+        self._to_channel(left, stamp, brightness, published)
 
-    def _publish_brightness(self, frame: Any, stamp: Any) -> None:
+    def _to_channel(
+        self, picture: Any, stamp: Any, brightness: float, published: Published
+    ) -> None:
+        """After a frame's pictures went out: the publish period sampled for the report line,
+        and the left picture handed to the perception feed while ``perception_feed`` is on (a
+        reference into its one-slot mailbox: the pump's whole cost; the arrays are this frame's
+        own, nothing writes them after the publish)."""
+        now = time.monotonic()
+        if self._published_at is not None:
+            self._tally.sample("publish_gap_ms", (now - self._published_at) * 1e3)
+        self._published_at = now
+        if self._switches.on("perception_feed"):
+            self._feed.offer(picture, stamp_seconds(stamp), published.channel, brightness)
+
+    def _publish_brightness(self, frame: Any, stamp: Any) -> float:
         """The decoded frame's mean luma on :data:`pepin.gaze_gate.BRIGHTNESS_TOPIC` under the
-        frame's own stamp, before any of its pictures go out."""
+        frame's own stamp, before any of its pictures go out; the value back."""
         msg = Illuminance()
         msg.header.stamp = stamp
         msg.header.frame_id = self._cfg.optical_frame
         msg.illuminance = frame_brightness(frame)
         self._brightness_pub.publish(msg)
+        return float(msg.illuminance)
 
     def _frame_time(self, headers: dict[str, str]) -> float | None:
         """A part's board time under the ``camera_stamp`` mode; the send-grab lag of every part
@@ -772,10 +853,21 @@ class CameraStream(Node):
         )
         self.get_logger().info(
             f"camera: {w.rate('frames'):.1f} frames/s{unstamped}, {self._stamp_report(w)},"
-            f"{self._stereo_report(w)}"
+            f"{self._stereo_report(w)} {self._channel_report(w)},"
             f" optics: {self._published.optics.source},"
             f" flags: {self._switches.state(live_only=False)}"
         )
+
+    def _channel_report(self, w: Window) -> str:
+        """The publish period's median/p95 and the perception feed's own line (or that it is
+        off): the feed is meant to cost the pump nothing, and this is where that shows."""
+        gaps = sorted(w.samples.get("publish_gap_ms", ()))
+        period = ""
+        if gaps:
+            median, p95 = gaps[len(gaps) // 2], gaps[min(len(gaps) - 1, int(0.95 * len(gaps)))]
+            period = f"publish period {median:.1f}/{p95:.1f} ms, "
+        feed = self._feed.report() if self._switches.on("perception_feed") else "perception off"
+        return period + feed
 
     def _stamp_report(self, w: Window) -> str:
         """The stamp mode and the period's send-grab lag as median/p90 milliseconds, or why

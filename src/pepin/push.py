@@ -90,6 +90,7 @@ HOST_SERVICES: dict[str, str] = {
     "pepin.head_server": "board: pepin-head.service runs it from /opt/pepin (board/README.md)",
     "pepin.depth_service": "laptop: ros/models.sh restart depth",
     "pepin.localization_service": "laptop: ros/models.sh restart localization",
+    "pepin.perception_service": "laptop: ros/models.sh restart perception",
 }
 
 # Modules started per call by a script or by hand (nothing long-lived holds them).

@@ -115,7 +115,7 @@ from pepin.gaze import Aim, Reach, Speed
 if TYPE_CHECKING:
     from pepin.expression.conversation import ConversationObserver, LiveFlag
     from pepin.expression.door import SpeakerDoor
-    from pepin.expression.finder import SnapshotFinder
+    from pepin.expression.finder import ServiceFinder, SnapshotFinder, SwitchedFinder
     from pepin.expression.wheels import WheelsExecutor
     from pepin.voice_live.sources import BoardLink
 
@@ -167,8 +167,8 @@ class SpeakerSettings:
     seek_pan_deg: float = 20.0
     seek_frames: int = 1
     seek_every_s: float = 0.4
-    seek_min_face_px: float = 28.0
-    track_min_face_px: float = 40.0
+    seek_min_face_px: float = 24.0  # the rectified eye's pixels (fx 454.5): 28 in the raw eye's
+    track_min_face_px: float = 34.0  # the rectified eye's pixels: 40 in the raw eye's
     min_body_score: float = 0.5
     track_hz: float = 10.0
     track_speaking_hz: float = 1.0
@@ -968,7 +968,9 @@ class SpeakerGaze:
             elif now >= self.verify_until:  # the check ran out of time: back to the face
                 self._unseen(now)
                 return
-        frame = self.finder.look()
+        # A finder that reads frames already taken (the perception service's) waits for one
+        # exposed after the head settled: the arbiter's blind_until, both on the board's clock.
+        frame = self.finder.look(not_before=view.blind_until)
         self.counts["frames"] += 1
         people = sightings(frame, view.head, min_face_px=s.seek_min_face_px,
                            min_body_score=s.min_body_score)  # fmt: skip
@@ -1389,7 +1391,7 @@ def robot_gaze(
     doa: DoaSource,
     *,
     on: bool | None = None,
-    finder: SnapshotFinder | None = None,
+    finder: FaceFinder | None = None,
     on_face: FaceListener | None = None,
     wheels: Wheels | None = None,
 ) -> SpeakerGazeWorker:
@@ -1408,7 +1410,7 @@ def robot_gaze(
         from pepin.head_link import HeadClient
         from pepin.neck import NeckConfig
 
-        looks = finder
+        looks: FaceFinder | None = finder
         if looks is None:
             try:
                 looks = board_finder(host)  # config reads only: the models load on warm()
@@ -1434,6 +1436,8 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         worker: SpeakerGazeWorker,
         door: SpeakerDoor,
         finder: SnapshotFinder,
+        service: ServiceFinder,
+        switched: SwitchedFinder,
         turn: WheelsExecutor,
         link: BoardLink,
     ) -> None:
@@ -1441,6 +1445,8 @@ if TYPE_CHECKING:  # the speaker gaze's real parts satisfy their seams
         flag: LiveFlag = worker
         gaze_door: GazeDoor = door
         faces: FaceFinder = finder
+        records: FaceFinder = service
+        either: FaceFinder = switched
         wheels: Wheels = turn
         doa: DoaSource = link
-        del observer, flag, gaze_door, faces, wheels, doa
+        del observer, flag, gaze_door, faces, records, either, wheels, doa

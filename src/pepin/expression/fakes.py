@@ -261,10 +261,12 @@ class FakeFaceFinder:
 
     frames: deque[FaceFrame | None] = field(default_factory=deque)
     looks: int = 0
+    asked: list[float | None] = field(default_factory=list)  # each look's not_before
 
-    def look(self) -> FaceFrame | None:
+    def look(self, not_before: float | None = None) -> FaceFrame | None:
         """The next scripted frame."""
         self.looks += 1
+        self.asked.append(not_before)
         return self.frames.popleft() if self.frames else None
 
 
@@ -294,10 +296,12 @@ class FakeScene:
     half_pan_deg: float = 30.0
     half_tilt_deg: float = 25.0
     looks: int = 0
+    asked: list[float | None] = field(default_factory=list)  # each look's not_before
 
-    def look(self) -> FaceFrame | None:
+    def look(self, not_before: float | None = None) -> FaceFrame | None:
         """The faces and bodies in view now."""
         self.looks += 1
+        self.asked.append(not_before)
         view = self.door.state()
         if view is None or view.head is None:
             return None

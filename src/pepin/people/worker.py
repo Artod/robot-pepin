@@ -24,7 +24,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
@@ -34,7 +34,16 @@ from pepin.expression.speaker import FaceFinder, FaceFrame, FaceSighting
 from pepin.face_sensor.identity import Gallery, Vector, centroid
 from pepin.people.config import FLAG, PeopleConfig
 from pepin.people.door import Outcome
-from pepin.people.face import IdentityNet, Shot, gate, shots, strong
+from pepin.people.face import (
+    FaceNet,
+    IdentityNet,
+    RoutedIdentity,
+    ServiceIdentity,
+    Shot,
+    gate,
+    shots,
+    strong,
+)
 from pepin.people.fusion import Verdict, comparable, fuse
 from pepin.people.matcher import Reading, galleries, judge
 from pepin.people.session import Observation, Session, Track, learnable
@@ -42,6 +51,10 @@ from pepin.people.store import Kind, Modality, Person, PersonStore
 from pepin.people.tag import head
 from pepin.people.voice import RATE, VoiceEmbedder, samples_of, speech_span
 from pepin.voice_cascade.stages import Speaker
+
+if TYPE_CHECKING:
+    from pepin.perception.client import Perception
+    from pepin.perception.source import VisionSource
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +74,7 @@ class Parts:
 
     store: PersonStore
     voice: VoiceEmbedder | None
-    faces: IdentityNet | None
+    faces: FaceNet | None
     finder: FaceFinder | None
 
 
@@ -558,9 +571,18 @@ class People:
             close()
 
 
-def robot_people(finder: FaceFinder | None, *, on: bool | None = None) -> People:
-    """Person recognition on this Mac: config/people.json's store and nets, pictures from
-    ``finder`` (the one the speaker gaze shares); built the first time its switch is on."""
+def robot_people(
+    finder: FaceFinder | None,
+    *,
+    on: bool | None = None,
+    service: Perception | None = None,
+    source: VisionSource | None = None,
+) -> People:
+    """Person recognition on this Mac: config/people.json's store and nets, faces from
+    ``finder`` (the one the speaker gaze shares); built the first time its switch is on. With
+    the perception ``service`` (and the live ``source`` that picks the camera path), a face that
+    came by frame number is embedded there and the net in this process loads only on the
+    snapshot path."""
 
     def build(config: PeopleConfig) -> Parts:
         from pepin.people.store import SqliteStore
@@ -573,7 +595,7 @@ def robot_people(finder: FaceFinder | None, *, on: bool | None = None) -> People
             voice = WeSpeaker(config.path(config.voice.model), threads=config.voice.threads)
         except (OSError, ImportError) as exc:
             say(f"no voice net ({exc}): faces only")
-        faces: IdentityNet | None = None
+        local: IdentityNet | None = None
         model = config.path(config.face.model)
         if model.exists():
 
@@ -583,8 +605,12 @@ def robot_people(finder: FaceFinder | None, *, on: bool | None = None) -> People
                 cache = config.path("models/face/coreml_cache")
                 return ArcFace(model, device=config.face.device, cache=cache)
 
-            faces = IdentityNet(load)
-        else:
+            local = IdentityNet(load)
+        faces: FaceNet | None = local
+        if service is not None and source is not None:
+            remote = ServiceIdentity(service, model.stem)
+            faces = RoutedIdentity(local, remote, source, model.stem)
+        elif local is None:
             say(f"no identity net at {model}: voices only")
         return Parts(store, voice, faces, finder)
 

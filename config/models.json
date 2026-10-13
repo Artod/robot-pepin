@@ -20,5 +20,21 @@
       "model": "boq_dinov2",
       "device": "mps"
     }
+  },
+  "perception": {
+    "_note": "The one camera channel (pepin.perception_service, ros/models.sh job perception, 127.0.0.1:8792): camera_stream POSTs every rectified left eye it publishes (its flag perception_feed, knobs perception_hz / perception_quality), the service keeps ring_s of them and finds faces and people on the newest one at detect_hz; the speaker gaze, person recognition and the see tool read it, and the voice process holds no pixels. The detector's weights and threshold are config/face_sensor.json's models block, the identity net's file config/people.json's face.model: the same networks the snapshot path loads.",
+    "port": 8792,
+    "source": "service",
+    "detect_hz": 10.0,
+    "ring_s": 10.0,
+    "faces": "ane",
+    "persons": "vision",
+    "body_head_frac": 0.12,
+    "min_score": 0.0,
+    "identity_device": "ane",
+    "identity_unload_after_s": 300.0,
+    "look_wait_s": 0.4,
+    "see_wait_s": 0.3,
+    "note": "source: the voice process's start value of the live knob vision.source (service: this service; snapshot: the path before it, ustreamer's /snapshot decoded and searched in the voice process, for a day this service or the camera half is broken; scripts/voice_cascade.py switch --knob vision.source=snapshot). detect_hz: detections a second on the newest frame, newest wins (10: the gaze's track_hz; the ring still takes every frame at the sender's rate). ring_s: seconds of frames kept as they came (20 fps x 77 KB x 10 s = 15 MB). faces: SCRFD's CoreML compute units, ane = CPU and Neural Engine (never the GPU the voice's Qwen3-TTS uses), cpu, coreml (CoreML chooses, the GPU included), mps, none. persons: vision (Apple Vision's human rectangles from the JPEG bytes, Neural Engine) or none. body_head_frac: an upright person's head is this share of their box's height below its top. min_score: faces under it are left out of the records (SCRFD's own threshold is face_sensor.json's det_threshold). identity_device: ArcFace's units for /embed, loaded at the first embedding and let go after identity_unload_after_s idle. look_wait_s: how long a gaze look waits for a record exposed after the head settled (a frame exposed at the settle reaches the service 70-100 ms later and is detected within one detect period). see_wait_s: how long see waits for the first still frame after a head move before it takes the newest one."
   }
 }

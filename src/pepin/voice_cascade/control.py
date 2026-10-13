@@ -15,7 +15,11 @@ command reads back. What the file holds at the start is an earlier run's and is 
 A feature's live switch (:class:`pepin.expression.conversation.LiveFlag`: ``gestures``,
 ``speaker_gaze``) is the ``flags`` key, ``{"flags": {"gestures": true}}`` (``switch --flag
 gestures=on``), answered as ``{"what": "flag", "name": "gestures", "state": "applied", "on":
-true}``; a name no flag of the running loop carries is answered ``failed``.
+true}``; a name no flag of the running loop carries is answered ``failed``. A live knob of
+several values (:class:`LiveKnob`: ``vision.source``, service or snapshot) is the ``knobs``
+key, ``{"knobs": {"vision.source": "snapshot"}}`` (``switch --knob vision.source=snapshot``),
+answered as ``{"what": "knob", "name": "vision.source", "state": "applied", "value":
+"snapshot"}``; an unknown name or value is answered ``failed``.
 """
 
 from __future__ import annotations
@@ -26,7 +30,7 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from pepin.voice_cascade.config import CascadeConfig, VoiceConfig
 from pepin.voice_cascade.engines import BrainSetup
@@ -35,10 +39,34 @@ from pepin.voice_cascade.transcriber import Choice, SwitchingTranscriber, choice
 
 CONTROL = "control.json"
 ANSWERS = "control.jsonl"
-KEYS = ("brain", "voice", "voice_preset", "transcriber", "flags")
+KEYS = ("brain", "voice", "voice_preset", "transcriber", "flags", "knobs")
 DONE_STATES = ("applied", "failed")  # the last answer of a switch
 FLAG = "flag"  # the ``what`` of a flag's answer
+KNOB = "knob"  # the ``what`` of a knob's answer
 ON_WORDS = {"on": True, "true": True, "1": True, "off": False, "false": False, "0": False}
+
+
+class LiveKnob(Protocol):
+    """A setting of several values, changed while the cascade runs (``vision.source``)."""
+
+    @property
+    def knob(self) -> str:
+        """Its name in ``control.json``'s ``knobs``."""
+        ...
+
+    @property
+    def value(self) -> str:
+        """Its value now."""
+        ...
+
+    @property
+    def choices(self) -> tuple[str, ...]:
+        """The values it takes."""
+        ...
+
+    def set(self, value: str) -> str | None:
+        """Change it; None when applied, else why not."""
+        ...
 
 
 def flag_value(value: Any) -> bool | None:
@@ -64,11 +92,12 @@ class Request:
     voice: str | None = None
     transcriber: Any = None
     flags: Mapping[str, bool] = field(default_factory=dict)
+    knobs: Mapping[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_dict(cls, data: dict[str, Any], default_id: str = "") -> Request:
         """From the control file's object (``default_id`` when it carries none); a flag whose
-        value says neither on nor off is left out."""
+        value says neither on nor off is left out, and so is a knob whose value is not text."""
         voice = data.get("voice_preset") or data.get("voice")
         raw = data.get("flags")
         flags = {
@@ -76,12 +105,19 @@ class Request:
             for name, value in (raw.items() if isinstance(raw, dict) else ())
             if (wanted := flag_value(value)) is not None
         }
+        raw_knobs = data.get("knobs")
+        knobs = {
+            str(name): value.strip()
+            for name, value in (raw_knobs.items() if isinstance(raw_knobs, dict) else ())
+            if isinstance(value, str) and value.strip()
+        }
         return cls(
             str(data.get("id") or default_id),
             data.get("brain") or None,
             voice or None,
             data.get("transcriber") or None,
             flags,
+            knobs,
         )
 
 
@@ -91,16 +127,19 @@ def write_request(
     voice: str | None,
     transcriber: str | None = None,
     flags: Mapping[str, bool] | None = None,
+    knobs: Mapping[str, str] | None = None,
 ) -> Request:
     """Ask the running loop for a switch (the file replaced at once, never half written)."""
     stamp = time.strftime("%H%M%S-") + f"{time.time_ns() % 10**9:09d}"
-    request = Request(stamp, brain, voice, transcriber, dict(flags or {}))
+    request = Request(stamp, brain, voice, transcriber, dict(flags or {}), dict(knobs or {}))
     root.mkdir(parents=True, exist_ok=True)
     body: dict[str, Any] = {"id": request.id, "t": round(time.time(), 3)}
     body.update({k: v for k, v in (("brain", brain), ("voice", voice),
                                    ("transcriber", transcriber)) if v})  # fmt: skip
     if request.flags:
         body["flags"] = dict(request.flags)
+    if request.knobs:
+        body["knobs"] = dict(request.knobs)
     tmp = root / (CONTROL + ".tmp")
     tmp.write_text(json.dumps(body, ensure_ascii=False) + "\n")
     tmp.replace(root / CONTROL)

@@ -8,6 +8,7 @@ was asked, so a test can say what a tool did; none of them touches a socket. Tim
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import time
 from collections.abc import Iterator
@@ -186,6 +187,9 @@ class FakeNeck:
     down: bool = False
     moves: list[tuple[float | None, float | None]] = field(default_factory=list)
     kept: int = 0
+    moving_until: float = -math.inf  # the head is on its way until the clock reads this
+    still_from: float | None = None  # the arbiter's blind_until (the board's clock)
+    poses: int = 0
 
     def reach(self) -> HeadReach:
         """The real neck's reach, rounded."""
@@ -196,9 +200,11 @@ class FakeNeck:
         return REST
 
     def pose(self) -> HeadPose:
-        """Where the head points."""
+        """Where the head points, moving or not, and from when its pictures are still."""
         self._check()
-        return self.pose_now
+        self.poses += 1
+        moving = self.clock() < self.moving_until
+        return dataclasses.replace(self.pose_now, moving=moving, still_from=self.still_from)
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
         """Arrive at once, one second later, or be refused during a drive."""
@@ -312,9 +318,11 @@ class FakeCamera:
 
     jpeg: bytes = b"\xff\xd8\xff\xe0fake-jpeg\xff\xd9"
     down: bool = False
+    asked: list[tuple[float | None, float]] = field(default_factory=list)
 
-    def snapshot(self) -> Image:
-        """The picture."""
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The picture (what it was asked for is kept)."""
+        self.asked.append((not_before, wait_s))
         if self.down:
             raise ServiceDownError(
                 "camera", "http://10.0.0.187:8080", "timed out", "Is the board up?"

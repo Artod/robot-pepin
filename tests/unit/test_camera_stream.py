@@ -22,6 +22,7 @@ import ros_stubs
 RCLPY = ros_stubs.install()
 
 import cv2  # noqa: E402
+import pepin_bringup.camera_stream as camera_stream_module  # noqa: E402
 from camera_configs import (  # noqa: E402
     CALIBRATION,
     camera_config,
@@ -156,6 +157,24 @@ def until(predicate: Callable[[], Any], timeout_s: float = 2.0) -> bool:
 Build = Callable[..., tuple[CameraStream, FakeStream]]
 
 
+class FakeFeed:
+    """:class:`pepin.perception.feed.FrameFeed` without a thread or a socket: what was offered."""
+
+    def __init__(self, url: str, *, quality: int = 90, hz: float = 20.0, **_: Any) -> None:
+        self.url, self.quality, self.hz = url, quality, hz
+        self.offered: list[tuple[np.ndarray, float, str, float]] = []
+        self.closed = False
+
+    def offer(self, image: Any, stamp: float, optics: str, brightness: float = 0.0) -> None:
+        self.offered.append((np.asarray(image), stamp, optics, brightness))
+
+    def report(self) -> str:
+        return f"fake feed {len(self.offered)} offered"
+
+    def close(self) -> None:
+        self.closed = True
+
+
 @pytest.fixture
 def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Build]:
     """Build a camera node whose stream is the given bytes and whose parameters are the given
@@ -175,6 +194,7 @@ def build(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[Build]:
     ) -> tuple[CameraStream, FakeStream]:
         stream = FakeStream(feed) if stream is None else stream
         monkeypatch.setattr(urllib.request, "urlopen", lambda url, timeout=None: stream)
+        monkeypatch.setattr(camera_stream_module, "FrameFeed", FakeFeed)  # no socket in a test
         with ros_stubs.parameters(**{"config": default_config, **params}):
             node = CameraStream()
         made.append(node)
@@ -479,11 +499,60 @@ def test_the_report_line_carries_the_rate_the_optics_and_the_switches(build: Bui
     node._report()
     line = node.logger.texts("info")[-1]
     assert (
-        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.0" in line
+        "flags: camera_stamp=grab undistort=off fold_mask=on perception_feed=on"
+        " static_camera_tf=off scale=0.5 camera_stamp_lag_s=0.0 perception_hz=20.0"
+        " perception_quality=90" in line
     )
     node._report()
     assert "camera: 0.0 frames/s" in node.logger.texts("info")[-1], "the period was emptied"
+
+
+# ---- the one camera channel ------------------------------------------------------------------
+def test_every_published_left_picture_goes_to_the_perception_feed_with_its_stamp(
+    build: Build, tmp_path: Path
+) -> None:
+    """With a stereo calibration the RECTIFIED left eye goes out to the feed after the publish,
+    with the frame's own stamp, the brightness /camera/brightness carried and the optics header
+    naming the pixel space (the calibration's shared pinhole); the report line carries the
+    publish period and the feed's own line."""
+    config = stereo_config(tmp_path, ideal_stereo_calibration())
+    node, _ = build(
+        multipart([(1_750_000_000.0, stereo_jpeg()), (1_750_000_000.05, stereo_jpeg())]),
+        config=config,
+    )
+    feed: FakeFeed = node._feed  # type: ignore[assignment]
+    assert until(lambda: len(feed.offered) == 2)
+    picture, stamp, optics, brightness = feed.offered[0]
+    assert picture.shape == (600, 800, 3), "the left eye, in colour"
+    image = node.pubs["/camera/image"].sent[0]
+    assert np.array_equal(picture.reshape(-1), np.frombuffer(bytes(image.data), np.uint8))
+    assert stamp == pytest.approx(stamp_seconds(image.header.stamp), abs=1e-6)
+    assert brightness == pytest.approx(node.pubs[BRIGHTNESS_TOPIC].sent[0].illuminance)
+    name, fx, _fy, cx, _cy, width, height = optics.split()
+    info = node.pubs["/camera/camera_info"].sent[0]
+    assert name == "rectified-left" and (int(width), int(height)) == (800, 600)
+    assert (float(fx), float(cx)) == pytest.approx((info.k[0], info.k[2]), abs=1e-3)
+    node._report()
+    line = node.logger.texts("info")[-1]
+    assert "publish period" in line and "fake feed" in line
+
+
+def test_the_feed_s_flag_and_knobs_are_live(build: Build) -> None:
+    """perception_feed off: nothing is offered and the line says so; the quality and the rate
+    reach the feed for the next frame."""
+    node, _ = build()
+    feed: FakeFeed = node._feed  # type: ignore[assignment]
+    assert node.set_parameters([Param("perception_quality", 80)])[0].successful
+    assert node.set_parameters([Param("perception_hz", 10.0)])[0].successful
+    assert (feed.quality, feed.hz) == (80, 10.0)
+    assert node.set_parameters([Param("perception_feed", False)])[0].successful
+    node._publish(np.zeros((720, 1280, 3), np.uint8), 1.0)
+    assert feed.offered == [] and node.pubs["/camera/image"].sent, "published, not offered"
+    node._report()
+    assert "perception off" in node.logger.texts("info")[-1]
+    assert node.set_parameters([Param("perception_feed", True)])[0].successful
+    node._publish(np.zeros((720, 1280, 3), np.uint8), 2.0)
+    assert len(feed.offered) == 1 and feed.offered[0][2].startswith("raw ")
 
 
 # ---- the switches ----------------------------------------------------------------------------
@@ -767,7 +836,8 @@ def test_the_stereo_report_line_names_the_rig_the_evidence_and_every_stage(
     for stage in ("decode", "split", "rectify", "publish"):
         assert f"{stage} " in line.split("stages: ")[1]
     assert (
-        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=1.0" in line
+        "flags: camera_stamp=grab undistort=off fold_mask=on perception_feed=on"
+        " static_camera_tf=off scale=1.0" in line
     )
 
 
@@ -825,8 +895,9 @@ def test_the_mono_rig_is_exactly_the_node_it_always_was(build: Build) -> None:
     node._report()
     line = node.logger.texts("info")[-1]
     assert line.endswith(
-        "flags: camera_stamp=grab undistort=off fold_mask=on static_camera_tf=off scale=0.5"
-        " camera_stamp_lag_s=0.0"
+        "flags: camera_stamp=grab undistort=off fold_mask=on perception_feed=on"
+        " static_camera_tf=off scale=0.5"
+        " camera_stamp_lag_s=0.0 perception_hz=20.0 perception_quality=90"
     )
 
 

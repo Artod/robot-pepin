@@ -105,7 +105,7 @@ class FakeFinder:
     frames: list[FaceFrame] = field(default_factory=list)
     looks: int = 0
 
-    def look(self) -> FaceFrame | None:
+    def look(self, not_before: float | None = None) -> FaceFrame | None:
         """The next scripted frame."""
         self.looks += 1
         if not self.frames:

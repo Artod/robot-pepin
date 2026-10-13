@@ -27,8 +27,8 @@ class FaceKnobs:
     margin: float = 0.08
     stranger: float = 0.25
     sure: float = 0.55
-    min_px: float = 40.0
-    strong_px: float = 60.0
+    min_px: float = 34.0  # the rectified eye's pixels (fx 454.5): 40 in the raw eye's
+    strong_px: float = 52.0  # 60 in the raw eye's
     max_yaw_deg: float = 45.0
     min_det: float = 0.7
     min_sharpness: float = 10.0

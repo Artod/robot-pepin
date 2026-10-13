@@ -1,8 +1,12 @@
 """Who a face is: the speaker's face picked out of a picture, judged worth believing, embedded.
 
-Faces come from the head camera's pictures the expression finder takes
-(:class:`pepin.expression.finder.SnapshotFinder`; each sighting carries its detection and the
-frame its picture). While the speaker gaze tracks the person, the face it centred is the
+Faces come from the expression finder. On the one camera channel
+(:class:`pepin.expression.finder.ServiceFinder`) each sighting carries its detection and its
+crop's measures and the frame its number in the perception service's ring: the gate reads the
+measures and the service embeds the face (:class:`ServiceIdentity`), so no picture enters this
+process. On the snapshot path (:class:`pepin.expression.finder.SnapshotFinder`) the frame
+carries its picture and the net runs here (:class:`IdentityNet`); :class:`RoutedIdentity` takes
+each shot the way it came. While the speaker gaze tracks the person, the face it centred is the
 speaker's; otherwise the widest face is, but only when it is ``dominance`` times wider than the
 next (a crowd of alike faces names nobody). A face counts only when :func:`gate` passes it:
 ``min_px`` wide, the detector's score, the five-point yaw (a profile is no evidence), a crop
@@ -21,6 +25,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import TYPE_CHECKING, Protocol
 
 import numpy as np
 from numpy.typing import NDArray
@@ -30,8 +35,12 @@ from pepin.expression.speaker import FaceFrame, FaceSighting
 from pepin.face_sensor.geometry import crop_box
 from pepin.face_sensor.identity import Vector
 from pepin.face_sensor.models import Detection, Embedder
-from pepin.face_sensor.quality import measure
+from pepin.face_sensor.quality import Quality, measure
 from pepin.people.config import FaceKnobs
+
+if TYPE_CHECKING:
+    from pepin.perception.client import Perception
+    from pepin.perception.source import VisionSource
 
 logger = logging.getLogger(__name__)
 
@@ -40,12 +49,15 @@ Image = NDArray[np.uint8]
 
 @dataclass(frozen=True)
 class Shot:
-    """One face to identify: the picture it is in, its detection, and whether it is the
-    speaker's (the gaze's tracked face, or the dominant one)."""
+    """One face to identify: the picture it is in (None when the frame stayed in the perception
+    service: then its number there and the crop's measures the service took), its detection,
+    and whether it is the speaker's (the gaze's tracked face, or the dominant one)."""
 
-    image: Image
+    image: Image | None
     detection: Detection
     speaker: bool
+    seq: int | None = None
+    quality: Quality | None = None
 
     @property
     def width(self) -> float:
@@ -55,7 +67,7 @@ class Shot:
 
 def gate(shot: Shot, knobs: FaceKnobs) -> str:
     """``ok``, or why the face is no evidence (``small``, ``doubtful``, ``turned``, ``blurry``,
-    ``dark``, ``bright``, ``no landmarks``)."""
+    ``dark``, ``bright``, ``no landmarks``, ``unmeasured``: neither a picture nor measures)."""
     det = shot.detection
     if len(det.kps) < 5:
         return "no landmarks"
@@ -66,7 +78,12 @@ def gate(shot: Shot, knobs: FaceKnobs) -> str:
     yaw = head_yaw_deg(det)
     if yaw is not None and abs(yaw) > knobs.max_yaw_deg:
         return "turned"
-    q = measure(crop_box(shot.image, det.box))
+    if shot.quality is not None:
+        q = shot.quality
+    elif shot.image is not None:
+        q = measure(crop_box(shot.image, det.box))
+    else:
+        return "unmeasured"
     if q.brightness < knobs.min_brightness:
         return "dark"
     if q.brightness > knobs.max_brightness:
@@ -83,9 +100,10 @@ def strong(shot: Shot, knobs: FaceKnobs) -> bool:
 
 def shots(frame: FaceFrame, speaker: FaceSighting | None, dominance: float) -> list[Shot]:
     """Every face of ``frame`` that carries its detection, the speaker's marked: ``speaker``
-    when the gaze picked one, else the widest when it is ``dominance`` times the next."""
+    when the gaze picked one, else the widest when it is ``dominance`` times the next. A frame
+    needs its picture or its number in the perception service's ring."""
     image = frame.image
-    if image is None:
+    if image is None and frame.seq is None:
         return []
     faces = [f for f in frame.faces if f.detection is not None]
     if not faces:
@@ -100,8 +118,127 @@ def shots(frame: FaceFrame, speaker: FaceSighting | None, dominance: float) -> l
     out = []
     for f in faces:
         assert f.detection is not None
-        out.append(Shot(image, f.detection, f is chosen))
+        measured = (
+            Quality(f.sharpness, f.brightness)
+            if f.sharpness is not None and f.brightness is not None
+            else None
+        )
+        out.append(Shot(image, f.detection, f is chosen, frame.seq, measured))
     return out
+
+
+class FaceNet(Protocol):
+    """What person recognition embeds faces with: :class:`IdentityNet` in this process,
+    :class:`ServiceIdentity` through the perception service, :class:`RoutedIdentity` both."""
+
+    @property
+    def name(self) -> str:
+        """The model's name: the key its samples are filed under in the store."""
+        ...
+
+    @property
+    def loaded(self) -> bool:
+        """Whether the net is in memory (here or in the service)."""
+        ...
+
+    def warm(self) -> None:
+        """Load it now."""
+        ...
+
+    def embed(self, shot: Shot) -> Vector:
+        """The unit-length embedding of ``shot``'s face; raises when there is none."""
+        ...
+
+    def unload(self) -> bool:
+        """Let this process's net go; whether it was loaded."""
+        ...
+
+
+class ServiceIdentity:
+    """:class:`FaceNet` through the perception service's ``/embed``: the shot's frame number
+    and detection go there, never pixels; the service loads ArcFace on demand and lets it go
+    when idle."""
+
+    def __init__(self, service: Perception, name: str) -> None:
+        """``name``: the model the service runs (config/people.json's ``face.model`` stem, the
+        same file the service loads)."""
+        self.service, self._name = service, name
+        self.requests = 0
+
+    @property
+    def name(self) -> str:
+        """The model's name."""
+        return self._name
+
+    @property
+    def loaded(self) -> bool:
+        """The service holds it (it loads at the first embedding)."""
+        return True
+
+    def warm(self) -> None:
+        """Nothing here: the service loads its net at the first embedding (0.1 s)."""
+
+    def embed(self, shot: Shot) -> Vector:
+        """The service's embedding; ``RuntimeError`` when it gives none."""
+        if shot.seq is None:
+            raise ValueError("a face with no frame number cannot be embedded by the service")
+        vector = self.service.embed(shot.seq, shot.detection)
+        if vector is None:
+            why = getattr(self.service, "last_error", "") or "no answer"
+            raise RuntimeError(f"the perception service gave no embedding ({why})")
+        self.requests += 1
+        return vector
+
+    def unload(self) -> bool:
+        """Nothing is held here."""
+        return False
+
+
+class RoutedIdentity:
+    """:class:`FaceNet` for both camera paths: a shot with its picture (the snapshot path) is
+    embedded by the net in this process, a shot by frame number by the service; ``warm`` loads
+    the local net only while ``vision.source`` says snapshot, so with the service nothing loads
+    here."""
+
+    def __init__(
+        self,
+        local: IdentityNet | None,
+        remote: ServiceIdentity | None,
+        source: VisionSource,
+        name: str,
+    ) -> None:
+        self.local, self.remote, self.source, self._name = local, remote, source, name
+
+    @property
+    def name(self) -> str:
+        """The model's name (both paths run the same file)."""
+        return self._name
+
+    @property
+    def loaded(self) -> bool:
+        """Whether the path in use holds its net."""
+        if self.source.service:
+            return self.remote is not None
+        return self.local is not None and self.local.loaded
+
+    def warm(self) -> None:
+        """The local net, while the source is the snapshot path."""
+        if not self.source.service and self.local is not None:
+            self.local.warm()
+
+    def embed(self, shot: Shot) -> Vector:
+        """By the shot's kind: pixels here, a frame number at the service."""
+        if shot.image is None:
+            if self.remote is None:
+                raise RuntimeError("no perception service to embed a face by frame number")
+            return self.remote.embed(shot)
+        if self.local is None:
+            raise RuntimeError("no identity net in this process (config/people.json face.model)")
+        return self.local.embed(shot)
+
+    def unload(self) -> bool:
+        """Let the local net go."""
+        return self.local.unload() if self.local is not None else False
 
 
 class IdentityNet:
@@ -132,7 +269,9 @@ class IdentityNet:
         self._get()
 
     def embed(self, shot: Shot) -> Vector:
-        """The unit-length embedding of ``shot``'s face."""
+        """The unit-length embedding of ``shot``'s face (a shot with its picture)."""
+        if shot.image is None:
+            raise ValueError("this net embeds a face in a picture; this shot has none")
         net = self._get()
         self.last_used = self._clock()
         return net.embed(shot.image, shot.detection)

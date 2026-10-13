@@ -67,7 +67,9 @@ class FaceSighting:
     down), its box width in pixels, the detector's score, who it is when the finder knows, how
     far the head is turned from the camera (degrees, from the detector's five points; 0 faces
     the robot) when the finder reads it, and the detection itself (box and five points: what
-    person recognition aligns the face on) when the finder keeps it."""
+    person recognition aligns the face on) when the finder keeps it; a finder that keeps no
+    pixels (the perception service's) gives the crop's sharpness and brightness instead, the
+    measures person recognition's gate reads."""
 
     pan_deg: float
     tilt_deg: float
@@ -76,6 +78,8 @@ class FaceSighting:
     who: str | None = None
     yaw_deg: float | None = None
     detection: Detection | None = field(default=None, compare=False, repr=False)
+    sharpness: float | None = field(default=None, compare=False, repr=False)
+    brightness: float | None = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -98,20 +102,25 @@ class BodySighting:
 @dataclass(frozen=True)
 class FaceFrame:
     """The faces of one frame, its capture time (the camera's own stamp), when the finder keeps
-    it the picture (BGR) the faces were found in, and the people's boxes when it has a body
-    detector."""
+    it the picture (BGR) the faces were found in, the people's boxes when it has a body
+    detector, and the frame's number in the perception service's ring when it came from there
+    (what person recognition names a face by, in place of the pixels)."""
 
     stamp: float
     faces: tuple[FaceSighting, ...]
     image: NDArray[np.uint8] | None = field(default=None, compare=False, repr=False)
     bodies: tuple[BodySighting, ...] = ()
+    seq: int | None = field(default=None, compare=False)
 
 
 class FaceFinder(Protocol):
     """Faces on demand: one frame from the head camera, searched now (never a stream)."""
 
-    def look(self) -> FaceFrame | None:
-        """The faces in a fresh frame; None when no frame came."""
+    def look(self, not_before: float | None = None) -> FaceFrame | None:
+        """The faces in a fresh frame; None when no frame came. ``not_before``: the board-clock
+        moment from which a frame is still (the arbiter's ``blind_until``): a finder that reads
+        frames already taken waits for one exposed after it; one that takes its picture now may
+        ignore it."""
         ...
 
 

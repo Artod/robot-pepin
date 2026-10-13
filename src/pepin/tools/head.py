@@ -6,6 +6,11 @@ at rest alone). A look holds the head for ten seconds, ``see`` keeps it there, a
 goes home by itself, so no tool turns it back. What was seen is ``world``'s: a sweep only
 reports the sightings the memory filed while the head dwelt at each direction, so no picture is
 judged here.
+
+``see`` takes the FIRST STILL FRAME: the arbiter says from which moment (the board's clock) the
+head's pictures are still, and the camera (the perception service's ring) gives the newest frame
+exposed after it, waiting up to the robot's ``still_wait_s`` (0.3 s) in all, the head's own way
+there included; past it, the newest frame there is, marked ``still: false``.
 """
 
 from __future__ import annotations
@@ -23,6 +28,7 @@ from pepin.tools.robot import Robot
 SWEEP_PANS_DEG = (120.0, 60.0, 0.0, -60.0, -120.0)  # ~83 deg of view each: they overlap
 DWELL_S = 2.0  # at each direction of a sweep, what the memory files in this long is what was seen
 MAX_SEEN = 8  # labels reported per direction
+STILL_POLL_S = 0.05  # see: the arbiter asked this often while the head is still on its way
 
 
 @tool
@@ -72,14 +78,23 @@ def see(robot: Robot) -> Result:
     (pan_deg left +, tilt_deg down +). This is what answers "what do you see?" or "look at me":
     call it alone; the head already faces forward. Only to see another direction, turn the head
     with look first. Seeing keeps the head where look put it a while longer."""
-    picture = robot.camera.snapshot()
+    start = robot.clock()
+    still_from: float | None = None
     try:
-        head: dict[str, Any] = robot.neck.pose().as_dict()
+        pose = robot.neck.pose()
+        while pose.moving and robot.clock() - start < robot.still_wait_s:
+            robot.sleep(STILL_POLL_S)  # the head is on its way: the first still frame is wanted
+            pose = robot.neck.pose()
+        head: dict[str, Any] = pose.as_dict()
+        still_from = pose.still_from
     except ToolError as error:
         head = {"head": f"unknown: {error.why}"}
+    left = max(0.0, robot.still_wait_s - (robot.clock() - start))
+    picture = robot.camera.snapshot(not_before=still_from, wait_s=left)
     with contextlib.suppress(ToolError):
         robot.neck.keep()
-    return ok(image=picture, **head)
+    extra = {"frame": picture.frame} if picture.frame else {}
+    return ok(image=picture, **head, **extra)
 
 
 def sweep(robot: Robot, skip: float | None = None) -> list[float]:
