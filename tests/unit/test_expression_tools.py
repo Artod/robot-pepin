@@ -9,7 +9,7 @@ from pepin.arm_motion import load_arm_motion
 from pepin.expression.animator import EngineConfig, GestureEngine
 from pepin.expression.arm_link import ArmClient
 from pepin.expression.book import load_book, with_rest
-from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakePlayout
+from pepin.expression.fakes import FakeArmLink, FakeExecutor, FakePlaces, FakePlayout
 from pepin.expression.parts import ArmPart
 from pepin.expression.trajectory import ArmStatus, Knot, Trajectory
 from pepin.tools import TOOLS
@@ -67,6 +67,25 @@ def test_the_tool_on_the_real_engine_sends_the_arm_a_trajectory() -> None:
         now[0] += 0.05
         engine.step()
     assert [name for name, _ in link.calls].count("send") == 1
+
+
+def test_a_person_s_ask_takes_a_mark_with_its_argument_and_the_book_s_spellings() -> None:
+    """``perform("point:printer")`` (the tool's and the command line's door) points at the
+    room's place; ``count:second`` is ``count:2``; ``!`` the accent; a bare ``point`` its first
+    argument (you); a name with no such argument is refused with the book's names."""
+    rows: list[tuple[str, dict[str, object]]] = []
+    engine = GestureEngine(
+        {"arm": FakeExecutor("arm"), "face": FakeExecutor("face"), "head": FakeExecutor("head")},
+        FakePlayout(), lambda: (BOOK, EngineConfig(arm_speed_scale=1.0, seed=2)), on=True,
+        clock=lambda: 10.0, record=lambda kind, fields: rows.append((kind, fields)),
+    )  # fmt: skip
+    engine.resolver.room = FakePlaces({"printer": 10.0})
+    for ask in ("point:printer", "count:second", "!", "point"):
+        assert engine.perform(ask, source="tool").ok, ask
+    shown = [(f["intent"], f["arg"]) for k, f in rows if k == "performance"]
+    assert shown == [("point", "printer"), ("count", "2"), ("accent", None), ("point", None)]
+    refused = engine.perform("size:enormous", source="tool")
+    assert not refused.ok and "point:printer" in refused.why
 
 
 def test_the_link_reads_the_arm_s_state_and_the_board_s_answers() -> None:

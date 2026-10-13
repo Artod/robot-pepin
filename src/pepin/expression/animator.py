@@ -94,6 +94,7 @@ from pepin.expression.animation import (
     Performance,
     Scene,
 )
+from pepin.expression.book import vocabulary
 from pepin.expression.conversation import (
     GESTURES,
     AudioTap,
@@ -103,7 +104,7 @@ from pepin.expression.conversation import (
     moment_rank,
 )
 from pepin.expression.executors import Executor, Outcome, Renewing
-from pepin.expression.markers import Cue, Part, Playout, cues
+from pepin.expression.markers import Cue, Part, Playout, cues, gesture
 from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart, HeadPart
 from pepin.expression.render import BookRenderer, Resolver, WeightedChooser
@@ -348,8 +349,10 @@ class GestureEngine:
     # -- the animator ----------------------------------------------------------------------------
 
     def perform(self, intent: str, *, source: str) -> Outcome:
-        """Perform ``intent`` now (a tool, the command line): refused while off, during a
-        drive, for an intent the book lacks, or when no part can play."""
+        """Perform ``intent`` now (a tool, the command line): a composition's name, or a mark
+        as the brain writes one, its argument after a colon and the book's other spellings
+        (``point:printer``, ``count:second``, ``!``); refused while off, during a drive, for
+        what the book does not hold, or when no part can play."""
         if self._thread is None or threading.current_thread() is self._thread:
             return self._perform_now(intent, source)
         future: concurrent.futures.Future[Outcome] = concurrent.futures.Future()
@@ -646,13 +649,16 @@ class GestureEngine:
                 )
             if self._driving:
                 return Outcome(False, "a drive is under way: the body is the drive's")
-            if intent not in self.book.compositions:
+            asked = self._asked(intent)
+            if asked is None:
                 return Outcome(
                     False,
-                    f"no gesture {intent!r}; the gestures are {', '.join(self.book.compositions)}",
+                    f"no gesture {intent!r}; the gestures are {', '.join(self.book.compositions)}"
+                    " (an argument after a colon: point:printer)",
                 )
-            request = Request(intent, None, Priority.ASK, source)
-            performance = self._render(intent, source, None, request)
+            name, arg = asked
+            request = Request(name, None, Priority.ASK, source)
+            performance = self._render(name, source, None, request, arg=arg)
             if performance is None:
                 return Outcome(False, "no part can play it now")
             outcomes = self._place(request, performance, None, rendered=True)
@@ -663,6 +669,14 @@ class GestureEngine:
             c.offset_s for c in performance.clips
         )
         return Outcome(True, f"seed {performance.seed}, variant {performance.variant}", seconds)
+
+    def _asked(self, intent: str) -> tuple[str, str | None] | None:
+        """A person's ask as a composition and its argument: a composition's name as it is
+        (its first argument when it takes one), else read as a marker's inside is."""
+        if intent in self.book.compositions:
+            return intent, None
+        named = gesture(intent, vocabulary(self.book, frozenset()))
+        return None if named is None else (named[1], named[2])
 
     def _request(
         self, request: Request, cue: Cue | None = None, *, moment: str | None = None
@@ -743,11 +757,12 @@ class GestureEngine:
         request: Request,
         *,
         counted: bool = True,
+        arg: str | None = None,
     ) -> Performance | None:
-        """``intent`` rendered for the parts ready now, the arm's and the body's clips stretched
-        to their speed scales (the arm left out past ``arm_per_minute``, unless the performance
-        is not ``counted``: an accent, a series' later item); logged with its seed. None when it
-        cannot be played."""
+        """``intent`` rendered for the parts ready now (``arg``: an ask's argument), the arm's
+        and the body's clips stretched to their speed scales (the arm left out past
+        ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
+        later item); logged with its seed. None when it cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
@@ -756,7 +771,7 @@ class GestureEngine:
         for hook in self.scene_hooks:
             scene = hook(scene, request)
         seed = self.config.seed if self.config.seed is not None else self.seeds.randrange(2**31)
-        performance = self.renderer.render(intent, scene, seed, cue)
+        performance = self.renderer.render(intent, scene, seed, cue, arg=arg)
         scales = {"arm": self.config.arm_speed_scale, "body": self.config.body_speed_scale}
         clips = tuple(
             stretched(c, 1.0 / scales[c.part]) if c.part in scales else c for c in performance.clips
@@ -772,10 +787,11 @@ class GestureEngine:
         now = self.clock()
         arm = any(c.part == "arm" for c in clips)
         self._started.append((now, intent, arm, counted))  # the arm's: see _place
-        self._used[_mark(intent, cue)] = now
+        self._used[_mark(intent, cue, arg)] = now
         self._last = performance
         self.record("performance", {
-            "intent": intent, "source": source, "seed": performance.seed,
+            "intent": intent, "arg": cue.marker.arg if cue else arg,
+            "source": source, "seed": performance.seed,
             "variant": performance.variant, "parts": [c.part for c in clips],
             "turn": cue.turn if cue else None, "part": cue.index if cue else None,
             "share": round(cue.share, 3) if cue else None, "arm_at": scene.arm_at,
@@ -1031,10 +1047,11 @@ class GestureEngine:
         )
 
 
-def _mark(intent: str, cue: Cue | None) -> str:
-    """A mark as its cooldown knows it: the intent, with the argument its marker gave
-    (``point:you`` and ``point:printer`` are two)."""
-    arg = cue.marker.arg if cue is not None and cue.marker.name == intent else None
+def _mark(intent: str, cue: Cue | None, arg: str | None = None) -> str:
+    """A mark as its cooldown knows it: the intent, with the argument its marker (or an ask)
+    gave (``point:you`` and ``point:printer`` are two)."""
+    if cue is not None:
+        arg = cue.marker.arg if cue.marker.name == intent else None
     return intent if arg is None else f"{intent}:{arg}"
 
 

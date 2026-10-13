@@ -116,8 +116,9 @@ class Animator(Protocol):
     on that part's audio itself; :meth:`perform` is the door of the tool and the command line."""
 
     def perform(self, intent: str, *, source: str) -> Outcome:
-        """Perform ``intent`` now; refused when the gestures are off, a drive runs, or the book
-        has no such intent."""
+        """Perform ``intent`` now (a composition's name, or ``name:arg`` as a marker writes it:
+        ``point:printer``); refused when the gestures are off, a drive runs, or the book has no
+        such intent."""
         ...
 
     def hush(self, why: str) -> None:

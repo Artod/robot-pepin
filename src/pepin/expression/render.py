@@ -165,9 +165,11 @@ class Resolver:
 
     # -- the marker ------------------------------------------------------------------------------
 
-    def meaning(self, composition: Composition, cue: Cue | None) -> Meaning:
-        """The meaning of ``cue``'s argument for ``composition``."""
-        arg = cue.marker.arg if cue is not None and cue.marker.name == composition.name else None
+    def meaning(self, composition: Composition, cue: Cue | None, arg: str | None = None) -> Meaning:
+        """The meaning of ``cue``'s argument for ``composition`` (without a cue: ``arg``, a
+        person's ask's)."""
+        if cue is not None:
+            arg = cue.marker.arg if cue.marker.name == composition.name else None
         if arg is None:
             arg = next((a for a in composition.args if a != "*"), None)
         turn = cue.turn if cue is not None else None
@@ -487,16 +489,18 @@ class BookRenderer:
         cue: Cue | None = None,
         *,
         variant: int | None = None,
+        arg: str | None = None,
     ) -> Performance:
         """The performance of ``intent`` (``variant`` forces one, for a replay or a rung of the
-        ladder); ``KeyError`` for an intent the book does not hold. The brain's marker rendered
-        first (``cue`` and no ``variant``) places its catchment; a repeat of it in the same
+        ladder; ``arg``: a person's ask's argument, with no cue); ``KeyError`` for an intent the
+        book does not hold. The brain's marker rendered first (``cue`` and no ``variant``), or
+        an ask with its argument, places its catchment; a repeat of the marker in the same
         reply, or a variant written for another argument, renders no clips."""
         composition = self.book.compositions[intent]
         rng = random.Random(seed)
         resolver = self.resolver
-        meaning = resolver.meaning(composition, cue)
-        first = variant is None and cue is not None
+        meaning = resolver.meaning(composition, cue, arg)
+        first = variant is None and (cue is not None or arg is not None)
         ctx = Context(self.book, composition, meaning, commit=first)
 
         def fits(v: Variant) -> bool:

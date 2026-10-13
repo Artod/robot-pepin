@@ -7,6 +7,7 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py halt                     # stop where it is (held, then rest)
     uv run python scripts/gesture.py play greeting --speed 0.2
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
+    uv run python scripts/gesture.py play point:printer --dry-run   # a mark with its argument
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
     uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
     uv run python scripts/gesture.py turn 10                  # the wheels: 10 deg left in place
@@ -14,7 +15,9 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py turn -10 --dry-run       # every check, nothing moves
 
 ``play`` renders the intent from config/animation.json (seed and variant printed, so a run is
-replayed with them), stretches its arm clip by 1/speed, checks it against config/arm.json's
+replayed with them; a mark's argument after a colon, as the brain writes it, a place's name
+read once from the goal server's places book and the robot's pose, the person straight
+ahead), stretches its arm clip by 1/speed, checks it against config/arm.json's
 limits and caps scaled by the speed, and sends it to the base server, which plays it by itself
 and rests; the face's expressions go to the head server (source ``expression``); the head's
 clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds the head
@@ -43,16 +46,20 @@ from typing import Any
 
 from pepin.arm_motion import ArmMotion, load_arm_motion
 from pepin.audio_link import board_host
-from pepin.expression.animation import Clip, Scene, Track
+from pepin.expression.animation import Book, Clip, Scene, Track
 from pepin.expression.arm_link import ArmClient
-from pepin.expression.book import book_from, load_book, with_rest
+from pepin.expression.book import book_from, load_book, vocabulary, with_rest
 from pepin.expression.door import OverlayDoor
 from pepin.expression.head import GESTURE, ClipLook
+from pepin.expression.markers import ANY, gesture
 from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
-from pepin.expression.render import BookRenderer
+from pepin.expression.places import GoalPlaces, Room
+from pepin.expression.render import BookRenderer, Resolver
 from pepin.expression.trajectory import JOINTS, Trajectory
 from pepin.neck import NeckConfig
+from pepin.tools.clients import GoalServerLink
+from pepin.tools.robot import Endpoints
 
 REPO = Path(__file__).resolve().parents[1]
 BOOK = REPO / "config" / "animation.json"
@@ -113,19 +120,59 @@ def simple(host: str, cmd: str) -> int:
     return 0 if reply is not None else 3
 
 
+def asked(text: str, book: Book) -> tuple[str, str | None] | None:
+    """``play``'s NAME as a composition and its argument: a composition's name as it is (its
+    first argument when it takes one), else as the brain writes a mark (``point:printer``,
+    ``count:second``, ``!``)."""
+    if text in book.compositions:
+        return text, None
+    named = gesture(text, vocabulary(book, frozenset()))
+    return None if named is None else (named[1], named[2])
+
+
+def room_for(book: Book, name: str, arg: str | None) -> Room | None:
+    """The goal server's places, read once, for a mark that may name one (None: none needed);
+    where the argument points, printed."""
+    takes = book.compositions[name].args
+    if arg is None or ANY not in takes or arg in takes:
+        return None
+    where = Endpoints.from_env()
+    room = GoalPlaces(GoalServerLink(where.goal_host, where.goal_port))
+    room.refresh()
+    found = room.find(arg)
+    if not room.known():
+        print(f"  {arg}: the goal server did not answer: no place is known (its floor)")
+    elif found is None:
+        print(f"  {arg}: no place of that name: a referent (the first spot)")
+    else:
+        there = room.where(found)
+        how = "no fresh pose" if there is None else f"{there[0]:+.0f} deg, {there[1]:.1f} m"
+        print(f"  {arg}: the place {found}, {how}")
+    return room
+
+
 def play(args: argparse.Namespace, motion: ArmMotion) -> int:
     book = with_rest(load_book(BOOK), motion.rest_deg)
-    if args.name not in book.compositions:
-        print(f"no gesture {args.name!r}; the gestures are {', '.join(book.compositions)}")
+    found = asked(args.name, book)
+    if found is None:
+        print(f"no gesture {args.name!r}; the gestures are {', '.join(book.compositions)}"
+              " (an argument after a colon: point:printer)")  # fmt: skip
         return 2
+    name, arg = found
     if not 0.0 < args.speed <= 1.0:
         print("--speed: above 0, at most 1")
         return 2
     seed = args.seed if args.seed is not None else int(time.time()) % 2**31
     scene = Scene(frozenset({"arm", "face", "head"}))
-    performance = BookRenderer(book).render(args.name, scene, seed, variant=args.variant)
-    print(f"{args.name}: seed {seed}, variant {performance.variant}"
+    renderer = BookRenderer(book, resolver=Resolver(room=room_for(book, name, arg)))
+    performance = renderer.render(name, scene, seed, variant=args.variant, arg=arg)
+    mark = name if arg is None else f"{name}:{arg}"
+    print(f"{mark}: seed {seed}, variant {performance.variant}"
           f" (replay: --seed {seed} --variant {performance.variant})")  # fmt: skip
+    if not performance.clips:
+        print("  nothing plays: a variant written for another argument, or a place past both the"
+              " arm's and the head's reach")  # fmt: skip
+        return 2
     part = ArmPart(_NoLink(), motion, speed_scale=args.speed, knot_hz=args.knot_hz)
     limits = NeckLimits.of(NeckConfig.from_json(NECK).motion)
     trajectory: Trajectory | None = None
@@ -136,7 +183,7 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         at = clip.offset_s - start
         if clip.part == "arm":
             slow = clip
-            plan = part.plan(slow, args.name)
+            plan = part.plan(slow, name)
             if isinstance(plan, str):
                 print(f"  arm: refused here: {plan}")
                 return 3
