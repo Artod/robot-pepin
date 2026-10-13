@@ -81,6 +81,7 @@ from pepin.perception.source import KNOB as VISION_KNOB
 from pepin.perception.source import SOURCES as VISION_SOURCES
 from pepin.perception.source import VisionSource
 from pepin.tools import TOOLS, Robot
+from pepin.tools.clients import ChannelSightings
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
 from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import (
@@ -623,6 +624,8 @@ def main() -> int:
     if on_robot:  # the robot, its array, its head
         assert isinstance(mic, BoardLink)
         gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face, wheels=wheels)
+        # the approach tool's speaker: the person this gaze holds, on the channel's own frames
+        robot.sightings = ChannelSightings(perception, vision, gaze, wait_s=channel.look_wait_s)
 
     body = Body.build(
         args.host,

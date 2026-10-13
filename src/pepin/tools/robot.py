@@ -29,9 +29,9 @@ from pepin.tools.clients import (
     BoardSpeech,
     Body,
     Camera,
+    ChannelSightings,
     Eyes,
     Face,
-    FaceSensorSightings,
     GazeNeck,
     GoalServer,
     GoalServerLink,
@@ -161,7 +161,7 @@ class Robot:
             face=HeadFace(where.board, where.head_port),
             body=BaseBody(where.board, where.base_port),
             eyes=stereo_eyes(where.board, where.camera_port, where.depth_url, neck, goals),
-            sightings=FaceSensorSightings(),
+            sightings=ChannelSightings(service, source, wait_s=channel.look_wait_s),
             still_wait_s=channel.see_wait_s,
         )
 

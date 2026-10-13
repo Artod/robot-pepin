@@ -1,8 +1,10 @@
 """Going up to someone or something and standing in a relation to it.
 
 One tool and two words from the model, the target and the relation; the rest is the robot's.
-The target becomes a map point — the speaker's face through :mod:`pepin.pixel_to_map`
-(``robot.eyes``), a place from the book, or a box of the last ``see`` picture — and the relation a
+The target becomes a map point through :mod:`pepin.pixel_to_map` (``robot.eyes``: stereo depth
+in the box's own pixel space) — the person the robot talks with (``robot.sightings``: the one the
+speaker gaze holds, their face or body box on the camera channel's newest still frame), a place
+from the goal server's book, or a box of the last ``see`` picture — and the relation a
 standing pose with two alternatives (:mod:`pepin.stand_pose`). Each is asked of the goal server's
 ``plan`` (RTAB-Map's map cell and one plan: never motion, because the navigator answers a refused
 goal by turning and backing up) until one would be driven, and that ONE goal is driven by
@@ -16,8 +18,8 @@ import math
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from pepin.perception.record import RAW_LEFT
 from pepin.stand_pose import Distances, Relation, Stand, Target, facing_from, stands
+from pepin.tools.clients import HeadPose
 from pepin.tools.drive import drive, pose_on_map
 from pepin.tools.registry import Result, ToolError, fail, tool
 from pepin.tools.robot import Robot
@@ -26,6 +28,7 @@ if TYPE_CHECKING:  # numpy's module, loaded when a target is located
     from pepin.pixel_to_map import Box, Located, Pose2D
 
 SPEAKER = ("me", "speaker", "person")  # the target words that mean the person speaking
+STILL_POLL_S = 0.05  # the head asked this often while it is still on its way (as see asks)
 
 
 @dataclass(frozen=True)
@@ -50,10 +53,10 @@ def approach(
     to a person. For a plain named place go_to is enough.
 
     Args:
-        target: "me" for the person speaking (the face the robot sees; if it sees none, ask
-            them to face it); a place name exactly as list_places gives it; or a thing in the
-            picture of your last see() as its box "x0,y0,x1,y1" in pixels of that picture
-            (call see() again first if the head has turned since).
+        target: "me" for the person speaking (the one the robot looks at; if it sees nobody,
+            ask them to step into view or face it); a place name exactly as list_places gives
+            it; or a thing in the picture of your last see() as its box "x0,y0,x1,y1" in pixels
+            of that picture (call see() again first if the head has turned since).
         relation: to (about 0.8 m away, facing it), right_of or left_of (a person's own right
             or left; a thing's as the robot sees it), in_front_of, beside (the nearer side),
             behind.
@@ -113,7 +116,7 @@ def resolve(robot: Robot, target: str, here: Pose2D, distances: Distances) -> Re
     if box is not None:
         return _thing(robot, box, distances)
     if words.lower() in SPEAKER:
-        return _speaker(robot, here)
+        return _speaker(robot, here, distances)
     known = ", ".join(sorted(book)) or "none yet"
     raise ToolError(
         f"target {target!r} is none of: 'me' (the person speaking), a place name ({known}),"
@@ -121,28 +124,53 @@ def resolve(robot: Robot, target: str, here: Pose2D, distances: Distances) -> Re
     )
 
 
-def _speaker(robot: Robot, here: Pose2D) -> Resolved:
-    """The nearest face the face sensor sees, located by depth; its facing from the head's yaw."""
-    sighting = robot.sightings.face()
+def _speaker(robot: Robot, here: Pose2D, distances: Distances) -> Resolved:
+    """The person the robot talks with (:meth:`pepin.tools.clients.Sightings.speaker`: the one
+    the speaker gaze holds, on the camera channel's newest frame since the head stood still),
+    located by depth in that frame's own pixels; their facing from their face's turn. Refused
+    when the head moved between the frame and the depth."""
+    head = still_head(robot)
+    sighting = robot.sightings.speaker(head)
     if sighting is None:
         raise ToolError(
-            "no face in view: ask the person to turn to the robot (it sees faces up to about"
-            " 3.5 m), or turn the head toward them with look first; nothing moved"
+            "nobody in view: ask the person to step in front of the robot or turn to it (faces"
+            " are seen up to about 3.5 m), or turn the head toward them with look first; nothing"
+            " moved"
         )
     from pepin.pixel_to_map import Box as Rectangle
 
-    located = _locate(robot, Rectangle(*sighting.box), RAW_LEFT, "the person")
-    yaw = sighting.head_yaw_deg if sighting.head_yaw_deg is not None else 0.0
+    located = _locate(robot, Rectangle(*sighting.box), sighting.space, "the person")
+    moved = max(
+        abs(math.degrees(located.head.pan_rad) - head.pan_deg),
+        abs(math.degrees(located.head.pitch_rad) - head.tilt_deg),
+    )
+    if moved > distances.head_moved_deg:
+        raise ToolError(
+            f"the head moved {moved:.0f} deg while the person was being measured, so the picture"
+            " and the depth disagree: ask again; nothing moved"
+        )
+    yaw = sighting.yaw_deg if sighting.yaw_deg is not None else 0.0
     facing = facing_from(located.x, located.y, here, yaw)
-    found: dict[str, Any] = {"kind": "person", "who": sighting.who, **located.as_dict()}
+    found: dict[str, Any] = {"kind": "person", "seen_by": sighting.kind, **located.as_dict()}
     found["facing_deg"] = round(math.degrees(math.atan2(math.sin(facing), math.cos(facing))))
-    if sighting.head_yaw_deg is None:
+    found["frame"] = sighting.seq
+    if sighting.yaw_deg is None:
         found["facing_note"] = "the head's turn was not read: taken as facing the robot"
-    if sighting.faces > 1:
-        found["note"] = f"{sighting.faces} faces in view: the nearest one was taken"
+    if sighting.people > 1:
+        found["note"] = f"{sighting.people} people in view: {sighting.chosen} was taken"
     target = Target("person", located.x, located.y, facing, located.sigma_m)
-    label = sighting.who or "the person"
-    return Resolved(target, found, (located.x, located.y, located.z), label)
+    return Resolved(target, found, (located.x, located.y, located.z), "the person")
+
+
+def still_head(robot: Robot) -> HeadPose:
+    """The head's pose once it has stopped (or after ``robot.still_wait_s`` on its way), as
+    ``see`` waits for it: the speaker's frame must be exposed after this pose's ``still_from``."""
+    start = robot.clock()
+    pose = robot.neck.pose()
+    while pose.moving and robot.clock() - start < robot.still_wait_s:
+        robot.sleep(STILL_POLL_S)
+        pose = robot.neck.pose()
+    return pose
 
 
 def _thing(robot: Robot, box: Box, distances: Distances) -> Resolved:

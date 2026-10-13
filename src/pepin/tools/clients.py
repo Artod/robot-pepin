@@ -5,7 +5,8 @@ is and the places are the goal server's (TCP 3337, :mod:`pepin.goal_link`), the 
 arbiter's (HTTP 3339 on this Mac, :mod:`pepin.gaze_link`), what is where is ``world``'s (HTTP
 8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the one camera
 channel's (the perception service, HTTP 8792 on this Mac, fed by camera_stream), or ustreamer's
-(HTTP 8080 on the board) while the live ``vision.source`` says snapshot.
+(HTTP 8080 on the board) while the live ``vision.source`` says snapshot; who stands in front of
+the robot is that channel's records, read with the speaker gaze's attention where one runs.
 Each client here speaks one of them and nothing else; none of them can send the wheels a twist.
 
 Every Protocol is what a tool relies on, so a fake stands in for a service in the tests
@@ -39,6 +40,7 @@ from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
 
 if TYPE_CHECKING:  # numpy's modules: loaded by the clients that use them
+    from pepin.expression.speaker import AttentionView
     from pepin.perception.client import Perception
     from pepin.perception.source import VisionSource
     from pepin.pixel_to_map import Box, Located, Pose2D
@@ -867,78 +869,151 @@ class BaseBody:
         )
 
 
-# -- sightings and the picture's points: the face sensor, and pepin.pixel_to_map's inputs ---------
+# -- the person in front of the robot, and the picture's points: pepin.pixel_to_map's inputs ----
+
+# The speaker gaze's own rule (config/expression.json speaker.match_deg, a contract test keeps
+# the two equal): a face or a body this near a person's bearing is that person.
+MATCH_DEG = 20.0
+CHANNEL_HINT = "Start it with ros/models.sh start perception (fed by camera_stream in pepin-vslam)"
 
 
 @dataclass(frozen=True)
-class FaceSighting:
-    """The nearest face the face sensor sees: its box in pixels of the raw left eye (the
-    picture ``see`` shows), who it is (a name, ``guest-N`` or None), the head's yaw when the
-    landmarker read it (degrees, positive when the person looks to their own left), and how
-    many faces were in the frame."""
+class PersonSighting:
+    """The person the robot talks with in one frame of the camera channel: their box in that
+    frame's pixels (``space``: the channel's rectified left eye), whether it is their ``face``
+    or their ``body``, their bearing in the cart's frame (degrees, + left), how far their head
+    is turned from the camera (degrees, + their own left; a face only), how many people the
+    frame holds, its number in the channel's ring, and how this person was chosen."""
 
     box: tuple[float, float, float, float]
-    who: str | None
-    head_yaw_deg: float | None
-    faces: int
-    age_s: float
+    space: str
+    kind: str
+    bearing_deg: float
+    yaw_deg: float | None
+    people: int
+    seq: int
+    chosen: str
 
 
 class Sightings(Protocol):
-    """Who is in front of the robot."""
+    """Who is in front of the robot (the approach tool's speaker)."""
 
-    def face(self) -> FaceSighting | None:
-        """The nearest face in view now; None when the sensor sees no face."""
+    def speaker(self, head: HeadPose) -> PersonSighting | None:
+        """The person the robot talks with, in a frame exposed while the head stood at ``head``
+        (from its ``still_from`` on); None when the frame shows nobody; :class:`ToolError`
+        (:class:`ServiceDownError`) saying why it cannot tell."""
         ...
 
 
-class FaceSensorSightings:
-    """:class:`Sightings` from the face sensor's ``latest.json`` (``scripts/face_sensor.py run``):
-    a missing or stale line means the sensor is not running, a fresh one without a face means
-    nobody is in view."""
+class ChannelSightings:
+    """:class:`Sightings` from the one camera channel (:mod:`pepin.perception`): the newest
+    record exposed since the head stood still, and in it the person the speaker gaze holds
+    (``attention``, its :class:`pepin.expression.speaker.AttentionView`: the face, else the body
+    box, within :data:`MATCH_DEG` of their bearing), else, with no gaze or nobody engaged, the
+    widest face (the nearest), else the tallest body box. The boxes are the record's own, in the
+    rectified left eye the frame is; nothing is detected or rectified here. While ``source``
+    (the live ``vision.source``) says snapshot the channel is not the camera, and the speaker is
+    not measured."""
 
-    HINT = "Is the face sensor running (uv run python scripts/face_sensor.py run)?"
+    def __init__(
+        self,
+        service: Perception,
+        source: VisionSource | None = None,
+        attention: AttentionView | None = None,
+        *,
+        wait_s: float = 0.4,
+        match_deg: float = MATCH_DEG,
+    ) -> None:
+        """``wait_s``: how long to wait for a record exposed after the head settled (config/
+        models.json perception.look_wait_s, the gaze's own wait)."""
+        self.service, self.source, self.attention = service, source, attention
+        self.wait_s, self.match_deg = wait_s, match_deg
 
-    def __init__(self, path: str | Path | None = None, max_age_s: float | None = None) -> None:
-        """The sensor's ``latest.json`` (data/face/ by default), older than ``max_age_s``
-        (the sensor's own staleness by default) counting as no sensor."""
-        from pepin.face_sensor.publish import DEFAULT_DIR, LATEST, STALE_S
+    def speaker(self, head: HeadPose) -> PersonSighting | None:
+        """See :meth:`Sightings.speaker`."""
+        from pepin.perception.record import RECTIFIED_LEFT
 
-        self.path = Path(path) if path is not None else DEFAULT_DIR / LATEST
-        self.max_age_s = STALE_S if max_age_s is None else max_age_s
-
-    def face(self) -> FaceSighting | None:
-        """The newest line's face."""
-        import time
-
-        try:
-            record = json.loads(self.path.read_text())
-        except (OSError, ValueError) as error:
-            raise ServiceDownError("face sensor", str(self.path), error, self.HINT) from error
-        stamp = record.get("stamp") if isinstance(record, dict) else None
-        age = time.time() - float(stamp) if isinstance(stamp, (int, float)) else math.inf
-        if age > self.max_age_s:
-            raise ServiceDownError(
-                "face sensor", str(self.path), f"its newest line is {age:.0f} s old", self.HINT
-            )
-        if record.get("face_px") is None:
-            return None
-        box = record.get("box")
-        if not (isinstance(box, list) and len(box) == 4):
+        if self.source is not None and not self.source.service:
             raise ToolError(
-                "the face sensor publishes no face box (a build from before the approach tool):"
-                " restart it from this checkout"
+                "the person is measured on the camera channel's frames, and vision.source is"
+                " snapshot now: switch it back (scripts/voice_cascade.py switch --knob"
+                " vision.source=service), or call see() and give the person's box from its"
+                " picture; nothing moved"
             )
-        head = record.get("head_deg") or {}
-        yaw = head.get("yaw") if isinstance(head, dict) else None
-        who = record.get("who") or {}
-        return FaceSighting(
-            box=(float(box[0]), float(box[1]), float(box[2]), float(box[3])),
-            who=who.get("id") if isinstance(who, dict) else None,
-            head_yaw_deg=float(yaw) if isinstance(yaw, (int, float)) else None,
-            faces=int(record.get("faces") or 1),
-            age_s=age,
+        record = self.service.latest(0, head.still_from, self.wait_s)
+        if record is None:
+            if self.service.down or self.service.health() is None:
+                why = getattr(self.service, "last_error", "") or "no answer"
+                raise ServiceDownError("perception service", self.service.url, why, CHANNEL_HINT)
+            raise ToolError(
+                f"the camera channel has no frame taken since the head stopped (waited"
+                f" {self.wait_s:.1f} s; is camera_stream's perception_feed on?); nothing moved"
+            )
+        if record.optics != RECTIFIED_LEFT:
+            raise ToolError(
+                f"the camera channel's frames are {record.optics or 'unnamed'} pixels, not the"
+                " rectified left eye: no stereo calibration in camera_stream; nothing moved"
+            )
+        faces = [
+            _Seen("face", f.box, head.pan_deg + f.pan_deg, f.yaw_deg, f.width_px)
+            for f in record.faces
+        ]
+        bodies = [
+            _Seen("body", p.box, head.pan_deg + p.pan_deg, None, p.height_deg)
+            for p in record.persons
+        ]
+        people = max(len(faces), len(bodies))
+        if people == 0:
+            return None
+        view = self.attention.attention() if self.attention is not None else None
+        if view is not None and view.bearing_deg is not None and view.phase not in IDLE:
+            bearing = view.bearing_deg
+            for group in (faces, bodies):
+                near = [s for s in group if abs(_wrap_deg(s.bearing - bearing)) <= self.match_deg]
+                if near:
+                    best = min(near, key=lambda s: abs(_wrap_deg(s.bearing - bearing)))
+                    return best.sighting(people, record.seq, "the person the gaze holds")
+            shown = ", ".join(f"{s.bearing:+.0f}" for s in faces or bodies)
+            raise ToolError(
+                f"the person the robot talks with is at {bearing:+.0f} deg and the newest"
+                f" picture shows nobody there (people at {shown} deg): ask them to step into"
+                " view, or turn the head toward them with look first; nothing moved"
+            )
+        if faces:
+            return max(faces, key=lambda s: s.size).sighting(
+                people, record.seq, "the widest face (the nearest)"
+            )
+        return max(bodies, key=lambda s: s.size).sighting(
+            people, record.seq, "the tallest body (the nearest)"
         )
+
+
+IDLE = ("idle", "paused")  # the gaze's phases without a person engaged (a drive pauses it)
+
+
+@dataclass(frozen=True)
+class _Seen:
+    """A face or a body of a record, with its bearing in the cart's frame and its size (a face's
+    width in pixels, a body's height in degrees)."""
+
+    kind: str
+    box: tuple[float, float, float, float]
+    bearing: float
+    yaw_deg: float | None
+    size: float
+
+    def sighting(self, people: int, seq: int, chosen: str) -> PersonSighting:
+        """As the tools' :class:`PersonSighting`."""
+        from pepin.perception.record import RECTIFIED_LEFT
+
+        return PersonSighting(
+            self.box, RECTIFIED_LEFT, self.kind, self.bearing, self.yaw_deg, people, seq, chosen
+        )
+
+
+def _wrap_deg(deg: float) -> float:
+    """An angle wrapped to -180..180 degrees."""
+    return (deg + 180.0) % 360.0 - 180.0
 
 
 class Eyes(Protocol):

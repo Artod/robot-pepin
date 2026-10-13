@@ -18,12 +18,14 @@ from typing import Any
 from pepin.expression.executors import Outcome
 from pepin.gaze import DRIVE_REFUSAL
 from pepin.people.door import Outcome as Answer
+from pepin.perception.record import RECTIFIED_LEFT
 from pepin.pixel_to_map import Box, Head, Located, LocateError, Pose2D
 from pepin.tools.clients import (
-    FaceSighting,
+    CHANNEL_HINT,
     HeadMove,
     HeadPose,
     HeadReach,
+    PersonSighting,
     ServiceDownError,
 )
 from pepin.tools.registry import Image, ToolError
@@ -479,23 +481,34 @@ class FakePeople:
         return Answer(True, payload={"forgotten": name})
 
 
-FACE = FaceSighting(box=(380.0, 210.0, 420.0, 258.0), who="artem", head_yaw_deg=0.0, faces=1,
-                    age_s=0.4)  # fmt: skip
+SPEAKER = PersonSighting(
+    box=(380.0, 210.0, 420.0, 258.0),
+    space=RECTIFIED_LEFT,
+    kind="face",
+    bearing_deg=0.0,
+    yaw_deg=0.0,
+    people=1,
+    seq=7,
+    chosen="the person the gaze holds",
+)
 CAMERA_HEIGHT_M = 1.2  # the camera's height at the working pose, near enough for a fake aim
 
 
 @dataclass
 class FakeSightings:
-    """The face sensor: ``sighting`` is the face it sees (None: nobody in view)."""
+    """The camera channel's speaker: ``sighting`` is the person it finds (None: nobody in view);
+    ``down`` is the perception service not answering. The head poses asked with are kept."""
 
-    sighting: FaceSighting | None = FACE
+    sighting: PersonSighting | None = SPEAKER
     down: bool = False
+    heads: list[HeadPose] = field(default_factory=list)
 
-    def face(self) -> FaceSighting | None:
-        """The face, unless the sensor is down."""
+    def speaker(self, head: HeadPose) -> PersonSighting | None:
+        """The person, unless the service is down."""
+        self.heads.append(head)
         if self.down:
             raise ServiceDownError(
-                "face sensor", "data/face/latest.json", "no line", "Is it running?"
+                "perception service", "http://127.0.0.1:8792", "refused", CHANNEL_HINT
             )
         return self.sighting
 
