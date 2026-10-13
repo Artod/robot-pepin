@@ -2,7 +2,14 @@
 the brain's marks (gesticulation DESIGN.md §6.2, §6.3, §9), each a
 :class:`pepin.expression.schedule.Request` posted into the engine's one scheduler, under its
 priority table (moments at ``MOMENT`` in :data:`pepin.expression.conversation.MOMENTS`' order,
-the voice's accents at ``PULSE``, the melody at ``IDLE``).
+the voice's accents at ``PULSE``, the melody and the held arm's sway at ``IDLE``).
+
+ONE BODY: every event below is an ensemble of every part that can move, the book's own
+compositions (config/animation.json, ``callable`` false) asked for by name with the parts found
+free for it (:attr:`pepin.expression.schedule.Request.parts`): the head where its ledger has
+room, the arm where a unit holds it up, the wheels where the cart stands (no drive, no body turn
+of the gaze's, no motion of its own still settling) and each part where its lead covers its
+preparation. The book draws the rest; the dice of the rules are this module's knobs.
 
 :class:`Alive` is a conversation observer with a thread of its own (the cascade's calls only
 post to it) that drives the :class:`pepin.expression.prosody.ProsodyListener` (the voice's
@@ -12,39 +19,39 @@ While the robot speaks (``pulse``):
 
 * the MELODY: the part's pitch contour as a still tilt of the head (up with the pitch,
   ``melody_deg_per_st`` a semitone round the part's median, within +-``melody_max_deg``), keys
-  at the contour's turns at least ``melody_key_gap_s`` apart (so the tilt never turns back
-  faster than the arbiter's 2.5 Hz), on the idle source (it never blinds the head while within
-  the arbiter's ``clip_still_deg``), in overlays of at most ``SEGMENT_S``, sent again after a nod
-  of its own;
-* an ACCENT NOD of ``beat_amp_deg`` (by the nucleus's z) on the first nucleus of a part with
-  z >= ``beat_z``, or on its most prominent one when the part's whole audio is known before the
-  nod must go; at most one a part, ``beat_gap_s`` after any head stroke, ``beats_per_minute``,
-  never with less lead than the nod's own preparation (the arbiter lets a nod's bottom come
-  0.2 s after its first move at the earliest, plus the head's latency: ``beat_lead_min_s``),
-  never within ``mark_gap_s`` of a marker's head stroke (sent, or still waiting for its
-  word: :meth:`pepin.expression.animator.GestureEngine.pending`) and never in a part that
-  carries a marker (the brain's gesture is that sentence's accent); inside an arm unit already open
-  (the arm part's ``held`` pose) a wrist beat of ``wrist_beat_deg`` instead, with
-  ``wrist_beat_p`` (a flick bigger than the caps allow in its time takes longer, its stroke
-  still on the beat);
-* the ACCENT'S ROCK: once a reply at most, with ``accent_rock_p``, the cart rocks 1 cm (the
-  book's ``body_rock`` at its low end) with its stroke on the reply's strongest nucleus over
-  ``beat_z`` that it can still reach (decided when the first one's lead is about to run out, on
-  it unless a stronger one already known lies ahead); its motion never starts in the reply's
-  first ``ROCK_AFTER_S`` of sound, never in quiet, never in a reply whose arm is up or due up,
-  never while the arm moves or holds, a mark waits for the arm, the cart moves or a body turn
-  is pending (the board refuses the wheels while the arm moves or holds);
+  at the contour's turns at least ``melody_key_gap_s`` apart, on the idle source (it never
+  blinds the head while within the arbiter's ``clip_still_deg``), in overlays of at most
+  ``SEGMENT_S``, sent again after a nod of its own; the idle layer's keys glide (each key's
+  speed and ramp the gentlest that land it on time: :func:`pepin.expression.parts.clip_look`);
+* an ACCENT on the first nucleus of a part with z >= ``beat_z``, or on its most prominent one
+  when the part's whole audio is known before its ensemble must go; at most one a part, by its
+  strength: under ``strong_z`` ``pulse_weak`` (the nod; with the arm up its wrist's beat,
+  ``wrist_beat_p`` of them; the cart's 0.5 cm sway on ``wheel_accent_share`` of them, steady),
+  from ``strong_z`` ``pulse_strong`` (the nod, the wrist's beat with the arm up, the cart's 1 cm
+  rock), the reply's strongest known (once a reply, from ``strong_z``) ``pulse_peak`` (all three,
+  bigger); the head's nod ``beat_gap_s`` after any head stroke, ``beats_per_minute``, never with
+  less lead than its own preparation (``beat_lead_min_s``), never within ``mark_gap_s`` of a
+  marker's head stroke (sent, or still waiting for its word); no accent in a part that carries
+  a marker (the brain's gesture is that sentence's accent); the decision waits for the lead of
+  the slowest part it wants (the wheels' rock: ~1 s at speed 0.4);
+* the LAUGH'S SOUND: a run of ``laugh_run`` accents of a part ``laugh_gap_s`` apart is the voice
+  laughing: each of its accents asks for ``pulse_laugh`` (the cart's rock, the happy face, a bob
+  of the head), each part where it is free (the cart takes the next accent once its rock is
+  over); no text is read;
 * the ARM UP: a reply with ``arm_up_min_sentences`` parts with words at the voice (a sentence,
   or a clause a style cut; their TEXT, before their sound) raises the arm once to the book's
   ``ready`` and holds it there as an open unit while the reply goes on (``POSTURE``): sent at
-  the stream second being heard (the reply's first sound when it has not begun), after any
-  motion of the cart and its settling, never in quiet or with less than ``POSTURE_MIN_S`` of
-  the reply's speech known after it is up; its hold reaches ``POSTURE_TAIL_S`` past the
-  reply's audio known (at most config/arm.json's ``hold_max_s``, the board's own limit: past it
-  the board rests the arm by itself) and is sent again before it lapses while more audio comes;
-  a mark's stroke plans from it and keeps its hold, the arm going back to ``ready`` after it;
-  wrist beats ride it; the engine rests it when the person speaks, at the reply's end or cut
-  and for the body's turn; a part in a quiet style and a laugh's rock rest it too;
+  the stream second being heard (the reply's first sound when it has not begun), never in quiet
+  or with less than ``POSTURE_MIN_S`` of the reply's speech known after it is up; its hold
+  reaches ``POSTURE_TAIL_S`` past the reply's audio known (at most config/arm.json's
+  ``hold_max_s``, the board's own limit: past it the board rests the arm by itself) and is sent
+  again before it lapses while more audio comes; a mark's stroke plans from it and keeps its
+  hold, the arm going back to ``ready`` after it; the accents' beats ride it; the engine rests
+  it when the person speaks, at the reply's end or cut and for the body's turn; a part in a
+  quiet style rests it too;
+* the HELD ARM'S BREATH: while a unit holds the arm up and nothing moves it (``SWAY_GAP_S``
+  after its last motion, with its hold outlasting the sway), ``arm_sway``, a slow sway of the
+  wrist over the held pose (the head's share of the breath is the idle layer's loop);
 * the QUESTION TILT: a part ending in "?" lifts and cocks the head at its last nucleus, held
   until half a second after its audio, once a reply;
 * the LONG-REPLY AVERSION: in a reply with ``aversion_reply_s`` of audio known, a look aside or
@@ -59,24 +66,25 @@ Between turns and while the person speaks (``moments``):
   the reply's first sound when the reply comes sooner (the face ``thinking`` half the time);
   never when the audio came first;
 * the LISTENER NOD on the ears' ``listener_pause``: after ``listener_min_speech_s`` of their
-  speech, ``listener_gap_s`` apart, with ``listener_nod_p``, never while their last words were a
-  question (their words so far when the pause brings them, else their last utterance);
+  speech, ``listener_gap_s`` apart, never while their last words were a question (their words
+  so far when the pause brings them, else their last utterance): ``listen_nod``, its nod with
+  ``listener_nod_p``, the cart's 0.5 cm rock with ``nod_rock_p``;
 * the ACKNOWLEDGEMENT: a statement of ``ack_min_s`` or more (not a question: ``question``) gets
-  a small nod ``predict_delay_s`` after its close, with ``ack_nod_p``, once a turn;
+  ``ack_nod`` ``predict_delay_s`` after its close, once a turn: its nod with ``ack_nod_p``, the
+  cart's 0.5 cm rock with ``nod_rock_p``;
 * GREETING and FAREWELL DUE: the person's words (``greeting``; the voice loop's goodbye rule)
   play the book's ``greeting`` or ``farewell`` (or what its ``moments`` map ``greeting_due``,
   ``farewell_due`` to) ``predict_delay_s`` after the close, in the brain's wait, under the
   engine's caps; while the body turns toward the person it waits for the turn's end; a later
   marker of it is absorbed by its cooldown;
-* the LAUGH'S ROCK: a reply part that carries ``{laugh}`` (once its laugh played) rocks the
-  cart once as a tail bound after the part's start (the scheduler's ``after``: its stroke
-  within ``timing.after_s`` of speech); the laugh itself never uses the arm, and an arm up or
-  moving goes to rest first;
 * FACE FOUND: the attention engine's first clear face of the conversation brings a smile;
 * the LISTENING SHIFT (``listen_shift_deg`` 0: off): a still shift of the head every
   ``listen_shift_s`` while the person speaks;
 * every discrete head stroke at least ``head_gap_s`` from the one before (a held move's return
   counts), so head moves never pile up at a turn's edge.
+
+The arm and the wheels move together (one body): neither waits for the other; the gaze's body
+turn is the one thing that outranks the pulse's wheels (and takes the arm to rest first).
 
 The QUIET rule: a reply in a quiet style, the hours ``quiet.hours`` or the person's voice under
 ``quiet.peak_db`` leave the melody and the face only (a person's ask still plays whole; the
@@ -105,6 +113,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from pepin.expression.animation import Clip, Event, Layer, PartName, Scene, Track
+from pepin.expression.book import span
 from pepin.expression.conversation import (
     ACKNOWLEDGED,
     FACE_FOUND,
@@ -120,7 +129,6 @@ from pepin.expression.conversation import (
     moment_rank,
 )
 from pepin.expression.markers import Part
-from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart
 from pepin.expression.prosody import PartNews, ProsodyListener, VoiceStats
 from pepin.expression.schedule import (
@@ -164,24 +172,27 @@ POLL_S = 0.2  # the head's holder and attention read this often in a conversatio
 IDLE_WAIT_S = 1.0  # the thread's longest sleep with nothing due
 DECIDE_MARGIN_S = 0.05  # a causal beat is decided this long before its lead runs out
 SHIFT_MOVE_S, SHIFT_HOLD_S = 0.6, (1.5, 3.0)  # the listening shift's way and hold
-ROCK_PERIOD_S, ROCK_M = (0.9, 1.2), (0.01, 0.02)  # the book's body_rock at speed 1
-ROCK_AFTER_S = 0.5  # no accent's rock starts moving in a reply's first half second of sound
-WRIST_PERIOD_S = (0.3, 0.35)  # a wrist flick inside a unit, at the caps
-ARM_YIELD_S = 0.2  # a rock goes this long after the arm was sent to rest for it
-BODY_CLEAR_S = 0.3  # the arm rises this long after the cart's motion ends (the wheels settle)
+BODY_SETTLE_S = 0.8  # the cart is the gestures' again this long after a clip's end (two stops)
+SWAY_GAP_S = 0.5  # the held arm sways this long after its last motion at the earliest
 POSTURE_MIN_S = 1.0  # the arm rises only with this much of the reply's speech known after it
 POSTURE_TAIL_S = 0.5  # the posture's hold reaches this far past the reply's audio known
 RENEW_AHEAD_S = 0.6  # the hold is sent again when it has less than this left...
 RENEW_GAIN_S = 0.3  # ...and the reply's audio known goes on at least this much past it
 RETURN_AFTER_S = 0.3  # the arm goes back to the posture this long after a mark's motion
 POSTURE_CAPS = 0.5  # the posture's way at this share of the arm's caps (rest to ready ~0.8 s)
-ACCENT_ROCK = "accent_rock"  # the moment of the accent's rock
+SWAY_MARGIN_S = RENEW_AHEAD_S + POLL_S  # the held arm's hold outlasts its sway by this at least
+# The book's own ensembles (config/animation.json, callable false) the listeners ask for
+WEAK, STRONG, PEAK = "pulse_weak", "pulse_strong", "pulse_peak"  # an accent, by its strength
+LAUGHING = "pulse_laugh"  # an accent of the voice's laughing
+LISTEN_NOD, ACK_NOD = "listen_nod", "ack_nod"  # the nods of the person's pause and statement
+ARM_SWAY = "arm_sway"  # the held arm's breath
+LAUGH_SOUND = "laugh_sound"  # the moment of the voice's laughing
 # The composition a moment due from the person's words plays, unless config/animation.json's
 # moments map it to another
 DUE = {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
 MINE = frozenset(
-    ("accent", "wrist_beat", "melody", "question", "think_glance", "aversion", "listen_nod",
-     "ack_nod", "smile", "laugh_rock", "listen_shift", ACCENT_ROCK, POSTURE)
+    (WEAK, STRONG, PEAK, LAUGHING, LISTEN_NOD, ACK_NOD, ARM_SWAY, "melody", "question",
+     "think_glance", "aversion", "smile", "listen_shift", POSTURE)
 )  # fmt: skip
 QUESTION = (  # a question: its mark, or a question word first
     r"\?|^\W*(?:(?:а|и|ну)\W+)?"  # noqa: RUF001
@@ -199,21 +210,22 @@ def local_hour() -> int:
 
 @dataclass(frozen=True)
 class PulseKnobs:
-    """config/expression.json's ``pulse``: the head while the robot speaks."""
+    """config/expression.json's ``pulse``: the body while the robot speaks."""
 
     melody_deg_per_st: float = 0.2
     melody_max_deg: float = 0.9
     melody_cutoff_hz: float = 1.0
-    melody_key_gap_s: float = 0.25
+    melody_key_gap_s: float = 0.5
     beat_z: float = 2.0
-    beat_amp_deg: tuple[float, float] = (2.0, 4.0)
+    strong_z: float = 3.0
     beat_gap_s: float = 2.0
     beats_per_minute: int = 12
     beat_lead_min_s: float = 0.30
     mark_gap_s: float = 0.6
     wrist_beat_p: float = 0.5
-    wrist_beat_deg: tuple[float, float] = (15.0, 25.0)
-    accent_rock_p: float = 0.5
+    wheel_accent_share: float = 0.5
+    laugh_run: int = 3
+    laugh_gap_s: tuple[float, float] = (0.2, 0.4)
     arm_up_min_sentences: int = 2
     voice_stats: VoiceStats = field(default_factory=VoiceStats)
 
@@ -238,10 +250,9 @@ class MomentKnobs:
     listener_nod_p: float = 0.6
     listener_gap_s: float = 5.0
     listener_min_speech_s: float = 2.0
-    listener_nod_deg: tuple[float, float] = (2.0, 3.0)
     ack_nod_p: float = 0.3
     ack_min_s: float = 1.5
-    ack_nod_deg: float = 2.0
+    nod_rock_p: float = 0.3
     question: str = QUESTION
     greeting: str = GREETING
     predict_delay_s: float = 0.2
@@ -285,47 +296,47 @@ def alive_knobs(data: Mapping[str, Any]) -> AliveKnobs:
         return float(block.get(key, default))
 
     pulse = PulseKnobs(
-        num(p, "melody_deg_per_st", dp.melody_deg_per_st),
-        num(p, "melody_max_deg", dp.melody_max_deg),
-        num(p, "melody_cutoff_hz", dp.melody_cutoff_hz),
-        num(p, "melody_key_gap_s", dp.melody_key_gap_s),
-        num(p, "beat_z", dp.beat_z),
-        _pair(p.get("beat_amp_deg"), dp.beat_amp_deg),
-        num(p, "beat_gap_s", dp.beat_gap_s),
-        int(p.get("beats_per_minute", dp.beats_per_minute)),
-        num(p, "beat_lead_min_s", dp.beat_lead_min_s),
-        num(p, "mark_gap_s", dp.mark_gap_s),
-        num(p, "wrist_beat_p", dp.wrist_beat_p),
-        _pair(p.get("wrist_beat_deg"), dp.wrist_beat_deg),
-        num(p, "accent_rock_p", dp.accent_rock_p),
-        int(p.get("arm_up_min_sentences", dp.arm_up_min_sentences)),
-        VoiceStats.of(p.get("voice_stats", {})),
+        melody_deg_per_st=num(p, "melody_deg_per_st", dp.melody_deg_per_st),
+        melody_max_deg=num(p, "melody_max_deg", dp.melody_max_deg),
+        melody_cutoff_hz=num(p, "melody_cutoff_hz", dp.melody_cutoff_hz),
+        melody_key_gap_s=num(p, "melody_key_gap_s", dp.melody_key_gap_s),
+        beat_z=num(p, "beat_z", dp.beat_z),
+        strong_z=num(p, "strong_z", dp.strong_z),
+        beat_gap_s=num(p, "beat_gap_s", dp.beat_gap_s),
+        beats_per_minute=int(p.get("beats_per_minute", dp.beats_per_minute)),
+        beat_lead_min_s=num(p, "beat_lead_min_s", dp.beat_lead_min_s),
+        mark_gap_s=num(p, "mark_gap_s", dp.mark_gap_s),
+        wrist_beat_p=num(p, "wrist_beat_p", dp.wrist_beat_p),
+        wheel_accent_share=num(p, "wheel_accent_share", dp.wheel_accent_share),
+        laugh_run=int(p.get("laugh_run", dp.laugh_run)),
+        laugh_gap_s=_pair(p.get("laugh_gap_s"), dp.laugh_gap_s),
+        arm_up_min_sentences=int(p.get("arm_up_min_sentences", dp.arm_up_min_sentences)),
+        voice_stats=VoiceStats.of(p.get("voice_stats", {})),
     )
     dirs = m.get("think_dirs", dm.think_dirs)
     moments = MomentKnobs(
-        num(m, "head_gap_s", dm.head_gap_s),
-        num(m, "think_glance_s", dm.think_glance_s),
-        num(m, "think_p", dm.think_p),
-        _pair(m.get("think_deg"), dm.think_deg),
-        _pair(m.get("think_back_s"), dm.think_back_s),
-        {str(k): float(v) for k, v in dirs.items() if k != "note"},
-        num(m, "aversion_reply_s", dm.aversion_reply_s),
-        _pair(m.get("aversion_deg"), dm.aversion_deg),
-        _pair(m.get("aversion_s"), dm.aversion_s),
-        num(m, "end_gaze_s", dm.end_gaze_s),
-        num(m, "listener_nod_p", dm.listener_nod_p),
-        num(m, "listener_gap_s", dm.listener_gap_s),
-        num(m, "listener_min_speech_s", dm.listener_min_speech_s),
-        _pair(m.get("listener_nod_deg"), dm.listener_nod_deg),
-        num(m, "ack_nod_p", dm.ack_nod_p),
-        num(m, "ack_min_s", dm.ack_min_s),
-        num(m, "ack_nod_deg", dm.ack_nod_deg),
-        str(m.get("question", dm.question)),
-        str(m.get("greeting", dm.greeting)),
-        num(m, "predict_delay_s", dm.predict_delay_s),
-        num(m, "smile_s", dm.smile_s),
-        num(m, "listen_shift_deg", dm.listen_shift_deg),
-        _pair(m.get("listen_shift_s"), dm.listen_shift_s),
+        head_gap_s=num(m, "head_gap_s", dm.head_gap_s),
+        think_glance_s=num(m, "think_glance_s", dm.think_glance_s),
+        think_p=num(m, "think_p", dm.think_p),
+        think_deg=_pair(m.get("think_deg"), dm.think_deg),
+        think_back_s=_pair(m.get("think_back_s"), dm.think_back_s),
+        think_dirs={str(k): float(v) for k, v in dirs.items() if k != "note"},
+        aversion_reply_s=num(m, "aversion_reply_s", dm.aversion_reply_s),
+        aversion_deg=_pair(m.get("aversion_deg"), dm.aversion_deg),
+        aversion_s=_pair(m.get("aversion_s"), dm.aversion_s),
+        end_gaze_s=num(m, "end_gaze_s", dm.end_gaze_s),
+        listener_nod_p=num(m, "listener_nod_p", dm.listener_nod_p),
+        listener_gap_s=num(m, "listener_gap_s", dm.listener_gap_s),
+        listener_min_speech_s=num(m, "listener_min_speech_s", dm.listener_min_speech_s),
+        ack_nod_p=num(m, "ack_nod_p", dm.ack_nod_p),
+        ack_min_s=num(m, "ack_min_s", dm.ack_min_s),
+        nod_rock_p=num(m, "nod_rock_p", dm.nod_rock_p),
+        question=str(m.get("question", dm.question)),
+        greeting=str(m.get("greeting", dm.greeting)),
+        predict_delay_s=num(m, "predict_delay_s", dm.predict_delay_s),
+        smile_s=num(m, "smile_s", dm.smile_s),
+        listen_shift_deg=num(m, "listen_shift_deg", dm.listen_shift_deg),
+        listen_shift_s=_pair(m.get("listen_shift_s"), dm.listen_shift_s),
     )
     hours = q.get("hours", dq.hours)
     quiet = QuietKnobs(
@@ -362,34 +373,13 @@ def head_clip(
     return Clip("head", -stroke_s, stroke_s, times[-1], tuple(tracks), layer=layer)
 
 
-def nod_clip(amp_deg: float, period_s: float) -> Clip:
-    """The book's head_nod: down ``amp_deg`` at half the period and back up."""
-    return head_clip(((0.0, 0.0, 0.0), (period_s / 2, 0.0, amp_deg), (period_s, 0.0, 0.0)),
-                     period_s / 2)  # fmt: skip
-
-
-def rock_clip(amp_m: float, period_s: float, scale: float, *, at_stroke: bool = False) -> Clip:
-    """The book's ``body_rock``: forward ``amp_m`` at half the period and back, stretched by
-    ``1 / scale`` as the engine stretches the body's clips; anchored at its start (a tail) or,
-    ``at_stroke``, at its stroke."""
-    track = Track("x_m", "additive", (0.0, period_s / 2, period_s), (0.0, amp_m, 0.0))
-    clip = Clip("body", 0.0, period_s / 2, period_s, (track,))
-    clip = stretched(clip, 1.0 / scale) if 0.0 < scale < 1.0 else clip
-    return replace(clip, offset_s=-clip.stroke_s if at_stroke else 0.0)
-
-
-def wrist_clip(amp_deg: float, period_s: float, hold_s: float) -> Clip:
-    """A flick of the wrist ``amp_deg`` down and back over the held pose, its stroke 0.4 of
-    ``period_s`` in, the unit's pose held ``hold_s`` after it."""
-    stroke = period_s * 0.4
-    track = Track("wrist_flex", "additive", (0.0, stroke, period_s), (0.0, amp_deg, 0.0))
-    return Clip("arm", -stroke, stroke, period_s, (track,), then="hold", hold_s=round(hold_s, 2))
-
-
 def _holds(part: Any) -> bool:
-    """Whether a part holds a unit's pose (an arm that keeps one)."""
+    """Whether a part holds a unit's pose (an arm that keeps one: its ``holding()``, or the
+    ``held`` pose a part without it shows)."""
     holding = getattr(part, "holding", None)
-    return callable(holding) and holding() is not None
+    if callable(holding):
+        return holding() is not None
+    return getattr(part, "held", None) is not None
 
 
 def held_clip(pan_deg: float, tilt_deg: float, out_s: float, seconds: float) -> Clip:
@@ -416,7 +406,6 @@ class _PartState:
 
     text: str = ""
     marked: bool = False  # a gesture marker of the brain's in it
-    laugh: bool = False  # the brain's {laugh} in it
     quiet: bool = False  # it went to the voice in a quiet moment
     question: bool = False
     start_s: float | None = None
@@ -430,6 +419,7 @@ class _PartState:
     waiting: bool = False  # a timer decides it when its lead is about to run out
     melody_waiting: bool = False  # a timer sends the melody's next batch
     tried: set[float] = field(default_factory=set)  # nuclei a beat could not take
+    laughed: set[float] = field(default_factory=set)  # its laugh's accents decided
     complete: bool = False
     skipped: list[str] = field(default_factory=list)
     accent: dict[str, Any] | None = None
@@ -451,11 +441,7 @@ class _Reply:
     sentences: int = 0  # parts with words at the voice (a sentence, or a clause a style cut)
     posture: str = ""  # the arm up: "" not due, "due", "up", "down" (was up), "done" (never)
     posture_why: str = ""  # why a due posture still waits
-    rock: str = ""  # the accent's rock: "" undecided, "done"
-    rock_why: str = ""  # why the last nucleus it might have taken was passed
-    rock_tried: set[float] = field(default_factory=set)  # nuclei it can no longer take
-    rock_waiting: bool = False  # a timer decides it when its lead is about to run out
-    body_until: float = -math.inf  # a rock of this reply moves the cart until then (engine clock)
+    peaked: bool = False  # its strongest accent played (pulse_peak)
 
 
 @dataclass
@@ -589,15 +575,11 @@ class Alive:
         return reply is not None and reply.posture in ("due", "up")
 
     def scene(self, scene: Scene, request: Request) -> Scene:
-        """What a rendering may use, for all but a person's ask (it plays whole): the laugh never
-        the arm (its rock is the wheels', refused while the arm moves); in a quiet moment the
-        face only."""
-        if request.priority <= Priority.ASK:
+        """What a rendering may use, for all but a person's ask (it plays whole): in a quiet
+        moment the face only."""
+        if request.priority <= Priority.ASK or self._quiet is None:
             return scene
-        ready = scene.ready - {"arm"} if request.intent == "laugh" else scene.ready
-        if self._quiet is not None:
-            return replace(scene, ready=ready & {"face"}, quiet=True)
-        return scene if ready == scene.ready else replace(scene, ready=ready)
+        return replace(scene, ready=scene.ready & {"face"}, quiet=True)
 
     # -- the thread ----------------------------------------------------------------------------
 
@@ -721,6 +703,12 @@ class Alive:
         self._shift_at: float | None = None
         kinds = MINE | {"greeting", "farewell", "arm_hold"}  # arm_hold: the posture sent again
         self._counts: dict[str, int] = dict.fromkeys(sorted(kinds), 0)
+        self._head_moves = 0  # the listeners' discrete head moves (the minute's rate)
+        self._sway = 0.0  # the weak accents' share of the cart's sway owed (wheel_accent_share)
+        # the cart's motions the listeners asked for, each (start, end + its settling) on the
+        # engine clock: another goes only outside them all
+        self._body_spans: deque[tuple[float, float]] = deque(maxlen=16)
+        self._sway_at = -math.inf  # the held arm sways again from then (engine clock)
         self._speech_total = 0.0  # seconds of the robot's audio
         self._speaking: set[int] = set()  # replies with parts at the voice, not yet done
         self._cpu0 = (self.prosody.cpu_s, self.prosody.audio_s)
@@ -786,7 +774,6 @@ class Alive:
         state.text = part.text
         gestures = [m for m in part.markers if m.channel == "gesture"]
         state.marked = bool(gestures)
-        state.laugh = any(m.name == "laugh" for m in gestures)
         state.question = part.text.rstrip().rstrip("»\"')").endswith("?")
         reply.sentences = sum(1 for s in reply.parts.values() if s.text.strip())
         self._update_quiet(reply)
@@ -808,8 +795,6 @@ class Alive:
         state.start_s = stream_s
         if state.quiet:
             self._posture_end(reply, f"quiet: {self._quiet or 'the style'}")
-        if state.laugh:
-            self._rock(reply, index, stream_s)
         if index == 0:
             self._glance_back(stream_s)
         self._raise(reply)
@@ -898,15 +883,16 @@ class Alive:
                 state.keys.append((round(end, 4), 0.0))
             if state.question and not reply.question:
                 self._question(reply, state, now)
+        self._laugh(reply, state, now)
         self._accent(reply, state, now)
-        self._accent_rock(reply, now)
         self._melody(reply, state, now)
         if news.complete:
             self._log_part(reply, news.index, state)
 
     def _accent(self, reply: _Reply, state: _PartState, now: float) -> None:
         """The part's accent: on its most prominent nucleus when its audio is all in, else on
-        its first over ``beat_z`` once its lead is about to run out."""
+        its first over ``beat_z`` once the lead of the slowest part its ensemble wants is about
+        to run out."""
         if state.beat or not self.engine.on:
             return
         p = self.knobs.pulse
@@ -923,10 +909,14 @@ class Alive:
             state.beat = True
             state.skipped.append(f"quiet: {self._quiet}")
             return
+        if state.laughed:
+            state.beat = True
+            state.skipped.append("its laugh is its accent")
+            return
         if not state.complete:
             first = over[0]
             lead = self._lead(first.second + STROKE_BIAS_S)
-            floor = self._beat_floor()
+            floor = self._floor(reply, first)
             if lead - floor > DECIDE_MARGIN_S:
                 if not state.waiting:
                     state.waiting = True
@@ -943,9 +933,6 @@ class Alive:
                 return
             state.tried.add(nucleus.second)
             state.skipped.append(why)
-            if why.startswith("the per-minute"):
-                state.beat = True
-                return
         if state.complete:
             state.beat = True
 
@@ -954,90 +941,263 @@ class Alive:
         if self._replies.get(reply.turn) is reply:
             self._accent(reply, state, self.clock())
 
-    def _beat_floor(self) -> float:
-        head = self._latency("head")
-        clip = nod_clip(self.knobs.pulse.beat_amp_deg[0], NOD_PERIOD_S[1])
-        return max(self.knobs.pulse.beat_lead_min_s, head_prep_s(clip, head, self.settings))
+    def _strength(self, reply: _Reply, nucleus: Nucleus) -> str:
+        """The ensemble an accent on ``nucleus`` asks for: ``pulse_weak`` under ``strong_z``, the
+        reply's strongest known from ``strong_z`` (once a reply) ``pulse_peak``, else
+        ``pulse_strong``."""
+        if nucleus.z < self.knobs.pulse.strong_z:
+            return WEAK
+        known = max(n.z for state in reply.parts.values() for n in state.nuclei)
+        return PEAK if not reply.peaked and nucleus.z >= known else STRONG
+
+    def _sway_due(self, intent: str) -> bool:
+        """Whether an accent's ensemble wants the cart: a strong one always, a weak one when the
+        sway's share owed reaches a whole one (``wheel_accent_share``: steady, not dice)."""
+        share = self.knobs.pulse.wheel_accent_share
+        return intent != WEAK or (share > 0.0 and self._sway + share >= 1.0 - 1e-9)
+
+    def _floor(self, reply: _Reply, nucleus: Nucleus) -> float:
+        """The lead an accent on ``nucleus`` needs for the slowest part it would want: the
+        head's nod always, the arm's beat while a unit holds it, the wheels when its strength
+        (or the sway's share) asks for them."""
+        intent = self._strength(reply, nucleus)
+        floor = self._head_floor(intent)
+        if _holds(self.engine.parts.get("arm")):
+            floor = max(floor, self._prep(intent, "arm"))
+        if self._sway_due(intent):
+            floor = max(floor, self._prep(intent, "body"))
+        return floor
 
     def _beat(self, reply: _Reply, state: _PartState, nucleus: Nucleus, now: float) -> str | None:
-        """An accent on ``nucleus``: a nod, or a wrist beat inside an open arm unit; None when
-        sent, else why not."""
+        """An accent on ``nucleus``: its strength's ensemble on the parts free for it (the head's
+        nod, the arm's beat over a held unit, the wheels' rock); None when sent, else why not,
+        part by part."""
         p = self.knobs.pulse
         stroke_s = nucleus.second + STROKE_BIAS_S
         lead = self._lead(stroke_s)
-        lo, hi = p.beat_amp_deg
-        share = min(1.0, max(0.0, (nucleus.z - p.beat_z) / 2.0))
-        clip = nod_clip(lo + (hi - lo) * share, self.rng.uniform(*NOD_PERIOD_S))
-        latency = self._latency("head")
-        floor = max(p.beat_lead_min_s, head_prep_s(clip, latency, self.settings))
-        if lead < floor:
-            return f"lead {lead:.2f} s under {floor:.2f}"
         stroke = now + lead
-        while self._beats and now - self._beats[0] > 60.0:
-            self._beats.popleft()
-        if len(self._beats) >= p.beats_per_minute:
-            return f"the per-minute cap {p.beats_per_minute}"
-        start = stroke - clip.stroke_s
-        why = self._head_free(
-            start, start + clip.duration_s, stroke, p.beat_gap_s, mark_gap=p.mark_gap_s
-        )
-        if why is not None:
-            return why
-        wrist = self._wrist(nucleus, stroke_s, lead)
-        if wrist is not None and self.rng.random() < p.wrist_beat_p:
-            self.engine.request(wrist)
-            self._counts["wrist_beat"] += 1
-            kind = "wrist"
+        intent = self._strength(reply, nucleus)
+        parts: set[PartName] = set()
+        whys: list[str] = []
+        why = self._head_room(intent, stroke, lead, now, p.beat_gap_s, mark_gap=p.mark_gap_s,
+                              per_minute=True)  # fmt: skip
+        if why is None:
+            parts.add("head")
         else:
-            request = Request("accent", AtStream(round(stroke_s, 4), reply.turn), Priority.PULSE,
-                              "pulse", clips=(clip,))  # fmt: skip
-            self.engine.request(request)
-            self._counts["accent"] += 1
-            kind = "nod"
-            start_s = stroke_s - clip.stroke_s
-            self._occupy(start, start + clip.duration_s, stroke, None)
-            self._busy(reply, start_s, start_s + clip.duration_s)
-        self._beats.append(now)
+            whys.append(f"head: {why}")
+        if intent != WEAK or self.rng.random() < p.wrist_beat_p:
+            why = self._arm_room(intent, reply, stroke, lead, now)
+            if why is None:
+                parts.add("arm")
+            elif _holds(self.engine.parts.get("arm")):
+                whys.append(f"arm: {why}")
+        if self._sway_due(intent):
+            why = "the person speaks" if self._listening else None
+            why = why or self._body_room(intent, stroke, lead, now)
+            if why is None:
+                parts.add("body")
+            else:
+                whys.append(f"wheels: {why}")
+        if not parts:
+            return "; ".join(whys)
+        self._ask(intent, AtStream(round(stroke_s, 4), reply.turn), Priority.PULSE, "pulse",
+                  parts, stroke, now, reply=reply)  # fmt: skip
+        if "head" in parts:
+            self._beats.append(now)
+        if intent == WEAK:
+            self._sway = min(1.0, self._sway + p.wheel_accent_share) - ("body" in parts)
+        reply.peaked = reply.peaked or intent == PEAK
         state.accent = {"s": round(nucleus.second, 3), "z": round(nucleus.z, 2),
-                        "lead_s": round(lead, 3), "kind": kind}  # fmt: skip
+                        "lead_s": round(lead, 3), "kind": intent.removeprefix("pulse_"),
+                        "parts": sorted(parts)}  # fmt: skip
+        state.skipped += whys
         return None
 
-    def _wrist(self, nucleus: Nucleus, stroke_s: float, lead: float) -> Request | None:
-        """A wrist flick at the caps over the pose an arm unit holds, when one is open and its
-        hold outlasts the beat (it keeps the rest of that hold); None otherwise (no unit: no
-        wrist beat). A flick bigger than the caps allow in its period takes longer, planned
-        so, its stroke still on the beat."""
+    def _ask(
+        self,
+        intent: str,
+        anchor: AtStream | AtTime | None,
+        priority: Priority,
+        source: str,
+        parts: set[PartName],
+        stroke: float,
+        now: float,
+        *,
+        reply: _Reply | None = None,
+        rank: int = 0,
+    ) -> Request:
+        """The book's own ensemble ``intent`` asked for on ``parts``, its stroke at ``stroke``
+        (engine clock): the head's ledger and the cart's taken for it."""
+        request = Request(intent, anchor, priority, source, bind="word", rank=rank,
+                          parts=frozenset(parts))  # fmt: skip
+        self.engine.request(request)
+        self._counts[intent] += 1
+        if "head" in parts:
+            pre, post = self._reach(intent, "head")
+            self._occupy(stroke - pre, stroke + post, stroke, None)
+            self._head_moves += 1
+            if reply is not None and isinstance(anchor, AtStream):
+                self._busy(reply, anchor.second - pre, anchor.second + post)
+        if "body" in parts:
+            pre, post = self._reach(intent, "body")
+            start = max(stroke - pre, now + self._latency("body"))
+            self._body_spans.append((start, start + pre + post + BODY_SETTLE_S))
+        return request
+
+    def _reach(self, intent: str, part: PartName) -> tuple[float, float]:
+        """How long before its stroke ``intent`` moves ``part`` and how long after (the book's
+        widest, the arm's and the wheels' stretched as the engine plays them)."""
+        config = self.engine.config
+        scale = {"arm": config.arm_speed_scale, "body": config.body_speed_scale}.get(part, 1.0)
+        return span(self.engine.book, intent, part, 1.0 / scale if scale > 0.0 else 1.0)
+
+    def _prep(self, intent: str, part: PartName) -> float:
+        """The lead ``intent``'s ``part`` needs: its latency and its way to the stroke."""
+        return self._latency(part) + self._reach(intent, part)[0]
+
+    def _head_floor(self, intent: str) -> float:
+        """The least lead of ``intent``'s head: its preparation, never under the arbiter's
+        shortest half period (a nod's bottom is a turn of the tilt) nor ``beat_lead_min_s``."""
+        s = self.settings
+        half = 0.5 / s.clip_max_hz if s.clip_max_hz > 0 else 0.0
+        pre = max(self._reach(intent, "head")[0], half)
+        return max(self.knobs.pulse.beat_lead_min_s, self._latency("head") + pre)
+
+    def _head_room(
+        self,
+        intent: str,
+        stroke: float,
+        lead: float,
+        now: float,
+        gap: float,
+        *,
+        mark_gap: float | None = None,
+        per_minute: bool = False,
+    ) -> str | None:
+        """Why ``intent``'s head may not stroke at ``stroke`` (engine clock), None when it may:
+        its lead, the accents' per-minute cap (``per_minute``), the head's ledger."""
+        pre, post = self._reach(intent, "head")
+        if pre == post == 0.0:
+            return "none in it"
+        floor = self._head_floor(intent)
+        if lead < floor:
+            return f"lead {lead:.2f} s under {floor:.2f}"
+        if per_minute:
+            while self._beats and now - self._beats[0] > 60.0:
+                self._beats.popleft()
+            if len(self._beats) >= self.knobs.pulse.beats_per_minute:
+                return f"the per-minute cap {self.knobs.pulse.beats_per_minute}"
+        return self._head_free(stroke - pre, stroke + post, stroke, gap, mark_gap=mark_gap)
+
+    def _arm_room(
+        self, intent: str, reply: _Reply, stroke: float, lead: float, now: float
+    ) -> str | None:
+        """Why ``intent``'s arm beat may not go (no unit holds the arm up, a clip moves it or
+        waits for it, too little lead, the hold ends first), None when it may: it rides the
+        held pose and keeps the rest of its hold (the scheduler's)."""
         arm = self.engine.parts.get("arm")
-        if arm is None:
-            return None
-        held = arm.holding() if isinstance(arm, ArmPart) else getattr(arm, "held", None)
-        if held is None:
-            return None
-        now = self.clock()
-        if self.engine.scheduler.reservations.holder("arm", now) is not None:
-            return None
-        last = self._arm_seen
-        period = self.rng.uniform(*WRIST_PERIOD_S)
-        amp = self.rng.uniform(*self.knobs.pulse.wrist_beat_deg)
+        if arm is None or not _holds(arm):
+            return "no unit holds it up"
+        reservations = self.engine.scheduler.reservations
+        moving = reservations.holder("arm", now)
+        if moving is not None and moving.priority < Priority.IDLE:
+            return f"it plays {moving.performance.intent}"
+        pre, post = self._reach(intent, "arm")
+        if pre == post == 0.0:
+            return "none in it"
+        if lead < self._latency("arm") + pre:
+            return f"lead {lead:.2f} s under {self._latency('arm') + pre:.2f}"
+        start, end = stroke - pre, stroke + post
+        for waiting in self.engine.pending("arm"):
+            if waiting.start < end + RETURN_AFTER_S and waiting.end > start - RETURN_AFTER_S:
+                return f"{waiting.intent} waits for it"
         if isinstance(arm, ArmPart):
-            planned = arm.plan(wrist_clip(amp, period, 0.0), base=held)
-            if isinstance(planned, str):
-                return None
-            period *= max(1.0, planned.stretch)
-        stroke = period * 0.4
-        if lead < arm.latency_s + stroke:
-            return None
-        lasts = (last.ends + last.clip.hold_s) if last is not None else now
-        reply, posture = self._replies.get(nucleus.turn), self._posture
-        if reply is not None and posture is not None and posture.turn == reply.turn:
+            lasts = arm.held_until
+        else:
+            last = reservations.last("arm")
+            lasts = last.ends + last.clip.hold_s if last is not None else now
+        posture = self._posture
+        if posture is not None and posture.turn == reply.turn:
             lasts = max(lasts, now + self._lead(reply.end_s) + POSTURE_TAIL_S)  # it is kept so
-        keep = lasts - (now + lead - stroke + period)
-        if isinstance(arm, ArmPart):
-            keep = min(keep, arm.motion.hold_max_s)
-        if keep <= 0.0:
-            return None
-        return Request("wrist_beat", AtStream(round(stroke_s, 4), nucleus.turn), Priority.PULSE,
-                       "pulse", clips=(wrist_clip(amp, period, keep),))  # fmt: skip
+        if lasts < end:
+            return "its hold ends first"
+        return None
+
+    def _body_room(self, intent: str, stroke: float, lead: float | None, now: float) -> str | None:
+        """Why ``intent``'s wheels may not stroke at ``stroke`` (engine clock), None when they
+        may: no wheels, the gaze's body turn (the one thing that outranks the pulse's wheels),
+        too little ``lead`` (None: it may go late), the cart still moving or settling from a
+        clip of anyone's."""
+        body = self.engine.parts.get("body")
+        not_ready = body.ready() if body is not None else "no wheels"
+        if not_ready is not None:
+            return not_ready
+        turning = self._turning()
+        if turning is not None:
+            return turning
+        pre, post = self._reach(intent, "body")
+        if pre == post == 0.0:
+            return "none in it"
+        if lead is not None and lead < self._prep(intent, "body"):
+            return f"lead {lead:.2f} s under {self._prep(intent, 'body'):.2f}"
+        start = max(stroke - pre, now + self._latency("body"))
+        end = start + pre + post
+        if any(start < b and end + BODY_SETTLE_S > a for a, b in self._body_spans):
+            return "the cart still moves"
+        held = self.engine.scheduler.reservations.holder("body", now)
+        if held is not None and held.ends + BODY_SETTLE_S > start:
+            return f"the cart plays {held.performance.intent}"
+        for waiting in self.engine.pending("body"):
+            if waiting.start < end + BODY_SETTLE_S and waiting.end + BODY_SETTLE_S > start:
+                return f"{waiting.intent} waits for the cart"
+        return None
+
+    def _laugh(self, reply: _Reply, state: _PartState, now: float) -> None:
+        """The voice laughing (no text read): each accent of a run of ``laugh_run`` accents of
+        the part ``laugh_gap_s`` apart asks for ``pulse_laugh`` on the parts free for it, once."""
+        p = self.knobs.pulse
+        if p.laugh_run <= 0 or not self.engine.on or self._driving:
+            return
+        lo, hi = p.laugh_gap_s
+        run: list[Nucleus] = []
+        for nucleus in [*(n for n in state.nuclei if n.z >= p.beat_z), None]:
+            if nucleus is not None and run and lo <= nucleus.second - run[-1].second <= hi:
+                run.append(nucleus)
+                continue
+            if len(run) >= p.laugh_run:
+                for accent in run:
+                    if accent.second not in state.laughed:
+                        state.laughed.add(accent.second)
+                        self._laugh_beat(reply, accent, now)
+            run = [nucleus] if nucleus is not None else []
+
+    def _laugh_beat(self, reply: _Reply, nucleus: Nucleus, now: float) -> None:
+        """One accent of the voice's laugh: the cart's rock with the happy face where the cart
+        is free (the next accent once its rock is over), a bob of the head where the head is."""
+        stroke_s = nucleus.second + STROKE_BIAS_S
+        lead = self._lead(stroke_s)
+        stroke = now + lead
+        parts: set[PartName] = set()
+        whys: list[str] = []
+        if self._quiet is not None:
+            whys.append(f"quiet: {self._quiet}")
+        else:
+            why = self._body_room(LAUGHING, stroke, lead, now)
+            if why is None:
+                parts |= {"body", "face"}
+            else:
+                whys.append(f"wheels: {why}")
+            why = self._head_room(LAUGHING, stroke, lead, now, self.knobs.moments.head_gap_s)
+            if why is None:
+                parts.add("head")
+            else:
+                whys.append(f"head: {why}")
+        if parts:
+            self._ask(LAUGHING, AtStream(round(stroke_s, 4), reply.turn), Priority.PULSE, "pulse",
+                      parts, stroke, now, reply=reply)  # fmt: skip
+        self._moment_log(LAUGH_SOUND, None if parts else "; ".join(whys), turn=reply.turn,
+                         s=round(nucleus.second, 3), z=round(nucleus.z, 2),
+                         parts=sorted(parts))  # fmt: skip
 
     def _question(self, reply: _Reply, state: _PartState, now: float) -> None:
         """The question tilt at the part's last nucleus, held past its audio."""
@@ -1258,8 +1418,9 @@ class Alive:
         self._at(back, end)
 
     def _listener_nod(self, text: str = "") -> None:
-        """A nod at the person's pause inside their utterance (``text``: their words so far,
-        when the ears read them in time)."""
+        """The listener's nod at the person's pause inside their utterance (``text``: their
+        words so far, when the ears read them in time): ``listen_nod``, its nod with
+        ``listener_nod_p``, the cart's rock with ``nod_rock_p``."""
         m = self.knobs.moments
         now = self.clock()
         asked = bool(re.search(m.question, text.strip(), re.IGNORECASE)) if text else self._asked
@@ -1274,26 +1435,43 @@ class Alive:
             why = f"the last {now - self._last_listener:.1f} s ago"
         elif asked:
             why = "their words so far are a question" if text else "after their question"
-        elif self.rng.random() >= m.listener_nod_p:
-            why = f"p {m.listener_nod_p:g}"
-        clip = nod_clip(self.rng.uniform(*m.listener_nod_deg), self.rng.uniform(0.45, 0.5))
-        latency = self._latency("head")
-        stroke = now + latency + clip.stroke_s
         if why is None:
-            why = self._head_free(now + latency, now + latency + clip.duration_s, stroke,
-                                  m.head_gap_s)  # fmt: skip
-        if why is None:
-            rank = moment_rank(LISTENER_PAUSE)
-            request = Request("listen_nod", None, Priority.MOMENT, "moment", rank=rank,
-                              clips=(clip,))  # fmt: skip
-            self.engine.request(request)
-            self._counts["listen_nod"] += 1
-            self._last_listener = now
-            self._occupy(now + latency, now + latency + clip.duration_s, stroke, None)
+            stroke = now + self._latency("head") + self._reach(LISTEN_NOD, "head")[0]
+            parts, why = self._nod_parts(LISTEN_NOD, m.listener_nod_p, stroke, now)
+            if parts:
+                self._ask(LISTEN_NOD, AtTime(stroke), Priority.MOMENT, "moment", parts, stroke,
+                          now, rank=moment_rank(LISTENER_PAUSE))  # fmt: skip
+                self._last_listener = now
         self._moment_log(LISTENER_PAUSE, why)
 
+    def _nod_parts(
+        self, intent: str, nod_p: float, stroke: float, now: float
+    ) -> tuple[set[PartName], str | None]:
+        """A nod's ensemble's parts: the head with ``nod_p`` where its ledger has room, the
+        cart's rock with ``nod_rock_p`` where the cart is free (it may go late); why none."""
+        m = self.knobs.moments
+        parts: set[PartName] = set()
+        whys: list[str] = []
+        if self.rng.random() < nod_p:
+            pre, post = self._reach(intent, "head")
+            why = self._head_free(stroke - pre, stroke + post, stroke, m.head_gap_s)
+            if why is None:
+                parts.add("head")
+            else:
+                whys.append(why)
+        else:
+            whys.append(f"p {nod_p:g}")
+        if self.rng.random() < m.nod_rock_p:
+            why = self._body_room(intent, stroke, None, now)
+            if why is None:
+                parts.add("body")
+            else:
+                whys.append(f"wheels: {why}")
+        return parts, None if parts else "; ".join(whys)
+
     def _ack(self, heard: Heard, close_id: int, now: float) -> None:
-        """A small nod at the close of a statement."""
+        """The acknowledgement at the close of a statement: ``ack_nod``, its nod with
+        ``ack_nod_p``, the cart's rock with ``nod_rock_p``."""
         m = self.knobs.moments
         why: str | None = None
         if not self.engine.on:
@@ -1306,23 +1484,15 @@ class Alive:
             why = "a question"
         elif self._acked == close_id:
             why = "once a turn"
-        elif self.rng.random() >= m.ack_nod_p:
-            why = f"p {m.ack_nod_p:g}"
-        clip = nod_clip(m.ack_nod_deg, 0.45)
-        latency = self._latency("head")
-        assert self._close_s is not None
-        stroke = max(self._close_s + m.predict_delay_s, now + latency + clip.stroke_s)
         if why is None:
-            start = stroke - clip.stroke_s
-            why = self._head_free(start, start + clip.duration_s, stroke, m.head_gap_s)
-        if why is None:
-            self.engine.request(Request("ack_nod", AtTime(stroke), Priority.MOMENT, "moment",
-                                        rank=moment_rank(ACKNOWLEDGED), clips=(clip,)))  # fmt: skip
-            self._counts["ack_nod"] += 1
-            self._acked = close_id
-            self._occupy(
-                stroke - clip.stroke_s, stroke - clip.stroke_s + clip.duration_s, stroke, None
-            )
+            assert self._close_s is not None
+            pre = self._reach(ACK_NOD, "head")[0]
+            stroke = max(self._close_s + m.predict_delay_s, now + self._latency("head") + pre)
+            parts, why = self._nod_parts(ACK_NOD, m.ack_nod_p, stroke, now)
+            if parts:
+                self._ask(ACK_NOD, AtTime(stroke), Priority.MOMENT, "moment", parts, stroke, now,
+                          rank=moment_rank(ACKNOWLEDGED))  # fmt: skip
+                self._acked = close_id
         self._moment_log(ACKNOWLEDGED, why)
 
     def _due(self, name: str, close_id: int, first: float) -> None:
@@ -1344,51 +1514,6 @@ class Alive:
         self._counts["greeting" if name == GREETING_DUE else "farewell"] += 1
         self._moment_log(name, None, deferred_s=round(now - first, 2) if now > first + 0.05 else 0)
 
-    def _rock(self, reply: _Reply, index: int, stream_s: float) -> None:
-        """The rock after the brain's ``{laugh}``, once that laugh played (its caps) without a
-        motion of the body of its own."""
-        turn = reply.turn
-        why: str | None = None
-        last = self.engine.last()
-        if not self.engine.on or self._driving:
-            why = "off or driving"
-        elif self._quiet is not None:
-            why = f"quiet: {self._quiet}"
-        elif (
-            last is None
-            or last.intent != "laugh"
-            or last.cue is None
-            or ((last.cue.turn, last.cue.index) != (turn, index))
-        ):
-            why = "the laugh did not play (its caps)"
-        elif any(c.part == "body" for c in last.clips):
-            why = "the laugh moves the body itself"
-            self._yield_arm(reply, "the laugh sways the cart")  # its sway needs the arm down
-        else:
-            self._laugh_rock(reply, stream_s)
-        self._moment_log("laugh_rock", why, turn=turn, index=index)
-
-    def _laugh_rock(self, reply: _Reply, stream_s: float) -> None:
-        """The laugh's rock of the cart: a tail from ``stream_s`` (the laughing part's start;
-        the scheduler keeps its stroke within ``after_s`` of speech), the arm sent to rest first
-        when it moves or holds (the board refuses the wheels then; a posture of the reply
-        ends)."""
-        wait = self._yield_arm(reply, "the laugh rocks the cart")
-        second = stream_s
-        if wait > 0.0:
-            heard = self.engine.playout.played() - self._lag()
-            second = max(stream_s, heard + wait + ARM_YIELD_S)
-        period = self.rng.uniform(*ROCK_PERIOD_S)
-        amp = self.rng.uniform(*ROCK_M)
-        clip = rock_clip(amp, period, self.engine.config.body_speed_scale)
-        request = Request("laugh_rock", AtStream(round(second, 4), reply.turn), Priority.MOMENT,
-                          "moment", bind="after", rank=moment_rank("laugh_rock"),
-                          clips=(clip,))  # fmt: skip
-        self.engine.request(request)
-        self._counts["laugh_rock"] += 1
-        start = self.clock() + max(0.0, self._lead(second))
-        reply.body_until = max(reply.body_until, start + clip.duration_s)
-
     def _turning(self) -> str | None:
         """Why the cart is not the gestures' now (the speaker gaze turns it, or will), None
         when it is."""
@@ -1396,103 +1521,6 @@ class Alive:
         if view is not None and (view.phase == "turning" or view.past_arc):
             return "a body turn is pending"
         return None
-
-    def _yield_arm(self, reply: _Reply, why: str) -> float:
-        """The arm to rest for the cart's motion when it moves or holds (the reply's posture up
-        ends; one due waits for the cart): the seconds until it is there (0: it is)."""
-        self._posture_end(reply, why, rest=False, due=False)
-        try:
-            return max(0.0, self.engine.release_arm(why))
-        except Exception:
-            logger.exception("alive: the arm would not yield")
-            return 0.0
-
-    # -- the accent's rock -----------------------------------------------------------------------
-
-    def _accent_rock(self, reply: _Reply, now: float) -> None:
-        """The accent's rock (the module's notes): the first nucleus over ``beat_z`` it can
-        still reach is decided when its lead is about to run out; one known after it that is
-        stronger takes its turn; a refusal of the reply's own ends it, a passing one (the arm,
-        the cart, a body turn) leaves the next nucleus its chance."""
-        p = self.knobs.pulse
-        if reply.rock or reply.start_s is None or p.accent_rock_p <= 0.0 or not self.engine.on:
-            return
-        clip = rock_clip(ROCK_M[0], ROCK_PERIOD_S[0], self.engine.config.body_speed_scale,
-                         at_stroke=True)  # fmt: skip
-        prep = self._latency("body") + clip.stroke_s
-        earliest = reply.start_s + ROCK_AFTER_S + clip.stroke_s - STROKE_BIAS_S
-        while True:
-            known = [n for state in reply.parts.values() for n in state.nuclei
-                     if n.z >= p.beat_z and n.second >= earliest
-                     and n.second not in reply.rock_tried]  # fmt: skip
-            ahead = [n for n in known if self._lead(n.second + STROKE_BIAS_S) >= prep]
-            reply.rock_tried.update(n.second for n in known if n not in ahead)
-            if not ahead:
-                return
-            first = min(ahead, key=lambda n: n.second)
-            lead = self._lead(first.second + STROKE_BIAS_S)
-            if lead - prep > DECIDE_MARGIN_S:
-                if not reply.rock_waiting:
-                    reply.rock_waiting = True
-                    self._at(now + lead - prep - DECIDE_MARGIN_S, lambda: self._rock_due(reply))
-                return
-            reply.rock_tried.add(first.second)
-            if any(n.z > first.z for n in ahead):
-                continue  # a stronger one known lies ahead: its turn
-            why, final = self._rock_refusal(reply, now, first, clip)
-            if why is None and self.rng.random() >= p.accent_rock_p:
-                why, final = f"p {p.accent_rock_p:g}", True
-            if why is not None and not final:
-                reply.rock_why = why
-                continue
-            reply.rock = "done"
-            if why is None:
-                anchor = first.second + STROKE_BIAS_S
-                self.engine.request(Request(ACCENT_ROCK, AtStream(round(anchor, 4), reply.turn),
-                                            Priority.PULSE, "pulse", clips=(clip,)))  # fmt: skip
-                self._counts[ACCENT_ROCK] += 1
-                start = now + lead - clip.stroke_s
-                reply.body_until = max(reply.body_until, start + clip.duration_s)
-            self._moment_log(ACCENT_ROCK, why, turn=reply.turn, s=round(first.second, 3),
-                             z=round(first.z, 2), lead_s=round(lead, 3))  # fmt: skip
-            return
-
-    def _rock_due(self, reply: _Reply) -> None:
-        reply.rock_waiting = False
-        if self._replies.get(reply.turn) is reply:
-            self._accent_rock(reply, self.clock())
-
-    def _rock_refusal(
-        self, reply: _Reply, now: float, nucleus: Nucleus, clip: Clip
-    ) -> tuple[str | None, bool]:
-        """Why the accent's rock may not take ``nucleus`` (None: it may), and whether that ends
-        the reply's chance (quiet, the arm up for the reply) or only this nucleus's."""
-        if self._driving:
-            return "a drive is under way", True
-        if self._quiet is not None:
-            return f"quiet: {self._quiet}", True
-        if reply.posture in ("due", "up"):
-            return "the arm is up for this reply", True
-        if self._listening:
-            return "the person speaks", True
-        turning = self._turning()
-        if turning is not None:
-            return turning, False
-        reservations = self.engine.scheduler.reservations
-        moving = reservations.holder("arm", now)
-        if moving is not None:
-            return f"the arm plays {moving.performance.intent}", False
-        if _holds(self.engine.parts.get("arm")):
-            return "the arm holds a pose", False
-        start = now + self._lead(nucleus.second + STROKE_BIAS_S) - clip.stroke_s
-        end = start + clip.duration_s
-        for waiting in self.engine.pending("arm"):
-            if waiting.start < end + BODY_CLEAR_S and waiting.end > start:
-                return f"{waiting.intent} waits for the arm", False
-        body = reservations.holder("body", now)
-        if body is not None or self.engine.pending("body") or reply.body_until > start:
-            return "the cart moves", False
-        return None, False
 
     # -- the arm up while a long reply goes on --------------------------------------------------
 
@@ -1575,15 +1603,8 @@ class Alive:
         if turning is not None:
             return turning
         start = now + max(0.0, self._lead(second))
-        reservations = self.engine.scheduler.reservations
-        if (
-            reservations.holder("body", now) is not None
-            or self.engine.pending("body")
-            or reply.body_until + BODY_CLEAR_S > start
-        ):
-            return "the cart moves"
-        moving = reservations.holder("arm", now)
-        if moving is not None:
+        moving = self.engine.scheduler.reservations.holder("arm", now)
+        if moving is not None and moving.priority < Priority.IDLE:
             return f"the arm plays {moving.performance.intent}"
         end = start + clip.duration_s
         for waiting in self.engine.pending("arm"):
@@ -1606,11 +1627,44 @@ class Alive:
                                     clips=(clip,)))  # fmt: skip
 
     def _keep(self, now: float) -> None:
-        """A due posture tried again; the one up kept (:meth:`_keep_posture`)."""
+        """A due posture tried again; the one up kept (:meth:`_keep_posture`); the held arm's
+        breath (:meth:`_arm_sway`)."""
         for reply in list(self._replies.values()):
             if reply.posture == "due":
                 self._raise(reply)
         self._keep_posture(now)
+        self._arm_sway(now)
+
+    def _arm_sway(self, now: float) -> None:
+        """While a unit holds the arm up and nothing moves it (``SWAY_GAP_S`` after its last
+        motion, none waiting), ``arm_sway`` over the held pose, its hold kept: only when the
+        hold outlasts the sway by ``SWAY_MARGIN_S`` (a posture renewed in time after it)."""
+        if not (self._conversation and self.engine.on) or self._driving or self._quiet:
+            return
+        arm = self.engine.parts.get("arm")
+        if now < self._sway_at or self._listening or arm is None or not _holds(arm):
+            return
+        reservations = self.engine.scheduler.reservations
+        last = reservations.last("arm")
+        if reservations.holder("arm", now) is not None or (
+            last is not None and now < last.ends + SWAY_GAP_S
+        ):
+            return
+        pre, post = self._reach(ARM_SWAY, "arm")
+        if pre == post == 0.0:
+            return
+        start = now + self._latency("arm")
+        end = start + pre + post
+        if any(w.start < end + RETURN_AFTER_S for w in self.engine.pending("arm")):
+            return
+        if isinstance(arm, ArmPart):
+            lasts = arm.held_until
+        else:
+            lasts = last.ends + last.clip.hold_s if last is not None else now
+        if lasts < end + SWAY_MARGIN_S:
+            return
+        self._ask(ARM_SWAY, None, Priority.IDLE, "idle", {"arm"}, start + pre, now)
+        self._sway_at = end + SWAY_GAP_S
 
     def _keep_posture(self, now: float) -> None:
         """The posture held while its reply goes on: sent again before its hold lapses while
@@ -1835,21 +1889,14 @@ class Alive:
                     overlays=len(state.segments))  # fmt: skip
 
     def _log_reply(self, reply: _Reply) -> None:
-        """The reply's last rows: its parts not yet logged, the posture that never rose and the
-        accent's rock never decided, each with its last reason."""
+        """The reply's last rows: its parts not yet logged and the posture that never rose,
+        with its last reason."""
         for index, state in reply.parts.items():
             if not state.complete and state.nuclei:
                 self._log_part(reply, index, state)
         if reply.posture == "due":
             reply.posture = "done"
             self._moment_log(POSTURE, reply.posture_why or "the reply ended first", turn=reply.turn)
-        if not reply.rock and reply.start_s is not None and self.engine.on:
-            reply.rock = "done"
-            why = reply.rock_why or "no accent over beat_z it could reach"
-            if reply.posture in ("up", "down"):
-                why = "the arm is up for this reply"
-            if self.knobs.pulse.accent_rock_p > 0.0:
-                self._moment_log(ACCENT_ROCK, why, turn=reply.turn)
         if self._posture is not None and self._posture.turn == reply.turn:
             self._posture = None
 
@@ -1859,11 +1906,11 @@ class Alive:
         speech_min = self._speech_total / 60.0
         cpu = self.prosody.cpu_s - self._cpu0[0]
         audio = self.prosody.audio_s - self._cpu0[1]
-        heads = sum(self._counts[k] for k in ("accent", "question", "think_glance", "aversion",
-                                               "listen_nod", "ack_nod"))  # fmt: skip
+        heads = self._head_moves + sum(self._counts[k] for k in ("question", "think_glance",
+                                                                  "aversion"))  # fmt: skip
+        accents = sum(self._counts[k] for k in (WEAK, STRONG, PEAK))
         per_min = {
-            "accents_per_speech_min": round(self._counts["accent"] / speech_min, 1)
-            if speech_min > 0 else 0.0,
+            "accents_per_speech_min": round(accents / speech_min, 1) if speech_min > 0 else 0.0,
             "head_moves_per_min": round(heads / minutes, 1),
         }  # fmt: skip
         ms = round(cpu * 1000.0 / audio, 2) if audio > 0 else 0.0

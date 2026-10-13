@@ -139,6 +139,29 @@ def intents(book: Book) -> tuple[str, ...]:
     return tuple(name for name, c in book.compositions.items() if c.callable)
 
 
+def span(book: Book, intent: str, part: PartName, stretch: float = 1.0) -> tuple[float, float]:
+    """How long before its sync point ``intent``'s steps on ``part`` may start moving it and how
+    long after it they may end, at the widest their ranges allow over every variant, each step
+    played ``stretch`` times slower round its stroke (the engine's speed scales); (0, 0) when no
+    step moves the part (or the book lacks the intent)."""
+    composition = book.compositions.get(intent)
+    if composition is None:
+        return 0.0, 0.0
+    before, after = 0.0, 0.0
+    for variant in composition.variants:
+        for step in variant.steps:
+            atom = book.atoms[step.atom]
+            if atom.part != part:
+                continue
+            ranges = {**atom.params, **step.params}
+            period = ranges[PERIOD].hi
+            repeats = ranges[REPEATS].hi if REPEATS in ranges else 1.0
+            hold = ranges[HOLD].hi if HOLD in ranges else 0.0
+            before = max(before, stretch * atom.stroke * period - step.at_s.lo)
+            after = max(after, step.at_s.hi + stretch * ((repeats - atom.stroke) * period + hold))
+    return before, after
+
+
 def _range(where: str, value: Any) -> Range:
     """A number or ``[lo, hi]`` as a range."""
     if isinstance(value, bool):

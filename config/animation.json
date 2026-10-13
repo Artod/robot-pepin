@@ -722,7 +722,7 @@
       "note": "the engine's own: the held arm's breath, a slow sway of the wrist over the pose a unit holds (the arm up), sent while nothing else moves it; the head's share of the breath is the idle layer's loop (idle below)",
       "variants": [
         {"needs": {"arm": "up"}, "steps": [
-          {"atom": "wrist_turn", "params": {"amp_deg": [6.0, 10.0], "period_s": [3.0, 4.0], "repeats": 1}}
+          {"atom": "wrist_turn", "params": {"amp_deg": [6.0, 10.0], "period_s": [2.5, 3.0], "repeats": 1}}
         ]}
       ]
     }
