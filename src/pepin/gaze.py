@@ -25,7 +25,12 @@ depth frames at each, how long to hold, which band, how long the request may liv
   ended, and the frames fused while it held the head still (late frames are counted for
   :data:`LATE_S`), for the node's report;
 * the head is BLIND from the write that starts a move until it has settled plus one frame period:
-  :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on;
+  :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on
+  (the interval's end against the newest encoder reading's stamp: both on the board's clock);
+* a POINT look that FOLLOWS (``follow``, :meth:`Arbiter.retarget`) keeps the head on its point
+  while the cart turns or moves under it: its caller re-resolves the point from the pose of now
+  (the node: TF) every step, and a view that moved past ``settle_tol_deg`` is written again, an
+  answered look's too (the speaker gaze's person in the map, 2026-10-15);
 * an OVERLAY (kind ``clip``, :class:`Overlay`) is keyed offsets ADDED to the aim of whatever holds
   the head (home when nothing does), each key written at its time at its own speed ceiling: it
   takes nothing from the holder, which keeps its status, its TTL and its aim, and the head goes
@@ -54,7 +59,7 @@ import threading
 import uuid
 from collections import Counter, deque
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol, cast
 
 from pepin.neck import (
@@ -306,7 +311,8 @@ class Look:
     ``hold_s``: above 0, a glance (answered at ``frames`` or ``hold_s`` after settling, atomic).
     A ``clip`` carries its :class:`Overlay` instead of views. ``speed_deg_s`` and ``acc_deg_s2``:
     the move's own ceilings over ``speed``'s (``neck_target``'s; None: the speed's own), so a
-    look can ease in and out on the servo's trapezoid."""
+    look can ease in and out on the servo's trapezoid. A ``point`` look keeps its point, and
+    with ``follow`` its view is re-resolved from it as the cart moves (:meth:`Arbiter.retarget`)."""
 
     source: str
     views: tuple[Aim, ...]
@@ -322,6 +328,8 @@ class Look:
     overlay: Overlay | None = None
     speed_deg_s: float | None = None
     acc_deg_s2: float | None = None
+    point: tuple[str, float, float, float] | None = None  # a point look's (frame, x, y, z)
+    follow: bool = False  # a point look kept on its point as the cart moves (:meth:`retarget`)
 
 
 @dataclass
@@ -667,6 +675,37 @@ class Arbiter:
             head = self._head
             return head.aim if head is not None and head.owner and not head.home else None
 
+    def following(self) -> Look | None:
+        """The look holding the head when it follows its point (``follow``): its caller
+        re-resolves the point from the pose of now and hands the view to :meth:`retarget`; None
+        when the holder is no such look."""
+        with self._lock:
+            active = self._active
+            if active is None or not active.look.follow or active.look.point is None:
+                return None
+            return active.look
+
+    def retarget(self, look_id: str, aim: Aim, now: float) -> bool:
+        """The following look ``look_id``'s point re-resolved to ``aim`` (the cart turned or
+        moved under it): past ``settle_tol_deg`` of its view, ``aim`` is its view and the head is
+        written there, an answered look's head too (it holds the head on its point; one not yet
+        answered is written by the next step). Whether it was; the same view, or a look that no
+        longer holds the head, changes nothing."""
+        with self._lock:
+            active = self._active
+            if active is None or active.look.id != look_id or not active.look.follow:
+                return False
+            views = active.look.views
+            if views and aim.off(views[-1]) <= math.radians(self.settings.settle_tol_deg):
+                return False
+            active.look = replace(active.look, views=(aim,))
+            active.view = 0
+            self.counts["follows"] += 1
+            if active.answered:
+                self._write(active, aim, home=False, now=now)
+        self._deliver()
+        return True
+
     def renew(self, source: str, now: float) -> int:
         """Restart the TTL of ``source``'s requests, and the dwell of one already answered
         (``see`` keeps a look; path gaze keeps its aim), and of its overlay; how many."""
@@ -716,6 +755,9 @@ class Arbiter:
             if head is not None and head.settled is not None:
                 until = head.settled.stamp + self.settings.frame_period_s
             reading = self._readings[-1] if self._readings else None
+            # the blind tail ends on the board's clock: the newest encoder reading's stamp is its
+            # "now" (never this Mac's clock against a board stamp; none read since: still blind)
+            board = None if reading is None else reading.stamp
             return GazeState(
                 phase=self._current_phase(),
                 head=None if reading is None else reading.aim,
@@ -724,7 +766,7 @@ class Arbiter:
                 request_id=active.look.id if active is not None else "",
                 source=active.look.source if active is not None else "",
                 band=active.look.band if active is not None else HOME,
-                blind=moving or (until is not None and now < until),
+                blind=moving or (until is not None and (board is None or board < until)),
                 blind_from=None if head is None else head.at,
                 blind_until=until,
                 head_stamp=None if reading is None else reading.stamp,
@@ -1397,11 +1439,17 @@ Resolver = Callable[[str, dict[str, float]], tuple[float, float, float] | str]
 
 
 def look_from_json(
-    data: dict[str, Any], settings: GazeSettings, cfg: NeckConfig, to_base: Resolver
+    data: dict[str, Any],
+    settings: GazeSettings,
+    cfg: NeckConfig,
+    to_base: Resolver,
+    from_pan: float | None = None,
 ) -> Look | str:
     """A request as the doors receive it, resolved to views; the refusal in words otherwise.
 
-    ``kind`` point (``target`` {frame, x, y, z}), direction ({bearing_rad, pitch_rad} in
+    ``kind`` point (``target`` {frame, x, y, z}; past the reach at the end nearer ``from_pan``,
+    the head's own pan, :meth:`Reach.clamp`; ``follow`` true keeps the head on the point as the
+    cart moves, :meth:`Arbiter.retarget`), direction ({bearing_rad, pitch_rad} in
     base_link), angles ({pan_rad, tilt_rad}; ``speed_deg_s`` and ``acc_deg_s2``, optional, are the
     move's own ceilings: an eased look), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
     or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s,
@@ -1429,6 +1477,9 @@ def look_from_json(
     target = data.get("target") or {}
     if not isinstance(target, dict):
         return "target is an object"
+    follow = bool(data.get("follow", False))
+    if follow and kind != "point":
+        return f"follow is a point look's, not a {kind}'s: the other kinds hold joint angles"
     if kind == "clip":
         overlay = overlay_from_json(target, settings)
         if isinstance(overlay, str):
@@ -1448,9 +1499,13 @@ def look_from_json(
     ceilings = _ceilings(data)
     if isinstance(ceilings, str):
         return ceilings
-    views = _views(kind, target, cfg, to_base)
+    views = _views(kind, target, cfg, to_base, from_pan)
     if isinstance(views, str):
         return views
+    point = None
+    if kind == "point":  # parsed by _views already: every coordinate is a number
+        frame = str(target.get("frame", "base_link"))
+        point = (frame, float(target["x"]), float(target["y"]), float(target["z"]))
     reach = Reach.of(cfg)
     for view in views:
         why = reach.refusal(view)
@@ -1469,6 +1524,8 @@ def look_from_json(
         id=str(data.get("id") or new_id()),
         speed_deg_s=ceilings[0],
         acc_deg_s2=ceilings[1],
+        point=point,
+        follow=follow,
     )
 
 
@@ -1525,7 +1582,11 @@ def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay
 
 
 def _views(
-    kind: str, target: dict[str, Any], cfg: NeckConfig, to_base: Resolver
+    kind: str,
+    target: dict[str, Any],
+    cfg: NeckConfig,
+    to_base: Resolver,
+    from_pan: float | None = None,
 ) -> tuple[Aim, ...] | str:
     try:
         if kind in ("home", "track"):
@@ -1551,7 +1612,7 @@ def _views(
         return f"target incomplete for a {kind}: {exc}"
     if isinstance(point, str):
         return point
-    return (Reach.of(cfg).clamp(aim_at_point(cfg, point)),)
+    return (Reach.of(cfg).clamp(aim_at_point(cfg, point), from_pan),)
 
 
 def _tilt_within(cfg: NeckConfig, aim: Aim) -> Aim:

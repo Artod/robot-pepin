@@ -60,12 +60,16 @@ class FakeHead:
         self.refusal: Refusal | None = None
         self.arrival: HeadReading | None = None
         self.kept = 0
+        self.ceilings: list[dict[str, float]] = []
 
     def blocked(self, now: float) -> Refusal | None:
         return self.block
 
-    def write(self, aim: Aim | None, *, speed: Speed, hold: bool, now: float) -> None:
+    def write(
+        self, aim: Aim | None, *, speed: Speed, hold: bool, now: float, **ceilings: float
+    ) -> None:
         self.writes.append((aim, hold, now))
+        self.ceilings.append(ceilings)
 
     def take_refusal(self) -> Refusal | None:
         refusal, self.refusal = self.refusal, None
@@ -119,7 +123,9 @@ def test_a_look_moves_settles_counts_its_frames_answers_and_falls_home() -> None
     arb.step(1.0)
     state = arb.state(1.05)
     assert state.phase == "still" and state.blind and state.blind_until == pytest.approx(1.1)
-    assert not arb.state(1.2).blind
+    assert arb.state(1.2).blind, "no reading past the tail yet: the board's now is 1.0"
+    arb.observe(HeadReading(LEFT.pan_rad, LEFT.tilt_rad, 1.12))
+    assert not arb.state(1.2).blind, "the newest reading is past the tail (one clock, the board's)"
     for stamp in (1.05, 1.2, 1.3):  # the first is inside the blur period: not a still frame
         arb.frame(stamp)
     arb.step(1.4)
@@ -134,6 +140,7 @@ def test_a_look_moves_settles_counts_its_frames_answers_and_falls_home() -> None
     assert arb.state(1.6).phase == "returning"
     arrive(arb, head, HOME, 2.5)
     arb.step(2.5)
+    arb.observe(HeadReading(HOME.pan_rad, HOME.tilt_rad, 2.7))
     assert arb.state(2.7).phase == "home" and not arb.state(2.7).blind
 
 
@@ -460,6 +467,59 @@ def test_a_pan_past_the_reach_goes_to_the_end_nearer_the_head_never_across_the_f
     kept = reach.clamp(inside, from_pan=math.radians(153.0))
     assert kept.pan_rad == pytest.approx(inside.pan_rad), "inside the reach: as asked"
     assert kept.tilt_rad == pytest.approx(HOME.tilt_rad)
+
+
+def test_a_point_past_the_reach_is_looked_at_from_the_end_nearer_the_head() -> None:
+    """A person a hair past straight back on the left, asked as a point: resolved to -177 deg
+    by the wrap, looked at from the left end when the head stands left (its own pan), as an
+    angles look's holder clamps it; without the head's pan, by number."""
+    reach = Reach.of(CFG)
+    behind = {"source": "voice.speaker", "kind": "point", "frames": 0,
+              "target": {"frame": "base_link", "x": -2.0, "y": -0.1, "z": 1.2}}  # fmt: skip
+    left = look_from_json(behind, SETTINGS, CFG, to_base, from_pan=math.radians(150.0))
+    assert isinstance(left, Look) and left.views[0].pan_rad == pytest.approx(reach.pan[1])
+    plain = look_from_json(behind, SETTINGS, CFG, to_base)
+    assert isinstance(plain, Look) and plain.views[0].pan_rad == pytest.approx(reach.pan[0])
+    assert left.point == ("base_link", -2.0, -0.1, 1.2) and not left.follow
+
+
+def test_a_point_look_that_follows_is_written_again_as_its_point_moves_under_the_head() -> None:
+    """The speaker gaze's person as a point that follows: once it holds the head (answered,
+    held for its TTL) a view re-resolved within the settle tolerance writes nothing (TF's
+    jitter, wheels that slip and turn no TF), one past it is written at once with the look's
+    own ceilings; a look that does not follow, or another's id, is never retargeted."""
+    arb, head, out = arbiter()
+    data = {"source": "voice.speaker", "kind": "point", "band": 5, "frames": 0, "hold": True,
+            "follow": True, "speed_deg_s": 60.0, "acc_deg_s2": 400.0,
+            "target": {"frame": "base_link", "x": 2.0, "y": 0.0, "z": 1.0}}  # fmt: skip
+    asked = look_from_json(data, SETTINGS, CFG, to_base)
+    assert isinstance(asked, Look) and asked.follow and asked.point is not None
+    arb.submit(asked, 0.0, out.append)
+    arb.step(0.0)
+    (first,) = arb.pending()
+    view = first.views[0]
+    arrive(arb, head, view, 0.4)
+    arb.step(0.4)
+    assert out and out[0].status == "done" and arb.holds("voice.speaker"), "answered, held"
+    following = arb.following()
+    assert following is not None and following.id == asked.id
+    writes = len(head.writes)
+    nudged = Aim(view.pan_rad + math.radians(0.5), view.tilt_rad)
+    assert not arb.retarget(asked.id, nudged, 0.5), "within the settle tolerance"
+    assert len(head.writes) == writes
+    turned = Aim(view.pan_rad - math.radians(20.0), view.tilt_rad)  # the cart turned 20 left
+    assert arb.retarget(asked.id, turned, 0.6)
+    assert head.writes[-1] == (turned, True, 0.6) and arb.counts["follows"] == 1
+    assert head.ceilings[-1] == {"speed_deg_s": 60.0, "acc_deg_s2": 400.0}, "the look's own"
+    assert arb.pending()[0].views == (turned,) and arb.state(0.6).target == turned
+    assert not arb.retarget("someone else", view, 0.7)
+    other, _head, _out = arbiter()
+    other.submit(look(frames=0, dwell_s=5.0), 0.0)
+    other.step(0.0)
+    assert other.following() is None, "an angles look holds joint angles"
+    refused = look_from_json({**data, "kind": "angles", "target": {"pan_rad": 0.1,
+                              "tilt_rad": 0.2}}, SETTINGS, CFG, to_base)  # fmt: skip
+    assert isinstance(refused, str) and "follow is a point look's" in refused
 
 
 def to_base(frame: str, xyz: dict[str, float]) -> tuple[float, float, float] | str:

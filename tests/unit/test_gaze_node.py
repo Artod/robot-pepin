@@ -36,7 +36,7 @@ from ros_stubs import (  # noqa: E402
     Time,
 )
 
-from pepin.gaze import PERSON, Aim, HeldLook, Look, Outcome  # noqa: E402
+from pepin.gaze import PERSON, Aim, HeldLook, Look, Outcome, aim_at_point  # noqa: E402
 from pepin.neck import NeckConfig  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
@@ -427,6 +427,60 @@ def test_the_door_state_names_the_driver_and_the_reach(node: Gaze) -> None:
     state = node._door_state({})
     assert state["head_stamp"] == pytest.approx(1_760_000_000.25, abs=1e-4), "its own stamp"
     assert state["pan_rad"] == pytest.approx(math.radians(10.0), abs=1e-4)
+
+
+class TurningTf:
+    """TF of a cart turning in place at the map's origin: ``yaw_deg`` is its heading now."""
+
+    def __init__(self) -> None:
+        self.yaw_deg = 0.0
+        self.asked: list[tuple[str, str, float]] = []
+
+    def pose(self, target: str, source: str, stamp: Any = None, timeout_s: float = 0.0) -> Any:
+        self.asked.append((target, source, timeout_s))
+        yaw = math.radians(self.yaw_deg)
+        c, s_ = math.cos(yaw), math.sin(yaw)
+        if (target, source) == ("base_link", "map"):  # a map point into the cart's frame
+            return RigidPose(np.array([[c, s_, 0.0], [-s_, c, 0.0], [0.0, 0.0, 1.0]]), np.zeros(3))
+        return RigidPose(np.eye(3), np.zeros(3))
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_point_that_follows_keeps_the_head_on_it_as_the_cart_turns_by_tf(node: Gaze) -> None:
+    """The speaker gaze's person as a map point that follows: the node resolves it from TF's
+    newest pose every step, never waiting, and writes the head again when the cart has turned
+    under it (TF turned 20 deg left: the pan 20 deg right); steps over a TF that does not turn
+    (wheels that slip) write nothing more."""
+    tf = TurningTf()
+    node._tf = tf  # type: ignore[assignment]
+    state_line(node, pan_ticks=2029, tilt_ticks=2311)  # neck_target
+    body = {"source": "voice.speaker", "kind": "point", "band": 5, "frames": 0, "hold": True,
+            "follow": True, "ttl_s": 6.0, "speed_deg_s": 60.0,
+            "target": {"frame": "map", "x": 1.0, "y": 1.0, "z": 1.0}}  # fmt: skip
+    look = gaze_node.look_from_json(body, node._arbiter.settings, node._cfg, node._to_base)
+    assert isinstance(look, Look) and look.follow
+    node._arbiter.submit(look, node._now())
+    node._step()
+    first = link(node).sent[-1]
+    there = aim_at_point(node._cfg, (1.0, 1.0, 1.0))  # the neck's lever arms included
+    assert first["cmd"] == "neck_target" and first["pan_rad"] == pytest.approx(there.pan_rad)
+    sent = len(link(node).sent)
+    for _ in range(3):
+        node._step()
+    assert [m for m in link(node).sent[sent:] if m.get("cmd") == "neck_target"] == [], "TF still"
+    tf.yaw_deg = 20.0
+    node._step()
+    turned = [m for m in link(node).sent[sent:] if m.get("cmd") == "neck_target"]
+    yaw = math.radians(20.0)
+    now = aim_at_point(node._cfg, (math.cos(yaw) + math.sin(yaw), math.cos(yaw) - math.sin(yaw),
+                                   1.0))  # fmt: skip
+    assert turned and turned[-1]["pan_rad"] == pytest.approx(now.pan_rad)
+    assert math.degrees(there.pan_rad - now.pan_rad) == pytest.approx(20.0, abs=1.5)
+    assert turned[-1]["speed_deg_s"] == 60.0, "the look's own ceiling"
+    assert ("base_link", "map", 0.0) in tf.asked, "never waited for"
+    assert node._arbiter.counts["follows"] == 1
 
 
 BREATH_CLIP = {

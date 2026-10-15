@@ -155,6 +155,8 @@ def test_an_overlay_adds_its_keys_to_the_holder_s_aim_and_the_holder_keeps_the_h
     assert arb.overlay() is not None and [r.source for r in arb.pending()] == [SPEAKER]
     still_at(arb, plus(LEFT, 0, 5), 1.15)
     arb.step(1.2)
+    held = plus(LEFT, 0, 5)
+    arb.observe(HeadReading(held.pan_rad, held.tilt_rad, 1.35))  # the board's now: its newest
     assert not arb.state(1.35).blind, "a held key is a still head: frames count again"
     arb.step(1.25)
     assert_aim(head.writes[-1][0], LEFT)
@@ -257,6 +259,7 @@ def test_a_breath_loops_without_blinding_the_head_until_its_ttl_lapses_unrenewed
     arb.submit(clip(BREATHE, BREATH, ttl_s=3.0, loop=True, idle=True), 1.0, out.append)
     for step in range(1, 50):
         now = 1.0 + step * 0.1
+        arb.observe(HeadReading(LEFT.pan_rad, LEFT.tilt_rad, now))  # the encoders, 10 a second
         arb.step(now)
         assert not arb.state(now).blind, f"blind at {now:.1f}: a breath is no move"
         if now == pytest.approx(2.5):
