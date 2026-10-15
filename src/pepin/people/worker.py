@@ -120,6 +120,8 @@ class People:
         self.session = Session(self.config.session)
         self.conversation = False
         self._gaze: tuple[float, FaceFrame, FaceSighting] | None = None
+        # who a sure verdict names, told on (the speaker gaze's register: the person engaged)
+        self.on_named: Callable[[str], None] | None = None
         self._writer = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people-store")
         self._unload: threading.Timer | None = None
         self._pool = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people-face")
@@ -278,6 +280,12 @@ class People:
         if person is not None:
             self._writer.submit(self._learn, parts, person, verdict, obs)
         speaker_name = person.name if person is not None else None
+        named = self.on_named
+        if named is not None and speaker_name and verdict.confidence == "sure":
+            try:
+                named(speaker_name)  # one queue put: never waits
+            except Exception:  # a listener never stops recognition
+                logger.exception("people: the listener of a name broke")
         log = {
             "who": speaker_name,
             "confidence": verdict.confidence,

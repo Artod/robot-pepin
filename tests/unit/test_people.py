@@ -414,10 +414,14 @@ def test_only_sure_verdicts_teach_and_the_conversation_s_end_forgets_strangers()
     sasha = rig.store.add_person("Саша", kind="guest", now=1.0)
     rig.store.add_samples(sasha.id, "voice", "fake-voice", [rig.voices[2]], now=1.0, keep=20)
     rig.people.opened(None)  # type: ignore[arg-type]
+    named: list[str] = []
+    rig.people.on_named = named.append  # the speaker gaze's register hears a sure name
     tentative = rig.hear(2)  # the voice alone, no face: tentative, learns nothing
     assert tentative.head == "говорит: Саша"  # the fake voice is exact: cos 1.0 >= sure
+    assert named == ["Саша"], "a sure verdict names the person the gaze holds"
     rig.people.config = PeopleConfig(on=True, voice=VoiceKnobs(sure=1.01))
     assert rig.hear(2).head == "говорит: похоже, Саша"
+    assert named == ["Саша"], "a tentative one names nobody"
     assert rig.store.counts(sasha.id) == {"face": 0, "voice": 2}  # only the sure one learned
     rig.hear(5, 600.0)
     assert rig.people.session.to_bind() is not None

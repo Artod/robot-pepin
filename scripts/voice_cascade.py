@@ -652,6 +652,7 @@ def main() -> int:
         # the approach tool's speaker: the person this gaze holds, on the channel's own frames
         robot.sightings = ChannelSightings(perception, vision, gaze, wait_s=channel.look_wait_s)
         robot.gaze = gaze  # and its body turn to the voice, when nobody is in view
+        people.on_named = gaze.named  # a sure verdict names the person the gaze holds
 
     body = Body.build(
         args.host,
