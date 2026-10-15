@@ -31,6 +31,7 @@ from pepin.feetech import (
 BYTE_S = 10e-6  # 1 Mbaud, 8N1: ten bits a byte
 ACCELERATION = 41  # the ramp a position move runs at, 100 ticks/s^2 a unit
 MAX_ACCELERATION = 85  # the firmware's ceiling on it: a larger Acceleration is stored as this
+MAX_POSITION_LIMIT = 11  # Max_Position_Limit (EEPROM), 2 bytes; Min_Position_Limit at 9 stays 0
 DELIVERED_MAX_ACCELERATION = 50  # what the neck's STS3215 read before anyone wrote it (2026-10-02)
 
 
@@ -59,10 +60,12 @@ class ServoWire:
 
     def __init__(self, ids: list[int], *, reply_latency_s: float = 0.0045) -> None:
         """``ids`` are the servos on the bus; each starts with a zeroed control table but for the
-        acceleration ceiling the servos came with."""
+        acceleration ceiling and the position limits (0..4095, the whole turn) the servos came
+        with."""
         self.memory = {motor_id: bytearray(128) for motor_id in ids}
         for table in self.memory.values():
             table[MAX_ACCELERATION] = DELIVERED_MAX_ACCELERATION
+            table[MAX_POSITION_LIMIT : MAX_POSITION_LIMIT + 2] = (4095).to_bytes(2, "little")
         self.silent: set[int] = set()
         self.reply_latency_s = reply_latency_s
         self.counts = WireCounts()

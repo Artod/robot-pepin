@@ -195,7 +195,8 @@ def answer_of(data: Mapping[str, Any]) -> GazeAnswer:
 
 
 def view_of(data: Mapping[str, Any]) -> HeadView:
-    """``GET /state`` as the speaker gaze reads it."""
+    """``GET /state`` as the speaker gaze reads it; ``head_stamp`` (the encoder reading's own
+    stamp, the board's clock) passed through, None from an arbiter that sends none."""
     pan, tilt = _number(data.get("pan_rad")), _number(data.get("tilt_rad"))
     head = Aim(pan, tilt) if pan is not None and tilt is not None else None
     until = data.get("blind_until")
@@ -208,6 +209,7 @@ def view_of(data: Mapping[str, Any]) -> HeadView:
         blind_until=float(until) if isinstance(until, (int, float)) else None,
         driving=bool(data.get("driving", False)),
         overlay=str(overlay.get("source", "")) if isinstance(overlay, dict) else "",
+        head_stamp=_number(data.get("head_stamp")) if head is not None else None,
     )
 
 

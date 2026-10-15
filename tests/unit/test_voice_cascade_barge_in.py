@@ -22,6 +22,7 @@ from pepin.voice_cascade.barge_in import (
     FuturePending,
     LevelDetector,
     Samples,
+    SpeechSeries,
     VadDetector,
     WordsDetector,
     build_detector,
@@ -29,6 +30,7 @@ from pepin.voice_cascade.barge_in import (
     interrupting_words,
     model_path,
     own_echo,
+    speech_series,
 )
 from pepin.voice_cascade.config import CascadeConfig
 from pepin.voice_cascade.ears import Ears
@@ -148,6 +150,34 @@ def test_the_vad_detector_needs_a_level_and_clears_of_the_echo() -> None:
     assert first_trigger(loud_echo, frames(tone(1.0))) is None  # within 10 dB of the echo
     no_echo = VadDetector(model, echo=lambda t: NO_ECHO_DB, echo_margin_db=10.0)
     assert first_trigger(no_echo, frames(tone(1.0))) is not None
+
+
+def test_the_vad_detector_keeps_each_chunk_s_probability_on_the_laptop_clock() -> None:
+    """The speaker gaze tags the array's readings with these (pepin.expression.doa): every 32 ms
+    chunk's probability, stamped with the laptop time of its last sample (a frame's time is its
+    last sample's), the last keep_s of them; a words detector's vad gate keeps its own, a level
+    detector none."""
+    vad = VadDetector(LoudIsSpeech())
+    for frame in frames(quiet(1.0) + tone(1.0), t0=10.0):
+        vad.voiced(frame)
+    series = speech_series(vad)
+    assert series is vad.series
+    assert series.peak(10.0, 10.9) == pytest.approx(0.02) and series.peak(11.1, 11.9) == 0.95
+    first = 10.0 + (512 - FRAME_SAMPLES) / RATE  # the first chunk ends 192 samples into frame 1
+    assert series.peak(9.9, first - series.chunk_s - 1e-6) is None
+    assert series.peak(9.9, first - series.chunk_s + 1e-6) == pytest.approx(0.02)
+    assert series.peak(12.1, 13.0) is None, "nothing heard after the stream"
+    short = SpeechSeries(keep_s=0.32)  # ten chunks
+    for k in range(20):
+        short.add(float(k), 0.1 * (k % 10))
+    assert short.peak(0.0, 9.5) is None and short.peak(10.0, 19.0) == pytest.approx(0.9)
+    base = CascadeConfig()
+    words = build_detector(
+        base.with_changes(barge_in_detector="words"), reader=Whisper(), vad=LoudIsSpeech()
+    )
+    assert isinstance(words, WordsDetector) and isinstance(words.gate, VadDetector)
+    assert speech_series(words) is words.gate.series
+    assert speech_series(build_detector(base)) is None and speech_series(None) is None
 
 
 def test_the_echo_is_the_played_level_a_lag_earlier_less_the_loss() -> None:

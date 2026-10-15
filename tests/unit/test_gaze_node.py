@@ -259,7 +259,9 @@ def test_the_recoveries_it_watches_are_the_behaviour_servers_and_the_trees() -> 
     plugins = params["behavior_server"]["ros__parameters"]["behavior_plugins"]
     assert set(gaze_node.BEHAVIOUR_ACTIONS) <= set(plugins)
     tree = (repo / "ros/params/pepin_nav_to_pose.xml").read_text()
-    assert "<BackUp " in tree and "<DriveOnHeading " in tree and "server_name" not in tree
+    # 2026-10-14: no forward drives in the tree (simulate_ahead_time 0 made a DriveOnHeading
+    # blind); the node still watches drive_on_heading, harmless while nothing requests it
+    assert "<BackUp " in tree and "<DriveOnHeading " not in tree and "server_name" not in tree
     assert gaze_node.CONTROLLER_ACTION == "follow_path"  # Nav2's controller server, no rename
     # ...and the tape keeps its status, which the replays' follow rows are made from
     assert "/follow_path/_action/status" in (repo / "src/pepin/tape_rows.py").read_text()
@@ -416,6 +418,15 @@ def test_the_door_state_names_the_driver_and_the_reach(node: Gaze) -> None:
     state_line(node, pan_ticks=2029, tilt_ticks=2311)
     assert node._door_state({})["driver"] == "neck_target"
     assert node._door_renew({"source": "nobody"}) == {"renewed": 0}
+    assert state["head_stamp"] is None, "no /neck/state yet"
+    joints = gaze_node.JointState()
+    joints.header.stamp = _stamp(1_760_000_000.25)  # the encoder read, on the board's clock
+    joints.name = ["neck_pan", "head_tilt"]
+    joints.position = [math.radians(10.0), math.radians(23.8)]
+    node._on_neck(joints)
+    state = node._door_state({})
+    assert state["head_stamp"] == pytest.approx(1_760_000_000.25, abs=1e-4), "its own stamp"
+    assert state["pan_rad"] == pytest.approx(math.radians(10.0), abs=1e-4)
 
 
 BREATH_CLIP = {
@@ -835,7 +846,8 @@ def test_drive_0330_has_no_path_saccade_in_the_plans_last_metres(
     before.close()
     assert [w for w in old if w.t < 40.0] == [w for w in writes if w.t < 40.0]  # nothing earlier
     assert [(w.t, w.source, w.pan_deg, w.tilt_deg) for w in old if 40.0 <= w.t < 42.0] == [
-        (40.8, "nav.path", -23.1, 65.6)  # 0.10 m of plan left at 0.15 m/s and slowing
+        (40.8, "nav.path", -23.1, 61.2)  # 0.10 m of plan left at 0.15 m/s and slowing; the
+        # tilt clamped to the reach's 61.2 deg down (2737 ticks since 2026-10-13; 65.6 before)
     ]
 
 

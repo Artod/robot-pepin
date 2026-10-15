@@ -477,7 +477,10 @@ class _Playing:
 class GazeState:
     """The one gate (``/gaze/state``): the phase, the head, the request holding it, and the
     blind interval (``blind_from`` the write that started the move, ``blind_until`` settled plus
-    one frame period, ``None`` while the head still moves)."""
+    one frame period, ``None`` while the head still moves). ``head`` is the newest encoder
+    reading and ``head_stamp`` that reading's own stamp (``/neck/state``'s header: the moment of
+    the encoder read on the board's clock, the clock the camera's frames are stamped on), so a
+    reader places a frame with the pose at the frame's stamp without its own clock."""
 
     phase: Phase
     head: Aim | None
@@ -489,6 +492,7 @@ class GazeState:
     blind: bool
     blind_from: float | None
     blind_until: float | None
+    head_stamp: float | None = None
 
     def as_dict(self) -> dict[str, Any]:
         """The JSON ``/gaze/state`` carries."""
@@ -496,6 +500,7 @@ class GazeState:
             "phase": self.phase,
             "pan_rad": None if self.head is None else round(self.head.pan_rad, 4),
             "tilt_rad": None if self.head is None else round(self.head.tilt_rad, 4),
+            "head_stamp": None if self.head_stamp is None else round(self.head_stamp, 4),
             "target": None if self.target is None else self.target.as_dict(),
             "since": round(self.since, 3),
             "request_id": self.request_id,
@@ -710,9 +715,10 @@ class Arbiter:
             until = None
             if head is not None and head.settled is not None:
                 until = head.settled.stamp + self.settings.frame_period_s
+            reading = self._readings[-1] if self._readings else None
             return GazeState(
                 phase=self._current_phase(),
-                head=self._readings[-1].aim if self._readings else None,
+                head=None if reading is None else reading.aim,
                 target=None if head is None else head.aim,
                 since=self._since,
                 request_id=active.look.id if active is not None else "",
@@ -721,6 +727,7 @@ class Arbiter:
                 blind=moving or (until is not None and now < until),
                 blind_from=None if head is None else head.at,
                 blind_until=until,
+                head_stamp=None if reading is None else reading.stamp,
             )
 
     def pending(self) -> list[Look]:
@@ -1040,6 +1047,12 @@ class Arbiter:
             return
         if now < self._retry_at or self._driver.blocked(now) is not None:
             return
+        if head is not None and head.settled is None:
+            # the holder's move (or the last key's) is still in flight: a key written now would
+            # hand the servo this key's speed and ramp mid-flight, and a glide key's tiny ramp
+            # takes its brakes away (2026-10-13: the head through its limits and its zero);
+            # the key waits for the head to settle, the next due key is the one written
+            return
         playing.key, playing.cycle, playing.base = index, cycle, base
         self._lift(base, key.offset, playing.still, look.id, key.speed_deg_s, now,
                    key.acc_deg_s2)  # fmt: skip
@@ -1086,6 +1099,8 @@ class Arbiter:
             return
         if now < self._retry_at or self._driver.blocked(now) is not None:
             return
+        if head.settled is None:
+            return  # the last key's move still flies: the way back waits for it (its ramp is small)
         self._lift(self._holder_aim(), ZERO, self._back_still, "", self._back_deg_s, now,
                    self._back_acc)  # fmt: skip
 
@@ -1325,12 +1340,20 @@ class Reach:
             )
         return None
 
-    def clamp(self, aim: Aim) -> Aim:
-        """The nearest aim inside the reach."""
-        return Aim(
-            min(max(aim.pan_rad, self.pan[0]), self.pan[1]),
-            min(max(aim.tilt_rad, self.tilt[0]), self.tilt[1]),
-        )
+    def clamp(self, aim: Aim, from_pan: float | None = None) -> Aim:
+        """The aim inside the reach: the tilt and a pan past the reach at the nearer end.
+
+        The two ends of a wide pan reach are a few degrees apart through the dead zone behind
+        and a whole sweep apart through the front, and a bearing behind, kept in (-pi, pi],
+        changes sign there: +184 deg reads -176 and the nearest end BY NUMBER is the far one.
+        With ``from_pan`` (the head's own pan, radians) the end nearer to THAT wins, so a target
+        behind never takes the head across the front for a few degrees of nearness (the whip of
+        2026-10-13: +153 -> -167, 320 deg at full speed, for the same person)."""
+        lo, hi = self.pan
+        pan = min(max(aim.pan_rad, lo), hi)
+        if from_pan is not None and not lo <= aim.pan_rad <= hi:
+            pan = lo if abs(from_pan - lo) < abs(from_pan - hi) else hi
+        return Aim(pan, min(max(aim.tilt_rad, self.tilt[0]), self.tilt[1]))
 
 
 def lens_at(cfg: NeckConfig, aim: Aim) -> tuple[float, float, float]:
@@ -1508,14 +1531,19 @@ def _views(
         if kind in ("home", "track"):
             return ()
         if kind == "angles":
-            return (Aim(float(target["pan_rad"]), float(target["tilt_rad"])),)
+            return (_tilt_within(cfg, Aim(float(target["pan_rad"]), float(target["tilt_rad"]))),)
         if kind == "scan":
-            return tuple(Aim(float(v["pan_rad"]), float(v["tilt_rad"])) for v in target["views"])
+            return tuple(
+                _tilt_within(cfg, Aim(float(v["pan_rad"]), float(v["tilt_rad"])))
+                for v in target["views"]
+            )
         if kind == "direction":
             frame = str(target.get("frame", "base_link"))
             if frame != "base_link":
                 return f"a direction is in base_link, not {frame}"
-            return (Aim(float(target["bearing_rad"]), float(target["pitch_rad"])),)
+            return (
+                _tilt_within(cfg, Aim(float(target["bearing_rad"]), float(target["pitch_rad"]))),
+            )
         point = to_base(
             str(target.get("frame", "base_link")), {k: float(target[k]) for k in ("x", "y", "z")}
         )
@@ -1524,6 +1552,15 @@ def _views(
     if isinstance(point, str):
         return point
     return (Reach.of(cfg).clamp(aim_at_point(cfg, point)),)
+
+
+def _tilt_within(cfg: NeckConfig, aim: Aim) -> Aim:
+    """``aim`` with its tilt inside the neck's reach: the head looks as far up or down as it
+    reaches (2026-10-14: a person standing over the robot asked for 21.9 deg up, 2 deg past the
+    stop, and the base server refused the 1791-tick target outright, so the head never moved).
+    The pan is left to the holder's own travel-aware clamp (:meth:`Reach.clamp`)."""
+    lo, hi = Reach.of(cfg).tilt
+    return Aim(aim.pan_rad, min(max(aim.tilt_rad, lo), hi))
 
 
 # ---- the drivers -----------------------------------------------------------------------------

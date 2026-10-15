@@ -1,13 +1,17 @@
 """Driving: where the robot is, the named places, a drive to one of them, and the stop.
 
-Every drive belongs to the goal server: its gate refuses a goal on a stale pose, it refuses a
-second goal while one runs ("already driving: cancel first"), and its cancel stops every goal on
-the robot, whoever sent it. These tools only ask it; they never command the wheels.
+Every drive belongs to the goal server: its gate refuses a goal on a stale pose, its one rule
+decides a request while another runs (the same target: ``already`` under way, no new goal;
+another: the running one cancelled and this one started after its end, ``replaced``; the
+speaker gaze's own turn never cancels a tool's), and its cancel stops every goal on the robot,
+whoever sent it. These tools only ask it; they never command the wheels.
 
-The reflexes live here, not in the model: a drive waits for its own end and says how it ended;
-one that has not ended within :data:`pepin.tools.robot.DRIVE_TIMEOUT_S`, or whose report stream
-is lost, is cancelled, so no motion outlives the call that started it. The head is not theirs:
-the gaze arbiter lets every look go when a drive starts and points the head for the drive.
+The reflexes live here, not in the model: a drive waits for its own end and says how it ended
+(an arrival as soon as the goal server says Nav2 reached it, before its pivot and the tape's
+close); one that has not ended within :data:`pepin.tools.robot.DRIVE_TIMEOUT_S`, or whose
+report stream is lost, is cancelled, so no motion outlives the call that started it. The head
+is not theirs: the gaze arbiter lets every look go when a drive starts and points the head for
+the drive.
 """
 
 from __future__ import annotations
@@ -105,7 +109,7 @@ def list_places(robot: Robot) -> Result:
 def go_to(robot: Robot, place: str) -> Result:
     """Drive to a named place and wait until the drive ends (up to 4 minutes; a drive that has
     not ended by then is cancelled), then say how it ended: arrived, or why not and how far
-    short. One drive at a time: a second one is refused until the first ends or is cancelled.
+    short. One drive at a time.
 
     Args:
         place: the place's name, exactly as list_places gives it.
@@ -160,12 +164,16 @@ def cancel(robot: Robot) -> Result:
 
 
 def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
-    """One drive through the goal server, reported when it has ended: the body of go_to and
-    go_to_pose, and of any later tool that drives (approach, explore). When the goal server
-    takes the drive, a caller that listens hears ``status: driving`` (:func:`progress`)."""
+    """One drive through the goal server, reported when it has ended (reached: at the goal
+    server's ``arrival``, the pivot and the tape's close not waited for): the body of go_to and
+    go_to_pose, and of any later tool that drives (approach, explore, turn). When the goal
+    server takes the drive, a caller that listens hears ``status: driving`` (:func:`progress`),
+    with the run it replaced; the same drive already under way is answered at once
+    (:func:`already`)."""
     robot.seen = None  # the last picture does not show where the robot will stand
     deadline = robot.clock() + robot.drive_timeout_s
     accepted: dict[str, Any] | None = None
+    replaced: list[dict[str, Any]] = []
     feedback: dict[str, Any] = {}
     lost: dict[str, Any] | None = None
     done: dict[str, Any] | None = None
@@ -176,15 +184,19 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
         for event in events:
             kind = event.get("event")
             if kind == "error":
-                return refused(robot, str(event.get("detail", "")))
-            if kind == "accepted":
+                return refused(robot, str(event.get("detail", "")), event.get("cancelled_for"))
+            if kind == "already":
+                return already(event, target)
+            if kind == "replaced":
+                replaced.append(event)
+            elif kind == "accepted":
                 accepted = event
-                progress(status="driving", target=target, run=event.get("run"))
+                progress(status="driving", target=target, run=event.get("run"), **told(replaced))
             elif kind == "feedback":
                 feedback = event
             elif kind == "lost":
                 lost = event
-            elif kind == "done":
+            elif kind in ("arrival", "done"):
                 done = event
                 break
             now = robot.clock()
@@ -212,7 +224,9 @@ def drive(robot: Robot, request: dict[str, Any], target: str) -> Result:
             f"{what} ({link_error or 'no word'}); {robot.halt()}",
             **_progress(feedback),
         )
-    return outcome(accepted, done, feedback, lost, gave_up, target)
+    result = outcome(accepted, done, feedback, lost, gave_up, target)
+    result.update(told(replaced))
+    return result
 
 
 def outcome(
@@ -230,6 +244,7 @@ def outcome(
         "seconds": done.get("seconds"),
         "run": done.get("run"),
     }
+    payload.update({k: done[k] for k in ("turned_deg", "short_deg") if k in done})  # spin: its turn
     arrival = done.get("arrival")
     if isinstance(arrival, dict) and "x" in arrival:
         payload["position"] = {
@@ -251,6 +266,9 @@ def outcome(
     if lost is not None:
         reading = lost.get("reading") or "the pose was lost"
         why = f"localisation was lost mid-drive ({reading}) and the goal server stopped{short}"
+    elif status == NAV2_CANCELED and done.get("cancelled_for"):
+        payload["cancelled_for"] = done["cancelled_for"]
+        why = f"the drive was cancelled for another request: {done['cancelled_for']}{short}"
     elif status == NAV2_CANCELED:
         who = gave_up or "the drive was cancelled from outside this call"
         why = f"{who}{short}"
@@ -266,8 +284,9 @@ def outcome(
     return fail(why, **payload)
 
 
-def refused(robot: Robot, detail: str) -> Result:
-    """A goal the goal server would not take, with what the model needs to try again."""
+def refused(robot: Robot, detail: str, cancelled_for: Any = None) -> Result:
+    """A goal the goal server would not take, with what the model needs to try again (and,
+    cancelled before it started, the request it was cancelled for)."""
     why = f"not driving: {detail}"
     if "no such place" in detail or "no place" in detail:
         try:
@@ -277,7 +296,31 @@ def refused(robot: Robot, detail: str) -> Result:
         why += f". Known places: {', '.join(names)}" if names else ". No places are known yet"
     elif "already driving" in detail:
         why += " (another drive is under way: wait for it to end, or cancel it)"
-    return fail(why)
+    return fail(why, **({"cancelled_for": cancelled_for} if cancelled_for else {}))
+
+
+def already(event: dict[str, Any], target: str) -> Result:
+    """The goal server's ``already``: the same drive is under way (its run), no new goal."""
+    return ok(
+        already=True,
+        status="driving",
+        target=target,
+        run=event.get("run"),
+        detail=str(event.get("detail") or "already under way") + ", no new goal",
+    )
+
+
+def told(replaced: list[dict[str, Any]]) -> dict[str, Any]:
+    """The runs a drive cancelled to start, as its answer names them; the speaker gaze's own
+    turns are the body's, not the model's, and go unnamed."""
+    named = []
+    for event in replaced:
+        if event.get("source") == "gaze":
+            continue
+        run = event.get("cancelled_run")
+        what = str(event.get("target")) + ("" if run is None else f" (run {run})")
+        named.append(f"{what} {'cancelled' if event.get('started') else 'dropped'} for this one")
+    return {"replaced": "; ".join(named)} if named else {}
 
 
 def _progress(feedback: dict[str, Any]) -> dict[str, Any]:

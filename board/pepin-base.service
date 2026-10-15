@@ -1,14 +1,16 @@
 [Unit]
 Description=Pepin base server: wheels, odometry and deadman next to the UART (TCP 3336)
-After=ser2net.service network.target
+After=ser2net.service pepin-bus-tap.service network.target
 Requires=ser2net.service
+# The bus through the tap (pepin.bus_tap, TCP 3334): every byte logged; the tap restarts alone.
+Wants=pepin-bus-tap.service
 # Never give up restarting: the bus may be powered minutes after the board.
 StartLimitIntervalSec=0
 
 [Service]
 WorkingDirectory=/opt/pepin
 Environment=PYTHONPATH=/opt/pepin
-ExecStart=/opt/pepin/bin/python -m pepin.base_server --config /opt/pepin/config/base.json
+ExecStart=/opt/pepin/bin/python -m pepin.base_server --config /opt/pepin/config/base.json --bus-port 3334
 Restart=on-failure
 RestartSec=2
 TimeoutStopSec=5

@@ -32,6 +32,7 @@ from pepin.tools.clients import (
     ChannelSightings,
     Eyes,
     Face,
+    Facing,
     GazeNeck,
     GoalServer,
     GoalServerLink,
@@ -120,6 +121,7 @@ class Robot:
     drive_timeout_s: float = DRIVE_TIMEOUT_S
     animator: Animator | None = None  # the gesture engine, where one runs (the voice cascade)
     people: PeopleDoor | None = None  # person recognition, where it runs (the voice cascade)
+    gaze: Facing | None = None  # the speaker gaze, where it runs (the voice cascade)
     still_wait_s: float = STILL_WAIT_S  # see: the longest wait for the first still frame
     seen: Seen | None = None
 

@@ -16,13 +16,16 @@ speaker. Three detectors:
 
 A quiet frame inside a run takes back half a frame (:class:`Run`): speech dips between
 syllables. Detectors see every frame, also while the robot is silent, so a model's state
-follows the room.
+follows the room. A ``vad`` detector keeps its model's probabilities of the last
+``SERIES_KEEP_S`` (:class:`SpeechSeries`, :func:`speech_series`): the speaker gaze reads them to
+tell the person's voice from the array's other "speech" (:mod:`pepin.expression.doa`).
 """
 
 from __future__ import annotations
 
 import concurrent.futures
 import re
+import threading
 from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -53,6 +56,7 @@ BACKCHANNELS = frozenset(
 # sounds that are not words: laughter, a growl, exclamations, hesitation (Whisper's spellings)
 NOT_WORDS = re.compile("(?:х[аеиоэы]|гр+|[ауоэ]х|ой|ай|э+м*|м+|хм+|а+|о+)")  # noqa: RUF001
 NO_ECHO_DB = -120.0  # the predicted echo when nothing has played
+SERIES_KEEP_S = 16.0  # the probabilities kept: the longest utterance (ears.max_utterance_s 15)
 
 Samples = npt.NDArray[np.float32]
 EchoLevel = Callable[[float], float]  # mic time -> the robot's predicted echo there, dBFS
@@ -212,6 +216,29 @@ class SileroVad:
         return float(out[0][0])
 
 
+class SpeechSeries:
+    """The model's speech probability of each chunk, stamped with the laptop time of the
+    chunk's last sample, for the last ``keep_s``; the mic's thread adds, any thread reads."""
+
+    def __init__(self, keep_s: float = SERIES_KEEP_S, chunk_s: float = 512 / RATE) -> None:
+        """``chunk_s``: the span one probability covers."""
+        self.chunk_s = chunk_s
+        self._points: deque[tuple[float, float]] = deque(maxlen=max(1, round(keep_s / chunk_s)))
+        self._lock = threading.Lock()
+
+    def add(self, t: float, p: float) -> None:
+        """The probability ``p`` of the chunk that ended at ``t``."""
+        with self._lock:
+            self._points.append((t, p))
+
+    def peak(self, t0: float, t1: float) -> float | None:
+        """The highest probability of the chunks overlapping ``t0..t1``; None when none does."""
+        with self._lock:
+            points = list(self._points)
+        found = [p for t, p in points if t >= t0 and t - self.chunk_s <= t1]
+        return max(found) if found else None
+
+
 class VadDetector:
     """A voice-activity model instead of loudness: a frame is voice when the model's latest
     probability is at least ``threshold``, the frame is at least ``min_dbfs`` and it stands
@@ -236,6 +263,7 @@ class VadDetector:
         self._run = Run(hold_s)
         self._buffer: Samples = np.zeros(0, dtype=np.float32)
         self.p = 0.0  # the model's latest probability
+        self.series = SpeechSeries(chunk_s=vad.chunk / RATE)  # every chunk's, on the laptop clock
 
     def voiced(self, frame: Frame) -> bool:
         """See :class:`VoiceTest`; runs the model on every whole chunk the frame completes."""
@@ -245,6 +273,7 @@ class VadDetector:
         while len(self._buffer) >= n:
             self.p = self.vad(self._buffer[:n])
             self._buffer = self._buffer[n:]
+            self.series.add(frame.t - len(self._buffer) / RATE, self.p)  # the chunk's last sample
         if self.p < self.threshold or frame.db < self.min_dbfs:
             return False
         return self.echo is None or frame.db >= self.echo(frame.t) + self.echo_margin_db
@@ -415,6 +444,16 @@ def model_path(
         partial.write_bytes(body)
         partial.replace(path)
     return path
+
+
+def speech_series(detector: object) -> SpeechSeries | None:
+    """The speech probabilities of ``detector``'s voice-activity model: a ``vad`` detector's own
+    or a ``words`` detector's ``vad`` gate's; None for a detector without one (``level``)."""
+    for part in (detector, getattr(detector, "gate", None)):
+        series = getattr(part, "series", None)
+        if isinstance(series, SpeechSeries):
+            return series
+    return None
 
 
 def build_detector(

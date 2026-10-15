@@ -143,7 +143,8 @@ class GazeAnswer:
 class HeadView:
     """The arbiter's state as the speaker gaze reads it: the head's angles, the source and band
     holding it, whether a frame now would be blurred (the blind interval, the board's clock),
-    whether a drive runs, and the source of the overlay playing on top ("" for none)."""
+    whether a drive runs, the source of the overlay playing on top ("" for none), and the
+    board's stamp of the encoder reading ``head`` is (None from an arbiter that sends none)."""
 
     head: Aim | None
     holder: str
@@ -152,6 +153,7 @@ class HeadView:
     blind_until: float | None
     driving: bool
     overlay: str = ""
+    head_stamp: float | None = None
 
 
 @dataclass(frozen=True)
@@ -273,11 +275,13 @@ def head_refusal(view: Attention, now: float, seen_s: float = HEAD_SEEN_S) -> st
     return None
 
 
-def arm_refusal(view: Attention) -> str | None:
-    """Why no arm motion may start now, None when it may: the person engaged stands past the
-    forward arc or the body turns toward them (attention's turn goes first)."""
+def arm_refusal(view: Attention, past_arc_rule: bool = True) -> str | None:
+    """Why no arm motion may start now, None when it may: the body turns toward the person
+    (attention's turn goes first), or, under ``past_arc_rule`` (layers.arm_past_arc; off since
+    2026-10-14, Artem: the rule held the arm for a person a room away), the person engaged
+    stands past the forward arc."""
     if view.phase == "turning":
         return "attention: the body turns toward the person"
-    if view.past_arc:
+    if past_arc_rule and view.past_arc:
         return "attention: the person stands past the forward arc"
     return None

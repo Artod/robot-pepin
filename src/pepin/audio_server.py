@@ -2,13 +2,19 @@
 
 Three jobs, one TCP port (3338, framing in :mod:`pepin.audio_link`):
 
-- **Hearing.** ``arecord`` captures the array at 16 kHz, 2 channels, and one channel goes out as
+- **Hearing.** ``arecord`` captures the array at 16 kHz, as many channels as its firmware
+  offers (2, or 6 with the ``_16k6ch`` image; read off ``/proc/asound/cardN/stream0`` at every
+  open, or forced by ``capture_channels`` in config/audio.json), and one channel goes out as
   20 ms frames, each stamped with the board's monotonic clock at its first sample. Channel 0 by
   default: the array's processed output (echo cancelled, beamformed, noise suppressed, level
   controlled), because the robot will talk while it listens and its motors hum — the residual
   echo and noise suppression live only on that channel. Channel 1 is the ASR beam (echo
   cancelled and beamformed, fixed gain, no suppression), one flag away for an engine that wants
-  it raw. A capture that delivers nothing for two seconds is logged loudly and reopened.
+  it raw. With six channels and ``raw_mics`` on (config/audio.json, since 2026-10-14) channels
+  2-5, the four microphones before any processing, go out beside them as ``raw`` frames of the
+  same seq and stamp (:class:`pepin.audio_link.RawFrame`; the laptop computes the voice's
+  direction from them, :mod:`pepin.audio_doa`). A capture that delivers nothing for two seconds
+  is logged loudly and reopened.
 - **Direction.** The voice's direction (``DOA_VALUE``, :mod:`pepin.xvf3800`) is read over USB
   control at 10 Hz and sent to the listeners as JSON.
 - **Speech.** PCM from the laptop plays through the array's own output, ``aplay`` on the same
@@ -32,6 +38,7 @@ from __future__ import annotations
 import argparse
 import array
 import contextlib
+import json
 import logging
 import math
 import os
@@ -44,8 +51,9 @@ import subprocess
 import threading
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import IO, Any, Protocol, Self
 
 from pepin.audio_link import (
@@ -57,6 +65,7 @@ from pepin.audio_link import (
     DoaReading,
     FrameDecoder,
     ProtocolError,
+    RawFrame,
     encode,
 )
 from pepin.face import FaceTable, load_face_table, mouth_level
@@ -67,8 +76,12 @@ logger = logging.getLogger(__name__)
 
 CARD_MARK = "XVF3800"  # in the array's ALSA long name: "reSpeaker XVF3800 4-Mic Array"
 CARDS_FILE = "/proc/asound/cards"
+PROC_ASOUND = "/proc/asound"  # cardN/stream0: the USB audio interfaces' formats and channels
 DEADMAN_S = 2.0  # capture silent this long: log loudly, reopen
 FPS_WINDOW_S = 5.0
+DEFAULT_CHANNELS = 2  # the 2-channel firmware, and what an unreadable stream file falls back to
+RAW_CHANNELS = (2, 3, 4, 5)  # the four microphones in the 6-channel firmware's capture (0-based)
+AUDIO_CONFIG = "audio.json"  # config/audio.json: the switch and the capture's channel count
 
 
 # -- the sound card ----------------------------------------------------------------------------
@@ -120,6 +133,75 @@ def resolve_device(device: str, cards_file: str = CARDS_FILE) -> tuple[str, str]
     return f"plughw:CARD={card.id},DEV=0", card.name
 
 
+_CHANNELS_LINE = re.compile(r"^\s*Channels:\s*(\d+)\s*$")
+
+
+def capture_channels(stream_text: str) -> int | None:
+    """The most channels the capture interface of a ``/proc/asound/cardN/stream0`` text offers
+    (the USB audio driver lists each altsetting's ``Channels:`` under ``Capture:``), None when
+    the text has no capture section."""
+    found: list[int] = []
+    capturing = False
+    for line in stream_text.splitlines():
+        if line.startswith("Capture:"):
+            capturing = True
+        elif line.startswith("Playback:"):
+            capturing = False
+        elif capturing:
+            match = _CHANNELS_LINE.match(line)
+            if match is not None:
+                found.append(int(match.group(1)))
+    return max(found) if found else None
+
+
+def detect_channels(cards_file: str = CARDS_FILE, proc_asound: str = PROC_ASOUND) -> int:
+    """The channels the array's capture interface offers now (2 with the 2-channel firmware, 6
+    with the ``_16k6ch`` image); :data:`DEFAULT_CHANNELS`, logged, when the card or its stream
+    file cannot be read."""
+    try:
+        with open(cards_file) as handle:
+            card = find_array(handle.read())
+        if card is None:
+            raise OSError(f"no {CARD_MARK} among the sound cards")
+        with open(f"{proc_asound}/card{card.index}/stream0") as handle:
+            channels = capture_channels(handle.read())
+    except OSError as exc:
+        logger.warning("capture channels unknown (%s): assuming %d", exc, DEFAULT_CHANNELS)
+        return DEFAULT_CHANNELS
+    if channels is None:
+        logger.warning("no capture interface in card%d/stream0: assuming %d channels",
+                       card.index, DEFAULT_CHANNELS)  # fmt: skip
+        return DEFAULT_CHANNELS
+    return channels
+
+
+@dataclass(frozen=True)
+class AudioConfig:
+    """config/audio.json as the server reads it: whether the raw microphones go to the laptop,
+    and the capture's channel count ("auto": the card's own)."""
+
+    raw_mics: bool = True
+    capture_channels: int | str = "auto"
+
+
+def load_audio_config(path: str | Path | None = None) -> AudioConfig:
+    """config/audio.json (or ``path``); the defaults, logged, when the file is not there (the
+    board gets it by hand: board/README.md)."""
+    if path is None:
+        from pepin.deployment import config_file
+
+        try:
+            path = config_file(AUDIO_CONFIG)
+        except FileNotFoundError as exc:
+            logger.warning("%s; raw_mics on, capture channels auto", exc)
+            return AudioConfig()
+    data = json.loads(Path(path).read_text())
+    channels = data.get("capture_channels", "auto")
+    if channels != "auto":
+        channels = int(channels)
+    return AudioConfig(bool(data.get("raw_mics", True)), channels)
+
+
 # -- samples, frames and stamps ----------------------------------------------------------------
 
 
@@ -147,6 +229,43 @@ class ChannelSplitter:
         samples = array.array("h")
         samples.frombytes(data[:whole])
         return samples[self._index :: self._channels].tobytes()
+
+    def reset(self) -> None:
+        """Forget a partial frame (a new stream starts)."""
+        self._rest = b""
+
+
+class MultiSplitter:
+    """Takes several channels out of interleaved s16le chunks cut anywhere, as one interleaved
+    stream of their own (the four raw microphones of the 6-channel capture)."""
+
+    def __init__(self, channels: int, indices: Sequence[int]) -> None:
+        """``channels`` interleaved in the stream; ``indices`` the ones kept (0-based), in the
+        order they come out."""
+        if not indices or any(not 0 <= i < channels for i in indices):
+            raise ValueError(f"channels {list(indices)} of {channels}")
+        self._channels = channels
+        self._indices = tuple(indices)
+        self._stride = channels * SAMPLE_BYTES
+        self._rest = b""
+
+    @property
+    def count(self) -> int:
+        """Channels kept."""
+        return len(self._indices)
+
+    def take(self, chunk: bytes) -> bytes:
+        """The kept channels' samples, interleaved in their order, from every whole frame."""
+        data = self._rest + chunk
+        whole = len(data) - len(data) % self._stride
+        self._rest = data[whole:]
+        samples = array.array("h")
+        samples.frombytes(data[:whole])
+        frames = len(samples) // self._channels
+        out = array.array("h", bytes(frames * self.count * SAMPLE_BYTES))
+        for k, index in enumerate(self._indices):  # slice moves, never interprets, the bytes
+            out[k :: self.count] = samples[index :: self._channels]
+        return out.tobytes()
 
     def reset(self) -> None:
         """Forget a partial frame (a new stream starts)."""
@@ -188,24 +307,27 @@ class SampleClock:
 
 
 class Framer:
-    """Cuts a mono s16le stream into fixed frames and says where each one starts."""
+    """Cuts an s16le stream (mono, or ``channels`` interleaved) into fixed frames and says where
+    each one starts (the index of its first sample, per channel)."""
 
-    def __init__(self, frame_samples: int = FRAME_SAMPLES) -> None:
-        """``frame_samples`` per frame (320 = 20 ms at 16 kHz)."""
-        self._bytes = frame_samples * SAMPLE_BYTES
+    def __init__(self, frame_samples: int = FRAME_SAMPLES, channels: int = 1) -> None:
+        """``frame_samples`` per channel per frame (320 = 20 ms at 16 kHz)."""
+        self._frame_samples = frame_samples
+        self._stride = channels * SAMPLE_BYTES
+        self._bytes = frame_samples * self._stride
         self._buffer = bytearray()
-        self.samples_in = 0  # samples received in this stream
+        self.samples_in = 0  # samples (per channel) received in this stream
         self._framed = 0  # samples handed out as frames
 
-    def push(self, mono: bytes) -> list[tuple[int, bytes]]:
+    def push(self, pcm: bytes) -> list[tuple[int, bytes]]:
         """Add samples; every completed frame as (index of its first sample, its bytes)."""
-        self._buffer += mono
-        self.samples_in += len(mono) // SAMPLE_BYTES
+        self._buffer += pcm
+        self.samples_in += len(pcm) // self._stride
         out = []
         while len(self._buffer) >= self._bytes:
             out.append((self._framed, bytes(self._buffer[: self._bytes])))
             del self._buffer[: self._bytes]
-            self._framed += self._bytes // SAMPLE_BYTES
+            self._framed += self._frame_samples
         return out
 
     def reset(self) -> None:
@@ -220,6 +342,8 @@ class Framer:
 
 class PcmSource(Protocol):
     """A capture stream of interleaved s16le; the real one is :class:`ArecordSource`."""
+
+    channels: int  # interleaved in the stream, known once open
 
     def open(self) -> str:
         """Start capturing; returns where from (for the logs); raises OSError when it cannot."""
@@ -271,21 +395,25 @@ class ArecordSource:
     """``arecord`` from alsa-utils on the array: raw s16le to a pipe, 20 ms periods, a 0.5 s
     buffer so a busy board delays the audio instead of losing it."""
 
-    def __init__(self, device: str, *, rate: int, channels: int, xruns: XrunCounter) -> None:
-        """``device`` is an ALSA name or "auto" (the XVF3800 found by name at every open)."""
+    def __init__(self, device: str, *, rate: int, channels: int | str, xruns: XrunCounter) -> None:
+        """``device`` is an ALSA name or "auto" (the XVF3800 found by name at every open);
+        ``channels`` a count or "auto" (the card's capture interface, read at every open)."""
         self._device = device
         self._rate = rate
-        self._channels = channels
+        self._wanted = channels
         self._xruns = xruns
         self._proc: subprocess.Popen[bytes] | None = None
         self.where = ""
+        self.channels = channels if isinstance(channels, int) else DEFAULT_CHANNELS
 
     def open(self) -> str:
         """Spawn arecord on the array; raises OSError when the card is absent."""
         device, self.where = resolve_device(self._device)
+        if self._wanted == "auto":
+            self.channels = detect_channels()
         command = [
             "arecord", "-D", device, "-t", "raw", "-f", "S16_LE", "-r", str(self._rate),
-            "-c", str(self._channels), "--period-time=20000", "--buffer-time=500000",
+            "-c", str(self.channels), "--period-time=20000", "--buffer-time=500000",
         ]  # fmt: skip
         proc = subprocess.Popen(
             command, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
@@ -447,7 +575,10 @@ class CaptureLoop:
     delivers nothing for ``deadman_s`` is logged as a stall and reopened at once. Each opening
     starts a new sample clock; ``seq`` runs on across them, the stamps say where time jumped.
     With ``rescue``, streams that close without a byte reboot the array's chip as
-    :class:`DeadStreamPolicy` says (the XVF3800's cold-boot state).
+    :class:`DeadStreamPolicy` says (the XVF3800's cold-boot state). The stream's channel count
+    is the source's at each open (the firmware's: 2 or 6); with ``raw`` channels asked and
+    present, each 20 ms also goes to ``on_raw`` as a :class:`RawFrame` of those channels, the
+    same seq and stamp as the mono frame (``raw_channels`` says how many are streaming now).
     """
 
     def __init__(
@@ -455,8 +586,9 @@ class CaptureLoop:
         source: PcmSource,
         on_frame: Callable[[AudioFrame], None],
         *,
-        channels: int = 2,
         channel: int = 0,
+        raw: Sequence[int] = (),
+        on_raw: Callable[[RawFrame], None] | None = None,
         rate: int = RATE,
         frame_samples: int = FRAME_SAMPLES,
         deadman_s: float = DEADMAN_S,
@@ -467,15 +599,24 @@ class CaptureLoop:
         policy: DeadStreamPolicy | None = None,
     ) -> None:
         """``on_frame`` receives every frame on the capture thread (it must not block);
-        ``rescue`` reboots the array (blocking, on the capture thread), None never does."""
+        ``raw`` the channels (0-based) sent to ``on_raw`` the same way when the stream has
+        them (none, or ``on_raw`` None: no raw frames); ``rescue`` reboots the array (blocking,
+        on the capture thread), None never does."""
         self._source = source
         self._rescue = rescue
         self._policy = policy if policy is not None else DeadStreamPolicy()
         self._delivered = False
         self._rescued = False
         self._on_frame = on_frame
-        self._splitter = ChannelSplitter(channels, channel)
+        self._on_raw = on_raw
+        self._channel = channel
+        self._raw = tuple(raw)
+        self._frame_samples = frame_samples
+        self._splitter = ChannelSplitter(max(DEFAULT_CHANNELS, channel + 1), channel)
+        self._raw_splitter: MultiSplitter | None = None
         self._framer = Framer(frame_samples)
+        self._raw_framer = Framer(frame_samples, max(1, len(self._raw)))
+        self._stream_seq0 = 0  # the seq of this stream's first frame
         self._rate = rate
         self._stamps = SampleClock(rate)
         self._deadman_s = deadman_s
@@ -495,6 +636,9 @@ class CaptureLoop:
         self.ends = 0  # streams that ended by themselves
         self.stalls = 0  # streams the deadman closed
         self.reboots = 0  # of the array's chip, by ``rescue``
+        self.channels = 0  # the open stream's channels (0: none open yet)
+        self.raw_channels = 0  # raw microphone channels streaming now (0: none)
+        self.raw_frames = 0
         self.last_frame_at: float | None = None
         self.frame_age = LatencyTracker("audio.frame_age")
 
@@ -578,10 +722,33 @@ class CaptureLoop:
         self._failed_opens = 0
         self.error = None
         self._last_data = now
-        self._splitter.reset()
+        self._streams(self._source.channels)
         self._framer.reset()
+        self._raw_framer.reset()
+        self._stream_seq0 = self.seq
         self._stamps = SampleClock(self._rate)
-        logger.info("capture open: %s", self.where)
+        logger.info("capture open: %s, %d channels, channel %d out, raw %s", self.where,
+                    self.channels, self._channel,
+                    f"{self.raw_channels} channels" if self.raw_channels else "off")  # fmt: skip
+
+    def _streams(self, channels: int) -> None:
+        """The splitters for a stream of ``channels``: the one channel out, and the raw ones
+        when the stream has them all (a 2-channel firmware has none to give)."""
+        self.channels = channels
+        if self._channel >= channels:
+            raise OSError(f"channel {self._channel} asked of a {channels}-channel capture")
+        self._splitter = ChannelSplitter(channels, self._channel)
+        wanted = self._raw if self._on_raw is not None else ()
+        if wanted and all(i < channels for i in wanted):
+            self._raw_splitter = MultiSplitter(channels, wanted)
+            self.raw_channels = len(wanted)
+        else:
+            if wanted:
+                logger.warning("raw mics asked (channels %s) but the capture has %d channels"
+                               " (the 2-channel firmware?): no raw frames", list(wanted),
+                               channels)  # fmt: skip
+            self._raw_splitter = None
+            self.raw_channels = 0
 
     def _drop(self, why: str, *, retry: bool) -> None:
         self._source.close()
@@ -618,12 +785,20 @@ class CaptureLoop:
         frames = self._framer.push(mono)
         self._stamps.observe(now, self._framer.samples_in)
         for first_sample, pcm in frames:
-            frame = AudioFrame(self.seq, self._stamps.time_of(first_sample), pcm, self._rate)
-            self.seq += 1
+            seq = self._stream_seq0 + first_sample // self._frame_samples
+            frame = AudioFrame(seq, self._stamps.time_of(first_sample), pcm, self._rate)
+            self.seq = seq + 1
             self.last_frame_at = now
             self._recent.append(now)
             self.frame_age.add(max(0.0, now - frame.stamp_s - frame.duration_s))
             self._on_frame(frame)
+        if self._raw_splitter is None or self._on_raw is None:
+            return
+        for first_sample, pcm in self._raw_framer.push(self._raw_splitter.take(data)):
+            seq = self._stream_seq0 + first_sample // self._frame_samples
+            self.raw_frames += 1
+            self._on_raw(RawFrame(seq, self._stamps.time_of(first_sample), pcm,
+                                  self._raw_splitter.count, self._rate))  # fmt: skip
 
 
 # -- direction ---------------------------------------------------------------------------------
@@ -1114,7 +1289,13 @@ class Client:
         decoder = FrameDecoder()
         try:
             while self.alive:
-                chunk = self.conn.recv(65536)
+                try:
+                    chunk = self.conn.recv(65536)
+                except TimeoutError:
+                    # the socket's timeout guards the writer's sends; a client that only listens
+                    # sends nothing for minutes (since 2026-10-14 the laptop finds the voice's
+                    # direction itself and no longer polls `status`), and that is not a fault
+                    continue
                 if not chunk:
                     break
                 for header, payload in decoder.feed(chunk):
@@ -1146,9 +1327,14 @@ class AudioServer:
     """Dual-stack TCP server of the audio link: a hello to each new client, frames and
     directions to the listeners, replies to one, and everyone's commands in one inbox."""
 
-    def __init__(self, port: int, hello: Callable[[], dict[str, Any]]) -> None:
-        """``port`` 0 picks a free one (tests); ``hello`` builds the greeting at each connect."""
+    def __init__(
+        self, port: int, hello: Callable[[], dict[str, Any]], *, send_timeout_s: float = 5.0
+    ) -> None:
+        """``port`` 0 picks a free one (tests); ``hello`` builds the greeting at each connect;
+        ``send_timeout_s`` bounds each client's sends (a reader may stay silent as long as it
+        likes)."""
         self._requested_port = port
+        self._send_timeout_s = send_timeout_s
         self._hello = hello
         self._server: socket.socket | None = None
         self._clients: list[Client] = []
@@ -1235,7 +1421,13 @@ class AudioServer:
                 time.sleep(0.05)
                 continue
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-            client = Client(conn, f"{peer[0]}:{peer[1]}", self._inbox, self._on_close)
+            client = Client(
+                conn,
+                f"{peer[0]}:{peer[1]}",
+                self._inbox,
+                self._on_close,
+                send_timeout_s=self._send_timeout_s,
+            )
             client.post(encode(self._hello()))
             with self._lock:
                 self._clients.append(client)
@@ -1313,6 +1505,9 @@ class AudioService:
             "ends": cap.ends,
             "opens": cap.opens,
             "array_reboots": cap.reboots,
+            "capture_channels": cap.channels,
+            "raw_channels": cap.raw_channels,
+            "raw_frames": cap.raw_frames,
             "doa_deg": None if latest is None else latest.deg,
             "doa_speech": None if latest is None else latest.speech,
             "doa_age_s": None if age is None else round(age, 3),
@@ -1334,10 +1529,12 @@ class AudioService:
         """The once-a-minute journal line."""
         s = self.status(now)
         doa = "off" if s["doa_deg"] is None else f"{s['doa_deg']} deg {s['doa_age_s']:.1f} s old"
+        raw = f"{s['raw_channels']} ch" if s["raw_channels"] else "off"
         return (
             f"audio: alive={s['capture_alive']} {s['frames_per_s']:.1f} fr/s, dropouts "
             f"{s['dropouts']} (xruns {s['xruns']}, stalls {s['stalls']}, ends {s['ends']}), "
-            f"opens {s['opens']}, doa {doa}, clients {s['clients']}, played {s['played_s']} s"
+            f"opens {s['opens']}, {s['capture_channels']} ch in, raw {raw}, doa {doa}, clients "
+            f"{s['clients']}, played {s['played_s']} s"
         )
 
     def run(self, stop: threading.Event, report_every_s: float = 60.0) -> None:
@@ -1396,8 +1593,15 @@ def arguments(argv: list[str] | None = None) -> argparse.Namespace:
         help="capture channel sent: 0 processed (AEC, beams, noise suppression, AGC), 1 ASR beam",
     )  # fmt: skip
     parser.add_argument(
-        "--capture-channels", type=int, default=2,
-        help="channels the firmware captures: 2 (default image), 6 (the _16k6ch image)",
+        "--capture-channels", default=None,
+        help="channels arecord asks for: a number (2 the default image, 6 the _16k6ch image)"
+        " or auto (the card's capture interface, read at every open); default config/audio.json's"
+        " capture_channels (auto)",
+    )  # fmt: skip
+    parser.add_argument(
+        "--raw-mics", action=argparse.BooleanOptionalAction, default=None,
+        help="send the four raw microphones to the laptop as raw frames when the capture has"
+        " six channels; default config/audio.json's raw_mics (on)",
     )  # fmt: skip
     parser.add_argument("--rate", type=int, default=RATE, help="capture rate, Hz")
     parser.add_argument("--play-rate", type=int, default=RATE, help="playback rate, Hz")
@@ -1429,6 +1633,11 @@ def main() -> None:
     )
 
     stop = stop_on_sigterm()
+    config = load_audio_config()
+    raw_mics = config.raw_mics if args.raw_mics is None else bool(args.raw_mics)
+    channels: int | str = config.capture_channels
+    if args.capture_channels is not None:
+        channels = "auto" if args.capture_channels == "auto" else int(args.capture_channels)
     capture_xruns, play_xruns = XrunCounter(), XrunCounter()
     capture_ref: list[CaptureLoop] = []
     doa_ref: list[DoaPoller] = []
@@ -1443,6 +1652,7 @@ def main() -> None:
             "channels": 1,
             "frame_samples": FRAME_SAMPLES,
             "channel": args.channel,
+            "raw_channels": capture.raw_channels if capture else 0,
             "play_rate": args.play_rate,
             "device": capture.where if capture else "",
             "firmware": doa_ref[0].firmware if doa_ref else None,
@@ -1451,16 +1661,17 @@ def main() -> None:
     server = AudioServer(args.port, hello)
     xvf = XvfHost(args.xvf_host)
     capture = CaptureLoop(
-        ArecordSource(
-            args.device, rate=args.rate, channels=args.capture_channels, xruns=capture_xruns
-        ),
+        ArecordSource(args.device, rate=args.rate, channels=channels, xruns=capture_xruns),
         lambda frame: server.broadcast(frame.encode()),
-        channels=args.capture_channels,
         channel=args.channel,
+        raw=RAW_CHANNELS if raw_mics else (),
+        on_raw=(lambda frame: server.broadcast(frame.encode())) if raw_mics else None,
         rate=args.rate,
         deadman_s=args.deadman_s,
         rescue=None if args.no_array_reboot else lambda: reboot_array(xvf),
     )
+    logger.info("capture channels %s, raw mics %s (config/audio.json)", channels,
+                "on" if raw_mics else "off")  # fmt: skip
     capture_ref.append(capture)
     doa = None
     if args.doa_hz > 0:

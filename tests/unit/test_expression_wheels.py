@@ -10,6 +10,7 @@ import json
 import math
 import threading
 import time
+from collections import deque
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -33,6 +34,7 @@ from pepin.expression.conversation import Heard
 from pepin.expression.executors import WheelMove, WheelReport, WheelsDone
 from pepin.expression.fakes import FakeBase, FakeClock, FakeDoa, FakeFace, FakeFaceFinder, FakeView
 from pepin.expression.mix import stretched
+from pepin.expression.plan import BodyLimits
 from pepin.expression.render import BookRenderer
 from pepin.expression.tracker import SpeakerGaze, SpeakerGazeWorker, SpeakerSettings
 from pepin.expression.wheels import (
@@ -42,6 +44,7 @@ from pepin.expression.wheels import (
     WheelsGuard,
     WheelsSettings,
     legs_of,
+    measured_rate,
     standing,
 )
 from pepin.gaze import Reach
@@ -50,12 +53,72 @@ from pepin.neck import NeckConfig
 from pepin.odometry import Pose2D
 
 REPO = Path(__file__).resolve().parents[2]
-FULL = WheelsSettings(speed_scale=1.0, yaw_acc_deg_s2=90.0)  # the caps these tests pin
+# The caps these tests pin, every one spelled out: a request of 30 deg at most, 30 deg/s and
+# 90 deg/s^2 at speed 1, on the ideal cart of FakeBase (a twist in force 0.04 s after it is
+# sent, followed at once: the lead is that 0.04 and the brake is the ramp). The file ships others
+# (test_the_knobs_ship_as_the_design_bounds_them), measured on the cart (CartBase).
+FULL = WheelsSettings(limits=BodyLimits(max_turn_deg=30.0), speed_scale=1.0,
+                      yaw_rate_deg_s=30.0, yaw_acc_deg_s2=90.0, yaw_brake_deg_s2=90.0,
+                      lead_s=0.04)  # fmt: skip
 RATE, RAMP = math.radians(30.0), math.radians(90.0)  # the caps at speed 1
 BLOCKER = (0.13, -0.06)  # ahead-right: a 20 deg left turn's front corner comes within 0.04 m
 # A caller's thread is never held: milliseconds here, bounded far under the 0.6 s a stuck goal
 # server costs the wheels' own thread (FIRST_VIEW_S), with room for a loaded parallel run.
 CALLER_S = 0.2
+
+
+class CartBase(FakeBase):
+    """The cart as the servo bus tap measured it on 2026-10-13 (five body turns at 45 deg/s):
+    a twist takes effect ``lag_s`` after it is sent (0.17: the hop and the board's tick, then
+    the servos' 0.11-0.19) and the wheels then ramp toward it at the servos' own Acceleration (101
+    deg/s^2 of yaw on the 0.544 m track, 0.48 m/s^2 at the rim) whatever the twist asks; the
+    state lines carry the twist commanded, as the base server's do."""
+
+    YAW_RAMP = math.radians(101.0)
+    DRIVE_RAMP = 0.48
+
+    def __init__(self, clock: FakeClock, *, lag_s: float = 0.17) -> None:
+        super().__init__(clock, lag_s=lag_s)
+        self.rolling = Twist(0.0, 0.0)  # what the wheels do, behind the twist applied
+
+    def advance(self, seconds: float) -> None:
+        end = self.clock.now + seconds
+        while self.clock.now < end - 1e-12:
+            step = min(self.line_s, end - self.clock.now)
+            self.clock.now += step
+            now = self.clock.now
+            for t, action in [e for e in self.events if e[0] <= now]:
+                self.events.remove((t, action))
+                action(self)
+            while self.arriving and self.arriving[0][0] <= now:
+                _, twist, _ = self.arriving.popleft()
+                self.applied, self._last_cmd, self.deadman = twist, now, False
+            if self._foreign is not None:
+                twist, keep = self._foreign
+                self.applied, self._last_cmd, self.deadman = twist, now, False
+                self._foreign = self._foreign if keep else None
+            moving = abs(self.applied.linear) > 0 or abs(self.applied.angular) > 0
+            if moving and now - self._last_cmd > 0.5:
+                self.applied, self.deadman = Twist(0.0, 0.0), True
+            v = toward(self.rolling.linear, self.applied.linear, self.DRIVE_RAMP * step)
+            w = toward(self.rolling.angular, self.applied.angular, self.YAW_RAMP * step)
+            self.rolling = Twist(v, w)
+            v = 0.0 if self.stalled_drives else v
+            w = 0.0 if self.stalled_turns else w
+            theta = self.pose.theta + w * step
+            self.pose = Pose2D(
+                self.pose.x + v * math.cos(theta) * step,
+                self.pose.y + v * math.sin(theta) * step,
+                theta,
+            )
+            half = w * self.TRACK_M / 2.0
+            self.travel = ((v - half) * step, (v + half) * step)
+            self.line()
+
+
+def toward(value: float, goal: float, most: float) -> float:
+    """``value`` moved toward ``goal`` by at most ``most``."""
+    return goal if abs(goal - value) <= most else value + math.copysign(most, goal - value)
 
 
 @dataclass
@@ -67,9 +130,9 @@ class Rig:
     said: list[str]
 
 
-def rig(settings: WheelsSettings = FULL, **view: Any) -> Rig:
+def rig(settings: WheelsSettings = FULL, base_of: type[FakeBase] = FakeBase, **view: Any) -> Rig:
     clock = FakeClock()
-    base = FakeBase(clock)
+    base = base_of(clock)
     room = FakeView(base, **view)
     said: list[str] = []
     wheels = WheelsExecutor(base.attach, room, load=lambda: settings, clock=clock,
@@ -125,6 +188,51 @@ def test_a_turn_reaches_its_angle_within_the_tolerance_and_the_caps() -> None:
     assert report.done and max(t.angular for t in slow.base.twists()) <= RATE * 0.2 + 1e-9
 
 
+def test_the_turn_lands_within_settle_deg_on_the_cart_as_the_tap_measured_it() -> None:
+    """2026-10-13, the servo bus tap: five body turns at 45 deg/s landed +6.4..+8.1 deg past
+    the ask (149.7 -> 157.8, -40.9 -> -48.5, -72.4 -> -79.2) because the braking was planned on
+    the command (the ramp 180, a lead of 0.06 s) while the cart ramps at the servos' own 101
+    and answers a twist 0.15 s later: it ran on at 45 deg/s past the planned stop, then braked
+    over 9-10 deg of its own. Planned on the cart (the shipped yaw_brake_deg_s2 and lead_s)
+    the same turns land within settle_deg at the same pace, the 2 cm back-off within settle_m;
+    the old plan on the same cart runs past."""
+    shipped = WheelsSettings.load(REPO / "config/expression.json")
+    for asked in (149.7, -40.9, -72.4):
+        r = rig(shipped, CartBase)
+        began = r.clock.now
+        report = turn(r, asked)
+        assert report.done and report.attempts == 1, report
+        assert report.turned_deg == pytest.approx(asked, abs=shipped.settle_deg), asked
+        assert math.degrees(r.base.pose.theta) == pytest.approx(asked, abs=shipped.settle_deg)
+        profile = abs(asked) / 45.0 + 2 * 45.0 / 101.0  # the rate, the cart's two ramps
+        assert r.clock.now - began < profile + 1.0, "the pace: the checks, the lead, the settle"
+        assert max(abs(t.angular) for t in r.base.twists()) <= math.radians(45.0) + 1e-9
+    rock = rig(shipped, CartBase)
+    report = run(lambda done: rock.wheels.rock(0.02, 1, done))
+    xs = [state.pose.x for _, state in rock.base.lines]
+    assert report.done and max(xs) == pytest.approx(0.02, abs=shipped.settle_m)
+    assert abs(rock.base.pose.x) <= shipped.settle_m
+    old = replace(shipped, lead_s=0.06, yaw_brake_deg_s2=180.0)
+    past = turn(rig(old, CartBase), 149.7)
+    assert past.done and past.turned_deg - 149.7 > 5.0, "the command's plan: the overshoot"
+
+
+def test_the_measured_rate_reads_the_base_s_lines_over_the_window() -> None:
+    reads: deque[tuple[float, float]] = deque()
+    assert measured_rate(reads, 0.08) == 0.0
+    reads.append((10.0, 0.0))
+    assert measured_rate(reads, 0.08) == 0.0, "one read: the cart stands"
+    reads.append((10.02, 0.01))
+    assert measured_rate(reads, 0.08) == pytest.approx(0.5), "under the window: all of them"
+    for k in range(2, 12):
+        reads.append((10.0 + 0.02 * k, 0.01 * k))
+    assert measured_rate(reads, 0.08) == pytest.approx(0.5)
+    assert reads[0][0] >= 10.22 - 0.16 - 1e-9, "reads older than twice the window are dropped"
+    reads.append((10.24, 0.11))  # the same stamp twice never divides by zero
+    reads.append((10.24, 0.11))
+    assert measured_rate(deque([(1.0, 0.0), (1.0, 0.0)]), 0.08) == 0.0
+
+
 @pytest.mark.parametrize(
     ("world", "x"),
     [
@@ -171,6 +279,18 @@ def test_a_blocked_arc_steps_away_and_the_turn_goes_once_the_arc_is_clear() -> N
     assert not given_up.done and given_up.attempts == 2 and given_up.turned_deg == 0.0
     assert given_up.why.startswith("gave up: the arc is blocked: a mark at (+0.")
     assert given_up.backed_m == pytest.approx(0.02, abs=0.006)
+
+
+def test_with_the_clearance_check_off_a_mark_in_the_arc_refuses_nothing() -> None:
+    """2026-10-14: the marks 0.3 m ahead (the dock, Artem's legs) refused 19 of 21 body turns;
+    wheels.clearance_check false turns on the odometry alone, the marks and their age unread."""
+    off = replace(FULL, clearance_check=False, clearance_m=0.10)
+    r = rig(off, world=[BLOCKER], marks_age_s=0.0)
+    report = turn(r, 20.0)
+    assert report.done and report.attempts == 1 and report.backed_m == 0.0
+    assert report.turned_deg == pytest.approx(20.0, abs=FULL.settle_deg)
+    stale = rig(replace(FULL, clearance_check=False), world=[BLOCKER], marks_age_s=99.0)
+    assert turn(stale, 20.0).done, "old marks are no refusal when nothing reads them"
 
 
 def test_a_mark_that_walks_into_the_arc_mid_turn_stops_it_and_the_step_away_may_clear_it() -> None:
@@ -365,7 +485,8 @@ def test_the_rock_atom_lands_its_forward_stroke_near_its_time_and_ends_on_time()
 def test_every_body_atom_of_the_book_fits_the_caps_at_its_extremes_and_faster_is_refused() -> None:
     renderer = BookRenderer(load_book(REPO / "config/animation.json"))
     body = [name for name, atom in renderer.book.atoms.items() if atom.part == "body"]
-    assert sorted(body) == ["body_rock", "body_turn", "body_wiggle"]
+    assert sorted(body) == ["body_rock", "body_turn", "body_wag", "body_wiggle"]
+    shipped = WheelsSettings.load(REPO / "config/expression.json")
     for name in body:
         atom = renderer.book.atoms[name]
         for corner in range(2 ** len(atom.params)):
@@ -376,6 +497,11 @@ def test_every_body_atom_of_the_book_fits_the_caps_at_its_extremes_and_faster_is
             clip = renderer.atom_clip(name, params)
             assert not isinstance(legs_of(clip, FULL), str), (
                 f"{name} {params}: {legs_of(clip, FULL)}"
+            )
+            # body_turn is in no composition: this is the one place it meets the file's caps
+            played = stretched(clip, 1.0 / shipped.speed_scale)
+            assert not isinstance(legs_of(played, shipped), str), (
+                f"{name} {params} as shipped: {legs_of(played, shipped)}"
             )
             slow = replace(FULL, speed_scale=0.2)
             assert not isinstance(legs_of(stretched(clip, 5.0), slow), str), "the engine stretches"
@@ -566,7 +692,10 @@ def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
     wheels, _ = real_wheels(said)
     door = Door(view=view())
     doa = FakeDoa()
-    machine = SpeakerGaze(SpeakerSettings(doa_map=MAP), door=door, doa=doa,
+    # the gaze asks within the executor's own limits (FULL): a request of 30 deg, handed over,
+    # not refused at once as a 100 deg one would be
+    settings = SpeakerSettings(doa_map=MAP, body=FULL.limits, doa_tags="chip")  # the array's flag
+    machine = SpeakerGaze(settings, door=door, doa=doa,
                           finder=FakeFaceFinder(), wheels=wheels, face=FakeFace(),
                           reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
                           report=lambda line: None)  # fmt: skip
@@ -576,7 +705,8 @@ def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
     took = time.perf_counter() - began
     assert took < CALLER_S, f"{took * 1000:.1f} ms"
     assert door.aims()[0][0].pan_rad == pytest.approx(math.radians(100))
-    assert machine.turning is not None and machine.turning.asked_deg == pytest.approx(30.0)
+    assert machine.turning is not None
+    assert machine.turning.asked_deg == pytest.approx(FULL.limits.max_turn_deg)
     wheels.close()
 
 
@@ -653,18 +783,27 @@ def test_the_goal_server_s_returns_are_placed_through_the_laser_s_mount() -> Non
 def test_the_knobs_ship_as_the_design_bounds_them() -> None:
     settings = WheelsSettings.load(REPO / "config/expression.json")
     lim = settings.limits
-    # shipped at 0 until the first supervised motion (2026-10-12); the design bounds are 30 / 0.02
-    assert (lim.max_turn_deg, lim.max_rock_m) == (30.0, 0.02)
+    # 2026-10-13, Artem: the whole turn in one request (180), at the book's own speed (1.0)
+    assert (lim.max_turn_deg, lim.max_rock_m) == (180.0, 0.02)
     assert (lim.backoff_m, lim.backoff_deg) == (0.02, 10.0), "the one recovery, within the caps"
-    assert (settings.speed_scale, settings.yaw_acc_deg_s2) == (0.4, 360.0)
+    assert (settings.speed_scale, settings.yaw_rate_deg_s) == (1.0, 45.0)
+    assert settings.yaw_acc_deg_s2 == 180.0
+    # 2026-10-13, the bus tap: the servos' own ramp, the twist's way to the cart
+    assert (settings.yaw_brake_deg_s2, settings.lead_s) == (100.0, 0.17)
+    assert math.degrees(settings.yaw_brake()) == pytest.approx(100.0), "the lesser: the cart's"
+    assert math.degrees(replace(settings, speed_scale=0.5).yaw_brake()) == pytest.approx(45.0)
     assert settings.marks_age_s == 3.0
     assert SpeakerSettings.load(REPO / "config/expression.json").body == lim
     with pytest.raises(ValueError, match="speed_scale"):
         WheelsSettings.from_config({"wheels": {"speed_scale": 1.5}})
     with pytest.raises(ValueError, match="backoff_m"):
         WheelsSettings.from_config({"wheels": {"backoff_m": 0.03}})
-    with pytest.raises(ValueError, match="backoff_deg"):
-        WheelsSettings.from_config({"wheels": {"backoff_deg": 40.0}})
+    with pytest.raises(ValueError, match="backoff_deg"):  # a turn back longer than a request
+        WheelsSettings.from_config({"wheels": {"max_turn_deg": 30.0, "backoff_deg": 40.0}})
+    with pytest.raises(ValueError, match="lead_s"):
+        WheelsSettings.from_config({"wheels": {"lead_s": -0.1}})
+    with pytest.raises(ValueError, match="yaw_brake_deg_s2"):
+        WheelsSettings.from_config({"wheels": {"yaw_brake_deg_s2": 0.0}})
 
 
 def test_a_step_goes_away_from_the_mark_nearest_the_footprint() -> None:

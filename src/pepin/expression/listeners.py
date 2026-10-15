@@ -129,7 +129,7 @@ from pepin.expression.conversation import (
     moment_rank,
 )
 from pepin.expression.markers import Part
-from pepin.expression.parts import ArmPart
+from pepin.expression.parts import GENTLE_SHARE, ArmPart
 from pepin.expression.prosody import PartNews, ProsodyListener, VoiceStats
 from pepin.expression.schedule import (
     HOME,
@@ -167,6 +167,8 @@ THINK_MAX_S = 3.5  # a thinking glance never holds longer
 THINK_FACE_P = 0.5  # the thinking face with the glance
 PAUSE_GAP_S = 0.35  # two nuclei this far apart have a pause between them
 DEFER_MAX_S = 3.0  # a greeting waits for the body's turn at most this long
+GREET_SEEN_MAX_S = 6.0  # a greeting waits for the person to be SEEN at most this long
+GREET_SEEN_FRESH_S = 3.0  # seen this recently counts (a track's sighting may be minutes old)
 DEFER_STEP_S = 0.1
 POLL_S = 0.2  # the head's holder and attention read this often in a conversation
 IDLE_WAIT_S = 1.0  # the thread's longest sleep with nothing due
@@ -174,25 +176,26 @@ DECIDE_MARGIN_S = 0.05  # a causal beat is decided this long before its lead run
 SHIFT_MOVE_S, SHIFT_HOLD_S = 0.6, (1.5, 3.0)  # the listening shift's way and hold
 BODY_SETTLE_S = 0.8  # the cart is the gestures' again this long after a clip's end (two stops)
 SWAY_GAP_S = 0.5  # the held arm sways this long after its last motion at the earliest
+BREATH_GAP_S = 0.05  # the breath's clips follow each other and any motion this closely
 POSTURE_MIN_S = 1.0  # the arm rises only with this much of the reply's speech known after it
 POSTURE_TAIL_S = 0.5  # the posture's hold reaches this far past the reply's audio known
 RENEW_AHEAD_S = 0.6  # the hold is sent again when it has less than this left...
 RENEW_GAIN_S = 0.3  # ...and the reply's audio known goes on at least this much past it
 RETURN_AFTER_S = 0.3  # the arm goes back to the posture this long after a mark's motion
-POSTURE_CAPS = 0.5  # the posture's way at this share of the arm's caps (rest to ready ~0.8 s)
 SWAY_MARGIN_S = RENEW_AHEAD_S + POLL_S  # the held arm's hold outlasts its sway by this at least
 # The book's own ensembles (config/animation.json, callable false) the listeners ask for
 WEAK, STRONG, PEAK = "pulse_weak", "pulse_strong", "pulse_peak"  # an accent, by its strength
 LAUGHING = "pulse_laugh"  # an accent of the voice's laughing
 LISTEN_NOD, ACK_NOD = "listen_nod", "ack_nod"  # the nods of the person's pause and statement
-ARM_SWAY = "arm_sway"  # the held arm's breath
+ARM_SWAY = "arm_sway"  # the held arm's breath, the book's older way: the wrist alone
+ARM_BREATH = "arm_breath"  # the held arm's breath in every joint (the book's breath layer)
 LAUGH_SOUND = "laugh_sound"  # the moment of the voice's laughing
 # The composition a moment due from the person's words plays, unless config/animation.json's
 # moments map it to another
 DUE = {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
 MINE = frozenset(
-    (WEAK, STRONG, PEAK, LAUGHING, LISTEN_NOD, ACK_NOD, ARM_SWAY, "melody", "question",
-     "think_glance", "aversion", "smile", "listen_shift", POSTURE)
+    (WEAK, STRONG, PEAK, LAUGHING, LISTEN_NOD, ACK_NOD, ARM_SWAY, ARM_BREATH, "melody",
+     "question", "think_glance", "aversion", "smile", "listen_shift", POSTURE)
 )  # fmt: skip
 QUESTION = (  # a question: its mark, or a question word first
     r"\?|^\W*(?:(?:а|и|ну)\W+)?"  # noqa: RUF001
@@ -214,8 +217,8 @@ class PulseKnobs:
 
     melody_deg_per_st: float = 0.2
     melody_max_deg: float = 0.9
-    melody_cutoff_hz: float = 1.0
-    melody_key_gap_s: float = 0.5
+    melody_cutoff_hz: float = 0.5
+    melody_key_gap_s: float = 1.0
     beat_z: float = 2.0
     strong_z: float = 3.0
     beat_gap_s: float = 2.0
@@ -227,6 +230,7 @@ class PulseKnobs:
     laugh_run: int = 3
     laugh_gap_s: tuple[float, float] = (0.2, 0.4)
     arm_up_min_sentences: int = 2
+    arm_up_caps_share: float = GENTLE_SHARE
     voice_stats: VoiceStats = field(default_factory=VoiceStats)
 
 
@@ -311,6 +315,7 @@ def alive_knobs(data: Mapping[str, Any]) -> AliveKnobs:
         laugh_run=int(p.get("laugh_run", dp.laugh_run)),
         laugh_gap_s=_pair(p.get("laugh_gap_s"), dp.laugh_gap_s),
         arm_up_min_sentences=int(p.get("arm_up_min_sentences", dp.arm_up_min_sentences)),
+        arm_up_caps_share=num(p, "arm_up_caps_share", dp.arm_up_caps_share),
         voice_stats=VoiceStats.of(p.get("voice_stats", {})),
     )
     dirs = m.get("think_dirs", dm.think_dirs)
@@ -558,8 +563,8 @@ class Alive:
         ears have them; a slow tool)."""
         self._post("moment", name, text)
 
-    def drive(self, active: bool) -> None:
-        """A drive began or ended."""
+    def drive(self, active: bool, ran: bool = True) -> None:
+        """A drive began or ended (whether it ran changes nothing here)."""
         self._post("drive", active)
 
     def closed(self, reason: str) -> None:
@@ -1004,6 +1009,7 @@ class Alive:
             return "; ".join(whys)
         self._ask(intent, AtStream(round(stroke_s, 4), reply.turn), Priority.PULSE, "pulse",
                   parts, stroke, now, reply=reply)  # fmt: skip
+        self._swell(intent, stroke)
         if "head" in parts:
             self._beats.append(now)
         if intent == WEAK:
@@ -1499,16 +1505,26 @@ class Alive:
 
     def _due(self, name: str, close_id: int, first: float) -> None:
         """A greeting or a farewell due from the person's words: the book's composition now, or
-        once the body's turn toward the person is over."""
+        once the body's turn toward the person is over; a greeting only once the person is
+        SEEN (a face or a body, with eyes to see: a wave at a voice from behind reads as a wave
+        at nobody, Artem 2026-10-13), dropped when nobody is within GREET_SEEN_MAX_S."""
         now = self.clock()
         if not self._conversation or not self.engine.on or self._driving:
             self._moment_log(name, "no conversation, off or driving")
             return
         view = self._view()
-        turning = view is not None and (view.phase == "turning" or view.past_arc)
+        turning = view is not None and (view.phase == "turning" or self._past_arc(view))
         if turning and now - first < DEFER_MAX_S:
             self._at(now + DEFER_STEP_S, lambda: self._due(name, close_id, first))
             return
+        if name == GREETING_DUE and view is not None and view.eyes:
+            seen = view.seen_s is not None and now - view.seen_s <= GREET_SEEN_FRESH_S
+            if not seen:
+                if now - first < GREET_SEEN_MAX_S:
+                    self._at(now + DEFER_STEP_S, lambda: self._due(name, close_id, first))
+                    return
+                self._moment_log(name, f"nobody seen within {GREET_SEEN_MAX_S:.0f} s")
+                return
         intent = self.engine.book.moments.get(name, DUE[name])
         request = Request(intent, None, Priority.MOMENT, "moment", rank=moment_rank(name),
                           family=intent)  # fmt: skip
@@ -1520,9 +1536,14 @@ class Alive:
         """Why the cart is not the gestures' now (the speaker gaze turns it, or will), None
         when it is."""
         view = self._view()
-        if view is not None and (view.phase == "turning" or view.past_arc):
+        if view is not None and (view.phase == "turning" or self._past_arc(view)):
             return "a body turn is pending"
         return None
+
+    def _past_arc(self, view: Attention) -> bool:
+        """Whether the person past the forward arc counts as a turn to come: only under the
+        engine's ``arm_past_arc`` rule (layers.arm_past_arc)."""
+        return bool(view.past_arc and self.engine.config.arm_past_arc)
 
     # -- the arm up while a long reply goes on --------------------------------------------------
 
@@ -1553,7 +1574,8 @@ class Alive:
             return
         assert isinstance(arm, ArmPart) and pose is not None
         held = arm.holding()
-        clip = pose_clip(arm, held if held is not None else arm.base, pose, 0.0, POSTURE_CAPS)
+        share = self.knobs.pulse.arm_up_caps_share
+        clip = pose_clip(arm, held if held is not None else arm.base, pose, 0.0, share)
         second = self._posture_second(reply)
         if second is None:
             reply.posture_why = "the reply's voice has not begun"
@@ -1638,21 +1660,30 @@ class Alive:
         self._arm_sway(now)
 
     def _arm_sway(self, now: float) -> None:
-        """While a unit holds the arm up and nothing moves it (``SWAY_GAP_S`` after its last
-        motion, none waiting), ``arm_sway`` over the held pose, its hold kept: only when the
-        hold outlasts the sway by ``SWAY_MARGIN_S`` (a posture renewed in time after it)."""
+        """While a unit holds the arm up and nothing moves it (a gap after its last motion, none
+        waiting), the held arm's breath over the held pose, its hold kept: only when the hold
+        outlasts it by ``SWAY_MARGIN_S`` (a posture renewed in time after it). With the book's
+        breath layer for the arm (:attr:`pepin.expression.parts.ArmPart.breath`) a flat clip of
+        ``clip_s`` that the layer fills in every joint, the clips back to back (``BREATH_GAP_S``:
+        the layer joins them seamlessly); without it the book's ``arm_sway`` (the wrist alone,
+        ``SWAY_GAP_S`` apart)."""
         if not (self._conversation and self.engine.on) or self._driving or self._quiet:
             return
         arm = self.engine.parts.get("arm")
         if now < self._sway_at or self._listening or arm is None or not _holds(arm):
             return
+        layer = arm.breath if isinstance(arm, ArmPart) else None
+        gap = BREATH_GAP_S if layer is not None else SWAY_GAP_S
         reservations = self.engine.scheduler.reservations
         last = reservations.last("arm")
         if reservations.holder("arm", now) is not None or (
-            last is not None and now < last.ends + SWAY_GAP_S
+            last is not None and now < last.ends + gap
         ):
             return
-        pre, post = self._reach(ARM_SWAY, "arm")
+        if layer is not None:
+            pre, post = 0.0, layer.breath.clip_s
+        else:
+            pre, post = self._reach(ARM_SWAY, "arm")
         if pre == post == 0.0:
             return
         start = now + self._latency("arm")
@@ -1665,8 +1696,24 @@ class Alive:
             lasts = last.ends + last.clip.hold_s if last is not None else now
         if lasts < end + SWAY_MARGIN_S:
             return
-        self._ask(ARM_SWAY, None, Priority.IDLE, "idle", {"arm"}, start + pre, now)
-        self._sway_at = end + SWAY_GAP_S
+        if layer is not None:
+            clip = Clip("arm", 0.0, 0.0, post, (), then="hold")
+            self.engine.request(Request(ARM_BREATH, None, Priority.IDLE, "idle", clips=(clip,),
+                                        parts=frozenset({"arm"})))  # fmt: skip
+            self._counts[ARM_BREATH] += 1
+        else:
+            self._ask(ARM_SWAY, None, Priority.IDLE, "idle", {"arm"}, start + pre, now)
+        self._sway_at = end + gap
+
+    def _swell(self, intent: str, stroke: float) -> None:
+        """An accent's ensemble sent while a unit holds the arm up: the arm's breath swells by
+        the book's gain for it (the pulse feeds the layer), whether or not the arm's own beat
+        is in the ensemble; nothing at rest."""
+        arm = self.engine.parts.get("arm")
+        layer = arm.breath if isinstance(arm, ArmPart) else None
+        if layer is None or not _holds(arm):
+            return
+        layer.excite(layer.breath.accent_gain.get(intent, 0.0), stroke)
 
     def _keep_posture(self, now: float) -> None:
         """The posture held while its reply goes on: sent again before its hold lapses while
@@ -1699,7 +1746,7 @@ class Alive:
                 return  # the reply's audio is nearly out: the hold lapses with it
         elif arm.held_until - now > RENEW_AHEAD_S or want < arm.held_until + RENEW_GAIN_S:
             return
-        clip = pose_clip(arm, held, posture.pose, 0.0, POSTURE_CAPS)
+        clip = pose_clip(arm, held, posture.pose, 0.0, self.knobs.pulse.arm_up_caps_share)
         up_at = now + arm.latency_s + clip.duration_s
         if any(w.start < up_at + RETURN_AFTER_S for w in self.engine.pending("arm")):
             return  # a clip waiting for the arm comes first: it keeps the hold, plans from it

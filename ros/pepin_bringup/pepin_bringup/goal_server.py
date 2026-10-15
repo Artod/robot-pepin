@@ -13,11 +13,30 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
     {"cmd": "clearance", "radius_m": 1.0}  (where's ``navigating``, and depth_fusion's newest
                                            obstacle marks near the cart, for the voice's wheels)
     {"cmd": "plan", "x": 1.2, "y": 0.4, "yaw_deg": 90}
+    {"cmd": "spin", "deg": -90}            (a turn in place, + left: the behaviour server's Spin)
+    {"cmd": "pose_at", "stamp": 1760470123.456, "frame": "camera_link"}
+                                           (map -> frame at a stamp, out of TF's history)
 
-and answers with one JSON line per event: accepted, feedback, arrival, done. A ``plan`` is
-asked, never driven: would a goal there be driven (:meth:`GoalServer.plan`)? It also owns the
-run's recording: it starts one when a goal starts and closes it when the goal ends, so a
+and answers with one JSON line per event: accepted, feedback, arrival (the moment Nav2 reports
+the goal reached; the end-of-drive pivot and the tape's close come after it), done. A ``plan``
+is asked, never driven: would a goal there be driven, and where does its plan end
+(:meth:`GoalServer.plan`)? It also owns
+the run's recording: it starts one when a goal starts and closes it when the goal ends, so a
 recording can no longer outlive its run.
+
+ONE OWNER OF MOTION, ONE RULE FOR A NEW REQUEST (2026-10-14). A ``go`` or a ``spin`` carries
+its ``source``: ``tool`` (a person's ask: the brain's tools, ros/goto.sh; the default) or
+``gaze`` (the speaker gaze's own body turn). One run at a time is this node's, and a request
+that comes while one is under way, until its ``done`` (the pivot and the tape's close
+included), is decided here (:meth:`GoalServer._admit`): the same source asking for the same
+target is answered ``already`` with that run's number, no new goal (its end goes to its own
+requester); the gaze's turn never cancels a person's: refused while one runs; anything else
+cancels the run under way (its goal and its pivot, by their handles) and starts once that run
+has ended, ``replaced`` naming it, while the cancelled run's ``done`` names what it was
+cancelled for (``cancelled_for``). Nav2 has no such rule across its servers: the BT navigator
+preempts a NavigateToPose with the newest one (the old goal ABORTED), the behaviour server
+aborts a running Spin for a new one, and nothing arbitrates a Spin against a NavigateToPose,
+whose tree sends Spins of its own as recoveries; nor does any of them know "the same goal".
 
 A CANCEL MEANS EVERY GOAL ON THE BOARD, not only this node's own (since 2026-09-25): both
 navigators' cancel services are asked with a zero goal id, exactly as ``goto_ros.py cancel``
@@ -30,6 +49,14 @@ WHERE THE POSE COMES FROM. The laptop's RTAB-Map owns ``map -> odom`` (one local
 edge is (:class:`pepin.watch.GoalGate`) and by whether this start of RTAB-Map is placed at all
 (``start_needs_placement``). ``where`` answers ``"pose": "tf"``. The board tracker that answered
 ``/where_am_i`` with a fit before is on the tag alt/tracker-2026-09-22.
+
+WHERE A FRAME WAS AT A STAMP (``pose_at``, 2026-10-14). The same buffer is the one history of
+the poses on this Mac: RTAB-Map's ``map -> odom``, the EKF's ``odom -> base_link`` and the board's
+``base_link -> camera_link`` from the neck's encoders, each under its measurement's own stamp. A
+picture is placed with the camera where it was when the picture was exposed, never where it is
+when someone asks: on 2026-10-14 a face seen during the gaze's own turn was placed with the pose of
+after it and the cart drove 4.9 m into the kitchen. ``pose_at`` answers ``map -> frame`` at a
+stamp (:meth:`GoalServer.pose_at`); without a stamp, the newest there is, as ``where`` reads it.
 
 AND BECAUSE IT ALREADY PARSES ``/tf``, IT IS THE BOARD'S ONE LISTENER. A TF listener is a
 subscription to the whole stream — RTAB-Map's ``map -> odom`` at 20 Hz, the board's
@@ -49,6 +76,7 @@ import math
 import socket
 import threading
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -60,8 +88,10 @@ from geometry_msgs.msg import PoseStamped
 from nav2_msgs.action import ComputePathToPose, NavigateToPose, Spin
 from nav_msgs.msg import OccupancyGrid
 from rclpy.action import ActionClient
+from rclpy.duration import Duration as RosDuration
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy, qos_profile_sensor_data
+from rclpy.time import Time as RosTime
 from sensor_msgs.msg import LaserScan
 from std_msgs.msg import String
 
@@ -85,17 +115,32 @@ from pepin.watch import (
     Preflight,
     Readiness,
 )
-from pepin_bringup.msgs import scan_arrays, stamp_seconds, yaw_of
-from pepin_bringup.node_kit import Switches, TfLookup, spin_main
+from pepin_bringup.msgs import scan_arrays, stamp_from_seconds, stamp_seconds, yaw_of
+from pepin_bringup.node_kit import Switches, TfLookup, spin_main, tf_failure_kind
 
 PORT = 3337
 # The planner to select, and the controller that follows it. One controller now: the lattice
 # planner no longer expands in reverse, so there is nothing a reversing controller would add.
 PIVOT_TOLERANCE_DEG = 11.5  # the goal checker's 0.20 rad: below this the heading is met
-PIVOT_ALLOWANCE_S = 15.0
+PIVOT_ALLOWANCE_S = 15.0  # a Spin's time allowance for up to half a turn (0.6 rad/s: 5-6 s)
+SPIN_MAX_DEG = 360.0  # a `spin` request turns at most a whole turn either way
 RECORDER_PATIENCE_S = (
     8.0  # the recorder answers over the bridge; 3 s once named a drive after the previous tape
 )
+# WHO ASKS FOR MOTION (a request's `source`): a person's ask through a tool or an operator, the
+# default; or the speaker gaze's own body turn, which never cancels a person's.
+SOURCES = ("tool", "gaze")
+A_CANCEL = "a cancel"  # what a run the operator's cancel stopped was cancelled for
+SAME_GOAL_M = 0.10  # two goals this near are one target (the goal checker's xy_goal_tolerance)
+# A stopped run waits this long at most for Nav2's answer to its cancel, then lets the goal go
+# and ends (a Nav2 restarted mid-goal never answers: its run would hold the node for good).
+STOPPED_WAIT_S = 10.0
+UNANSWERED = f"Nav2 did not answer the cancel within {STOPPED_WAIT_S:g} s: the goal was let go"
+# A run cancelled for another request is waited for this long at most before the new one starts:
+# the longest a stopped run takes to end, its pivot awaited to the Spin's patience and then its
+# tape closed (Nav2's cancel itself answers well within a second).
+REPLACE_WAIT_S = PIVOT_ALLOWANCE_S + 5.0 + RECORDER_PATIENCE_S
+SETTLE_POLL_S = 0.05  # a spin after a replaced run polls the navigators' status lists this often
 
 MAP_FRAME = "map"
 BASE_FRAME = "base_link"
@@ -113,7 +158,10 @@ GOAL_CODES = {204: "goal outside the map", 206: "goal occupied", 208: "no valid 
 # footprint grown by the cart's (the polygon collision check every controller makes): Nav2 cannot
 # reach it, and the tree answers it with minutes of backing up and spinning beside the person
 # (2026-10-13, "come a bit closer to me"). The inscribed band (253) is left to the planner: with
-# base_link 6 cm behind the bumper it is where a bumper-to-furniture place stands.
+# base_link 6 cm behind the bumper it is where a bumper-to-furniture place stands. The check is
+# the flag goal_hull_check, OFF since the evening of 2026-10-13 (Artem: two judges of one goal is a
+# split brain; the Smac Hybrid planner with its goal tolerance is to be the one that answers an
+# occupied goal with the nearest free pose, the "taxi"): the code stays for the A/B.
 COSTMAP_TOPIC = "/global_costmap/costmap"
 LETHAL_AT = 100  # nav2_costmap_2d's LETHAL_OBSTACLE (254) as its OccupancyGrid carries it
 # THE ONE POSE TOPIC. This node already parses /tf for the pose; every other node beside it that
@@ -124,6 +172,19 @@ POSE_TOPIC = "/pose"
 POSE_HZ = 5.0
 TF_WAIT_S = 0.3  # how long a pose lookup waits for the edge: the drive thread asks, not a callback
 TF_FIRST_WAIT_S = 2.0  # ...and the first one waits for the listener's buffer to fill at all
+# `pose_at`: the frames it answers, from `map` (where a thing is) or from `odom` (how the camera
+# moved between two stamps, smooth: a localisation update of map -> odom between them is no
+# motion), and the history it can answer from. The buffer
+# is tf2_ros.Buffer's default (node_kit.TfLookup builds it without a cache_time): tf2's
+# BufferCore keeps 10 s behind each edge's newest sample, so a stamp older than that is refused
+# with the reason before any lookup. A stamp a little newer than the chain's newest edge (a
+# camera frame against the last neck line, 50 Hz) is waited for up to POSE_AT_WAIT_S; one more
+# than POSE_AT_AHEAD_S past this node's clock means the clocks disagree (ros/time.sh offset).
+POSE_AT_FRAMES = (BASE_FRAME, "camera_link")
+POSE_AT_PARENTS = (MAP_FRAME, "odom")
+TF_HISTORY_S = 10.0
+POSE_AT_WAIT_S = 0.5
+POSE_AT_AHEAD_S = 1.0
 
 # The live flags (CLAUDE.md rule 19); their state is printed in the node's start line.
 FLAGS = FlagSet(
@@ -179,6 +240,22 @@ FLAGS = FlagSet(
         " on the checkout), or a dark room with no seed at hand",
     ),
     Flag(
+        "goal_hull_check",
+        False,
+        description="`plan` refuses a goal where the cart's hull standing there would cover a"
+        " lethal cell of Nav2's global costmap (hull_on_costmap: a person's legs, a chair) before"
+        " any planner is asked, blaming the goal; off, the planner alone judges the goal and"
+        " `plan` reports the costmap as unchecked",
+        why="off since 2026-10-13 evening (Artem): the check refused every approach stand 0.3 m"
+        " from a seated person (the hull over 1-26 lethal cells, his shins) before Smac Hybrid"
+        " ever ran, so its goal tolerance (0.25 m, the nearest free pose, the taxi) was never"
+        " tried; two judges of one goal are a split brain, the planner is the one",
+        on_when="a planner without a goal tolerance (NavFn, Theta*) drives approach goals: a"
+        " goal inside a person's inflated footprint then costs minutes of recoveries beside them",
+        off_when="Smac Hybrid (or Lattice) is the planner for goals near people: its tolerance"
+        " answers an occupied goal; measure the stops it picks before trusting it (2026-10-14)",
+    ),
+    Flag(
         "face_events",
         True,
         description="the drive's moments on the head's face (pepin.face_events, through the"
@@ -193,6 +270,22 @@ FLAGS = FlagSet(
         " pepin.head_link status)",
         off_when="the face gets in the way of a test, or the head server is not there (each"
         " moment is then dropped, the reconnection logged every 5 s)",
+    ),
+    Flag(
+        "spin_requests",
+        True,
+        description="`spin` turns the cart in place by `deg` (+ left, at most a whole turn) with"
+        " one goal on the behaviour server's Spin, answered like a drive (accepted with the run,"
+        " done with Nav2's status, the pose and the turn measured on map -> base_link), recorded"
+        " and stopped by a cancel like one; the brain's turn tool sends it. Off, `spin` is"
+        " refused with this flag's name",
+        why="on since 2026-10-14: approach(me, face) sent a turn in place as a pose goal through"
+        " FollowPathShim, MPPI parked it, and it ended 40 deg short after 30 s (run 12, 13:40);"
+        " the end-of-drive pivot's Spin turns 40 deg in about 1.5 s",
+        on_when="the turn tool is offered to the brain (`повернись ко мне`, `налево`)",
+        off_when="a test of the voice's turns without the cart moving, or the behaviour server's"
+        " Spin misbehaves (Collision Ahead beside furniture: nav2_params.yaml"
+        " simulate_ahead_time)",
     ),
 )
 FACE_LEASE_EVERY_S = 2.0  # pepin.face_events.LEASE_S lasts three of these
@@ -250,6 +343,27 @@ def costmap_message(raw: bytes) -> Any:
     return deserialize_message(raw, OccupancyGrid)
 
 
+def plan_end(pose: Any, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+    """Where a plan ends, from its last pose (map frame), and how far that is from the goal asked
+    at ``(x, y, yaw_deg)``: ``end`` {x, y, yaw_deg}, ``short_m`` and ``short_deg`` (the end's
+    heading minus the goal's, (-180, 180]). A planner with a goal tolerance (Smac Hybrid's) ends
+    at the nearest pose it reaches, not at the goal. A last pose whose quaternion is all zeros
+    carries no heading: ``yaw_deg`` and ``short_deg`` are None."""
+    q = pose.orientation
+    ex, ey = float(pose.position.x), float(pose.position.y)
+    headed = math.hypot(q.x, q.y, q.z, q.w) > 1e-9
+    end_deg = math.degrees(yaw_of(q)) if headed else None
+    return {
+        "end": {
+            "x": round(ex, 3),
+            "y": round(ey, 3),
+            "yaw_deg": None if end_deg is None else round(end_deg, 1),
+        },
+        "short_m": round(math.hypot(ex - x, ey - y), 3),
+        "short_deg": None if end_deg is None else round(heading_residual_deg(end_deg, yaw_deg), 1),
+    }
+
+
 # Goals that are running on an action server, by action_msgs/GoalStatus: ACCEPTED, EXECUTING and
 # CANCELING (a canceling goal still drives until its server lets it go).
 ACTIVE_STATUSES = (1, 2, 3)
@@ -270,6 +384,55 @@ FOLLOWERS = {
 # FOLLOWERS' pair again. The tree plans at once on the new controller id and FollowPath passes
 # it with that plan to the controller server, which swaps the plugin in place on the same goal.
 PARKERS = {"shim_mppi": ("FollowPathMPPI", "general_goal_checker")}
+
+
+@dataclass(eq=False)
+class Run:
+    """One request for motion, this node's while it runs: who asked (``source``), what
+    (``kind`` go or spin, ``target`` its pose x, y, yaw_deg or its turn in degrees, and in
+    ``words``), its number once the recorder named its tape, the cancel count it started
+    under; whether it was stopped (a cancel, or another request: ``cancelled_for``), for a
+    request waiting for the run before it to end whether a newer one dropped it, and whether
+    it cancelled a run under way itself."""
+
+    source: str
+    kind: str
+    target: tuple[float, ...]
+    words: str
+    number: int | None = None
+    cancels: int = 0
+    stopped: bool = False
+    cancelled_for: str | None = None
+    dropped: bool = False
+    replaced: bool = False  # it cancelled a run under way to start
+
+    @property
+    def label(self) -> str:
+        """``go printer (tool)``: the request and who asked."""
+        return f"{self.words} ({self.source})"
+
+    def same(self, other: Run) -> bool:
+        """One source asking for one target: a pose the other's arrival would count as reached
+        (within the goal checker's SAME_GOAL_M and PIVOT_TOLERANCE_DEG), or a turn within the
+        heading's tolerance of the other's."""
+        if self.source != other.source or self.kind != other.kind:
+            return False
+        if self.kind == "spin":
+            return abs(self.target[0] - other.target[0]) <= PIVOT_TOLERANCE_DEG
+        x, y, yaw = self.target
+        ox, oy, oyaw = other.target
+        near = math.hypot(x - ox, y - oy) <= SAME_GOAL_M
+        return near and abs(heading_residual_deg(yaw, oyaw)) <= PIVOT_TOLERANCE_DEG
+
+    def about(self) -> dict[str, Any]:
+        """The run as another request's answer names it: its number, who asked, what."""
+        return {"run": self.number, "source": self.source, "target": self.words}
+
+
+def _for(run: Run) -> dict[str, Any]:
+    """A stopped run's end names the request it was cancelled for (none for a cancel)."""
+    reason = run.cancelled_for
+    return {} if reason is None or reason == A_CANCEL else {"cancelled_for": reason}
 
 
 class GoalServer(Node):
@@ -361,9 +524,10 @@ class GoalServer(Node):
         self.controller = ""  # the controller id last published on controller_selector
         self.goal_checker = ""  # ...and the goal checker id on goal_checker_selector
         self._goal_handle: Any = None
-        self._driving = (
-            False  # from before send_goal until the drive is finally over: cancel() clears it
-        )
+        # THE RUN UNDER WAY (a go or a spin), from its admission until its session is over, and
+        # a request waiting for that run's end after cancelling it (_admit: the one rule).
+        self._current: Run | None = None
+        self._next: Run | None = None
         # The end-of-drive pivot (behaviour server Spin) is a goal of its own: a cancel stops it
         # too. Every cancel bumps _cancels, so a drive that started before it never sends a goal
         # after it (see _go: the recorder alone may take 8 s between the two).
@@ -413,6 +577,7 @@ class GoalServer(Node):
             QoSProfile(depth=1, durability=DurabilityPolicy.TRANSIENT_LOCAL),
         )
         self._lock = threading.Lock()
+        self._turn = threading.Condition(self._lock)  # a run's end, for the request waiting on it
         # The drive's moments on the head's face (flag face_events): before the switches, whose
         # callback runs on the declarations too.
         self._drive_face: DriveFace | None = None
@@ -500,10 +665,20 @@ class GoalServer(Node):
         self._nav_active[action] = any(s.status in ACTIVE_STATUSES for s in msg.status_list)
 
     def navigating(self) -> bool:
-        """A drive of this node, or any goal running on a navigator or the spin behaviour."""
+        """A run of this node, or any goal running on a navigator or the spin behaviour."""
         with self._lock:
-            driving = self._driving or self._spin_handle is not None
+            driving = self._current is not None or self._next is not None
+            driving = driving or self._spin_handle is not None
         return driving or any(self._nav_active.values())
+
+    def _plan_races(self) -> bool:
+        """A plan now would race a navigator's own: a ``go`` of this node's under way, or any
+        navigator's goal of anyone's (the planner server serves the newest request and aborts
+        the one it was planning for the tree). A turn in place plans nothing."""
+        with self._lock:
+            run = self._current
+        busy = run is not None and run.kind == "go"
+        return busy or any(self._nav_active[action] for action in NAV_ACTIONS)
 
     @staticmethod
     def _wait(future: Any, timeout: float) -> Any:
@@ -631,8 +806,12 @@ class GoalServer(Node):
             )
         elif command == "go":
             self._go(request, connection)
+        elif command == "spin":
+            self._spin_in_place(request, connection)
         elif command == "plan":
             self._send(connection, self.plan(request))
+        elif command == "pose_at":
+            self._send(connection, self.pose_at(request))
         else:
             self._send(connection, {"event": "error", "detail": f"unknown command {command!r}"})
 
@@ -689,19 +868,22 @@ class GoalServer(Node):
     def plan(self, request: dict[str, Any]) -> dict[str, Any]:
         """Would a goal at ``(x, y, yaw_deg)`` be driven: never motion. RTAB-Map's cell under it
         first (unknown, occupied or outside the grid is refused before any plan: the costmap
-        cannot tell unknown from floor), then Nav2's global costmap under the cart's whole hull
-        standing there (:meth:`hull_on_costmap`: a goal inside a person's or a thing's inflated
-        footprint is refused, never sent to the navigator), then one ComputePathToPose from where
-        the cart stands with the selected planner. ``blames`` says whose the refusal is: ``goal``
-        (another goal may plan) or ``planner`` (none will); an ``error`` event when it cannot be
-        asked."""
+        cannot tell unknown from floor), then, behind the flag ``goal_hull_check``, Nav2's global
+        costmap under the cart's whole hull standing there (:meth:`hull_on_costmap`: a goal inside
+        a person's or a thing's inflated footprint is refused, never sent to the navigator; off,
+        the planner alone judges it), then one ComputePathToPose from where the cart stands with
+        the selected planner. ``blames`` says whose the refusal is: ``goal`` (another goal may
+        plan) or ``planner`` (none will); an ``error`` event when it cannot be asked. A plan
+        found says where it ends (:func:`plan_end`: ``end``, ``short_m``, ``short_deg``): a
+        planner with a goal tolerance may end short of the goal, and that end is what a drive
+        there reaches."""
         try:
             x, y = float(request["x"]), float(request["y"])
             yaw_deg = float(request.get("yaw_deg", 0.0))
         except (KeyError, TypeError, ValueError):
             return {"event": "error", "detail": "plan needs numbers x and y (and yaw_deg)"}
         answer: dict[str, Any] = {"event": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
-        if self.navigating():
+        if self._plan_races():
             return {"event": "error", "detail": "a drive is under way: a plan now would race it"}
         cell = self.map_cell(x, y)
         answer["cell"] = cell
@@ -718,12 +900,15 @@ class GoalServer(Node):
                 "outside": "the goal is outside the map",
             }[cell]
             return answer | {"ok": False, "blames": "goal", "reason": reason}
-        hull, why = self.hull_on_costmap(x, y, yaw_deg)
-        answer["costmap"] = hull
-        if hull == "no costmap":
-            return answer | {"ok": False, "blames": "planner", "reason": why}
-        if hull != "clear":
-            return answer | {"ok": False, "blames": "goal", "reason": why}
+        if self._switches.on("goal_hull_check"):
+            hull, why = self.hull_on_costmap(x, y, yaw_deg)
+            answer["costmap"] = hull
+            if hull == "no costmap":
+                return answer | {"ok": False, "blames": "planner", "reason": why}
+            if hull != "clear":
+                return answer | {"ok": False, "blames": "goal", "reason": why}
+        else:
+            answer["costmap"] = "unchecked"  # the planner's to judge (the flag's note)
         if not self._planner.wait_for_server(timeout_sec=2.0):
             return {"event": "error", "detail": "the planner server is not up"}
         goal = ComputePathToPose.Goal()
@@ -745,7 +930,8 @@ class GoalServer(Node):
                 )
                 for a, b in itertools.pairwise(poses)
             )
-            return answer | {"ok": True, "length_m": round(length, 2), "poses": len(poses)}
+            planned = {"ok": True, "length_m": round(length, 2), "poses": len(poses)}
+            return answer | planned | plan_end(poses[-1].pose, x, y, yaw_deg)
         code = int(getattr(result, "error_code", 0))
         said = str(getattr(result, "error_msg", "") or "")
         reason = GOAL_CODES.get(code) or said or f"planner error code {code}"
@@ -813,6 +999,76 @@ class GoalServer(Node):
             "y": transform.transform.translation.y,
             "yaw_deg": math.degrees(yaw_of(transform.transform.rotation)),
             "age_s": max(0.0, now - stamp_seconds(transform.header.stamp)),
+        }
+
+    def pose_at(self, request: dict[str, Any]) -> dict[str, Any]:
+        """``parent -> frame`` (one of :data:`POSE_AT_FRAMES`, from ``map`` unless ``odom`` is
+        asked) at ``stamp``, from TF's history: x, y, z, the quaternion (qx, qy, qz, qw),
+        yaw_deg, the transform's ``stamp``, this node's ``now`` and the stamp's ``age_s`` (now
+        minus stamp). No stamp asks the newest there is, stamped and aged as ``where``'s. Stamps
+        are seconds on this node's ROS clock, the Docker VM's, which the board's chrony follows
+        (README "One clock"): the clock of every TF stamp and of the camera channel's records
+        (camera_stream's board capture stamp). ``ok`` False names ``kind`` and ``reason``:
+        ``frame``, ``parent``, ``too_old`` (past :data:`TF_HISTORY_S`, not looked up),
+        ``ahead`` (the clocks disagree), or tf2's own (``Lookup``, ``Extrapolation``,
+        ``Connectivity``, ``Timeout``) after waiting :data:`POSE_AT_WAIT_S`."""
+        frame = str(request.get("frame", BASE_FRAME))
+        parent = str(request.get("parent", MAP_FRAME))
+        asked = request.get("stamp")
+        try:
+            stamp = None if asked is None else float(asked)
+        except (TypeError, ValueError):
+            return {"event": "error", "detail": f"pose_at's stamp is seconds, not {asked!r}"}
+        now = self.get_clock().now().nanoseconds * 1e-9
+        answer: dict[str, Any] = {"event": "pose_at", "frame": frame, "parent": parent,
+                                  "stamp": stamp, "now": now}  # fmt: skip
+        if stamp is not None:
+            answer["age_s"] = round(now - stamp, 3)
+        if frame not in POSE_AT_FRAMES:
+            known = " or ".join(POSE_AT_FRAMES)
+            return answer | {"ok": False, "kind": "frame", "reason": f"frame is {known}"}
+        if parent not in POSE_AT_PARENTS:
+            known = " or ".join(POSE_AT_PARENTS)
+            return answer | {"ok": False, "kind": "parent", "reason": f"parent is {known}"}
+        if stamp is not None and now - stamp > TF_HISTORY_S:
+            return answer | {
+                "ok": False,
+                "kind": "too_old",
+                "reason": f"the stamp is {now - stamp:.1f} s old and TF keeps"
+                f" {TF_HISTORY_S:g} s of history",
+            }
+        if stamp is not None and stamp - now > POSE_AT_AHEAD_S:
+            return answer | {
+                "ok": False,
+                "kind": "ahead",
+                "reason": f"the stamp is {stamp - now:.1f} s past this node's clock: the"
+                " board's and this Mac's clocks disagree (ros/time.sh offset)",
+            }
+        wait = POSE_AT_WAIT_S
+        if self._tf is None:
+            self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
+        when = RosTime() if stamp is None else RosTime.from_msg(stamp_from_seconds(stamp))
+        try:
+            transform = self._tf.buffer.lookup_transform(
+                parent, frame, when, timeout=RosDuration(seconds=wait)
+            )
+        except Exception as error:  # tf2's Lookup / Extrapolation / Connectivity / Timeout
+            reason = str(error).strip()[:200] or type(error).__name__
+            return answer | {"ok": False, "kind": tf_failure_kind(error), "reason": reason}
+        if stamp is None:
+            held = stamp_seconds(transform.header.stamp)
+            answer["stamp"], answer["age_s"] = held, round(max(0.0, now - held), 3)
+        t, q = transform.transform.translation, transform.transform.rotation
+        return answer | {
+            "ok": True,
+            "x": t.x,
+            "y": t.y,
+            "z": t.z,
+            "qx": q.x,
+            "qy": q.y,
+            "qz": q.z,
+            "qw": q.w,
+            "yaw_deg": math.degrees(yaw_of(q)),
         }
 
     def _ready(self, pose: dict[str, float] | None = None) -> Readiness:
@@ -912,25 +1168,154 @@ class GoalServer(Node):
             face.lease()
 
     def cancel(self, send: bool = True) -> bool:
-        """Stop the running drive, if any; True when there was one.
+        """The operator's stop (the red button, a tool's cancel): the run under way stopped and
+        a request waiting to start dropped; True when a run was going.
 
-        Clears ``_driving`` as well as the handle, and counts the cancel, so a drive still on
-        its way to Nav2 is never sent and a handle that arrives after it is cancelled at once
-        (:meth:`_go`). The end-of-drive pivot is cancelled whatever ``send`` says: no navigator
-        owns it. ``send=False`` lets the drive's handle go without cancelling it: the caller
-        cancels every goal on the navigators itself (:meth:`cancel_every_goal`).
+        Lets the handles go and counts the cancel, so a drive still on its way to Nav2 is never
+        sent and a handle that arrives after it is cancelled at once (:meth:`_go`); the run
+        stays this node's until its session has seen Nav2's answer and closed its tape. The
+        end-of-drive pivot is cancelled whatever ``send`` says: no navigator owns it.
+        ``send=False`` lets the drive's handle go without cancelling it: the caller cancels
+        every goal on the navigators itself (:meth:`cancel_every_goal`).
         """
-        with self._lock:
-            handle, self._goal_handle = self._goal_handle, None
-            spin, self._spin_handle = self._spin_handle, None
-            was_driving, self._driving = self._driving, False
-            self._cancels += 1
+        with self._turn:
+            run = self._current
+            going = run is not None and not run.stopped
+            if run is not None:
+                run.stopped = True
+            waiting, self._next = self._next, None
+            if waiting is not None:
+                waiting.dropped, waiting.cancelled_for = True, A_CANCEL
+            handle, spin = self._let_go()
             self._cancelled_at = time.monotonic()
+            self._turn.notify_all()
         if handle is not None and send:
             handle.cancel_goal_async()
         if spin is not None:
             spin.cancel_goal_async()
-        return was_driving or spin is not None
+        return going or spin is not None
+
+    def _let_go(self) -> tuple[Any, Any]:
+        """Under the lock: the drive's and the spin's handles let go (returned, to be cancelled
+        outside it) and the cancel counted."""
+        handle, self._goal_handle = self._goal_handle, None
+        spin, self._spin_handle = self._spin_handle, None
+        self._cancels += 1
+        return handle, spin
+
+    # -- the one rule ----------------------------------------------------------------------
+
+    @staticmethod
+    def _source_of(request: dict[str, Any]) -> str | None:
+        """The request's ``source`` (``tool`` when it names none); None for an unknown one."""
+        source = str(request.get("source", SOURCES[0]))
+        return source if source in SOURCES else None
+
+    def _admit(self, run: Run, connection: socket.socket) -> bool:
+        """THE ONE RULE for a request while a run is under way (the module's notes). ``run``
+        becomes the run under way at once when none is; the same source asking for the same
+        target as the run ahead (the one waiting to start, else the one under way unless
+        stopped) is answered ``already`` with it; the gaze's turn is refused while a person's
+        run is ahead; anything else cancels the run under way and drops one waiting, then
+        waits (REPLACE_WAIT_S at most) for the run under way to end and starts, a ``replaced``
+        event naming each request it displaced (``run.replaced``: it cancelled a run under
+        way). False when answered here, nothing to drive; True when ``run`` is under way, and
+        the caller ends it with :meth:`_over`."""
+        deadline = time.monotonic() + REPLACE_WAIT_S
+        answer: dict[str, Any] | None = None
+        displaced: list[Run] = []
+        handles: tuple[Any, Any] = (None, None)
+        with self._turn:
+            current, waiting = self._current, self._next
+            if current is None and waiting is None:
+                self._start(run)
+                return True
+            ahead = waiting
+            if ahead is None and current is not None and not current.stopped:
+                ahead = current
+            if ahead is not None and ahead.same(run):
+                detail = f"already under way: {ahead.words}" + (
+                    "" if ahead.number is None else f" (run {ahead.number})"
+                )
+                answer = {"event": "already", **ahead.about(), "detail": detail}
+            elif run.source == "gaze" and ahead is not None and ahead.source != "gaze":
+                about = "" if ahead.number is None else f"run {ahead.number}: "
+                answer = {
+                    "event": "error",
+                    "detail": f"a drive runs ({about}{ahead.label}): the gaze's turn waits",
+                }
+            else:
+                if waiting is not None:
+                    waiting.dropped, waiting.cancelled_for = True, run.label
+                    displaced.append(waiting)
+                if current is not None and not current.stopped:
+                    current.stopped, current.cancelled_for = True, run.label
+                    displaced.append(current)
+                    handles = self._let_go()
+                self._next = run
+                self._turn.notify_all()  # a dropped request's session wakes
+        if answer is not None:
+            self._send(connection, answer)
+            self.get_logger().info(f"{run.label}: {answer['detail']}")
+            return False
+        handle, spin = handles
+        if handle is not None:
+            handle.cancel_goal_async()
+        if spin is not None:
+            spin.cancel_goal_async()
+        run.replaced = any(not other.dropped for other in displaced)
+        for other in displaced:
+            what = "dropped before it started" if other.dropped else f"run {other.number} cancelled"
+            self.get_logger().info(f"{other.label}: {what} for {run.label}")
+        with self._turn:
+            while not run.dropped and self._current is not None:
+                left = deadline - time.monotonic()
+                if left <= 0.0:
+                    break
+                self._turn.wait(left)
+            if run.dropped:
+                why = _for(run).get("cancelled_for")
+                detail = "cancelled before it started" + (f" for {why}" if why else "")
+                answer = {"event": "error", "detail": detail, **_for(run)}
+            elif self._current is not None:
+                if self._next is run:
+                    self._next = None
+                late = self._current
+                answer = {
+                    "event": "error",
+                    "detail": f"not started: {late.label} (run {late.number}) did not end within"
+                    f" {REPLACE_WAIT_S:g} s of its cancel",
+                }
+            else:
+                self._next = None
+                self._start(run)
+        if answer is not None:
+            self._send(connection, answer)
+            self.get_logger().warning(f"{run.label}: {answer['detail']}")
+            return False
+        for other in displaced:
+            self._send(connection, {"event": "replaced", **other.about(),
+                                    "cancelled_run": other.number,
+                                    "started": not other.dropped})  # fmt: skip
+        return True
+
+    def _start(self, run: Run) -> None:
+        """Under the lock: ``run`` is the run under way, any cancel from here on its own."""
+        self._current = run
+        run.cancels = self._cancels
+
+    def _over(self, run: Run) -> None:
+        """``run``'s session is over: no longer under way; a request waiting on it may start."""
+        with self._turn:
+            if self._current is run:
+                self._current = None
+            self._turn.notify_all()
+
+    def _settle(self, deadline: float) -> None:
+        """After a cancelled run, until ``deadline``: wait for Nav2's latched status lists to
+        show its goal ended (they come apart from the action's result)."""
+        while any(self._nav_active.values()) and time.monotonic() < deadline:
+            time.sleep(SETTLE_POLL_S)
 
     def cancel_every_goal(self) -> dict[str, dict[str, Any]]:
         """Cancel every goal on both navigators, whoever sent it; what each said, per action.
@@ -969,13 +1354,20 @@ class GoalServer(Node):
         return {action: said[action] for action in self._cancel_clients}
 
     def _go(self, request: dict[str, Any], connection: socket.socket) -> None:
-        """Send one goal and stream its progress until it ends or the caller hangs up."""
+        """Send one goal and stream its progress until it ends or the caller hangs up. A goal
+        that would be refused (no such place, the gate, Nav2 down, an unknown source) is
+        refused before the one rule (:meth:`_admit`) can cancel anything for it."""
         target = self._target_of(request)
         if target is None:
             detail = self._why_no_place(str(request.get("place", "")))
             self._send(connection, {"event": "error", "detail": detail})
             return
         x, y, yaw_deg, name = target
+        source = self._source_of(request)
+        if source is None:
+            detail = f"source must be one of {', '.join(SOURCES)}, not {request.get('source')!r}"
+            self._send(connection, {"event": "error", "detail": detail})
+            return
         ready = self._ready()
         if not ready.ready:
             self._send(connection, {"event": "error", "detail": ready.reason})
@@ -988,15 +1380,30 @@ class GoalServer(Node):
         goal.pose = self._pose_msg(x, y, yaw_deg)
         started = time.monotonic()
         feedback: dict[str, Any] = {}
-        with self._lock:
-            if self._driving:
-                self._send(
-                    connection, {"event": "error", "detail": "already driving: cancel first"}
-                )
-                return
-            self._driving = True
-            cancels = self._cancels  # any cancel from here on is this drive's
+        words = f"go {name}" if name else f"go ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
+        run = Run(source, "go", (x, y, yaw_deg), words)
+        if not self._admit(run, connection):
+            return
+        try:
+            self._drive(run, goal, name, started, feedback, connection)
+        finally:
+            self._over(run)
+
+    def _drive(
+        self,
+        run: Run,
+        goal: Any,
+        name: str | None,
+        started: float,
+        feedback: dict[str, Any],
+        connection: socket.socket,
+    ) -> None:
+        """The admitted ``go`` (:meth:`_go`): taped, sent, reported (``arrival`` the moment
+        Nav2 reports the goal reached, the pivot after it, ``done`` last)."""
+        x, y, yaw_deg = run.target
+        cancels = run.cancels  # any cancel from its admission on is this drive's
         record = self.start_recording(name or f"{x:.0f}_{y:.0f}")
+        run.number = None if record is None else self._runs.run
         mode = str(self._switches["controller"])
         parks = (
             f": {PARKERS[mode][0]} within {self._switches['park_distance_m']:.2f} m"
@@ -1006,14 +1413,13 @@ class GoalServer(Node):
         self.get_logger().info(
             f"run {self._runs.run}: planner {PLANNERS[self.planner][0]}, controller "
             f"{self.controller} ({mode}{parks}) -> {name or 'coordinates'}"
-            f" ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg)"
+            f" ({x:.2f}, {y:.2f}, {yaw_deg:.0f} deg), asked by {run.source}"
         )
         face = self._drive_face  # this drive's, whatever the flag does meanwhile
         try:
             if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
-                self._send(
-                    connection, {"event": "error", "detail": "cancelled before Nav2 had the goal"}
-                )
+                detail = "cancelled before Nav2 had the goal"
+                self._send(connection, {"event": "error", "detail": detail, **_for(run)})
                 return
             handover = self._hand_over(x, y)  # a goal that starts within the parking distance
             send = self._client.send_goal_async(
@@ -1035,16 +1441,15 @@ class GoalServer(Node):
                     self._goal_handle = handle
             if late:  # the cancel came while Nav2 was taking the goal: it is cancelled now
                 handle.cancel_goal_async()
-                self._send(
-                    connection,
-                    {"event": "error", "detail": "cancelled while Nav2 took the goal: cancelled"},
-                )
+                detail = "cancelled while Nav2 took the goal: cancelled"
+                self._send(connection, {"event": "error", "detail": detail, **_for(run)})
                 return
             self._send(
                 connection,
                 {
                     "event": "accepted",
                     "run": self._runs.run,
+                    "source": run.source,
                     "planner": PLANNERS[self.planner][0],
                     "controller": self.controller,
                     "mode": mode,
@@ -1065,8 +1470,14 @@ class GoalServer(Node):
                 self._send(connection, handover)
             result_future = handle.get_result_async()
             last = 0.0
-            while rclpy.ok() and not result_future.done():
+            stopped_at: float | None = None
+            answered = False
+            while rclpy.ok() and not (answered := result_future.done()):
                 time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
+                if self._unanswered(stopped_at):
+                    break
+                if stopped_at is None and self._cancelled_since(cancels):
+                    stopped_at = time.monotonic()
                 handover = self._hand_over(x, y)
                 if handover is not None:
                     self._send(connection, handover)
@@ -1080,13 +1491,26 @@ class GoalServer(Node):
                     )
             with self._lock:
                 self._goal_handle = None
-            outcome = result_future.result()
+            outcome = result_future.result() if answered else None
             status = getattr(outcome, "status", 0) if outcome else 0
             # Now the heading, taped: only after a drive that ended on position alone (the RPP
             # pair's checker). Every other pair, a parking MPPI included, turns to the heading
             # itself and was held to it by the yaw-checking goal checker.
             ended_on_position = self.goal_checker == RPP_GOAL_CHECKER
-            if status == 4 and ended_on_position and not self._cancelled_since(cancels):
+            pivots = status == 4 and ended_on_position and not self._cancelled_since(cancels)
+            if status == 4:  # reached: said at once, before the pivot and the tape's close
+                self._send(
+                    connection,
+                    {
+                        "event": "arrival",
+                        "run": self._runs.run,
+                        "status": int(status),
+                        "seconds": round(time.monotonic() - started, 1),
+                        "arrival": self._pose_now(),
+                        "pivot": pivots,
+                    },
+                )
+            if pivots:
                 self._pivot_to(yaw_deg, connection, cancels)
             if face is not None:
                 face.done(int(status))
@@ -1101,6 +1525,8 @@ class GoalServer(Node):
                     "seconds": round(time.monotonic() - started, 1),
                     "arrival": self._pose_now(),
                     "recording": None if record is None else str(record),
+                    **_for(run),
+                    **({} if answered else {"detail": UNANSWERED}),
                 },
             )
         finally:  # a refused goal or a broken connection must not leave a recorder running
@@ -1108,13 +1534,17 @@ class GoalServer(Node):
             self._hand_back()
             if face is not None:
                 face.abandoned()  # nothing when the drive's end was shown
-            with self._lock:
-                self._driving = False
 
     def _cancelled_since(self, cancels: int) -> bool:
         """Whether a cancel came after the one counted as ``cancels``."""
         with self._lock:
             return self._cancels != cancels
+
+    @staticmethod
+    def _unanswered(stopped_at: float | None) -> bool:
+        """A run stopped at ``stopped_at`` whose goal Nav2 has not let go of in STOPPED_WAIT_S:
+        its session stops waiting for the result."""
+        return stopped_at is not None and time.monotonic() - stopped_at > STOPPED_WAIT_S
 
     def _pivot_to(self, yaw_deg: float, connection: socket.socket, cancels: int) -> None:
         """Turn in place to the mark's heading once the drive has met the position.
@@ -1132,32 +1562,217 @@ class GoalServer(Node):
         if abs(residual) <= PIVOT_TOLERANCE_DEG:
             return
         event: dict[str, Any] = {"event": "pivot", "residual_deg": round(residual, 1)}
+        handle, refusal = self._start_spin(residual, PIVOT_ALLOWANCE_S, cancels)
+        if handle is None:
+            self._send(connection, event | {"status": 0, "detail": refusal})
+            return
+        outcome = self._wait(handle.get_result_async(), PIVOT_ALLOWANCE_S + 5.0)
+        self._spin_over(handle)
+        status = getattr(outcome, "status", 0) if outcome else 0
+        after = heading_residual_deg(yaw_deg, self._pose_now().get("yaw_deg", here))
+        self._send(connection, event | {"status": int(status), "after_deg": round(after, 1)})
+        self.get_logger().info(f"pivot {residual:+.0f} deg: status {status}, {after:+.0f} deg left")
+
+    def _start_spin(
+        self, turn_deg: float, allowance_s: float, cancels: int, feedback: Any = None
+    ) -> tuple[Any, str]:
+        """One goal on the behaviour server's Spin, ``turn_deg`` (+ left) within ``allowance_s``,
+        held in ``_spin_handle`` so a cancel stops it (:meth:`cancel`: no navigator owns it);
+        ``feedback`` hears Nav2's progress. The handle, or None and why not: no spin behaviour,
+        refused, or a cancel after the one counted as ``cancels`` (the late handle is cancelled
+        here)."""
         if not self._spin.wait_for_server(timeout_sec=2.0):
-            self._send(connection, event | {"status": 0, "detail": "no spin behaviour"})
-            return
+            return None, "no spin behaviour"
         goal = Spin.Goal()
-        goal.target_yaw = math.radians(residual)
-        goal.time_allowance = Duration(sec=int(PIVOT_ALLOWANCE_S))
-        handle = self._wait(self._spin.send_goal_async(goal), 5.0)
+        goal.target_yaw = math.radians(turn_deg)
+        goal.time_allowance = Duration(sec=math.ceil(allowance_s))
+        handle = self._wait(self._spin.send_goal_async(goal, feedback), 5.0)
         if handle is None or not handle.accepted:
-            self._send(connection, event | {"status": 0, "detail": "the spin was refused"})
-            return
+            return None, "the spin was refused"
         with self._lock:  # a cancel from here on stops the spin (cancel); before, it is done here
             late = self._cancels != cancels
             if not late:
                 self._spin_handle = handle
         if late:
             handle.cancel_goal_async()
-            self._send(connection, event | {"status": 0, "detail": "cancelled"})
-            return
-        outcome = self._wait(handle.get_result_async(), PIVOT_ALLOWANCE_S + 5.0)
+            return None, "cancelled"
+        return handle, ""
+
+    def _spin_over(self, handle: Any) -> None:
+        """A spin's handle let go, unless a cancel already took it."""
         with self._lock:
             if self._spin_handle is handle:
                 self._spin_handle = None
-        status = getattr(outcome, "status", 0) if outcome else 0
-        after = heading_residual_deg(yaw_deg, self._pose_now().get("yaw_deg", here))
-        self._send(connection, event | {"status": int(status), "after_deg": round(after, 1)})
-        self.get_logger().info(f"pivot {residual:+.0f} deg: status {status}, {after:+.0f} deg left")
+
+    def _spin_in_place(self, request: dict[str, Any], connection: socket.socket) -> None:
+        """``spin``: the cart turned in place by ``deg`` (+ left) with one goal on the behaviour
+        server's Spin (:meth:`_start_spin`, as the end-of-drive pivot sends it), answered and
+        recorded like a drive: ``accepted`` (the run, the pose it starts from), ``feedback`` each
+        second (Nav2's own count of the turn), ``arrival`` the moment Nav2 reports it reached,
+        ``done`` once its tape is closed (both: Nav2's status, the seconds, the pose after it
+        and the turn measured on map -> base_link: :meth:`turn_measured`). A cancel stops it,
+        and so does another request by the one rule (:meth:`_admit`). No map pose is needed:
+        the behaviour server turns on odometry (its local_frame); without one the turn is not
+        measured, and a drive's gate does not apply. Anyone's goal on a navigator refuses it
+        (two goals would share the wheels), once a run it cancelled has left Nav2's lists."""
+        if not self._switches.on("spin_requests"):
+            detail = "spin requests are off (flag spin_requests of the goal server)"
+            self._send(connection, {"event": "error", "detail": detail})
+            return
+        try:
+            deg = float(request["deg"])
+        except (KeyError, TypeError, ValueError):
+            self._send(connection, {"event": "error", "detail": "spin needs deg: degrees, + left"})
+            return
+        if not math.isfinite(deg) or deg == 0.0 or abs(deg) > SPIN_MAX_DEG:
+            detail = f"deg must be non-zero and within +-{SPIN_MAX_DEG:.0f}, not {deg:g}"
+            self._send(connection, {"event": "error", "detail": detail})
+            return
+        source = self._source_of(request)
+        if source is None:
+            detail = f"source must be one of {', '.join(SOURCES)}, not {request.get('source')!r}"
+            self._send(connection, {"event": "error", "detail": detail})
+            return
+        run = Run(source, "spin", (deg,), f"spin {deg:+g} deg")
+        asked = time.monotonic()
+        if not self._admit(run, connection):
+            return
+        try:
+            if run.replaced:  # the cancelled goal leaves Nav2's status lists after its result
+                self._settle(asked + REPLACE_WAIT_S)
+            if any(self._nav_active.values()):  # anyone's goal: two would share the wheels
+                detail = "a goal runs on Nav2: cancel first"
+                self._send(connection, {"event": "error", "detail": detail})
+                return
+            self._turn_in_place(run, connection)
+        finally:
+            self._over(run)
+
+    def _turn_in_place(self, run: Run, connection: socket.socket) -> None:
+        """The admitted ``spin`` (:meth:`_spin_in_place`): taped, sent, reported."""
+        deg = run.target[0]
+        cancels = run.cancels  # any cancel from its admission on is this spin's
+        started = time.monotonic()
+        allowance = PIVOT_ALLOWANCE_S * max(1.0, abs(deg) / 180.0)
+        before = self._pose_now()
+        record = self.start_recording(f"spin_{'left' if deg > 0 else 'right'}_{abs(deg):.0f}")
+        run.number = None if record is None else self._runs.run
+        self.get_logger().info(
+            f"run {self._runs.run}: spin {deg:+.0f} deg in place, asked by {run.source}"
+        )
+        face = self._drive_face  # this spin's, whatever the flag does meanwhile
+        spun: dict[str, float] = {}
+        handle: Any = None
+        try:
+            if self._cancelled_since(cancels):  # the recorder's wait is up to 8 s of it
+                detail = "cancelled before Nav2 had the spin"
+                self._send(connection, {"event": "error", "detail": detail, **_for(run)})
+                return
+            handle, refusal = self._start_spin(
+                deg,
+                allowance,
+                cancels,
+                lambda f: spun.update(deg=math.degrees(f.feedback.angular_distance_traveled)),
+            )
+            if handle is None:
+                if face is not None and refusal != "cancelled":
+                    face.refused()
+                detail = f"not turning: {refusal}"
+                self._send(connection, {"event": "error", "detail": detail, **_for(run)})
+                return
+            self._send(
+                connection,
+                {
+                    "event": "accepted",
+                    "run": self._runs.run,
+                    "source": run.source,
+                    "deg": deg,
+                    "pose": "tf" if before else "none",
+                    "recording": None if record is None else str(record),
+                    **{k: before[k] for k in ("x", "y", "yaw_deg") if k in before},
+                    "sent_in_ms": round((time.monotonic() - started) * 1000),
+                },
+            )
+            if face is not None:
+                face.accepted()
+            result_future = handle.get_result_async()
+            deadline = time.monotonic() + allowance + 5.0  # the pivot's patience
+            last = 0.0
+            stopped_at: float | None = None
+            while rclpy.ok() and not result_future.done() and time.monotonic() < deadline:
+                time.sleep(0.05)  # the node's own spin serves the action; this thread only reports
+                if self._unanswered(stopped_at):
+                    break
+                if stopped_at is None and self._cancelled_since(cancels):
+                    stopped_at = time.monotonic()
+                now = time.monotonic()
+                if spun and now - last > 1.0:
+                    last = now
+                    progress = {"t": round(now - started, 1), "spun_deg": round(spun["deg"], 1)}
+                    self._send(connection, {"event": "feedback", **progress})
+            self._spin_over(handle)
+            answered = result_future.done()
+            outcome = result_future.result() if answered else None
+            status = int(getattr(outcome, "status", 0)) if outcome else 0
+            after = self._pose_now() if before else {}
+            end: dict[str, Any] = {
+                "run": self._runs.run,
+                "status": status,
+                "seconds": round(time.monotonic() - started, 1),
+                "arrival": after,
+            }
+            if "deg" in spun:
+                end["spun_deg"] = round(spun["deg"], 1)
+            if not answered and stopped_at is not None:
+                end["detail"] = UNANSWERED
+            elif not answered:
+                end["detail"] = f"no result from the behaviour server in {allowance + 5.0:.0f} s"
+            end |= self.turn_measured(deg, before, after, status)
+            if answered and status == 4:  # reached: said at once, before the tape's close
+                self._send(connection, {"event": "arrival", **end})
+            if face is not None:
+                face.done(status)
+            self.stop_recording()  # closed before the answer: the caller fetches it on reading
+            done: dict[str, Any] = {
+                "event": "done",
+                **end,
+                "seconds": round(time.monotonic() - started, 1),
+                "recording": None if record is None else str(record),
+                **_for(run),
+            }
+            self._send(connection, done)
+            self.get_logger().info(
+                f"spin {deg:+.0f} deg: status {status} in {end['seconds']:.1f} s"
+                + (f", turned {end['turned_deg']:+.0f} deg" if "turned_deg" in end else "")
+            )
+        finally:  # a refused spin or a broken connection must not leave a recorder running
+            self.stop_recording()
+            if face is not None:
+                face.abandoned()  # nothing when the spin's end was shown
+            if handle is not None:
+                self._spin_over(handle)
+
+    @staticmethod
+    def turn_measured(
+        deg: float, before: dict[str, float], after: dict[str, float], status: int
+    ) -> dict[str, Any]:
+        """A spin of ``deg`` measured on map -> base_link: ``turned_deg`` (the heading's change,
+        unwrapped toward the ask) and ``short_deg`` (the heading still to go, + left), and a
+        ``detail`` when a spin Nav2 calls succeeded is off by more than the goal checker's
+        tolerance (:data:`PIVOT_TOLERANCE_DEG`). Empty without a heading at both ends."""
+        if "yaw_deg" not in before or "yaw_deg" not in after:
+            return {}
+        short = heading_residual_deg(before["yaw_deg"] + deg, after["yaw_deg"])
+        measured: dict[str, Any] = {"turned_deg": round(deg - short, 1)}
+        measured["short_deg"] = round(short, 1)
+        if status == 4 and abs(short) > PIVOT_TOLERANCE_DEG:
+            way = "short" if short * deg > 0 else "past the ask"
+            measured["detail"] = (
+                f"turned {deg - short:+.0f} of {deg:+.0f} deg by the map's heading:"
+                f" {abs(short):.0f} deg {way}, beyond the goal checker's"
+                f" {PIVOT_TOLERANCE_DEG:g} deg"
+            )
+        return measured
 
     def _target_of(self, request: dict[str, Any]) -> tuple[float, float, float, str | None] | None:
         """The goal asked for: a named place, or plain coordinates."""

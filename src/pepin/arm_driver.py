@@ -67,7 +67,7 @@ from pepin.expression.trajectory import (
     Knot,
     Trajectory,
 )
-from pepin.neck import acc_units, speed_ticks
+from pepin.neck import MOVING_TICKS_S, acc_units, braking_units, speed_ticks
 
 if TYPE_CHECKING:  # the base server imports this module; its rider group is only a type here
     from pepin.base_server import Riders
@@ -92,6 +92,11 @@ APPROACH_HZ = 50.0  # the knots of a minimum-jerk move: one a tick
 # which at slow speeds adds finite-difference noise: the board forgives this much over the
 # caps (the servos' profile registers hold the exact caps whatever the knots say).
 WIRE_SLACK = 1.05
+# A joint is IN FLIGHT above this encoder speed: the profile's ramp is then at least what
+# stops the fastest joint before its goal (pepin.neck.braking_units: the register brakes too;
+# a gentler trajectory taking the arm from a fast one mid-move would otherwise leave a joint
+# unable to stop before its knot, its range or its stop; the neck's runaway of 2026-10-13).
+ARM_MOVING_TICKS_S = MOVING_TICKS_S
 
 
 ReadGroup = Callable[[str], dict[str, int] | None]  # one register of the group, bounded
@@ -133,6 +138,9 @@ class ArmDriver:
         self._limits: tuple[tuple[float, float], ...] = motion.limits()
         self._mode_ok: bool | None = None
         self._checked_at = float("-inf")
+        self._watched: tuple[tuple[int, ...], float] | None = None  # the last reading, when
+        self._speed: tuple[float, ...] = ()  # ticks/s a joint, from the last two readings
+        self._floor_said = False
         self._profile: tuple[int, int, int] | None = None  # (speed, acc, torque) energised with
         self._sent: tuple[int, ...] | None = None
         self._answers: list[ArmAnswer] = []
@@ -198,6 +206,8 @@ class ArmDriver:
             return
         if self._phase == "silent":
             self._phase = "off"
+        if encoders.ticks is not None:
+            self._watch(encoders.ticks, now)
         if (self._mode_ok is None or self._ranges is None) and (
             now - self._checked_at >= self.motion.retry_s
         ):
@@ -273,6 +283,21 @@ class ArmDriver:
         self._profile, self._sent = None, None
 
     # -- internals -------------------------------------------------------------------------------
+
+    def _watch(self, reading: tuple[int, ...], now: float) -> None:
+        """Each joint's speed from this completed ride against the last (the same reading
+        again: the arm stands)."""
+        before = self._watched
+        self._watched = (reading, now)
+        if before is None or now <= before[1]:
+            return
+        dt = now - before[1]
+        self._speed = tuple((r - p) / dt for r, p in zip(reading, before[0], strict=False))
+
+    def in_flight(self) -> bool:
+        """Whether a joint moved faster than :data:`ARM_MOVING_TICKS_S` between the last two
+        readings."""
+        return any(abs(v) > ARM_MOVING_TICKS_S for v in self._speed)
 
     def _caps(self, scale: float) -> tuple[float, float]:
         """(speed, acceleration) caps at ``scale``."""
@@ -391,6 +416,26 @@ class ArmDriver:
                 acc_units(acc),
                 round(self.motion.torque_limit * TORQUE_FULL),
             )
+            if self.in_flight() and self._watched is not None:
+                # the register brakes too: the ramp at least what the fastest joint needs to
+                # stop before its goal (v^2 / 2d; pepin.neck.braking_units)
+                here = self._watched[0]
+                needed = max(
+                    braking_units(v, g - h)
+                    for v, g, h in zip(self._speed, goal, here, strict=False)
+                )
+                needed = min(needed, acc_units(self.motion.max_acc_deg_s2))  # the cap stays
+                if needed > profile[1]:
+                    if not self._floor_said:
+                        logger.info(
+                            "arm ramp %d units, not the %d asked: a joint flies at %d ticks/s"
+                            " and must stop before its goal",
+                            needed, profile[1], max(abs(v) for v in self._speed),
+                        )  # fmt: skip
+                        self._floor_said = True
+                    profile = (profile[0], needed, profile[2])
+            else:
+                self._floor_said = False
             if profile != self._profile:
                 self._bus.sync_write_block(
                     ARM_BLOCK,

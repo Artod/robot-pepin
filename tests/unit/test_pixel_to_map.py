@@ -5,12 +5,14 @@ from __future__ import annotations
 
 import math
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pytest
 
-from pepin.mounts import OPTICAL_MOUNT
-from pepin.neck import NeckConfig, NeckJoint, NeckPivot, NeckReference
+from pepin.depth import quaternion_from_matrix
+from pepin.mounts import OPTICAL_MOUNT, Mount
+from pepin.neck import NeckAngles, NeckConfig, NeckJoint, NeckPivot, NeckReference, camera_pose
 from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 from pepin.pixel_to_map import (
     Box,
@@ -25,10 +27,13 @@ from pepin.pixel_to_map import (
     Pair,
     Pose2D,
     RelativeError,
+    Stamped,
     StereoError,
     box_depth,
     disparity_to_depth,
     locate,
+    locate_at,
+    turned_deg,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -269,6 +274,89 @@ def test_the_locator_says_why_no_source_answered() -> None:
     with pytest.raises(LocateError, match="'raw' pixels cannot be placed"):
         refusing.locate(around(400, 300), "raw")  # a one-eyed head's picture
     assert isinstance(refusing.pairs, Pairs) and refusing.pairs.grabbed == 0
+
+
+# -- a box placed with TF's poses at its frame's stamp --------------------------------------------
+
+
+def tf_answer(rotation: np.ndarray, translation: np.ndarray, stamp: float) -> dict[str, Any]:  # type: ignore[type-arg]
+    """A goal server's ``pose_at`` answer for ``map <- frame``."""
+    qx, qy, qz, qw = quaternion_from_matrix(rotation)
+    x, y, z = (float(v) for v in translation)
+    yaw = math.degrees(math.atan2(rotation[1, 0], rotation[0, 0]))
+    return {"ok": True, "x": x, "y": y, "z": z, "qx": qx, "qy": qy, "qz": qz, "qw": qw,
+            "yaw_deg": yaw, "stamp": stamp, "age_s": 0.2}  # fmt: skip
+
+
+def at_stamp(heading_deg: float, head: Head = LEVEL, stamp: float = 100.0) -> Stamped:
+    """The two ``pose_at`` answers TF gives for a cart at the map's origin heading
+    ``heading_deg`` with its neck at ``head``: ``map <- base_link``, and ``map <- camera_link``
+    through the neck's model (the board's base_link -> camera_link)."""
+    c, s = math.cos(math.radians(heading_deg)), math.sin(math.radians(heading_deg))
+    base = np.array([[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]])
+    x, y, z, roll, pitch, yaw = camera_pose(CHAIN.neck, NeckAngles(head.pan_rad, head.pitch_rad))
+    link = Mount(x, y, z, math.degrees(roll), math.degrees(pitch), math.degrees(yaw))
+    camera = tf_answer(base @ link.rotation(), base @ link.translation(), stamp)
+    return Stamped.from_answers(camera, tf_answer(base, np.zeros(3), stamp))
+
+
+def test_the_same_box_at_two_stamps_of_a_turning_cart_lands_on_each_stamp_s_heading() -> None:
+    """2026-10-14: a face in a frame exposed while the cart turned in place. The same box at two
+    stamps lands 2 m out along the heading the cart had AT EACH STAMP, straight ahead of it
+    there; at a stamp whose poses are those of now, it is the old path's answer."""
+    depth = flat(2.0)
+    before = locate_at(EYE, CHAIN, CENTRE, depth, at_stamp(0.0, stamp=100.0), LEVEL, space=CHANNEL)
+    after = locate_at(EYE, CHAIN, CENTRE, depth, at_stamp(-76.0, stamp=102.2), LEVEL, space=CHANNEL)
+    assert before is not None and after is not None
+    assert (before.x, before.y, before.z) == pytest.approx((2.0, 0.0, 1.2))
+    turned = math.radians(-76.0)
+    assert (after.x, after.y) == pytest.approx((2.0 * math.cos(turned), 2.0 * math.sin(turned)))
+    assert (after.forward, after.left) == pytest.approx((2.0, 0.0), abs=1e-9)
+    assert (before.stamp, after.stamp) == (100.0, 102.2)
+    assert math.degrees(after.pose.yaw_rad) == pytest.approx(-76.0)
+    now = locate(EYE, CHAIN, CENTRE, depth, LEVEL, ORIGIN, space=CHANNEL)
+    assert now is not None and now.stamp is None
+    assert (now.x, now.y, now.z) == pytest.approx((before.x, before.y, before.z))
+
+
+def test_the_neck_s_pose_at_the_stamp_is_inside_tf_s_camera() -> None:
+    """The cart turned 30 deg right and the neck 30 deg left at the frame's stamp: the camera
+    looked along the map's x, so the point is there, 30 deg left of the cart's nose."""
+    panned = Head(math.radians(30.0), 0.0)
+    at = at_stamp(-30.0, head=panned)
+    found = locate_at(EYE, CHAIN, CENTRE, flat(2.0), at, LEVEL, space=CHANNEL)
+    assert found is not None
+    assert (found.x, found.y, found.z) == pytest.approx((2.0, 0.0, 1.2), abs=1e-9)
+    assert found.bearing_deg == pytest.approx(30.0)
+    assert found.head == LEVEL, "the neck's encoders at the depth pair, recorded only"
+
+
+class Nowhere:
+    """A head source, and a pose source that must not be asked."""
+
+    def head(self) -> Head:
+        return LEVEL
+
+    def pose(self) -> Pose2D:
+        raise AssertionError("a stamped box is never placed with the pose of now")
+
+
+def test_the_locator_places_a_stamped_box_with_tf_s_poses_and_never_asks_where() -> None:
+    geometry = CameraGeometry(EYE, CHAIN, lambda left, right: (left, right))
+    eyes = Locator(Pairs(), [Depth("stereo", 2.0)], Nowhere(), Nowhere(), geometry)
+    found = eyes.locate(CENTRE, CHANNEL, at_stamp(90.0, stamp=7.5))
+    assert (found.x, found.y) == pytest.approx((0.0, 2.0), abs=1e-9)
+    assert found.stamp == 7.5 and math.degrees(found.pose.yaw_rad) == pytest.approx(90.0)
+
+
+def test_how_far_the_camera_turned_is_the_head_s_turn_and_the_cart_s_together() -> None:
+    frame = at_stamp(0.0).camera
+    assert turned_deg(frame, frame) == pytest.approx(0.0, abs=1e-4)
+    assert turned_deg(frame, at_stamp(-40.0).camera) == pytest.approx(40.0)
+    held = at_stamp(-40.0, head=Head(math.radians(40.0), 0.0))  # the neck holding the person
+    assert turned_deg(frame, held.camera) == pytest.approx(0.0, abs=1e-4)
+    nodded = at_stamp(0.0, Head(0.0, math.radians(8.0)))  # the head alone tilted 8 deg down
+    assert turned_deg(frame, nodded.camera) == pytest.approx(8.0)
 
 
 # -- the live inputs, their remotes faked ---------------------------------------------------------

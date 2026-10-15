@@ -4,6 +4,7 @@
 #   ros/neck.sh                 the same as read
 #   ros/neck.sh read            what the encoders read now, in ticks and in degrees
 #   ros/neck.sh home            back to the reference pose of config/neck.json, then torque off
+#   ros/neck.sh release         torque off NOW, whoever holds the head (a runaway's stop)
 #   ros/neck.sh goto PAN TILT   move to those encoder ticks, then torque off (push it by hand again)
 #   ros/neck.sh hold PAN TILT   the same, but leave the servos energised so the head holds its pose
 #   ros/neck.sh motion [KEY VALUE ...]
@@ -17,7 +18,7 @@
 #                               read by the server that owns the bus; e.g. "head 85" is the
 #                               acceleration ceiling the server lifts to 254, "neck 41 1" the ramp
 # Ticks, not degrees, on purpose: the encoders are what the server speaks, and config/neck.json's
-# limits are in ticks (pan 257..3812, tilt 1814..2760). A target outside them is refused by the
+# limits are in ticks (pan 163..3929, tilt 1814..2787). A target outside them is refused by the
 # server, never quietly clamped; a move runs at the motion's top speed, wheels turning or not, and
 # gives up with "NOT reached" after half again its travel time plus a second (3 s at least).
 # PEPIN_HOST picks the board, PEPIN_BASE_PORT the port.
@@ -38,8 +39,8 @@ from typing import Any
 from pepin.neck import NeckConfig, joint_angles
 
 USAGE = (
-    "usage: ros/neck.sh read | home | goto PAN TILT | hold PAN TILT | motion [KEY VALUE ...]"
-    " | registers SERVO ADDRESS [SIZE]"
+    "usage: ros/neck.sh read | home | release | goto PAN TILT | hold PAN TILT"
+    " | motion [KEY VALUE ...] | registers SERVO ADDRESS [SIZE]"
 )
 
 
@@ -50,6 +51,8 @@ def request(argv: list[str]) -> tuple[dict[str, Any], str, float]:
         return {"cmd": "neck"}, "neck", 3.0
     if action == "home":
         return {"cmd": "neck_home"}, "neck_goto", 20.0
+    if action == "release":
+        return {"cmd": "neck_release"}, "neck_release", 3.0
     if action in ("goto", "hold") and len(argv) == 3:
         goal = {"cmd": "neck_goto", "pan_ticks": int(argv[1]), "tilt_ticks": int(argv[2])}
         return {**goal, "hold": action == "hold"}, "neck_goto", 20.0
@@ -65,6 +68,12 @@ def request(argv: list[str]) -> tuple[dict[str, Any], str, float]:
 
 def report(cfg: NeckConfig, message: dict[str, Any]) -> None:
     """Print one reply as ticks, degrees and how the move went; exit 1 on an error in it."""
+    if message.get("type") == "neck_release":
+        if message.get("error"):
+            print(f"error: {message['error']}", file=sys.stderr)
+            raise SystemExit(1)
+        print("released: torque off, the head is free")
+        return
     if message.get("type") == "neck_motion":
         keys = ("max_speed_deg_s", "max_acc_deg_s2", "tilt_max_acc_deg_s2", "lease_s")
         was = message.get("was", {})

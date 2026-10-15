@@ -16,11 +16,12 @@ import wave
 from collections.abc import Callable
 from pathlib import Path
 
-from pepin.audio_link import FRAME_SAMPLES, RATE, AudioClient, DoaReading
+from pepin.audio_link import FRAME_SAMPLES, RATE, AudioClient, DoaReading, RawFrame
 
 logger = logging.getLogger(__name__)
 
 FrameSink = Callable[[bytes, float], None]  # (20 ms of s16le at 16 kHz, laptop monotonic)
+RawSink = Callable[[RawFrame, float], object]  # (the four raw mics' 20 ms, laptop monotonic)
 
 
 class BoardLink:
@@ -45,6 +46,17 @@ class BoardLink:
         """Deliver frames to ``sink`` from a reader thread; keep the link alive."""
         threading.Thread(target=self._pump, args=(sink,), name="mic", daemon=True).start()
         threading.Thread(target=self._keepalive, name="keepalive", daemon=True).start()
+
+    def listen_raw(self, sink: RawSink) -> None:
+        """Deliver the board's raw microphone frames (the 6-channel firmware, config/audio.json
+        ``raw_mics``) to ``sink`` from a thread of their own; nothing comes when the board sends
+        none (the hello's ``raw_channels`` 0), and the main pump's reconnects carry over."""
+        threading.Thread(target=self._pump_raw, args=(sink,), name="mic-raw", daemon=True).start()
+
+    @property
+    def raw_channels(self) -> int:
+        """Microphones the board streams raw (0: none)."""
+        return self._client.raw_channels
 
     def play(self, pcm: bytes) -> None:
         """Queue speech on the board's speaker."""
@@ -90,6 +102,12 @@ class BoardLink:
                 continue
             silent = 0
             sink(frame.pcm, time.monotonic())
+
+    def _pump_raw(self, sink: RawSink) -> None:
+        while not self._stop.is_set():
+            frame = self._client.next_raw(timeout_s=1.0)  # the main pump replaces the client
+            if frame is not None:
+                sink(frame, time.monotonic())
 
     def _keepalive(self) -> None:
         while not self._stop.wait(2.0):

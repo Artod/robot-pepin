@@ -4,12 +4,15 @@ import array
 import subprocess
 import threading
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
 
-from pepin.audio_link import AudioClient, AudioFrame, DoaReading
+from pepin.audio_link import AudioClient, AudioFrame, DoaReading, RawFrame
 from pepin.audio_server import (
+    DEFAULT_CHANNELS,
+    RAW_CHANNELS,
     AudioServer,
     AudioService,
     CaptureLoop,
@@ -17,15 +20,21 @@ from pepin.audio_server import (
     DeadStreamPolicy,
     DoaPoller,
     Framer,
+    MultiSplitter,
     Player,
     SampleClock,
     XrunCounter,
     XvfHost,
     arguments,
+    capture_channels,
+    detect_channels,
     find_array,
+    load_audio_config,
     reboot_array,
     resolve_device,
 )
+
+REPO = Path(__file__).resolve().parents[2]
 
 CARDS = """\
  0 [audiocodec     ]: audiocodec - audiocodec
@@ -44,6 +53,37 @@ def stereo(left: list[int], right: list[int]) -> bytes:
 
 def mono(samples: list[int]) -> bytes:
     return array.array("h", samples).tobytes()
+
+
+def six(frames: int, first: int = 0) -> bytes:
+    """``frames`` of a 6-channel capture: channel c's sample k is 100 * c + k."""
+    values = [100 * c + k for k in range(first, first + frames) for c in range(6)]
+    return array.array("h", values).tobytes()
+
+
+STREAM0 = """\
+Seeed Studio reSpeaker XVF3800 4-Mic Array at usb-5101000.usb-1.3, high speed : USB Audio
+
+Playback:
+  Status: Stop
+  Interface 1
+    Altset 1
+    Format: S16_LE
+    Channels: 2
+    Endpoint: 0x01 (1 OUT) (ASYNC)
+    Rates: 16000
+    Data packet interval: 125 us
+
+Capture:
+  Status: Stop
+  Interface 2
+    Altset 1
+    Format: S16_LE
+    Channels: 6
+    Endpoint: 0x82 (2 IN) (ASYNC)
+    Rates: 16000
+    Data packet interval: 125 us
+"""
 
 
 # -- the card ----------------------------------------------------------------------------------
@@ -121,8 +161,9 @@ def test_stamps_follow_a_sound_card_slower_than_the_board() -> None:
 class FakeSource:
     """Scripted reads: bytes, b"" for a silent read, or an exception to raise."""
 
-    def __init__(self, clock: "FakeClock") -> None:
+    def __init__(self, clock: "FakeClock", channels: int = 2) -> None:
         self.clock = clock
+        self.channels = channels
         self.script: list[Any] = []
         self.opens = self.closes = 0
         self.refuse = False
@@ -172,6 +213,82 @@ def test_capture_sends_the_processed_channel_as_numbered_stamped_frames() -> Non
     assert [f.seq for f in frames] == [0, 1]
     assert frames[1].stamp_s - frames[0].stamp_s == pytest.approx(0.004)
     assert loop.alive(clock.now)
+    assert loop.channels == 2 and loop.raw_channels == 0
+
+
+def test_six_channels_give_the_processed_channel_and_the_four_raw_mics_in_step() -> None:
+    """The 6-channel firmware: channel 0 goes out as before; channels 2-5, the microphones,
+    go out interleaved as raw frames of the same seq and stamp; a 2-channel stream asked for
+    raw frames gives none and says why once."""
+    clock = FakeClock()
+    source = FakeSource(clock, channels=6)
+    frames: list[AudioFrame] = []
+    raws: list[RawFrame] = []
+    loop = CaptureLoop(source, frames.append, raw=RAW_CHANNELS, on_raw=raws.append,
+                       frame_samples=4, rate=1000, clock=clock)  # fmt: skip
+    loop.step()  # open
+    assert loop.channels == 6 and loop.raw_channels == 4
+    clock.now += 0.1
+    source.script = [six(3), six(5, first=3)]  # cut inside a frame
+    loop.step()
+    loop.step()
+    assert [f.pcm for f in frames] == [mono([0, 1, 2, 3]), mono([4, 5, 6, 7])]
+    assert len(raws) == 2 and loop.raw_frames == 2
+    assert [r.seq for r in raws] == [f.seq for f in frames] == [0, 1]
+    assert [r.stamp_s for r in raws] == [f.stamp_s for f in frames]
+    assert raws[0].channels == 4 and raws[0].samples == 4 and raws[0].rate == 1000
+    expected = [100 * c + k for k in range(4) for c in (2, 3, 4, 5)]
+    assert array.array("h", raws[0].pcm).tolist() == expected
+    assert array.array("h", raws[1].pcm).tolist() == [v + 4 for v in expected]
+    stereo_only = FakeSource(clock, channels=2)
+    none: list[RawFrame] = []
+    loop2 = CaptureLoop(stereo_only, frames.append, raw=RAW_CHANNELS, on_raw=none.append,
+                        frame_samples=4, rate=1000, clock=clock)  # fmt: skip
+    loop2.step()
+    stereo_only.script = [stereo([1, 2, 3, 4], [9] * 4)]
+    loop2.step()
+    assert loop2.raw_channels == 0 and none == [] and frames[-1].pcm == mono([1, 2, 3, 4])
+    with pytest.raises(OSError):  # channel 1 of a stream that has one would be nonsense
+        CaptureLoop(FakeSource(clock, channels=1), frames.append, channel=1, clock=clock).step()
+
+
+def test_the_multi_splitter_and_the_framer_keep_the_channels_interleaved() -> None:
+    splitter = MultiSplitter(6, (2, 3, 4, 5))
+    data = six(3)
+    out = splitter.take(data[:7]) + splitter.take(data[7:])  # cut mid-sample
+    assert array.array("h", out).tolist() == [100 * c + k for k in range(3) for c in (2, 3, 4, 5)]
+    assert splitter.count == 4
+    with pytest.raises(ValueError):
+        MultiSplitter(2, (2,))
+    framer = Framer(4, channels=2)
+    cut = framer.push(array.array("h", list(range(20))).tobytes())
+    assert [(k, len(pcm)) for k, pcm in cut] == [(0, 16), (4, 16)] and framer.samples_in == 10
+
+
+def test_capture_channels_are_read_off_the_card_s_stream_file(tmp_path: Path) -> None:
+    assert capture_channels(STREAM0) == 6
+    assert capture_channels(STREAM0.replace("Channels: 6", "Channels: 2")) == 2
+    assert capture_channels(STREAM0.split("Capture:")[0]) is None
+    proc = tmp_path / "asound"
+    (proc / "card1").mkdir(parents=True)
+    (tmp_path / "cards").write_text(CARDS)
+    (proc / "card1" / "stream0").write_text(STREAM0)
+    assert detect_channels(str(tmp_path / "cards"), str(proc)) == 6
+    (proc / "card1" / "stream0").write_text("nothing capturing")
+    assert detect_channels(str(tmp_path / "cards"), str(proc)) == DEFAULT_CHANNELS
+    assert detect_channels(str(tmp_path / "missing"), str(proc)) == DEFAULT_CHANNELS
+
+
+def test_the_audio_config_s_switch_and_the_command_line_over_it(tmp_path: Path) -> None:
+    shipped = load_audio_config(REPO / "config/audio.json")
+    assert shipped.raw_mics is True and shipped.capture_channels == "auto"
+    path = tmp_path / "audio.json"
+    path.write_text('{"raw_mics": false, "capture_channels": 2}')
+    assert load_audio_config(path) == load_audio_config(path).__class__(False, 2)
+    args = arguments([])
+    assert args.capture_channels is None and args.raw_mics is None, "the file decides"
+    args = arguments(["--capture-channels", "6", "--no-raw-mics"])
+    assert args.capture_channels == "6" and args.raw_mics is False
 
 
 def test_two_silent_seconds_are_a_stall_and_the_device_is_reopened_at_once(
@@ -528,7 +645,10 @@ def test_a_device_that_will_not_open_costs_one_error_per_utterance() -> None:
 
 
 class RealtimeSource:
-    """Delivers 5 ms stereo chunks in about real time: positive on the left, -1 on the right."""
+    """Delivers 5 ms six-channel chunks in about real time: positive on channel 0 (the
+    processed one), -1 on channel 1, and -2 .. -5 on the four raw microphones."""
+
+    channels = 6
 
     def __init__(self) -> None:
         self.n = 0
@@ -540,9 +660,11 @@ class RealtimeSource:
 
     def read(self, timeout_s: float) -> bytes:
         time.sleep(0.005)
-        left = [1 + (v % 1000) for v in range(self.n, self.n + 80)]
+        values = []
+        for v in range(self.n, self.n + 80):
+            values += [1 + (v % 1000), -1, -2, -3, -4, -5]
         self.n += 80
-        return stereo(left, [-1] * 80)
+        return array.array("h", values).tobytes()
 
     def close(self) -> None:
         self.open_now = False
@@ -553,7 +675,12 @@ def test_frames_directions_status_and_playback_travel_the_socket() -> None:
     sinks: list[FakeSink] = []
     log: list[str] = []
     server = AudioServer(0, lambda: {"type": "hello", "rate": 16000, "play_rate": 16000})
-    capture = CaptureLoop(RealtimeSource(), lambda f: server.broadcast(f.encode()))
+    capture = CaptureLoop(
+        RealtimeSource(),
+        lambda f: server.broadcast(f.encode()),
+        raw=RAW_CHANNELS,
+        on_raw=lambda f: server.broadcast(f.encode()),
+    )
     control = FakeControl()
     control.answers = [(45, True)] * 1000
     doa = DoaPoller(lambda: control, lambda r: server.broadcast(r.encode()), hz=50.0)
@@ -574,6 +701,10 @@ def test_frames_directions_status_and_playback_travel_the_socket() -> None:
         samples = array.array("h")
         samples.frombytes(frames[0].pcm)
         assert all(s > 0 for s in samples)  # the left channel, the processed one
+        raw = client.next_raw(2.0)
+        assert raw is not None and raw.channels == 4 and raw.samples == 320
+        assert array.array("h", raw.pcm).tolist()[:8] == [-2, -3, -4, -5] * 2, "mics 2-5 in step"
+        assert client.raw_received >= 1 and raw.seq >= seqs[0]
         deadline = time.monotonic() + 2.0
         while client.latest_doa() is None and time.monotonic() < deadline:
             time.sleep(0.01)
@@ -581,6 +712,8 @@ def test_frames_directions_status_and_playback_travel_the_socket() -> None:
         status = client.status()
         assert status is not None and status["capture_alive"] and status["firmware"] == "2.1.1"
         assert status["listeners"] == 1 and status["dropouts"] == 0
+        assert status["capture_channels"] == 6 and status["raw_channels"] == 4
+        assert status["raw_frames"] >= 1 and "raw 4 ch" in service.report(time.monotonic())
         client.play(b"\x01\x00" * 320)
         client.play_end()
         deadline = time.monotonic() + 2.0
@@ -610,6 +743,26 @@ def test_a_status_probe_that_never_listens_gets_clean_json() -> None:
                 received += probe.recv(4096)
         assert received == b'{"type":"hello"}\n{"type":"status","ok":true}\n'
         assert header == {"cmd": "status"}
+    finally:
+        server.close()
+
+
+@pytest.mark.slow
+def test_a_listener_that_sends_nothing_outlives_the_send_timeout() -> None:
+    """The socket timeout bounds the writer's sends, not a quiet reader: since 2026-10-14 the
+    laptop finds the voice's direction itself and sends nothing for minutes on end."""
+    import socket
+
+    server = AudioServer(0, lambda: {"type": "hello"}, send_timeout_s=0.2).start()
+    try:
+        with socket.create_connection(("127.0.0.1", server.port), timeout=2.0) as probe:
+            probe.sendall(b'{"cmd":"listen"}\n')
+            time.sleep(0.8)  # four send timeouts of silence from the client
+            server.broadcast(AudioFrame(7, 0.0, b"\x00\x00" * 320).encode())
+            received = b""
+            while received.count(b"\n") < 2:
+                received += probe.recv(4096)
+        assert received.startswith(b'{"type":"hello"}\n{"type":"pcm","seq":7')
     finally:
         server.close()
 

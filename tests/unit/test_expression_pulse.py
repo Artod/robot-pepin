@@ -698,14 +698,38 @@ def test_a_goodbye_waves_bye_in_the_wait_and_a_greeting_waits_for_the_body_s_tur
     assert [f["intent"] for k, f in rig.records if k == "performance"] == ["farewell"]
     rig = Rig(seed=1)
     rig.open()
-    rig.view.be(phase="turning")
+    rig.view.be(phase="turning", eyes=True)
     rig.heard("Привет!", seconds=1.0)
     rig.tick(1.0)
     assert not [f for k, f in rig.records if k == "performance"]
-    rig.view.be(phase="track")
+    rig.view.be(phase="track", eyes=True)  # the turn is over, nobody seen yet: it waits
+    rig.tick(0.6)
+    assert not [f for k, f in rig.records if k == "performance"]
+    rig.view.be(phase="track", eyes=True, seen_s=rig.clock.now)
     rig.tick(0.2)
     assert [f["intent"] for k, f in rig.records if k == "performance"] == ["greeting"]
-    assert rig.moments(GREETING_DUE)[0]["deferred_s"] >= 0.8
+    assert rig.moments(GREETING_DUE)[0]["deferred_s"] >= 1.4
+
+
+def test_a_greeting_waits_to_see_the_person_and_is_dropped_when_nobody_shows() -> None:
+    """2026-10-13: the hello at the wake waved at a voice from behind, before any face; with
+    eyes the wave waits for a fresh sighting (a face or a body), and a hello nobody shows up
+    for is no wave at all. Without eyes (no finder) it plays as before."""
+    rig = Rig(seed=1)
+    rig.open()
+    rig.view.be(phase="voice", eyes=True, seen_s=rig.clock.now - 60.0)  # seen a minute ago
+    rig.heard("Привет!", seconds=1.0)
+    rig.tick(3.0)
+    assert not [f for k, f in rig.records if k == "performance"], "a stale sighting is none"
+    rig.tick(3.5)
+    assert not [f for k, f in rig.records if k == "performance"]
+    assert "nobody seen" in rig.moments(GREETING_DUE)[0]["why"]
+    rig = Rig(seed=1)
+    rig.open()
+    rig.view.be(phase="voice", eyes=False)
+    rig.heard("Привет!", seconds=1.0)
+    rig.tick(0.3)
+    assert [f["intent"] for k, f in rig.records if k == "performance"] == ["greeting"]
 
 
 def test_the_laugh_is_one_body_its_face_head_gripper_and_cart_together() -> None:
@@ -714,10 +738,13 @@ def test_the_laugh_is_one_body_its_face_head_gripper_and_cart_together() -> None
     listeners add no rock of their own to it."""
     everything = Scene(frozenset(PARTS))
     laugh = BOOK.compositions["laugh"]
-    for k, variant in enumerate(laugh.variants):
-        clips = BookRenderer(BOOK).render("laugh", everything, 3, variant=k).clips
+    for k, variant in enumerate(laugh.variants):  # each for its own argument (happy, evil)
+        arg = variant.needs.get("arg")
+        clips = BookRenderer(BOOK).render("laugh", everything, 3, variant=k, arg=arg).clips
         parts = {c.part for c in clips}
         assert parts == ({"face", "head"} if variant.floor else {"face", "head", "arm", "body"})
+        faces = {e.name for c in clips if c.part == "face" for e in c.events}
+        assert faces == {"sinister"} if arg == "evil" else "sinister" not in faces
     for seed in range(4):
         rig = Rig(seed=seed)
         assert rig.engine.perform("laugh", source="tool").ok
@@ -732,9 +759,10 @@ def test_the_laugh_is_one_body_its_face_head_gripper_and_cart_together() -> None
 
 def test_the_accents_move_the_cart_by_their_strength_and_the_weak_ones_sway_it_steadily() -> None:
     """Five sentences, one accent each, z 2.4, 2.6, 3.6, 3.2, 2.5 (strong_z 3): each nods; the
-    weak ones sway the cart 0.5 cm on every second one (wheel_accent_share 0.5: steady, not
-    dice), the reply's strongest is the peak (its rock 1.2-1.5 cm), the strong one after it
-    rocks 1 cm; never only once a reply."""
+    weak ones move the cart on every second one (wheel_accent_share 0.5: steady, not dice): a
+    0.5 cm sway or a 2-2.5 deg wag (the dice between the book's variants), the reply's
+    strongest is the peak (its rock 1.2-1.5 cm or its wag 2.5-3 deg), the strong one after it
+    rocks 1 cm or wags 2.5-3 deg; never only once a reply."""
     rig = Rig()
     rig.open()
     for k, z in enumerate((2.4, 2.6, 3.6, 3.2, 2.5)):
@@ -745,9 +773,16 @@ def test_the_accents_move_the_cart_by_their_strength_and_the_weak_ones_sway_it_s
     kinds = [f["accent"]["kind"] for k, f in rig.events if k == "pulse"]
     assert kinds == ["weak", "weak", "peak", "strong", "weak"]
     assert len([c for c in rig.clips() if c.layer == "gesture"]) == 5  # every one nods
-    rocks = [max(c.tracks[0].values) for c in rig.clips("body")]
-    assert rocks[0] == pytest.approx(0.005) and 0.012 <= rocks[1] <= 0.015
-    assert rocks[2] == pytest.approx(0.01) and len(rocks) == 3
+    moves = [(c.tracks[0].dof, max(abs(v) for v in c.tracks[0].values)) for c in rig.clips("body")]
+    sizes = {"weak": {"x_m": (0.005, 0.005), "yaw_deg": (2.0, 2.5)},
+             "peak": {"x_m": (0.012, 0.015), "yaw_deg": (2.5, 3.0)},
+             "strong": {"x_m": (0.01, 0.01), "yaw_deg": (2.5, 3.0)}}  # fmt: skip
+    assert len(moves) == 3
+    for kind, (dof, size) in zip(("weak", "peak", "strong"), moves, strict=True):
+        lo, hi = sizes[kind][dof]
+        assert lo - 1e-6 <= size <= hi + 1e-6, (kind, dof, size)
+        if dof == "yaw_deg":  # a wag nets to zero: the cart's heading as it began
+            assert rig.clips("body")[moves.index((dof, size))].tracks[0].values[-1] == 0.0
     never = Rig(wheel_accent_share=0.0)
     never.open()
     for k in range(4):
@@ -948,7 +983,10 @@ def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_composit
     data = json.loads((CONFIG / "expression.json").read_text())
     knobs_ = alive_knobs(data)
     assert knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.9
-    assert knobs_.pulse.melody_key_gap_s == 0.5  # the glide: a key a half second at least
+    # the glide: a key a second at least, the contour's phrase-level turns only (2026-10-13
+    # evening: a key every 0.5 s read as a floating drift)
+    assert knobs_.pulse.melody_key_gap_s == 1.0 and knobs_.pulse.melody_cutoff_hz == 0.5
+    assert knobs_.pulse.arm_up_caps_share == 0.3  # the posture's raise, quiet
     assert knobs_.moments.head_gap_s == 1.0 and "breath_deg" not in data["moments"]
     assert knobs_.pulse.strong_z == 3.0 and knobs_.pulse.wheel_accent_share == 0.5
     assert knobs_.pulse.laugh_run == 3 and knobs_.pulse.laugh_gap_s == (0.2, 0.4)

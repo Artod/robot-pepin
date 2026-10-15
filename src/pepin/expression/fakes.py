@@ -114,9 +114,9 @@ class RecordingObserver:
         """Recorded (the words only when there are some)."""
         self.calls.append(("moment", (name, text) if text else (name,)))
 
-    def drive(self, active: bool) -> None:
-        """Recorded."""
-        self.calls.append(("drive", (active,)))
+    def drive(self, active: bool, ran: bool = True) -> None:
+        """Recorded (whether it ran only when it did not)."""
+        self.calls.append(("drive", (active,) if ran else (active, ran)))
 
     def closed(self, reason: str) -> None:
         """Recorded."""

@@ -35,14 +35,16 @@ GESTURES: tuple[str, ...] = Gesture.__args__  # type: ignore[attr-defined]
 @tool
 def gesture(robot: Robot, name: Gesture) -> Result:
     """Make a gesture with the body now (the head, the mouth on the screen, the arm and its
-    gripper), when a person asks to see one ("wave", "nod", "laugh"). Most of the time the
-    robot gestures without this tool; call it only when asked.
+    gripper), when a person asks to see one ("wave", "nod"). Most of the time the robot
+    gestures without this tool; call it only when asked. To laugh, do not call this: write
+    {laugh} in your reply before the ha-ha, so the body laughs WITH the sound (a laugh played
+    here runs before the voice and reads as a twitch).
 
     Args:
-        name: greeting (a wave hello), farewell (a wave goodbye), laugh, doubt (so-so),
-            thinking (a look away), emphasis (a nod on a word), surprise, agreement (a nod),
-            disagreement (a shake of the head), shrug, evil_click (the gripper clicks
-            mischievously), sympathy.
+        name: greeting (a wave hello), farewell (a wave goodbye), laugh (silent, only when
+            asked to show the gesture), doubt (so-so), thinking (a look away), emphasis (a nod
+            on a word), surprise, agreement (a nod), disagreement (a shake of the head), shrug,
+            evil_click (the gripper clicks mischievously), sympathy.
     """
     animator = robot.animator
     if animator is None:

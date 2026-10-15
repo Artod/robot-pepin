@@ -30,7 +30,10 @@ THE RESOLVER (:class:`Resolver`; DESIGN.md §4.3-§4.6, the gesture space of con
 * ``@pose:NAME``: the book's pose NAME as a place of the space (the via applies);
 * ``@toward``: the open hand (``space.open_hand``) turned at the person engaged (the attention
   view's bearing and distance), ``@bearing``: the shut hand at the marker's place (the room's);
-  both only inside the clear pan range (``space.pan_deg``), else unresolved;
+  a bearing past the clear pan range (``space.pan_deg``) gets the range's edge nearest it: the
+  arm points as far as it reaches (logged ``reach``, with how far short), the head's glance
+  carrying the rest (2026-10-13: {point:printer} at a place past the pans rendered nothing and
+  the arm just rose for the posture);
 * ``@locus``: the cell of the marker's referent (a catchment), the gripper shut;
 * ``@count``: the n-th of ``space.loci`` for ``{count:n}``;
 * ``@path:k``: the k-th cell of ``space.paths["name:arg"]`` (its last beyond its end).
@@ -96,7 +99,12 @@ ARG_NEED = "arg"  # a variant's need of its marker's argument
 # a name no room was there to tell (its floor only: never a referent's cell for a place)
 YOU, ME, PLACE, THING, NAME = "you", "me", "place", "thing", "name"
 SHUT = {"gripper": 0.0}  # a referent's spot is pointed at with the gripper shut (the finger)
-AWAY_DEG = 90.0  # a place further than this from the person gets no head glance
+# A place further than this from the person gets no head glance: behind their back the glance
+# reads as looking away (90 until 2026-10-13: the printer at ~95 deg from Artem got none)
+AWAY_DEG = 120.0
+# A bearing this far past the clear pan range's edge still gets the edge (the arm as far as it
+# reaches: the printer left of the pans); further is behind the robot, where an arm says nothing
+REACH_DEG = 60.0
 GLANCE_DEG = 1.0  # ... and one nearer than this none either: the head is looking there
 BACK_SHARE = 0.8  # the way home after a hold in the middle runs at this share of the caps
 # The caps the book's timings are sized for (config/arm.json): their ratio places a via
@@ -239,9 +247,9 @@ class Resolver:
                 return None
             return book.poses.get(path[min(int(k), len(path) - 1)])
         if ref == "@toward":
-            return self._pointing(book, space.open_hand, self._person(book))
+            return self._pointing(book, space.open_hand, self._person(book), ctx.commit)
         if ref == "@bearing":
-            return self._pointing(book, space.shut_hand, self._place(meaning))
+            return self._pointing(book, space.shut_hand, self._place(meaning), ctx.commit)
         if ref == "@locus":
             cell = self._locus(ctx)
             return None if cell is None else {**book.poses[cell], **SHUT}
@@ -333,16 +341,30 @@ class Resolver:
         )
 
     def _pointing(
-        self, book: Book, hand: str | None, there: tuple[float, float] | None
+        self,
+        book: Book,
+        hand: str | None,
+        there: tuple[float, float] | None,
+        commit: bool = False,
     ) -> Pose | None:
-        """``hand`` (a pose pointing straight ahead) turned on its pan at ``there``, None
-        outside the clear pan range."""
+        """``hand`` (a pose pointing straight ahead) turned on its pan at ``there``; a bearing
+        past the clear pan range by up to :data:`REACH_DEG` gets the range's edge nearest it,
+        as far as the arm reaches (logged ``reach`` on the brain's first rendering,
+        ``commit``); None without a hand or a place, or for a bearing further behind."""
         if hand is None or there is None or hand not in book.poses:
             return None
         pose = book.poses[hand]
-        pan = pose["shoulder_pan"] - _seen_from(book.space.arm_axis_m, there)
+        bearing = _seen_from(book.space.arm_axis_m, there)
+        pan = pose["shoulder_pan"] - bearing
         lo, hi = book.space.pan_deg
-        return {**pose, "shoulder_pan": round(pan, 1)} if lo <= pan <= hi else None
+        reached = min(max(pan, lo), hi)
+        if abs(pan - reached) > REACH_DEG:
+            return None
+        if commit and abs(reached - pan) > 1e-9:
+            self.record("reach", {"hand": hand, "bearing_deg": round(bearing, 1),
+                                  "pan_deg": round(reached, 1),
+                                  "short_deg": round(abs(pan - reached), 1)})  # fmt: skip
+        return {**pose, "shoulder_pan": round(reached, 1)}
 
     # -- catchments ------------------------------------------------------------------------------
 
@@ -506,16 +528,24 @@ class BookRenderer:
         meaning = resolver.meaning(composition, cue, arg)
         first = variant is None and (cue is not None or arg is not None)
         ctx = Context(self.book, composition, meaning, commit=first)
+        # a variant written for the argument (its need) wins over one written for any: the
+        # laugh's sinister variant for {laugh} in a sinister part, never a happy one
+        exact = any(
+            v.needs.get(ARG_NEED) is not None and resolver.fits(v, meaning)
+            for v in composition.variants
+        )
 
         def fits(v: Variant) -> bool:
+            if exact and v.needs.get(ARG_NEED) is None:
+                return False
             return resolver.fits(v, meaning) and self._resolvable(v, ctx)
 
         index = variant if variant is not None else self.chooser.choose(composition, scene, rng,
                                                                         fits)  # fmt: skip
         chosen = composition.variants[index]
-        if not resolver.fits(chosen, meaning) or (
-            first and resolver.repeated(self.book, composition, meaning)
-        ):
+        if not resolver.fits(chosen, meaning) or (exact and chosen.needs.get(ARG_NEED) is None):
+            return Performance(intent, seed, index, (), cue)
+        if first and resolver.repeated(self.book, composition, meaning):
             return Performance(intent, seed, index, (), cue)
         drawn = [self._aimed(self._draw(step, rng), ctx) for step in chosen.steps]
         if any(self._unplaced(d, ctx) for d in drawn):  # the arm's strokes need their place

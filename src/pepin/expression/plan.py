@@ -36,7 +36,7 @@ class BodyLimits:
     """config/expression.json's ``wheels`` block: the turn and the rock per request, the turn's
     progress step, the one recovery's step away and turn back."""
 
-    max_turn_deg: float = 30.0
+    max_turn_deg: float = 180.0
     step_deg: float = 10.0
     max_rock_m: float = 0.02
     backoff_m: float = 0.02

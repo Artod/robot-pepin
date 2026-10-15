@@ -166,12 +166,35 @@ def test_an_overlay_adds_its_keys_to_the_holder_s_aim_and_the_holder_keeps_the_h
     assert arb.holds(SPEAKER) and arb.state(1.5).target == LEFT
 
 
+def test_no_key_is_written_while_the_holder_s_move_flies_and_the_key_waits_to_settle() -> None:
+    """2026-10-13: the pulse's melody and the idle breath wrote their glide keys (1-3 ramp
+    units) over the speaker look's 200 deg/s turn while it flew; the base server passed the
+    ramp on and the servo lost its brakes. A key due while the head has not settled waits;
+    the key due once it has is the one written, with its own ceilings."""
+    arb, head, out = arbiter()
+    arb.submit(Look(SPEAKER, (LEFT,), IDLE, 0, 6.0, 6.0), 0.0, out.append)
+    arb.step(0.0)  # the holder's turn written: the head flies, not settled
+    writes = len(head.writes)
+    assert arb.submit(clip(BREATHE, BREATH, idle=True, loop=True), 0.1, out.append).status == (
+        "granted"
+    )
+    arb.step(0.1)
+    arb.step(0.5)
+    assert len(head.writes) == writes, "no key over a head in flight"
+    still_at(arb, LEFT, 0.6)
+    arb.step(0.7)
+    assert len(head.writes) == writes + 1, "settled: the key due now is written"
+    assert_aim(head.writes[-1][0], plus(LEFT, 0, -0.6))
+    assert head.ceilings[-1] == 0.6
+
+
 def test_over_nothing_an_overlay_plays_over_home_and_lets_the_head_go_after() -> None:
     arb, head, out = arbiter()
     arb.submit(clip(GLANCE), 0.0, out.append)
     arb.step(0.0)
     assert_aim(head.writes[-1][0], plus(HOME, 15, -6))
     assert head.writes[-1][1] is True, "a lifted home is held"
+    still_at(arb, plus(HOME, 15, -6), 0.3)  # the key's move settled: the way back may go
     arb.step(2.0)
     assert head.writes[-1] == (None, False, 2.0), "home, let go"
     arb.step(2.2)
@@ -199,7 +222,7 @@ def test_an_overlay_never_plays_over_a_better_band_and_ends_when_one_takes_the_h
 def test_an_overlay_past_the_reach_the_bound_or_the_mast_s_rate_is_refused_whole() -> None:
     arb, _head, out = arbiter()
     speaker_on(arb, Aim(math.radians(150), math.radians(20)))
-    far = arb.submit(clip(((0.0, 10.0, 0.0, 100.0), (0.5, 0.0, 0.0, 100.0))), 1.0, out.append)
+    far = arb.submit(clip(((0.0, 20.0, 0.0, 100.0), (0.5, 0.0, 0.0, 100.0))), 1.0, out.append)
     assert far.status == "denied" and "past the neck's reach" in far.reason
     wide = clip(((0.0, 35.0, 0.0, 100.0),))
     assert "clip_max_deg 30" in str(wide.overlay and wide.overlay.refusal(SETTINGS))
@@ -253,6 +276,7 @@ def test_its_source_s_release_ends_the_overlay_and_the_head_fades_back() -> None
     speaker_on(arb)
     arb.submit(clip(((0.0, 20.0, 0.0, 200.0), (3.0, 0.0, 0.0, 200.0))), 1.0, out.append)
     arb.step(1.0)
+    still_at(arb, plus(LEFT, 20, 0), 1.2)  # the key's move settled: the way back may go
     assert arb.withdraw(GESTURE, 1.5, "its source's release", fade_s=0.4) == 1
     assert out[-1].status == "preempted"
     arb.step(1.55)

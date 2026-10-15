@@ -308,3 +308,77 @@ class Tracks:
             if not spare:
                 break
             self.tracks.remove(min(spare, key=Track.last_s))
+
+
+# -- the voices ------------------------------------------------------------------------------------
+
+
+@dataclass
+class VoiceSource:
+    """One voice the array hears: its bearing in the cart's frame (radians, + left), when it
+    was last heard (the laptop's clock), the strength of its last peak (the SRP-PHAT response,
+    0..1), how many peaks placed it, and ``who`` (reserved for the voice's embedding: nothing
+    fills it yet)."""
+
+    id: int
+    bearing: float
+    heard_s: float
+    strength: float
+    peaks: int = 1
+    who: str | None = None
+
+
+class VoiceSources:
+    """The register of voices (the seed of tracking several people by voice, 2026-10-14):
+    every source peak of a voiced chunk (:mod:`pepin.audio_doa`) joins the nearest source
+    within ``match_deg`` and keeps its id, or starts one; a source unheard for ``forget_s`` is
+    forgotten, at most ``max_sources`` are kept (the stalest goes). The person engaged is one
+    of them; the others keep their last known bearing, turned with the cart like the tracks.
+    Nobody is engaged or looked at from here: the gaze's rules are the tracks' (above); this
+    only remembers where the voices were."""
+
+    def __init__(self, *, match_deg: float = 25.0, forget_s: float = 300.0, max_sources: int = 8):
+        """The association's angle in degrees, the memory in seconds."""
+        self.match_rad = math.radians(match_deg)
+        self.forget_s, self.max_sources = forget_s, max_sources
+        self.sources: list[VoiceSource] = []
+        self._ids = itertools.count(1)
+
+    def heard(self, bearing: float, now: float, strength: float) -> VoiceSource:
+        """A peak at ``bearing`` (radians, the cart's frame) of ``strength``: the source it
+        places (the nearest within ``match_deg``, moved to it; else a new one)."""
+        near = [s for s in self.sources if abs(wrap(s.bearing - bearing)) <= self.match_rad]
+        found = min(near, key=lambda s: abs(wrap(s.bearing - bearing)), default=None)
+        if found is not None:
+            found.bearing, found.heard_s, found.strength = bearing, now, strength
+            found.peaks += 1
+            return found
+        source = VoiceSource(next(self._ids), bearing, now, strength)
+        self.sources.append(source)
+        while len(self.sources) > self.max_sources:
+            self.sources.remove(min(self.sources, key=lambda s: s.heard_s))
+        return source
+
+    def nearest(self, bearing: float) -> VoiceSource | None:
+        """The source within ``match_deg`` of ``bearing`` (the person engaged's, say), or None."""
+        near = [s for s in self.sources if abs(wrap(s.bearing - bearing)) <= self.match_rad]
+        return min(near, key=lambda s: abs(wrap(s.bearing - bearing)), default=None)
+
+    def forget(self, now: float) -> list[VoiceSource]:
+        """Drop the sources unheard for ``forget_s``; those dropped."""
+        old = [s for s in self.sources if now - s.heard_s > self.forget_s]
+        self.sources = [s for s in self.sources if s not in old]
+        return old
+
+    def turned(self, rad: float) -> None:
+        """The cart turned ``rad`` (+ left): every bearing moved the other way."""
+        for s in self.sources:
+            s.bearing = wrap(s.bearing - rad)
+
+    def clear(self) -> None:
+        """Forget every voice (the cart drove: every bearing is stale)."""
+        self.sources = []
+
+    def adopt(self, other: VoiceSources) -> None:
+        """Take ``other``'s voices (new knobs, the same voices)."""
+        self.sources, self._ids = other.sources, other._ids

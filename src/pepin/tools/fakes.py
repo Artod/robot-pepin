@@ -11,15 +11,17 @@ from __future__ import annotations
 import dataclasses
 import math
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import Any
 
 from pepin.expression.executors import Outcome
+from pepin.expression.speaker import Attention, AttentionPhase
 from pepin.gaze import DRIVE_REFUSAL
 from pepin.people.door import Outcome as Answer
 from pepin.perception.record import RECTIFIED_LEFT
-from pepin.pixel_to_map import Box, Head, Located, LocateError, Pose2D
+from pepin.pixel_to_map import Box, Head, Located, LocateError, Pose2D, Stamped
+from pepin.places import heading_residual_deg
 from pepin.tools.clients import (
     CHANNEL_HINT,
     HeadMove,
@@ -39,6 +41,7 @@ PLACES = {
     "printer": {"x": -1.2, "y": 3.4, "yaw_deg": 90.0},
     "bookshelf": {"x": 2.5, "y": -0.8, "yaw_deg": 180.0},
 }
+TF_NOW = 1000.0  # the fake goal server's clock (TF's), seconds: a sighting's stamp is aged by it
 
 
 class FakeClock:
@@ -87,7 +90,13 @@ class FakeGoalServer:
     error with that detail, as the server does for an unknown place or a stale pose.
     A ``plan`` answers ok unless ``unplannable`` (goals the planner finds occupied, the first
     that many asked) or ``plan_error`` (the server's error event, as an old build's
-    "unknown command") say otherwise.
+    "unknown command") say otherwise; an ok plan ends at ``plan_end`` (x, y, yaw_deg, the
+    heading None for a last pose without one; None: at the goal asked), with ``short_m`` and
+    ``short_deg`` as the server measures them.
+    A ``pose_at`` answers ``map -> frame`` from ``tf`` (frame and stamp, None the newest, to x,
+    y, z and yaw_deg; None where TF has no history), by default the cart standing at ``pose`` at
+    any stamp with its camera link :data:`CAMERA_HEIGHT_M` above it, aged on ``tf_now`` (the
+    server's clock, TF's); ``pose_at_error`` is its error event (an old build's).
     """
 
     clock: FakeClock
@@ -102,8 +111,12 @@ class FakeGoalServer:
     down: bool = False
     unplannable: int = 0
     plan_error: str | None = None
+    plan_end: dict[str, Any] | None = None
     asked: list[dict[str, Any]] = field(default_factory=list)
     cancelled: int = 0
+    tf_now: float = TF_NOW
+    tf: Callable[[str, float | None], dict[str, float] | None] | None = None
+    pose_at_error: str | None = None
 
     def where(self) -> dict[str, Any]:
         """``where``: the pose, or ``pose: none``."""
@@ -118,17 +131,22 @@ class FakeGoalServer:
         return dict(self.book)
 
     def go(self, request: dict[str, Any]) -> Iterator[dict[str, Any]]:
-        """``go``: the refusal, the scripted drive, or a plain arrival at the goal."""
+        """``go`` (or ``spin``): the refusal, the scripted drive, or a plain arrival at the goal
+        (the whole turn in place)."""
         self._ask(request)
         if self.refuse is not None:
             yield {"event": "error", "detail": self.refuse}
             return
-        goal = self._goal(request)
-        if goal is None:
-            yield {"event": "error", "detail": f"no such place: {request.get('place')!r}"}
-            return
+        if request.get("cmd") == "spin":
+            script = spin_script(self.pose, float(request["deg"]))
+        else:
+            goal = self._goal(request)
+            if goal is None:
+                yield {"event": "error", "detail": f"no such place: {request.get('place')!r}"}
+                return
+            script = arrival_script(*goal)
         before = self.cancelled
-        for event in self.drive if self.drive is not None else arrival_script(*goal):
+        for event in self.drive if self.drive is not None else script:
             if self.cancelled > before:
                 yield {
                     "event": "done",
@@ -172,7 +190,68 @@ class FakeGoalServer:
                 "reason": "goal occupied",
                 "blames": "goal",
             }
-        return answer | {"ok": True, "cell": "free", "length_m": 2.0, "poses": 40}
+        end = self.plan_end or {"x": x, "y": y, "yaw_deg": yaw_deg}
+        ex, ey, heading = float(end["x"]), float(end["y"]), end.get("yaw_deg")
+        turned = None if heading is None else heading_residual_deg(float(heading), yaw_deg)
+        return answer | {
+            "ok": True,
+            "cell": "free",
+            "length_m": 2.0,
+            "poses": 40,
+            "end": {
+                "x": round(ex, 3),
+                "y": round(ey, 3),
+                "yaw_deg": None if heading is None else round(float(heading), 1),
+            },
+            "short_m": round(math.hypot(ex - x, ey - y), 3),
+            "short_deg": None if turned is None else round(turned, 1),
+        }
+
+    def pose_at(
+        self, frame: str, stamp: float | None = None, parent: str = "map"
+    ) -> dict[str, Any]:
+        """``pose_at``: the frame's pose at the stamp (``map`` and ``odom`` one here), TF's
+        refusal, or the error event."""
+        request: dict[str, Any] = {"cmd": "pose_at", "frame": frame}
+        if stamp is not None:
+            request["stamp"] = stamp
+        if parent != "map":
+            request["parent"] = parent
+        self._ask(request)
+        if self.pose_at_error is not None:
+            return {"event": "error", "detail": self.pose_at_error}
+        held = self.tf_now if stamp is None else stamp
+        answer: dict[str, Any] = {
+            "event": "pose_at",
+            "frame": frame,
+            "parent": parent,
+            "stamp": held,
+            "now": self.tf_now,
+            "age_s": round(self.tf_now - held, 3),
+        }
+        where = self.tf(frame, stamp) if self.tf is not None else self._standing(frame)
+        if where is None:
+            reason = "Lookup would require extrapolation into the past"
+            return answer | {"ok": False, "kind": "Extrapolation", "reason": reason}
+        yaw = math.radians(float(where["yaw_deg"]))
+        return answer | {
+            "ok": True,
+            "x": float(where["x"]),
+            "y": float(where["y"]),
+            "z": float(where.get("z", 0.0)),
+            "qx": 0.0,
+            "qy": 0.0,
+            "qz": math.sin(yaw / 2.0),
+            "qw": math.cos(yaw / 2.0),
+            "yaw_deg": float(where["yaw_deg"]),
+        }
+
+    def _standing(self, frame: str) -> dict[str, float] | None:
+        """The cart standing at ``pose`` (its camera link above it, the neck straight)."""
+        if self.pose is None:
+            return None
+        z = CAMERA_HEIGHT_M if frame == "camera_link" else 0.0
+        return {"x": self.pose["x"], "y": self.pose["y"], "z": z, "yaw_deg": self.pose["yaw_deg"]}
 
     def _ask(self, request: dict[str, Any]) -> None:
         self.asked.append(request)
@@ -204,6 +283,21 @@ def arrival_script(x: float, y: float, yaw_deg: float, place: str | None) -> lis
             "arrival": {"x": x + 0.05, "y": y - 0.03, "yaw_deg": yaw_deg + 2.0},
         },
     ]
+
+
+def spin_script(pose: dict[str, Any] | None, deg: float) -> list[dict[str, Any]]:
+    """The events of a whole turn in place by ``deg`` from ``pose`` (none: unmeasured), as the
+    goal server's ``spin`` answers: accepted, done with the pose after it and the turn."""
+    if pose is None or "yaw_deg" not in pose:
+        return [{"event": "accepted", "run": 8, "deg": deg, "pose": "none"},
+                {"event": "done", "run": 8, "status": 4, "seconds": 2.0}]  # fmt: skip
+    where = {"x": pose["x"], "y": pose["y"], "yaw_deg": pose["yaw_deg"]}
+    after = where | {"yaw_deg": (pose["yaw_deg"] + deg + 180.0) % 360.0 - 180.0}
+    return [
+        {"event": "accepted", "run": 8, "deg": deg, "pose": "tf", **where},
+        {"event": "done", "run": 8, "status": 4, "seconds": 2.0, "arrival": after,
+         "turned_deg": deg, "short_deg": 0.0},
+    ]  # fmt: skip
 
 
 @dataclass
@@ -490,6 +584,7 @@ SPEAKER = PersonSighting(
     people=1,
     seq=7,
     chosen="the person the gaze holds",
+    stamp=TF_NOW - 0.2,  # exposed 0.2 s before the goal server's now
 )
 CAMERA_HEIGHT_M = 1.2  # the camera's height at the working pose, near enough for a fake aim
 
@@ -514,11 +609,57 @@ class FakeSightings:
 
 
 @dataclass
+class FakeGaze:
+    """The speaker gaze as the approach tool reads it: ``view`` is its snapshot;
+    ``face_person`` turns the body for ``turn_s`` of the clock (the phase reads "turning"
+    meanwhile, then ``after``) unless ``refuse`` says why not. Every ask is kept with its
+    reason."""
+
+    clock: FakeClock
+    view: Attention = field(default_factory=Attention)
+    turn_s: float = 1.0
+    after: AttentionPhase = "track"
+    refuse: str | None = None
+    asked: list[str] = field(default_factory=list)
+    turning_until: float | None = None
+
+    def attention(self) -> Attention:
+        """The snapshot, "turning" while the fake turn runs."""
+        if self.turning_until is not None:
+            if self.clock() < self.turning_until:
+                return dataclasses.replace(self.view, phase="turning")
+            self.turning_until = None
+            self.view = dataclasses.replace(self.view, phase=self.after)
+        return self.view
+
+    def face_person(self, why: str) -> str | None:
+        """The turn, or the scripted refusal."""
+        self.asked.append(why)
+        if self.refuse is not None:
+            return self.refuse
+        self.turning_until = self.clock() + self.turn_s
+        return None
+
+    def keep_person(self, why: str) -> Attention | str:
+        """The snapshot, "turning" from now on, or the scripted refusal (``refuse``, or no
+        conversation for an idle view)."""
+        self.asked.append(why)
+        if self.refuse is not None:
+            return self.refuse
+        if self.view.phase == "idle":
+            return "no conversation"
+        self.view = dataclasses.replace(self.view, phase="turning")
+        return self.view
+
+
+@dataclass
 class FakeEyes:
     """Points of the picture: whatever box is asked lies at map ``point`` (x, y, z), measured
-    with ``sigma_m`` by ``source``, seen from where the fake goal server says the robot stands;
+    with ``sigma_m`` by ``source``, seen from where the fake goal server says the robot stands
+    (or, given TF's poses at the box's frame's stamp, from the cart's pose then);
     ``blank`` makes every box a :class:`pepin.pixel_to_map.LocateError` with that text. Each
-    box asked is kept with the pixel space it was given in (``asked``)."""
+    box asked is kept with the pixel space it was given in (``asked``) and the stamped poses
+    it was given (``stamped``)."""
 
     goals: FakeGoalServer
     neck: FakeNeck
@@ -528,15 +669,20 @@ class FakeEyes:
     blank: str | None = None
     boxes: list[Box] = field(default_factory=list)
     asked: list[tuple[Box, str]] = field(default_factory=list)
+    stamped: list[Stamped | None] = field(default_factory=list)
 
-    def locate(self, box: Box, space: str) -> Located:
+    def locate(self, box: Box, space: str, at: Stamped | None = None) -> Located:
         """The scripted point, with its range and bearing from the robot."""
         self.boxes.append(box)
         self.asked.append((box, space))
+        self.stamped.append(at)
         if self.blank is not None:
             raise LocateError(self.blank)
-        where = self.goals.where()
-        pose = Pose2D(float(where["x"]), float(where["y"]), math.radians(where["yaw_deg"]))
+        if at is not None:
+            pose = at.base
+        else:
+            where = self.goals.where()
+            pose = Pose2D(float(where["x"]), float(where["y"]), math.radians(where["yaw_deg"]))
         x, y, z = self.point
         forward, left = pose.to_base(x, y)
         head = self.neck.pose_now
@@ -544,6 +690,7 @@ class FakeEyes:
             x=x, y=y, z=z, forward=forward, left=left, depth_m=math.hypot(forward, left),
             sigma_m=self.sigma_m, spread_m=0.02, source=self.source, pixels=400,
             head=Head(math.radians(head.pan_deg), math.radians(head.tilt_deg)), pose=pose,
+            stamp=None if at is None else at.stamp,
         )  # fmt: skip
 
     def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:

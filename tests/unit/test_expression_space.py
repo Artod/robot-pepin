@@ -254,27 +254,45 @@ def test_toward_turns_the_open_hand_at_the_person_and_an_edge_falls_to_the_floor
     turned = [pans[b] for b in sorted(pans)]
     assert turned == sorted(turned, reverse=True)  # left of the nose: the pan inward
     assert pans[0.0] == pytest.approx(-37.0, abs=1.0)  # ahead at 1.2 m: in from the arm's side
-    attention.be(bearing_deg=-70.0)  # past the pans: the floor, a nod
+    attention.be(bearing_deg=-70.0)  # past the pans: the hand at the range's edge, the nod
+    reached: list[dict[str, Any]] = []
+    renderer.resolver.record = lambda kind, fields: reached.append({kind: fields})
+    performance = renderer.render("point", EVERYTHING, 5, cue("point", "you"))
+    assert arm_of(performance) is not None and head_of(performance) is not None
+    assert pan_of(performance) == pytest.approx(BOOK.space.pan_deg[1])
+    (row,) = reached
+    assert row["reach"]["hand"] == "point_open" and 10.0 < row["reach"]["short_deg"] < 20.0
+    attention.be(bearing_deg=-150.0)  # behind: no arm says "there"; the floor, a nod
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "you"))
     assert arm_of(performance) is None and head_of(performance) is not None
     renderer.resolver.attention = None  # no attention view: the person ahead
     assert pan_of(renderer.render("point", EVERYTHING, 5, cue("point", "you"))) == pans[0.0]
 
 
-def test_a_place_gets_the_shut_hand_and_a_glance_past_the_pans_the_glance_behind_none() -> None:
+def test_a_place_gets_the_shut_hand_and_a_glance_past_the_pans_the_edge_behind_none() -> None:
+    """A place the arm reaches gets the shut hand on its bearing and the head's glance; one past
+    the clear pans (the printer left of them, 2026-10-13) the hand at the range's edge, as far
+    as the arm reaches (logged how far short), the glance carrying the rest; one behind
+    nothing (no arm says "there", no glance behind the person's back)."""
     attention = FakeAttention().be(bearing_deg=10.0, distance_m=1.5)
     room = scripted(printer=-30.0, door=70.0, shelf=170.0)
-    renderer = BookRenderer(BOOK, resolver=Resolver(attention=attention, room=room))
+    reached: list[dict[str, Any]] = []
+    resolver = Resolver(attention=attention, room=room, record=lambda k, f: reached.append(f))
+    renderer = BookRenderer(BOOK, resolver=resolver)
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "принтер"))
     arm, head = arm_of(performance), head_of(performance)
     assert arm is not None and head is not None
     assert at_stroke(arm, "gripper") == 0.0  # the finger
     assert pan_of(performance) == pytest.approx(-27.0 + 30.0, abs=3.0)  # 3 m: little parallax
     assert min(track(head, "pan_deg")[1]) == pytest.approx(-25.0)  # 40 deg off: the most
+    assert not reached
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "door"))
-    head = head_of(performance)
-    assert arm_of(performance) is None and head is not None  # past the pans: the head alone
+    arm, head = arm_of(performance), head_of(performance)
+    assert arm is not None and head is not None  # past the pans: the edge, the glance
+    assert pan_of(performance) == pytest.approx(BOOK.space.pan_deg[0])  # the inner edge (left)
     assert max(track(head, "pan_deg")[1]) == pytest.approx(25.0)
+    (row,) = reached
+    assert row["hand"] == "point_shut" and 20.0 < row["short_deg"] < 40.0
     assert not renderer.render("point", EVERYTHING, 5, cue("point", "shelf")).clips  # behind
 
 

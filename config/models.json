@@ -25,7 +25,7 @@
     "_note": "The one camera channel (pepin.perception_service, ros/models.sh job perception, 127.0.0.1:8792): camera_stream POSTs every rectified left eye it publishes (its flag perception_feed, knobs perception_hz / perception_quality), the service keeps ring_s of them and finds faces and people on the newest one at detect_hz; the speaker gaze, person recognition and the see tool read it, and the voice process holds no pixels. The detector's weights and threshold are config/face_sensor.json's models block, the identity net's file config/people.json's face.model: the same networks the snapshot path loads.",
     "port": 8792,
     "source": "service",
-    "detect_hz": 10.0,
+    "detect_hz": 20.0,
     "ring_s": 10.0,
     "faces": "ane",
     "persons": "vision",
