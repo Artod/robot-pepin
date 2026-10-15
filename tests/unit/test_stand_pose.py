@@ -12,9 +12,10 @@ from pepin.pixel_to_map import Pose2D
 from pepin.stand_pose import RELATIONS, Distances, Relation, Stand, Target, facing_from
 from pepin.stand_pose import stands as _stands
 
-# the geometry below is checked at the design's original distances; the shipped defaults
-# (config/approach.json, Artem's 20 cm "come closer") are pinned by their own test at the end
-GEOMETRY = Distances(front_m=0.8, side_m=0.7, person_min_m=0.6)
+# the geometry below is checked at the design's original distances (the person floor with two
+# sigmas of the depth; shipped as 0 since 2026-10-13); the shipped defaults (config/approach.json,
+# Artem's 20 cm "come closer") are pinned by their own test at the end
+GEOMETRY = Distances(front_m=0.8, side_m=0.7, person_min_m=0.6, sigma_k=2.0)
 
 
 def stands(
@@ -57,6 +58,12 @@ def test_a_person_is_never_stood_nearer_than_the_minimum_plus_two_sigma() -> Non
     spoken = stands(sharp, "to", AT_ORIGIN, distance_m=0.3)[0]  # "come up close, 30 cm"
     assert xy(spoken) == pytest.approx((2.4, 0.0))
     assert xy(stands(sharp, "to", AT_ORIGIN, distance_m=1.5)[0]) == pytest.approx((1.5, 0.0))
+    # sigma_k 0 (the shipped value): the floor is the minimum alone, whatever the depth's sigma
+    plain = Distances(front_m=0.8, side_m=0.7, person_min_m=0.6, sigma_k=0.0)
+    assert xy(stands(blurred, "to", AT_ORIGIN, plain)[0]) == pytest.approx((2.2, 0.0))
+    assert xy(stands(blurred, "to", AT_ORIGIN, plain, distance_m=0.3)[0]) == pytest.approx(
+        (2.4, 0.0)
+    )
 
 
 def test_right_of_a_person_is_their_own_right_side_by_side() -> None:

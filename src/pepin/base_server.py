@@ -72,14 +72,18 @@ from pepin.geometry import BaseConfig
 from pepin.kinematics import STOP, Twist
 from pepin.neck import (
     ACC_UNIT_DEG_S2,
+    ACC_UNITS_TOP,
     MOTION_RANGES,
+    MOVING_TICKS_S,
     PAN,
     RAD_PER_TICK,
+    TICKS_PER_TURN,
     TILT,
     NeckAngles,
     NeckConfig,
     NeckMotion,
     acc_units,
+    braking_units,
     neck_servo_ids,
     speed_ticks,
     ticks_for,
@@ -106,7 +110,13 @@ NECK_TICK_S = 0.02  # the board's 50 Hz tick: a stalled tick advances a jog by a
 MODE_CHECK_WINDOW_S = 0.03  # the operating-mode read's whole wait: one reply burst, never 0.4 s
 # Maximum_Acceleration for the neck: the register's top, so the Acceleration written with every
 # block is the ramp. At the servos' own 50 every ramp above 439 deg/s^2 ran at 439 (2026-10-02).
-NECK_ACC_CEILING = 254
+NECK_ACC_CEILING = ACC_UNITS_TOP
+# The head is IN FLIGHT above this encoder speed: a goal's ramp is then at least what stops
+# the servo before its target (pepin.neck.braking_units: the register brakes too; 2026-10-13).
+NECK_MOVING_TICKS_S = MOVING_TICKS_S
+# A reading this far past a limit, or a jump over half a turn between two ticks, is a head
+# that ran away: torque off at once, every goal refused until neck_release or a restart.
+NECK_RUNAWAY_MARGIN_TICKS = 60
 # Torque_Enable .. Goal_Velocity, eight bytes a servo: ONE packet energises, ramps, aims and paces
 # both servos, so a head that starts moving costs one write, never a sequence of them.
 NECK_BLOCK = ("Torque_Enable", "Acceleration", "Goal_Position", "Goal_Time", "Goal_Velocity")
@@ -462,6 +472,10 @@ class NeckMover:
         self._mode_error = ""
         self._mode_asked_at = float("-inf")
         self._replies: list[dict[str, Any]] = []
+        self._watched: tuple[tuple[int, ...], float] | None = None  # the last reading, when
+        self._speed: tuple[float, ...] = (0.0, 0.0)  # ticks/s per axis, from the last two reads
+        self._floor_said = False
+        self.runaway: str | None = None  # the head let go for running away, and why
 
     # -- commands ------------------------------------------------------------------------------
 
@@ -635,7 +649,10 @@ class NeckMover:
         if not encoders.live:
             self._end_owner(f"the neck servos fell silent: {encoders.error}", now)
             self._sent = None
+            self._watched = None
             return
+        if encoders.ticks is not None:
+            self._watch(encoders.ticks, now)
         if self._mode_ok is None and now - self._mode_asked_at >= self.motion.retry_s:
             self._check_mode(now)
         owner = self._owner
@@ -649,6 +666,49 @@ class NeckMover:
         if wanted.torque and self._mode_ok is not True:
             return  # never a goal to a servo that may be in velocity mode
         self._write(wanted)
+
+    def _watch(self, reading: tuple[int, ...], now: float) -> None:
+        """This tick's reading against the last: the head's speed per axis, and a head that ran
+        away (a jump over half a turn: it crossed the encoder's zero; a reading past a limit by
+        :data:`NECK_RUNAWAY_MARGIN_TICKS`) let go on the spot and every goal refused until
+        ``neck_release`` or a restart. A servo that crossed its zero counts its position a
+        turn off from then on: the operator powers it down."""
+        before = self._watched
+        self._watched = (reading, now)
+        if before is None:
+            return
+        (previous, at) = before
+        dt = now - at
+        if dt <= 0.0:
+            return
+        jumps = [r - p for r, p in zip(reading, previous, strict=True)]
+        self._speed = tuple(j / dt for j in jumps)
+        why = None
+        for joint, r, j in zip((self._cfg.pan, self._cfg.tilt), reading, jumps, strict=True):
+            if abs(j) > TICKS_PER_TURN // 2:
+                why = f"{joint.name} jumped {j:+d} ticks in one tick: it crossed the encoder's zero"
+                break
+            lo, hi = (
+                joint.min_ticks - NECK_RUNAWAY_MARGIN_TICKS,
+                joint.max_ticks + NECK_RUNAWAY_MARGIN_TICKS,
+            )
+            if not lo <= r <= hi:
+                why = f"{joint.name} reads {r} ticks, past its limits"
+                why += f" {joint.min_ticks}..{joint.max_ticks}"
+                break
+        if why is None or self.runaway is not None:
+            return
+        self.runaway = (
+            f"the head RAN AWAY ({why}): torque off; every goal refused until neck_release or a"
+            " restart, and the servo may count its turns wrong until it is powered down"
+        )
+        logger.error("neck %s", self.runaway)
+        self.release()
+
+    def in_flight(self) -> bool:
+        """Whether either axis moved faster than :data:`NECK_MOVING_TICKS_S` between the last
+        two reads."""
+        return any(abs(v) > NECK_MOVING_TICKS_S for v in self._speed)
 
     def take_replies(self) -> list[dict[str, Any]]:
         """The answers of moves that ended since the last call (arrived, gave up, preempted)."""
@@ -665,6 +725,8 @@ class NeckMover:
 
     def _unwritable(self) -> str | None:
         """Why the servos cannot be given a goal now, or None when they can."""
+        if self.runaway is not None:
+            return self.runaway
         if not self._encoders.live:
             return f"the neck servos are silent: {self._encoders.error or 'never answered'}"
         if self._mode_ok is False:
@@ -784,9 +846,34 @@ class NeckMover:
         speed = top_speed if speed_deg_s is None else min(speed_deg_s, top_speed)
         acc = top_acc if acc_deg_s2 is None else min(acc_deg_s2, top_acc)
         tilt_acc = min(acc, self.motion.tilt_max_acc_deg_s2)
-        return ServoGoal(
-            True, targets[0], targets[1], speed_ticks(speed), acc_units(acc), acc_units(tilt_acc)
-        )
+        units, tilt_units = acc_units(acc), acc_units(tilt_acc)
+        if self.in_flight():
+            # the register brakes too: a ramp under v^2 / 2d (the speed by the encoder, d the
+            # way left to the target) could not stop the servo before it; a lower ramp is
+            # honoured when there is room for it, else the least that stops in time
+            here = self._watched[0] if self._watched is not None else None
+            needed = tuple(
+                braking_units(v, t - h) if here is not None else 0
+                for v, t, h in zip(self._speed, targets, here or targets, strict=True)
+            )
+            # never above an axis's own ceiling: the tilt's keeps the mast from rocking, and
+            # the full ramp is the hardest brake there is anyway
+            tops = (acc_units(top_acc), acc_units(self.motion.tilt_max_acc_deg_s2))
+            kept = (
+                max(units, min(needed[0], tops[0])),
+                max(tilt_units, min(needed[1], tops[1])),
+            )
+            if kept != (units, tilt_units) and not self._floor_said:
+                logger.info(
+                    "neck ramp %d/%d units, not the %d/%d asked: the head flies at %d ticks/s"
+                    " and must stop before its target",
+                    kept[0], kept[1], units, tilt_units, max(abs(v) for v in self._speed),
+                )  # fmt: skip
+                self._floor_said = True
+            units, tilt_units = kept
+        else:
+            self._floor_said = False
+        return ServoGoal(True, targets[0], targets[1], speed_ticks(speed), units, tilt_units)
 
     def _wanted(self) -> ServoGoal:
         """What the servos should hold this tick, from whoever holds the head."""
@@ -844,17 +931,62 @@ class NeckMover:
         if modes is None:
             return
         wrong = {name: mode for name, mode in modes.items() if mode != POSITION_MODE}
-        self._mode_ok = not wrong
-        self._mode_error = (
-            f"not in position mode, Operating_Mode {wrong}: refusing to write a goal"
-            if wrong
-            else ""
-        )
         if wrong:
+            self._mode_ok = False
+            self._mode_error = (
+                f"not in position mode, Operating_Mode {wrong}: refusing to write a goal"
+            )
             logger.error("neck %s", self._mode_error)
-        else:
-            logger.info("neck servos in position mode: goals allowed")
-            self._lift_acc_ceiling(names)
+            return
+        lows = read_group(self._bus, "Min_Position_Limit", names, "neck servo range")
+        highs = (
+            read_group(self._bus, "Max_Position_Limit", names, "neck servo range") if lows else None
+        )
+        if lows is None or highs is None:
+            return  # asked again retry_s later, as a silent mode read is
+        self._mode_error = self._narrow(lows, highs)
+        self._mode_ok = not self._mode_error
+        if self._mode_error:
+            logger.error("neck %s", self._mode_error)
+            return
+        self._lift_acc_ceiling(names)
+
+    def _narrow(self, lows: dict[str, int], highs: dict[str, int]) -> str:
+        """The servos' own EEPROM range (Min/Max_Position_Limit, what scripts/neck_limits.py
+        writes from config/neck.json, as lerobot's calibration does for the arm) against the
+        file's: the goals' limits become the two ranges' intersection, as the arm driver's
+        do; a servo holding a wider range than the file (0..4095 as delivered: nothing in the
+        servo stops it) is logged; the reference pose outside the intersection refuses every
+        goal. The error, or an empty string."""
+        joints = {}
+        for joint in (self._cfg.pan, self._cfg.tilt):
+            lo, hi = lows[joint.name], highs[joint.name]
+            if lo < joint.min_ticks or hi > joint.max_ticks:
+                logger.warning(
+                    "neck servo %s holds limits %d..%d, wider than config/neck.json's %d..%d:"
+                    " nothing in the servo stops it past the file's (scripts/neck_limits.py"
+                    " --write)",
+                    joint.name, lo, hi, joint.min_ticks, joint.max_ticks,
+                )  # fmt: skip
+            joints[joint.name] = replace(
+                joint, min_ticks=max(lo, joint.min_ticks), max_ticks=min(hi, joint.max_ticks)
+            )
+        pan, tilt = joints[self._cfg.pan.name], joints[self._cfg.tilt.name]
+        ref = self._cfg.reference
+        for joint, at in ((pan, ref.pan_ticks), (tilt, ref.tilt_ticks)):
+            if at is not None and not joint.within_limits(at):
+                return (
+                    f"reference {joint.name} {at} ticks is outside the servo's range"
+                    f" {joint.min_ticks}..{joint.max_ticks}: refusing every goal"
+                )
+        self._cfg = replace(self._cfg, pan=pan, tilt=tilt)
+        logger.info(
+            "neck servos in position mode; range %s %d..%d, %s %d..%d ticks (the servos' own"
+            " %s): goals allowed",
+            pan.name, pan.min_ticks, pan.max_ticks, tilt.name, tilt.min_ticks, tilt.max_ticks,
+            {n: (lows[n], highs[n]) for n in (pan.name, tilt.name)},
+        )  # fmt: skip
+        return ""
 
     def _lift_acc_ceiling(self, names: list[str]) -> None:
         """Maximum_Acceleration to :data:`NECK_ACC_CEILING` on both servos, read back: in RAM
@@ -1004,7 +1136,10 @@ class BaseServerCore:
         elif cmd == "neck":
             if self._neck is None:
                 return {"type": "neck", "error": "no neck configured on this base server"}
-            return self._neck.reply(now)
+            reply = self._neck.reply(now)
+            if self._mover is not None and self._mover.runaway is not None:
+                reply["runaway"] = self._mover.runaway
+            return reply
         elif cmd in ("neck_goto", "neck_home"):
             return self._start_neck_move(cmd, message, now)
         elif cmd == "neck_jog":
@@ -1015,6 +1150,20 @@ class BaseServerCore:
             if self._mover is None:
                 return {"type": "neck_motion", "error": "no neck configured on this base server"}
             return self._mover.motion_command(message)
+        elif cmd == "neck_release":
+            # torque off NOW, whoever holds the head (a runaway's stop on the bench; the
+            # watchdog's primitive): answered at once, the write goes out this instant; the
+            # operator's word also lifts a runaway's refusal
+            if self._mover is None:
+                return {"type": "neck_release", "error": "no neck configured on this base server"}
+            self._mover.release()
+            was = self._mover.runaway
+            self._mover.runaway = None
+            logger.warning(
+                "neck_release: torque off, the head let go%s",
+                " (the runaway cleared)" if was else "",
+            )
+            return {"type": "neck_release", "released": True, "runaway_was": was}
         elif cmd == "max_wheel_speed":
             return self._max_wheel_speed(message)
         elif cmd == "registers":
@@ -1148,6 +1297,8 @@ class BaseServerCore:
         # /neck/state and base_link -> camera_link. Absent when the neck did not answer it.
         if self._neck is not None:
             message.update(self._neck.state_fields())
+            if self._mover is not None and self._mover.runaway is not None:
+                message["neck_runaway"] = self._mover.runaway
         # The arm's angles of the same read and its motion (absent when the read left it out).
         arm = self._arm_driver.state_fields(stamp) if self._arm_driver is not None else None
         if arm is not None:

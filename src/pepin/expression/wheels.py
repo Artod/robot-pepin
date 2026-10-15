@@ -18,15 +18,27 @@ base server's own wheel odometry in its 50 Hz state lines (the yaw source with t
 latency: the same connection, ~20-40 ms; the EKF lives in ROS and reaches this process only
 through a request), a time cap per leg, the base server's 0.5 s deadman behind it. Never Nav2.
 A turn is one continuous motion with a trapezoidal profile (``yaw_rate_deg_s``,
-``yaw_acc_deg_s2``, both times ``speed_scale``), braking on the remaining angle less what the
-command latency still turns, done within ``settle_deg``; a straight leg likewise in metres.
+``yaw_acc_deg_s2``, both times ``speed_scale``), done within ``settle_deg``; a straight leg
+likewise in metres. THE BRAKING IS PLANNED ON THE CART, NOT ON THE COMMAND: the wheel servos
+ramp at their own ``yaw_brake_deg_s2`` whatever the twists ask, and a twist moves the cart
+``lead_s`` after it is sent (the WiFi hop, the board's tick, the servos' response: a transport
+delay, so what the cart does over the next ``lead_s`` is what was sent over the last), so every
+tick brakes from where the cart WILL BE when this tick's twist takes effect (its position plus
+the twists in flight) on the lesser of the ramp asked and the cart's own, and sends the zero
+once the cart follows and that place is within half of ``settle_deg``: the cart's own last
+brake from the profile's speed there runs it the other half at most, so it lands inside
+``settle_deg`` whether it brakes at its ramp or stops at once. Braking on the command's own
+speed (2026-10-13: the ramp 180, a lead of 0.06 s) landed five turns at 45 deg/s +6.4..+8.1
+deg past the ask and the 2 cm back-off steps at 3 cm.
 
 EVERY MOTION IS CHECKED before it starts and at every control tick (25 Hz): the base server's state
 is fresh, the cart stands (no twist commanded, the wheels still), the servo bus answers, no stop of
 someone else's within ``stop_hold_s`` (the arm is not the wheels' business: they move together, each
 within its own caps); the goal server beside Nav2 (:class:`GoalServerView`, asked ten times a second
 while a motion runs) says nothing navigates and depth_fusion's newest obstacle marks are fresh, and
-the swept footprint keeps ``clearance_m`` from every mark (:mod:`pepin.expression.clearance`: the
+under ``clearance_check`` (off since 2026-10-14, Artem: the marks 0.3 m ahead, the dock and his own
+legs, refused 19 of 21 turns) the swept footprint keeps ``clearance_m`` from every mark
+(:mod:`pepin.expression.clearance`: the
 voxel volume's slice, lidar, camera depth and ToF fused, remembered round the cart). Without the
 marks nothing moves: a silent depth_fusion is a refusal with its reason, never the raw scan instead.
 A refusal says why; nothing is ever clamped.
@@ -93,12 +105,12 @@ CONFIG_FILE = "expression.json"
 TICK_S = 0.04  # the control loop: a twist every 40 ms, well inside the board's 0.5 s deadman
 ECHO_S = 0.3  # a twist of ours shows in the state lines within this (WiFi out, a tick, WiFi in)
 HELD_S = DEADMAN_S + ECHO_S  # ...and may still show this long: the board holds it to its deadman
-LEAD_S = 0.06  # what the cart still turns after a command: the WiFi hop, a tick, the servo
+RATE_WINDOW_S = 0.08  # the cart's rate is read over at least this much of the base's lines
 STATE_STALE_S = 0.25  # the base's newest state line older than this: no word from the base
 FIRST_STATE_S = 1.5  # the first motion connects to the base server and waits this for a line
 VIEW_STALE_S = 0.5  # the goal server's newest answer older than this: no word from it
 FIRST_VIEW_S = 0.6  # a motion waits this long for the goal server's first fresh answer
-SETTLE_S = 0.4  # after a leg's last twist, how long the wheels are given to stand still
+SETTLE_S = 0.4  # after a leg's last twist and the lead, how long the wheels get to stand still
 STILL_M = 0.0002  # a state line's wheel travel under this (1 cm/s at 50 Hz): standing
 STALL_SHARE = 1.0 / 3.0  # a leg that makes less than this of its commanded motion is stalled
 STALL_MIN_DEG, STALL_MIN_M = 2.0, 0.005  # ...once at least this much was commanded
@@ -121,13 +133,16 @@ class WheelsSettings:
     motion's caps at full speed and ``speed_scale``, the tolerances and the checks."""
 
     limits: BodyLimits = field(default_factory=BodyLimits)
-    speed_scale: float = 0.4
-    yaw_rate_deg_s: float = 30.0
-    yaw_acc_deg_s2: float = 360.0
+    speed_scale: float = 1.0
+    yaw_rate_deg_s: float = 45.0
+    yaw_acc_deg_s2: float = 180.0
+    yaw_brake_deg_s2: float = 100.0
+    lead_s: float = 0.17
     speed_m_s: float = 0.10
     acc_m_s2: float = 0.5
     settle_deg: float = 2.0
     settle_m: float = 0.005
+    clearance_check: bool = True  # the swept footprint against the obstacle marks
     clearance_m: float = 0.10
     marks_age_s: float = 1.5
     stall_s: float = 0.5
@@ -157,11 +172,13 @@ class WheelsSettings:
             raise ValueError(
                 f"wheels.speed_scale is above 0 and at most 1, not {settings.speed_scale}"
             )
-        positive = ("yaw_rate_deg_s", "yaw_acc_deg_s2", "speed_m_s", "acc_m_s2", "settle_deg",
-                    "settle_m", "marks_age_s", "stall_s")  # fmt: skip
+        positive = ("yaw_rate_deg_s", "yaw_acc_deg_s2", "yaw_brake_deg_s2", "speed_m_s",
+                    "acc_m_s2", "settle_deg", "settle_m", "marks_age_s", "stall_s")  # fmt: skip
         for name in positive:
             if getattr(settings, name) <= 0.0:
                 raise ValueError(f"wheels.{name} must be above 0")
+        if settings.lead_s < 0.0:
+            raise ValueError("wheels.lead_s must be 0 or above")
         if limits.step_deg <= 0.0:
             raise ValueError("wheels.step_deg must be above 0")
         if not 0.0 < limits.backoff_m <= limits.max_rock_m:
@@ -193,6 +210,11 @@ class WheelsSettings:
         """A straight leg's top speed and ramp at this speed scale (m/s, m/s^2)."""
         s = self.speed_scale
         return self.speed_m_s * s, self.acc_m_s2 * s * s
+
+    def yaw_brake(self) -> float:
+        """The ramp a turn is braked on (rad/s^2): the lesser of the ramp asked at this speed
+        scale and the cart's own (the wheel servos' ``yaw_brake_deg_s2``, whatever is asked)."""
+        return min(self.yaw_caps()[1], math.radians(self.yaw_brake_deg_s2))
 
 
 def footprint_of(path: str | Path | None = None) -> Footprint:
@@ -408,8 +430,17 @@ class WheelsExecutor:
 
     def headings(self) -> Headings:
         """The cart's heading from every state line since the link opened (at the first
-        motion), whoever turned it."""
+        motion, or :meth:`listen`), whoever turned it."""
         return self._headings
+
+    def listen(self) -> None:
+        """Open the base link now, without a motion (the speaker gaze before a turn in place
+        Nav2 drives): every state line's heading kept from here on. Never blocks (the link
+        connects on its reader thread); a motion queued or running opens it itself."""
+        with self._lock:
+            idle = self._current is None and self._pending is None
+            if self.base is None and idle and not self._closed:
+                self.base = self._link_factory(self.heard)
 
     def preview(self, request: WheelMove) -> str | None:
         """Why ``request`` would be refused now, checked without moving (the knobs, the base's
@@ -423,6 +454,8 @@ class WheelsExecutor:
             state, view = self._base_state(), self.around.latest()
             if state is None or view is None:
                 return "the base server or the goal server fell silent"
+            if not self.settings.clearance_check:
+                return None
             margin = self.settings.clearance_m
             if request.rocks or request.rock_m:
                 hit = drive_blocker(view.points, self.footprint, 0.0, request.rock_m, margin)
@@ -661,6 +694,8 @@ class WheelsExecutor:
             return "the goal server did not say whether Nav2 navigates"
         if view.navigating:
             return "Nav2 navigates (`ros/goto.sh where`)"
+        if not self.settings.clearance_check:
+            return None
         if view.marks_age_s is None:
             return "no obstacle marks have reached the goal server"
         age = view.marks_age_s + (now - view.at)
@@ -825,12 +860,16 @@ class WheelsExecutor:
         progress: Callable[[float], None] | None,
     ) -> LegEnd:
         """Drive ``axis`` to ``target`` (radians or metres from ``origin``): checked every tick,
-        braked on what is left, stopped and settled at the end."""
+        braked on what is left from where the cart will be when the twist takes effect, the
+        zero sent within half the tolerance of it, stopped and settled at the end."""
         s = self.settings
         tol = math.radians(s.settle_deg) if axis == "yaw" else s.settle_m
         floor = min(top, math.radians(TURN_FLOOR_DEG_S) if axis == "yaw" else DRIVE_FLOOR_M_S)
         stall_min = math.radians(STALL_MIN_DEG) if axis == "yaw" else STALL_MIN_M
         step = math.radians(s.limits.step_deg)
+        # The brake: the cart's own ramp when it is under the one asked (the wheel servos ramp
+        # at theirs whatever the twists say; a straight leg's ramp is about theirs already).
+        brake = min(ramp, s.yaw_brake()) if axis == "yaw" else ramp
         state = self._base_state()
         if state is None:
             return LegEnd(0.0, stopped=job.why or "no word from the base server")
@@ -841,6 +880,7 @@ class WheelsExecutor:
         cap = 2.0 * (abs(target - start) / max(top, SAME) + top / ramp) + 1.0
         last, told, integral, then = 0.0, start, 0.0, began
         history: deque[tuple[float, float, float]] = deque([(began, 0.0, start)])
+        reads: deque[tuple[float, float]] = deque()  # (board stamp, here): the measured rate
         here = start
         while True:
             now = self.clock()
@@ -851,6 +891,9 @@ class WheelsExecutor:
                 silent = "no word from the base server for a while"
                 return self._stop_leg(job, axis, origin, here, stopped=silent)
             here = offset(state.pose, origin, axis)
+            if not reads or state.stamp_s > reads[-1][0]:
+                reads.append((state.stamp_s, here))
+            rate = measured_rate(reads, RATE_WINDOW_S)
             left = target - here
             if abs(left) <= tol or left * direction <= 0.0:
                 break
@@ -860,16 +903,24 @@ class WheelsExecutor:
             integral += last * (now - then)
             then = now
             history.append((now, integral, here))
-            while len(history) > 1 and now - history[1][0] >= s.stall_s:
+            while len(history) > 1 and now - history[1][0] >= s.stall_s + s.lead_s:
                 history.popleft()
-            stall = stalled(history, now, s.stall_s, direction, stall_min, axis)
+            stall = stalled(history, now, s.stall_s, direction, stall_min, axis, s.lead_s)
             if stall:
                 return self._stop_leg(job, axis, origin, here, blocked=stall)
             if now - began > cap:
                 return self._stop_leg(job, axis, origin, here,
                                       stopped=f"the time cap ({cap:.1f} s) ran out")  # fmt: skip
-            room = max(abs(left) - abs(last) * LEAD_S, 0.0)
-            speed = min(top, math.sqrt(2.0 * ramp * room), abs(last) + ramp * TICK_S)
+            # Where the cart will be when this tick's twist takes effect: the twists in flight
+            # (sent since the line's stamp less the lead) are what it does meanwhile, once it
+            # follows them at all (a cart standing still is the stall judge's or the cap's,
+            # never done by a prediction).
+            ahead = here + in_flight(history, integral, now, s.lead_s + state.age_s)
+            left = target - ahead
+            if rate != 0.0 and (abs(left) <= tol / 2.0 or left * direction <= 0.0):
+                break
+            room = max(left * direction, 0.0)
+            speed = min(top, math.sqrt(2.0 * brake * room), abs(last) + ramp * TICK_S)
             speed = max(speed, floor)
             last = direction * speed
             twist = Twist(0.0, last) if axis == "yaw" else Twist(last, 0.0)
@@ -892,9 +943,9 @@ class WheelsExecutor:
         blocked: str = "",
     ) -> LegEnd:
         """The leg's last twist (zero, unless halted: the halt sent the stop), the wheels let
-        settle, and where they stood."""
+        settle (the lead, then ``SETTLE_S``), and where they stood."""
         self._command(job, Twist(0.0, 0.0))
-        deadline = self.clock() + SETTLE_S
+        deadline = self.clock() + self.settings.lead_s + SETTLE_S
         while self.clock() < deadline:
             state = self._base_state()
             if state is None:
@@ -930,12 +981,14 @@ class WheelsExecutor:
         refusal = self._view_refusal(view, now)
         if refusal is not None:
             return refusal, ""
+        if not self.settings.clearance_check:
+            return "", ""
         points = in_origin_frame(view.points, pose, origin)
         # What the cart may have moved since the marks' stamp, past the target; none on the way
         # back toward where the motion began (the cart stood there).
         homeward = min(0.0, here) <= target <= max(0.0, here)
         age = (view.marks_age_s or 0.0) + now - view.at
-        lag = 0.0 if homeward else abs(speed) * (age + LEAD_S)
+        lag = 0.0 if homeward else abs(speed) * (age + self.settings.lead_s)
         end = target + math.copysign(lag, target - here)
         margin = self.settings.clearance_m
         if axis == "yaw":
@@ -971,14 +1024,30 @@ def stalled(
     direction: float,
     least: float,
     axis: Literal["yaw", "x"],
+    lead_s: float = 0.0,
 ) -> str:
-    """Why a leg is stalled, "" while it is not: over the last ``window_s`` (``history`` of
-    (time, commanded travel so far, measured position)) at least ``least`` was commanded and
-    less than a third of it was made."""
-    t_old, commanded_old, at_old = history[0]
-    if now - t_old < window_s:
+    """Why a leg is stalled, "" while it is not: over the last ``window_s`` the cart made less
+    than a third of what the twists in force then asked, at least ``least`` (``history`` of
+    (time, commanded travel so far, measured position), oldest first). The twists in force over
+    the window are those sent ``lead_s`` earlier (the transport delay): the last ``lead_s`` of
+    commands has moved nothing yet and is not held against the cart (2026-10-13: a turn's first
+    half second asked 18.6 deg at the ramp 180 of a cart that answers 0.19 s later at its own
+    101 and had made 6.2, a false stall)."""
+    if now - history[0][0] < window_s + lead_s:
         return ""
-    _, commanded_now, at_now = history[-1]
+
+    def newest_before(t: float) -> tuple[float, float, float]:
+        entry = history[0]
+        for item in history:
+            if item[0] > t:
+                break
+            entry = item
+        return entry
+
+    _, _, at_old = newest_before(now - window_s)
+    _, commanded_now, _ = newest_before(now - lead_s)
+    _, commanded_old, _ = newest_before(now - window_s - lead_s)
+    at_now = history[-1][2]
     commanded = (commanded_now - commanded_old) * direction
     made = (at_now - at_old) * direction
     if commanded < least or made >= STALL_SHARE * commanded:
@@ -987,6 +1056,37 @@ def stalled(
         return (f"stalled: {math.degrees(made):+.1f} of {math.degrees(commanded):.1f} deg in"
                 f" {window_s:.1f} s")  # fmt: skip
     return f"stalled: {made * 100:+.1f} of {commanded * 100:.1f} cm in {window_s:.1f} s"
+
+
+def in_flight(
+    history: deque[tuple[float, float, float]], integral: float, now: float, lead_s: float
+) -> float:
+    """What the twists sent over the last ``lead_s`` move the cart on a leg's axis (signed):
+    ``integral`` (the commanded travel so far, at ``now``) less the commanded travel at
+    ``now - lead_s`` (``history``: (time, commanded travel, position), oldest first; before its
+    first entry nothing had been commanded)."""
+    then = now - lead_s
+    before = 0.0
+    for t, commanded, _ in history:
+        if t > then:
+            break
+        before = commanded
+    return integral - before
+
+
+def measured_rate(reads: deque[tuple[float, float]], window_s: float) -> float:
+    """The cart's rate on a leg's axis from its reads of the base's lines ((board stamp,
+    position), newest last): over the oldest read at least ``window_s`` back, else over all of
+    them; 0 before two reads (the cart stands when a leg begins). Reads older than twice the
+    window are dropped."""
+    if len(reads) < 2:
+        return 0.0
+    newest = reads[-1][0]
+    while len(reads) > 2 and newest - reads[1][0] >= 2.0 * window_s:
+        reads.popleft()
+    oldest = next((r for r in reversed(reads) if newest - r[0] >= window_s), reads[0])
+    dt = newest - oldest[0]
+    return (reads[-1][1] - oldest[1]) / dt if dt > 0.0 else 0.0
 
 
 def offset(pose: Pose2D, origin: Pose2D, axis: Literal["yaw", "x"]) -> float:
@@ -1073,8 +1173,8 @@ class WheelsGuard:
     def moment(self, name: str, text: str = "") -> None:
         """Nothing."""
 
-    def drive(self, active: bool) -> None:
-        """A drive starts: the wheels are the drive's."""
+    def drive(self, active: bool, ran: bool = True) -> None:
+        """A drive starts: the wheels are the drive's (its end, run or not, changes nothing)."""
         if active:
             self.wheels.halt("a drive starts")
 

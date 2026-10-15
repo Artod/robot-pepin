@@ -269,6 +269,29 @@ def test_every_head_atom_at_the_corners_of_its_ranges_is_within_the_arbiter_and_
                 assert _problems(clip) == [], f"{where} at {params}"
 
 
+def test_the_breath_is_one_slow_oscillation_with_a_stop_only_at_its_turns() -> None:
+    """The looping breath (2 deg at 0.25 Hz): two keys a cycle, up over half the period and
+    down over the other half, so between its turns the head never stops (the four-key cycle
+    before stopped at the middle every pass: a floating drift, 2026-10-13); each key a glide
+    at the Acceleration register's gentlest unit, ~2.3 deg/s, still (never blinds)."""
+    breath = RENDERER.render_atom("breath", 5)
+    frames = keyframes(breath)
+    tilts = [t for _, _, t in frames]
+    assert tilts == pytest.approx([0.0, -2.0, 2.0, -2.0, 2.0, -2.0, 2.0])  # three cycles
+    assert [b[0] - a[0] for a, b in itertools.pairwise(frames)] == pytest.approx([2.0] * 6)
+    look = clip_look(breath, IDLE_LOOK)
+    assert look is not None and look["target"]["loop"] is True
+    keys = look["target"]["keys"]
+    assert len(keys) == 7 and keys[-1]["at_s"] == pytest.approx(12.0)  # the loop's closing key
+    for key in keys[1:-1]:  # 4 deg in 2 s: the gentlest ramp, a slow glide
+        assert key["acc_deg_s2"] == pytest.approx(ACC_UNIT_DEG_S2, abs=0.01)
+        assert 2.0 <= key["speed_deg_s"] <= 2.6
+    overlay = overlay_from_json(dict(look["target"]), BOUNDS)
+    assert not isinstance(overlay, str) and overlay.idle
+    assert math.degrees(overlay.reach_rad) <= BOUNDS.clip_still_deg  # still: never blinds
+    assert _problems(breath) == []
+
+
 def test_every_composition_s_head_clip_plays_whole_through_the_arbiter() -> None:
     """Steps of one part merge into one clip, their offsets adding up: drawn many times, every
     variant's head clip passes the same checks (the head's steps never undo each other)."""
@@ -584,10 +607,17 @@ def test_a_gesture_overlay_never_changes_the_holder_and_the_head_returns_to_the_
     overlay = arbiter.overlay()
     assert overlay is not None and overlay.source == GESTURE
     offsets = set()
+    settled = len(driver.writes)
     while clock.now < 1.0 + clip.duration_s + 0.5:
         arbiter.step(clock.now)
         state = arbiter.state(clock.now)
         assert state.source == SPEAKER  # the person keeps the head
+        if len(driver.writes) > settled:  # the head arrives: a key waits for the one before
+            aim, _, _ = driver.writes[-1]
+            at = aim if aim is not None else person
+            for stamp in (clock.now + 0.005, clock.now + 0.01):
+                arbiter.observe(HeadReading(at.pan_rad, at.tilt_rad, stamp))
+            settled = len(driver.writes)
         clock.now += 0.02
     for aim, _, ceiling in driver.writes[written:]:
         assert aim is not None and ceiling is not None
@@ -612,6 +642,8 @@ def test_a_released_gesture_eases_back_onto_the_person_over_the_fade() -> None:
     arbiter.step(1.0)
     away, _, _ = driver.writes[-1]
     assert away is not None and math.degrees(away.pan_rad - person.pan_rad) == pytest.approx(14.0)
+    for stamp in (1.1, 1.11):  # the glance's move settled: the way back may go
+        arbiter.observe(HeadReading(away.pan_rad, away.tilt_rad, stamp))
     clock.now = 1.3
     head.fade("gesture", 0.35)  # the person starts speaking
     arbiter.step(1.3)

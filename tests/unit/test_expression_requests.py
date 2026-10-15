@@ -7,6 +7,7 @@ bookings, and the feelings' arm lengths."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
+import itertools
 import json
 from dataclasses import replace
 from pathlib import Path
@@ -44,7 +45,7 @@ from pepin.expression.schedule import (
     timing_from,
 )
 from pepin.expression.speaker import Attention
-from pepin.expression.trajectory import JOINTS, ArmStatus
+from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
 from pepin.tools.gesture import GESTURES as TWELVE
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
@@ -115,8 +116,13 @@ def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
     for composition in BOOK.compositions.values():
         if composition.name not in TWELVE:
             continue  # the brain's primitives: a floor for each argument (test_expression_space)
-        assert [v.floor for v in composition.variants].count(True) == 1, composition.name
-        assert all(v.needs == {} for v in composition.variants)
+        plain = [v for v in composition.variants if "arg" not in v.needs]
+        styled = [v for v in composition.variants if "arg" in v.needs]  # the style's (the laugh)
+        assert [v.floor for v in plain].count(True) == 1, composition.name
+        assert all(v.needs == {} for v in plain)
+        assert not styled or composition.name == "laugh"
+        assert all(v.needs["arg"] in composition.style_args for v in styled)
+        assert [v.floor for v in styled].count(True) == len({v.needs["arg"] for v in styled})
     assert BOOK.idle[0].unless == ("speaking", "listening")
     data = json.loads((CONFIG / "animation.json").read_text())
     data["compositions"]["point"] = {
@@ -253,6 +259,22 @@ def test_no_arm_motion_starts_while_the_person_stands_past_the_arc_or_the_body_t
         assert not rig.played("arm"), view
         why = rig.cues("arm", ok=False)[-1]["why"]
         assert "past the forward arc" in why or "body turns" in why
+
+
+def test_with_the_past_arc_rule_off_the_arm_plays_for_a_person_past_the_arc() -> None:
+    """layers.arm_past_arc false (2026-10-14, Artem): only a body turn under way holds the arm."""
+    rig = Rig(seed=3)
+    rig.engine.config = replace(rig.engine.config, arm_past_arc=False)
+    rig.view.view = Attention("track", past_arc=True, seen_s=rig.now)
+    rig.engine.perform("greeting", source="tool")
+    rig.tick(2.0)
+    assert rig.played("arm")
+    rig = Rig(seed=3)
+    rig.engine.config = replace(rig.engine.config, arm_past_arc=False)
+    rig.view.view = Attention("turning")
+    rig.engine.perform("greeting", source="tool")
+    rig.tick(2.0)
+    assert not rig.played("arm") and "body turns" in rig.cues("arm", ok=False)[-1]["why"]
 
 
 def test_a_farewell_past_its_stroke_plays_out_when_the_goodbye_closes_the_conversation() -> None:
@@ -717,11 +739,13 @@ def test_a_token_stream_mark_with_an_argument_or_another_spelling_prepares_the_a
     """The token stream reads marks as the parser does (the book's arguments and aliases):
     «{count:second} Колёса» is ``count:2`` on the reply's first word, rendered for its argument
     (the outer spot): too soon for the arm from rest, so it goes home first; so does a pointing
-    at a place the arm reaches, and one at a place past its pans prepares nothing."""
-    for text, prepares in (("{count:second} Колёса", "count"), ("{point:printer} Там", "point"),
-                           ("{point:door} Дверь", None)):  # fmt: skip
+    at a place the arm reaches, and at one past its pans (the door: the hand at the range's
+    edge, as far as it reaches); one at a place behind the robot prepares nothing."""
+    marks = (("{count:second} Колёса", "count"), ("{point:printer} Там", "point"),
+             ("{point:door} Дверь", "point"), ("{point:shelf} Полка", None))  # fmt: skip
+    for text, prepares in marks:
         rig = Ladder(BOOK)
-        rig.engine.resolver.room = FakePlaces({"printer": 10.0, "door": 80.0})
+        rig.engine.resolver.room = FakePlaces({"printer": 10.0, "door": 80.0, "shelf": 160.0})
         rig.engine.text_ahead(1, 0, text)
         rig.engine.step()
         if prepares is None:
@@ -814,12 +838,18 @@ def rests(rig: Ladder) -> int:
     return [name for name, _ in rig.link.calls].count("rest")
 
 
+def downs(rig: Ladder) -> list[Trajectory]:
+    """The gentle ways down sent (a trajectory named down, ending on rest, then rest)."""
+    return [t for t in rig.sent() if t.name == "down"]
+
+
 def test_a_held_unit_rests_when_the_person_speaks_at_its_reply_s_end_and_for_the_body_s_turn(
 ) -> None:  # fmt: skip
-    """A unit the board holds (no clip moving the arm) goes to rest when the person starts to
-    speak, when its own reply is done or cut (not another's), and when the body's turn asks
-    for the arm (its rest's seconds returned); while a clip still moves the arm, the reply's end
-    leaves it to its own end."""
+    """A unit the board holds (no clip moving the arm) goes to rest the board's quick way when
+    the person starts to speak and when the body's turn asks for the arm (its rest's seconds
+    returned), and its own slow way (a trajectory to rest at the gentle share, quiet like the
+    raise) when its own reply is done or cut (not another's); while a clip still moves the arm,
+    the reply's end leaves it to its own end."""
     rig = Ladder()
     hold_arm(rig, 1)
     rig.tick(0.7)
@@ -832,24 +862,34 @@ def test_a_held_unit_rests_when_the_person_speaks_at_its_reply_s_end_and_for_the
     rig.tick(0.7)
     rig.engine.reply_done(1)
     rig.engine.step()
-    assert rests(rig) == 1, "another reply's end"
+    assert rests(rig) == 1 and not downs(rig), "another reply's end"
     rig.engine.reply_done(2)
     rig.engine.step()
-    assert rests(rig) == 2 and rig.rows("faded")[-1]["why"] == "the reply is done"
+    assert rests(rig) == 1 and rig.arm.holding() is None
+    (down,) = downs(rig)
+    assert down.then == "rest" and down.knots[-1].deg == pytest.approx(MOTION.rest(), abs=0.01)
+    assert down.knots[0].deg == pytest.approx(rig.sent()[-2].knots[-1].deg, abs=0.01)
+    faded = rig.rows("faded")[-1]
+    assert faded["why"] == "the reply is done" and faded["down_s"] == pytest.approx(
+        0.06 + down.knots[-1].t_s, abs=0.01
+    )
+    speed = max(abs(b - a) for k0, k1 in itertools.pairwise(down.knots)
+                for a, b in zip(k0.deg, k1.deg, strict=True)) / (down.knots[1].t_s)  # fmt: skip
+    assert speed <= 0.3 * MOTION.max_speed_deg_s + 1e-6  # the gentle share's speed
     hold_arm(rig, 3)
     rig.tick(0.7)
     rig.engine.reply_cut(3)
     rig.engine.step()
-    assert rests(rig) == 3
+    assert rests(rig) == 1 and len(downs(rig)) == 2
     hold_arm(rig, 4)
     rig.tick(0.7)
     assert rig.engine.release_arm("the body turns") == pytest.approx(0.06)  # at rest: latency
-    assert rests(rig) == 4 and rig.arm.holding() is None
+    assert rests(rig) == 2 and rig.arm.holding() is None
     hold_arm(rig, 5)
     rig.tick(0.1)  # still lifting
     rig.engine.reply_done(5)
     rig.engine.step()
-    assert rests(rig) == 4, "a clip moving the arm ends as it was sent"
+    assert rests(rig) == 2 and len(downs(rig)) == 2, "a clip moving the arm ends as it was sent"
 
 
 def test_the_arm_and_the_cart_move_together() -> None:

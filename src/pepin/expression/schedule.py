@@ -1014,7 +1014,8 @@ class Scheduler:
                 post = 0.0 if playing.performance.intent.startswith(PREPARE) else POST_STROKE_S
                 after = playing.stroke + post
             if self._unit < strokes and latest is None:
-                froms.append(ArmFrom("unit", held, _knot(held), after, arm.held_until))
+                froms.append(ArmFrom("unit", held, arm.held_knot() or _knot(held), after,
+                                     arm.held_until))  # fmt: skip
             free = max(free, arm.held_until + self._return_s(arm, held))
         for other in waiting:
             fit = other.fit
@@ -1272,7 +1273,7 @@ class Scheduler:
         held = arm.holding()
         if held is None and self._held_only(waiting.performance):
             return "no unit holds the arm any more"
-        planned = arm.plan(clip, base=held, start=None if held is None else _knot(held))
+        planned = arm.plan(clip, base=held, start=None if held is None else arm.held_knot())
         if isinstance(planned, str):
             return f"the arm: {planned}"
         if held is None:
@@ -1309,7 +1310,8 @@ class Scheduler:
         held = arm.holding()
         if held is None and fit.held_only:
             return "no unit holds it any more"
-        planned = arm.plan(waiting.clip, base=held, start=None if held is None else _knot(held))
+        planned = arm.plan(waiting.clip, base=held,
+                           start=None if held is None else arm.held_knot())  # fmt: skip
         if isinstance(planned, str):
             return planned
         if fit.bind != "utterance" and planned.stretch > 1.0 + 1e-6:

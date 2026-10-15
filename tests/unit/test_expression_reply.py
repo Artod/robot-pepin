@@ -7,6 +7,7 @@ with a {greeting}, the reply's end and the close."""
 
 from __future__ import annotations
 
+import itertools
 import json
 import logging
 import random
@@ -34,6 +35,7 @@ from pepin.expression.fakes import (
 )
 from pepin.expression.head import IDLE_LOOK
 from pepin.expression.listeners import (
+    ARM_BREATH,
     ARM_SWAY,
     LAUGHING,
     PEAK,
@@ -93,14 +95,16 @@ class Conversation:
     scheduler lent the engine's parts, renderer, hooks and the voice's nuclei; one fake clock and
     player, moved by the test, the engine's thread brought level with them at every step."""
 
-    def __init__(self, motion: ArmMotion = MOTION, **pulse: Any) -> None:
-        """``motion``: the arm's (config/arm.json's by default); ``pulse``: knobs of the
-        ``pulse`` block changed by name."""
+    def __init__(self, motion: ArmMotion = MOTION, *, breath: bool = False, **pulse: Any) -> None:
+        """``motion``: the arm's (config/arm.json's by default); ``breath``: the book's breath
+        layer under the arm's clips (off: the book without it, the held arm's older wrist sway,
+        the knots exactly the poses'); ``pulse``: knobs of the ``pulse`` block changed by name."""
         self.clock = FakeClock(1000.0)
         self.playout = FakePlayout(now=0.0)
         self.playing = False
         self.link = TimedLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"), clock=self.clock)
         arm = ArmPart(self.link, motion, latency_s=0.06, clock=self.clock)
+        book = BOOK if breath else replace(BOOK, breath={})
         self.parts: dict[PartName, Executor] = {
             "arm": arm, "head": FakeExecutor("head", 0.1), "face": FakeExecutor("face", 0.05),
             "body": FakeExecutor("body", 0.15),
@@ -110,7 +114,7 @@ class Conversation:
         self.view = FakeAttention(Attention("track", 0.0, eyes=True, seen_s=self.clock.now))
         config = replace(engine_config(DATA), seed=3)
         self.engine = GestureEngine(
-            self.parts, self.playout, lambda: (BOOK, config), on=True, clock=self.clock,
+            self.parts, self.playout, lambda: (book, config), on=True, clock=self.clock,
             record=lambda kind, fields: self.records.append((kind, fields)),
             seeds=random.Random(3), attention=self.view,
         )  # fmt: skip
@@ -248,9 +252,11 @@ def test_one_reply_end_to_end_through_the_engine_s_thread_the_listeners_and_the_
 
 
 def played(c: Conversation, part: PartName, intent: str) -> list[Any]:
-    """What ``part`` played of ``intent``, in order (its ok cue rows are its plays)."""
+    """What ``part`` played of ``intent``, in order (its ok cue rows are its plays; the arm's
+    gentle way down at a reply's end is no cue's)."""
     if part == "arm":
-        plays = [args[0] for name, args in c.link.calls if name == "send"]
+        sent = [args[0] for name, args in c.link.calls if name == "send"]
+        plays = [tr for tr in sent if tr.name != "down"]
     else:
         executor = c.parts[part]
         assert isinstance(executor, FakeExecutor)
@@ -417,7 +423,7 @@ def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_th
     goes on, sent again before its hold lapses; the second sentence's accent beats the wrist
     from the held pose (15-25 deg: the book's beats) and keeps the hold, and the cart moves
     under the raised arm (one body); every hold sent ends within 1 s of the reply's last sound,
-    and the reply's end rests the arm then."""
+    and the reply's end takes the arm down its own slow way then (a trajectory to rest)."""
     caplog.set_level(logging.ERROR, logger="pepin.expression")
     c = Conversation(wrist_beat_p=1.0)
     texts = ["Сегодня утром мы поехали на дачу.", "Там было очень тихо и красиво, правда."]
@@ -442,7 +448,8 @@ def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_th
     finally:
         c.engine.close()
     assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
-    sends = [(t, tr) for name, t, tr in c.link.times if name == "send"]
+    downs = [(t, tr) for name, t, tr in c.link.times if name == "send" and tr.name == "down"]
+    sends = [(t, tr) for name, t, tr in c.link.times if name == "send" and tr.name != "down"]
     (raised, up), *rest = sends
     assert raised - marks["text"] <= 0.5  # within half a second of speech
     assert up.then == "hold" and up.knots[0].deg == pytest.approx(MOTION.rest(), abs=0.01)
@@ -462,8 +469,10 @@ def test_a_two_sentence_reply_raises_the_arm_at_its_second_sentence_and_beats_th
     for t, tr in sends:  # every hold ends within 1 s of the last sound (the board rests it then)
         assert t + 0.06 + tr.knots[-1].t_s + tr.hold_s <= end + 1.0
     assert [r for _, r in rest if r.knots[-1].t_s < 0.1], "the posture sent again, still"
-    resting = [t for name, t, _ in c.link.times if name == "rest"]
-    assert resting and resting[0] <= end + 1.0
+    ((went, down),) = downs  # the reply's end: the slow way down, quiet like the raise
+    assert went <= end + 1.0 and down.then == "rest"
+    assert down.knots[-1].deg == pytest.approx(MOTION.rest(), abs=0.01)
+    assert not [t for name, t, _ in c.link.times if name == "rest"]
     assert c.accents("body"), "the cart rocks under the raised arm"
 
 
@@ -738,12 +747,71 @@ def test_the_raised_arm_breathes_a_slow_wrist_sway_while_nothing_else_moves_it(
         assert t + 0.06 + sway.knots[-1].t_s + sway.hold_s <= end + 1.0
 
 
-def test_the_melody_s_keys_come_half_a_second_apart_and_glide(
+def test_the_raised_arm_breathes_in_every_joint_under_the_book_s_layer(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The same long reply with the book's breath layer: the arm up at ready carries flat
+    clips of clip_s back to back (arm_breath, the idle layer's), each joint moving by the
+    layer's amplitude and phase, continuous from one clip's last knot to the next's first; the
+    raise from rest carries none (never on the base); the accents' beats ride a breathing arm
+    and swell it; the hold kept, never past the reply's end."""
+    caplog.set_level(logging.ERROR, logger="pepin.expression")
+    c = Conversation(breath=True, wrist_beat_p=1.0)
+    texts = ["Вчера мы долго гуляли по большому старому парку у самой реки.",
+             "Там было много уток, лебедей и даже одна очень важная цапля.",
+             "Потом пошёл сильный дождь, и мы быстро побежали домой."]  # fmt: skip
+    reply = Spoken(c, 1, texts, [[], ["цапля"], []], [["долго", "реки"], ["уток"],
+                                                     ["дождь", "домой"]])  # fmt: skip
+    try:
+        c.engine.start()
+        c.both("opened", Heard(c.clock.now - 1.0, c.clock.now, "Пепин"))
+        c.run(0.5, {0.1: lambda: reply.text(0), 0.15: lambda: reply.text(1),
+                    0.2: lambda: reply.start(0), 0.3: lambda: reply.text(2)})  # fmt: skip
+        for k in (1, 2):
+            c.run(reply.lengths[k - 1] - 0.6)
+            c.run(0.1, {0.05: lambda k=k: reply.start(k)})
+        end = reply.heard_end()
+        c.run(max(0.0, end + 0.1 - c.clock.now))
+        c.both("reply_done", 1)
+        c.run(1.0)
+    finally:
+        c.engine.close()
+    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    layer = BOOK.breath["arm"]
+    sends = [tr for name, _, tr in c.link.times if name == "send"]
+    up = sends[0]  # the raise from rest: no breath on it
+    assert up.knots[0].deg == pytest.approx(MOTION.rest(), abs=0.01)
+    assert up.knots[-1].deg == pytest.approx([READY[j] for j in JOINTS], abs=0.01)
+    breaths = played(c, "arm", ARM_BREATH)
+    assert len(breaths) >= 2 and not played(c, "arm", ARM_SWAY)
+    swell = 1.0 + sum(layer.accent_gain.values())  # the most the accents may add
+    for breath in breaths:
+        assert breath.then == "hold" and breath.knots[-1].t_s == pytest.approx(layer.clip_s)
+        for j, joint in enumerate(JOINTS):
+            travel = max(abs(k.deg[j] - READY[joint]) for k in breath.knots)
+            assert travel <= layer.joints[joint].amp_deg * swell + 0.05, joint
+    moved = {j for b in breaths for j, joint in enumerate(JOINTS)
+             if max(abs(k.deg[j] - READY[joint]) for k in b.knots) > 0.5}  # fmt: skip
+    assert moved == set(range(len(JOINTS))), "every joint breathes"
+    for earlier, later in itertools.pairwise(sends):
+        if later.name == "down":
+            continue
+        assert later.knots[0].deg == pytest.approx(earlier.knots[-1].deg, abs=0.05)  # seamless
+    beats = [tr for intent in ACCENTS for tr in played(c, "arm", intent)]
+    assert beats, "the accent's beat rides the breathing arm"
+    assert c.alive._counts[ARM_BREATH] == len(breaths)
+    times = [t for name, t, tr in c.link.times if name == "send" and tr in breaths]
+    for t, breath in zip(times, breaths, strict=True):
+        assert t + 0.06 + breath.knots[-1].t_s + breath.hold_s <= end + 1.0
+
+
+def test_the_melody_s_keys_come_a_second_apart_and_glide(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """The voice's pitch as the head's still tilt, on the real prosody listener: its overlays'
-    keys at least melody_key_gap_s (0.5 s) apart, within melody_max_deg (0.9), each written with
-    a speed cap and its own ramp (the glide), within the arbiter's still bound (never blinds)."""
+    keys at least melody_key_gap_s (1.0 s since 2026-10-13 evening) apart, within
+    melody_max_deg (0.9), each written with a speed cap and its own ramp (the glide), within
+    the arbiter's still bound (never blinds)."""
     caplog.set_level(logging.ERROR, logger="pepin.expression")
     c = Conversation()
     text = "Мы долго шли по берегу большой и очень тихой реки, и было хорошо."
@@ -763,7 +831,7 @@ def test_the_melody_s_keys_come_half_a_second_apart_and_glide(
     assert melody, "the melody plays"
     for clip in melody:
         (track,) = clip.tracks
-        assert min(np.diff(track.times)) >= 0.5 - 1e-9
+        assert min(np.diff(track.times)) >= 1.0 - 1e-9
         assert max(abs(v) for v in track.values) <= 0.9 + 1e-9
         look = clip_look(clip, IDLE_LOOK)
         assert look is not None and look["target"].get("idle") is True

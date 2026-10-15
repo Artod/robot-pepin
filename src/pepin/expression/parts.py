@@ -32,7 +32,8 @@ from typing import Protocol
 
 from pepin.arm_driver import ARRIVED_DEG
 from pepin.arm_motion import ArmMotion
-from pepin.expression.animation import Clip, Layer, PartName
+from pepin.expression.animation import Clip, Layer, PartName, Track
+from pepin.expression.breath import ArmBreath
 from pepin.expression.executors import FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
 from pepin.expression.mix import (
@@ -52,18 +53,27 @@ from pepin.neck import ACC_UNIT_DEG_S2, NeckMotion
 
 logger = logging.getLogger(__name__)
 
+# The share of the arm's caps a posture's raise and its gentle way down run at (config/expression
+# .json pulse.arm_up_caps_share sets it live): 0.3 keeps the servos under ~70 deg/s, where the
+# quiet gesticulation lives (Artem 2026-10-13: the raise at 0.5, 110 deg/s, whined)
+GENTLE_SHARE = 0.3
+
 
 @dataclass(frozen=True)
 class Planned:
     """A clip as the board will play it: the trajectory, the board's approach from where the arm
     is to its first knot (seconds; 0 when it is there), the factor the caps stretched the clip
-    by (1: none), and when its stroke lands after the board takes it (the approach plus the
-    stretched stroke): the one stroke time the engine schedules and logs."""
+    by (1: none), when its stroke lands after the board takes it (the approach plus the
+    stretched stroke): the one stroke time the engine schedules and logs; and the pose its last
+    knot stands on WITHOUT the breath (``final_pose``: what a unit holds by name) with what the
+    breath added there (``final_offset``: what the hold freezes)."""
 
     trajectory: Trajectory
     approach_s: float
     stretch: float
     stroke_s: float
+    final_pose: tuple[float, ...] = ()
+    final_offset: tuple[float, ...] = ()
 
     @property
     def seconds(self) -> float:
@@ -78,7 +88,14 @@ class ArmPart:
     its ``hold_s``; the next clip within it plans from that knot (:attr:`held`, the board's goal,
     never the encoders, which sag under the torque limit), started there instead of at rest
     (:func:`pepin.expression.mix.rebased`), with no approach. Past the hold the board has taken
-    the arm to rest by itself, and the next clip plans from rest again."""
+    the arm to rest by itself, and the next clip plans from rest again.
+
+    THE BREATH (:attr:`breath`, :mod:`pepin.expression.breath`): every trajectory planned over a
+    held pose carries the breath's offsets in its knots, blended from the offset the last hold
+    froze (:attr:`held_offset`) to the live breath (out to none for a clip that ends at rest);
+    none from rest. :attr:`held` stays the clean pose (a unit's name, the posture's compare);
+    :meth:`held_knot` is where the arm really stands. A knot the breath would push past a limit
+    or a cap plays without it: the gesture never loses to its breath."""
 
     part: PartName = "arm"
 
@@ -92,21 +109,27 @@ class ArmPart:
         knot_hz: float = 25.0,
         source: str = "voice.gesture",
         clock: Callable[[], float] = time.monotonic,
+        breath: ArmBreath | None = None,
     ) -> None:
         """``motion``: config/arm.json's (rest pose, limits, caps); ``speed_scale`` scales the
         caps a clip is checked against and travels with each trajectory (the board's profile
         and its way to rest); ``knot_hz``: knots a second (the board interpolates between);
-        ``clock``: when a hold lapses."""
+        ``clock``: when a hold lapses; ``breath``: the layer under every held clip (None: no
+        breath)."""
         self.link, self.motion = link, motion
         self._latency_s = latency_s
         self.speed_scale = speed_scale
         self.knot_hz = knot_hz
         self.source = source
         self.clock = clock
+        self.breath = breath
+        self.gentle_share = GENTLE_SHARE
         self._ids = itertools.count(1)
         self.base = dict(motion.rest_deg)
         self.held: dict[str, float] | None = None  # the pose the last trajectory holds (a unit)
+        self.held_offset: tuple[float, ...] | None = None  # what the breath added to its knot
         self.held_until = float("-inf")  # when the board lets that hold go (engine clock)
+        self._breath_refused: str | None = None  # the last refusal of a breathed clip, logged
 
     @property
     def latency_s(self) -> float:
@@ -131,8 +154,17 @@ class ArmPart:
     def holding(self) -> dict[str, float] | None:
         """The pose a unit holds now (None: none, or its hold has lapsed)."""
         if self.held is not None and self.clock() > self.held_until:
-            self.held = None
+            self.held, self.held_offset = None, None
         return self.held
+
+    def held_knot(self) -> tuple[float, ...] | None:
+        """Where the arm really stands while a unit holds it: the held pose and the breath's
+        offset frozen on it; None without a unit."""
+        held = self.holding()
+        if held is None:
+            return None
+        offset = self.held_offset or (0.0,) * len(JOINTS)
+        return tuple(held[j] + o for j, o in zip(JOINTS, offset, strict=True))
 
     def plan(
         self,
@@ -143,9 +175,9 @@ class ArmPart:
         start: Sequence[float] | None = None,
     ) -> Planned | str:
         """``clip`` as the trajectory to send over ``base`` (the rest pose by default; a unit's
-        next stroke: the held pose, the clip started there) and when its stroke lands, or why it
-        cannot be played. The board's approach is from ``start`` (the arm's angles when the board
-        takes it; None: the newest state line's)."""
+        next stroke: the held pose, the clip started there, the breath under it) and when its
+        stroke lands, or why it cannot be played. The board's approach is from ``start`` (the
+        arm's angles when the board takes it; None: the newest state line's)."""
         if clip.part != "arm":
             return f"an {clip.part} clip is not the arm's"
         motion = self.motion
@@ -162,6 +194,18 @@ class ArmPart:
         refusal = check_knots(knots, motion.limits(), max_speed, max_acc, JOINTS)
         if refusal is not None:
             return refusal
+        final = tuple(knots[-1][1])
+        offset = (0.0,) * len(JOINTS)
+        if self.breath is not None and base is not None:  # never from rest
+            t0 = self.clock() + self.latency_s
+            breathed = self.breath.breathe(knots, t0, self.held_offset, live=clip.then == "hold")
+            why = check_knots(breathed, motion.limits(), max_speed, max_acc, JOINTS)
+            if why is None:
+                offset = self.breath.final_offset(knots, breathed)
+                knots = breathed
+            elif why != self._breath_refused:  # the gesture plays without its breath
+                logger.info("arm breath left out of a clip: %s", why)
+                self._breath_refused = why
         span = sampled[-1][0] - sampled[0][0]
         stretch = (knots[-1][0] - knots[0][0]) / span if span > 0 else 1.0
         trajectory = Trajectory(
@@ -174,7 +218,8 @@ class ArmPart:
             self.speed_scale,
         )
         approach = self.approach_s(knots[0][1], start)
-        return Planned(trajectory, approach, stretch, approach + stretch * clip.stroke_s)
+        return Planned(trajectory, approach, stretch, approach + stretch * clip.stroke_s, final,
+                       offset)  # fmt: skip
 
     def approach_s(
         self, first: tuple[float, ...] | list[float], start: Sequence[float] | None = None
@@ -226,34 +271,62 @@ class ArmPart:
         return fitted
 
     def final(self, planned: Planned) -> dict[str, float]:
-        """The pose a planned trajectory ends on (a unit holds it)."""
-        return dict(zip(JOINTS, planned.trajectory.knots[-1].deg, strict=True))
+        """The pose a planned trajectory ends on, the breath aside (a unit holds it by name)."""
+        final = planned.final_pose or planned.trajectory.knots[-1].deg
+        return dict(zip(JOINTS, final, strict=True))
 
     def play(self, clip: Clip) -> Outcome:
         """Send ``clip`` to the board, from the pose a unit holds (no approach) or from rest
         (the board's approach from where the arm is); refused here when it breaks the limits.
         Its stroke is the plan's (approach and stretch included)."""
         held = self.holding()
-        planned = self.plan(clip, base=held, start=None if held is None else self._knot(held))
+        planned = self.plan(clip, base=held, start=None if held is None else self.held_knot())
         if isinstance(planned, str):
             return Outcome(False, planned)
         trajectory = planned.trajectory
         self.link.send(trajectory)
         if clip.then == "hold":
             self.held = self.final(planned)
+            self.held_offset = planned.final_offset if any(planned.final_offset) else None
             self.held_until = self.clock() + self.latency_s + planned.seconds + trajectory.hold_s
         else:
-            self.held = None
+            self.held, self.held_offset = None, None
         return Outcome(True, f"sent as {trajectory.id}", planned.seconds, planned.stroke_s)
+
+    def lower(self, share: float | None = None) -> float | None:
+        """A unit's held arm taken to rest gently: a trajectory from where it stands to rest at
+        ``share`` of the caps (:attr:`gentle_share` by default; the book's cubic timing), the
+        breath blended out on the way, then the board's rest and torque off; the seconds it
+        takes, None when nothing is held (the board's own way is the quick one: :meth:`fade`)."""
+        held = self.holding()
+        knot = self.held_knot()
+        if held is None or knot is None:
+            return None
+        share = self.gentle_share if share is None else share
+        speed, acc = self.caps(share)
+        rest = self.motion.rest_deg
+        travel = max(abs(rest[j] - k) for j, k in zip(JOINTS, knot, strict=True))
+        seconds = max(1.5 * travel / speed, math.sqrt(6.0 * travel / acc), 0.05)
+        if self.breath is not None:  # the breath blends out on the way: at least that long
+            seconds = max(seconds, self.breath.breath.blend_s)
+        tracks = tuple(Track(j, "absolute", (0.0, seconds), (held[j], rest[j])) for j in JOINTS)
+        clip = Clip("arm", 0.0, seconds, seconds, tracks)
+        planned = self.plan(clip, "down", base=held, start=knot)
+        if isinstance(planned, str):
+            self.rest()  # the quick way, never nothing
+            return None
+        self.link.send(planned.trajectory)
+        self.held, self.held_offset = None, None
+        return self.latency_s + planned.seconds
 
     def fade(self, layer: Layer, seconds: float) -> None:
         """The gesture (or idle) layer let go: the board takes the arm to rest at its caps."""
-        self.held = None
+        self.held, self.held_offset = None, None
         self.link.rest()
 
     def rest(self) -> None:
         """To rest, then torque off (the board's)."""
-        self.held = None
+        self.held, self.held_offset = None, None
         self.link.rest()
 
     @staticmethod

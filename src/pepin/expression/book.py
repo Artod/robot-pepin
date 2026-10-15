@@ -42,10 +42,12 @@ from pepin.expression.animation import (
     Atom,
     Bind,
     Book,
+    Breath,
     Composition,
     Idle,
     IdleState,
     Key,
+    Oscillation,
     PartName,
     Range,
     Space,
@@ -107,7 +109,8 @@ def book_from(data: Mapping[str, Any]) -> Book:
             raise ValueError(f"moments.{moment}: no composition {intent!r}")
     aliases = _aliases(data.get("aliases", {}), compositions)
     space = _space(data.get("space", {}), poses)
-    return Book(atoms, compositions, poses, idle, moments, aliases, space)
+    breath = _breaths(data.get("breath", {}), compositions)
+    return Book(atoms, compositions, poses, idle, moments, aliases, space, breath)
 
 
 def with_rest(book: Book, rest: Mapping[str, float]) -> Book:
@@ -296,17 +299,68 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
     if bind not in BINDS:
         raise ValueError(f"{where}.bind: one of {', '.join(BINDS)}")
     family = body.get("family")
+    args = tuple(str(a) for a in body.get("args", []))
+    style_args = body.get("style_args", {})
+    if not isinstance(style_args, dict):
+        raise ValueError(f"{where}.style_args: arg -> the style words that choose it")
+    written = {v.needs.get(ARG) for v in variants} | set(args)  # what a variant is written for
+    for arg, words in style_args.items():
+        if arg not in written or not isinstance(words, list) or not words:
+            raise ValueError(f"{where}.style_args.{arg}: a variant's argument, a list of words")
     return Composition(
         name,
         tuple(variants),
         float(body.get("cooldown_s", 0.0)),
         str(body.get("note", "")),
         cast(Bind, bind),
-        tuple(str(a) for a in body.get("args", [])),
+        args,
         None if family is None else str(family),
         bool(body.get("long", False)),
         bool(body.get("callable", True)),
+        {str(a): tuple(str(w).lower() for w in ws) for a, ws in style_args.items()},
     )
+
+
+def _breaths(raw: Any, compositions: Mapping[str, Composition]) -> dict[PartName, Breath]:
+    """``breath``: a part -> its layer (the arm's first; a part absent keeps its older way)."""
+    if not isinstance(raw, dict):
+        raise ValueError("breath: part -> its layer")
+    out: dict[PartName, Breath] = {}
+    for part, body in raw.items():
+        if part == "note":
+            continue
+        where = f"breath.{part}"
+        if part not in PARTS or not isinstance(body, dict):
+            raise ValueError(f"{where}: one of {', '.join(PARTS)}, an object")
+        dofs = DOFS[cast(PartName, part)]
+        joints: dict[str, Oscillation] = {}
+        for dof, osc in body.get("joints", {}).items():
+            if dof not in dofs or not isinstance(osc, dict):
+                raise ValueError(f"{where}.joints.{dof}: a degree of freedom of the {part}")
+            amp = float(osc.get("amp_deg", 0.0))
+            period = float(osc.get("period_s", 0.0))
+            phase = float(osc.get("phase", 0.0))
+            if amp < 0.0 or period <= 0.0 or not 0.0 <= phase < 1.0:
+                raise ValueError(f"{where}.joints.{dof}: amp_deg >= 0, period_s > 0, phase 0..1")
+            joints[str(dof)] = Oscillation(amp, period, phase)
+        if not joints:
+            raise ValueError(f"{where}.joints: at least one")
+        gains = body.get("accent_gain", {})
+        if not isinstance(gains, dict) or not set(gains) <= set(compositions):
+            raise ValueError(f"{where}.accent_gain: a composition -> its gain")
+        when = body.get("when", "up")
+        if when != "up":
+            raise ValueError(f"{where}.when: up (never at rest)")
+        d = Breath({})
+        out[cast(PartName, part)] = Breath(
+            joints,
+            "up",
+            float(body.get("blend_s", d.blend_s)),
+            {str(k): float(v) for k, v in gains.items()},
+            float(body.get("accent_decay_s", d.accent_decay_s)),
+            float(body.get("clip_s", d.clip_s)),
+        )
+    return out
 
 
 def _named_params(atom: Atom) -> set[str]:

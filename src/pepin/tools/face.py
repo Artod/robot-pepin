@@ -28,6 +28,7 @@ Emotion = Literal[
     "sleepy",
     "focused",
     "listening",
+    "sinister",
 ]
 EMOTIONS: tuple[str, ...] = Emotion.__args__  # type: ignore[attr-defined]
 MAX_SECONDS = 60.0

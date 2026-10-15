@@ -161,8 +161,11 @@ class ConversationObserver(Protocol):
         ears' early read of that pause has landed ("" otherwise, and for every other moment)."""
         ...
 
-    def drive(self, active: bool) -> None:
-        """A drive the conversation started began (True) or ended (False)."""
+    def drive(self, active: bool, ran: bool = True) -> None:
+        """A drive the conversation started began (True) or ended (False); at its end ``ran``
+        says whether it set the body moving (the goal server took a goal of its calls, or the
+        same drive was under way): False when every call was refused or found nothing to do (a
+        turn already facing its target), nothing moved."""
         ...
 
     def closed(self, reason: str) -> None:

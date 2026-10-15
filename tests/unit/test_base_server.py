@@ -22,7 +22,7 @@ from pepin.base_server import (
     neck_parts,
 )
 from pepin.feetech import FeetechTcpClient
-from pepin.neck import NeckAngles, NeckConfig, acc_units, speed_ticks, ticks_for
+from pepin.neck import NeckAngles, NeckConfig, acc_units, braking_units, speed_ticks, ticks_for
 from pepin.telemetry import LatencyTracker
 
 REPO = Path(__file__).resolve().parents[2]
@@ -354,6 +354,9 @@ class NeckBus(PingableBus):
         self.positions.update({"neck": 2048, "head": 2360})
         self.modes = {"neck": 0, "head": 0}  # 0: position mode, the only one a goal makes sense in
         self.ceilings = {"neck": 50, "head": 50}  # Maximum_Acceleration as the servos came
+        # Min/Max_Position_Limit as scripts/neck_limits.py writes them (the file's); as delivered
+        # a servo holds 0..4095
+        self.ranges = {"neck": (163, 3929), "head": (1814, 2737)}
         self.keeps_ceiling = True  # False: a servo that ignores the ceiling's write
         self.silent: set[str] = set()
         self.reads: list[tuple[str, list[str], tuple[str, ...], float]] = []
@@ -373,6 +376,9 @@ class NeckBus(PingableBus):
             return {m: self.modes[m] for m in [*motors, *optional] if m not in self.silent}
         if data_name == "Maximum_Acceleration":
             return {m: self.ceilings[m] for m in [*motors, *optional] if m not in self.silent}
+        if data_name in ("Min_Position_Limit", "Max_Position_Limit"):
+            k = 0 if data_name.startswith("Min") else 1
+            return {m: self.ranges[m][k] for m in [*motors, *optional] if m not in self.silent}
         read = super().sync_read(data_name, motors, normalize=normalize)
         read.update({m: self.positions[m] for m in optional if m not in self.silent})
         return read
@@ -492,11 +498,13 @@ def test_the_first_read_that_hears_the_neck_checks_its_mode_and_lets_it_go() -> 
     assert bus.reads == [
         ("Present_Position", [LEFT, RIGHT], ("neck", "head"), 0.003),
         ("Operating_Mode", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
+        ("Min_Position_Limit", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
+        ("Max_Position_Limit", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
         ("Maximum_Acceleration", [], ("neck", "head"), MODE_CHECK_WINDOW_S),
     ]
     assert neck_writes(bus) == [CEILING, RELEASE]
     core.tick(0.02)
-    assert len(bus.reads) == 4 and len(neck_writes(bus)) == 2, "then nothing: one read a tick"
+    assert len(bus.reads) == 6 and len(neck_writes(bus)) == 2, "then nothing: one read a tick"
 
 
 def test_the_acceleration_ceiling_is_lifted_or_its_refusal_logged(
@@ -546,12 +554,144 @@ def test_a_silent_neck_leaves_the_read_and_is_asked_again_every_five_seconds() -
     bus.silent = set()
     bus.writes.clear()
     core.tick(1.04 + 10.1)
-    assert [r[0] for r in bus.reads[-3:]] == [
+    assert [r[0] for r in bus.reads[-5:]] == [
         "Present_Position",
         "Operating_Mode",
+        "Min_Position_Limit",
+        "Max_Position_Limit",
         "Maximum_Acceleration",
     ]
     assert neck_writes(bus) == [CEILING, RELEASE], "back: checked and lifted again, let go"
+
+
+def test_the_servos_own_range_narrows_the_limits_and_a_wide_one_is_logged(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """2026-10-13: the head lapped through its dead zone twice; the pan servo held 0..4095 in
+    its EEPROM (nothing in it stops it), while the arm's servos hold their calibrated range
+    (lerobot writes it). The check reads both servos' Min/Max_Position_Limit: the goals'
+    limits are the intersection with the file's, as the arm driver's; a servo wider than the
+    file is logged; a reference pose outside refuses every goal."""
+    with caplog.at_level("INFO"):
+        core, _bus = make_neck_core()
+    assert "range neck 163..3929, head 1814..2737 ticks" in caplog.text
+    assert "wider than" not in caplog.text
+    delivered = NeckBus()
+    delivered.ranges = {"neck": (0, 4095), "head": (0, 4095)}
+    with caplog.at_level("WARNING"):
+        core, delivered = make_neck_core(bus=delivered)
+    assert "neck servo neck holds limits 0..4095, wider than config/neck.json's 163..3929" in (
+        caplog.text
+    )
+    assert target(core, 1.0) is None, "the file's limits still hold; the servo's add nothing"
+    narrow = NeckBus()
+    narrow.ranges = {"neck": (300, 3800), "head": (1814, 2737)}
+    core, narrow = make_neck_core(bus=narrow)
+    reply = core.command({"cmd": "neck_goto", "pan_ticks": 3900}, now=1.0)
+    assert reply is not None and "outside its limits 300..3800" in reply["error"]
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 3700}, now=1.0) is None
+    off = NeckBus()
+    off.ranges = {"neck": (2100, 3929), "head": (1814, 2737)}  # the reference 2029 outside
+    core, off = make_neck_core(bus=off)
+    refused = target(core, 1.0)
+    assert refused is not None and "reference neck 2029 ticks is outside" in refused["error"]
+    assert off.ceilings == {"neck": 50, "head": 50}, "nothing lifted on a refused pair"
+
+
+def test_neck_release_drops_the_torque_at_once_whoever_holds_the_head() -> None:
+    """2026-10-13: the bench's stop for a head that runs away, and the watchdog's primitive:
+    a held lease, a move under way, a jog: all let go on the instant, the servos written
+    torque-off, and the next tick writes nothing more."""
+    core, bus = make_neck_core()
+    assert target(core, 1.0) is None
+    core.tick(1.0)
+    assert energised(bus)
+    reply = core.command({"cmd": "neck_release"}, now=1.02)
+    assert reply["type"] == "neck_release" and reply["released"] is True
+    assert neck_writes(bus)[-1] == RELEASE
+    bus.writes.clear()
+    core.tick(1.04)
+    assert neck_writes(bus) == [], "let go: nothing to hold"
+    assert core.command({"cmd": "neck_goto", "pan_ticks": 2100}, now=1.06) is None, "free again"
+
+
+def fly(core: BaseServerCore, bus: NeckBus, now: float, step: int, ticks: int = 3) -> float:
+    """The fake pan servo moving ``step`` ticks a tick for ``ticks`` ticks; the time after."""
+    for _ in range(ticks):
+        now += 0.02
+        bus.positions["neck"] += step
+        core.tick(now)
+    return now
+
+
+def test_a_ramp_asked_below_the_one_in_flight_is_kept_until_the_head_settles(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """2026-10-13, the tap: a turn at 650 deg/s^2 (74 units) in flight at 2000 ticks/s, then an
+    idle glide key with its 10 deg/s^2 (1 unit) ramp: the servo brakes with that register, so
+    the key left it a braking distance of turns and it ran through its goal, its limit and the
+    encoder's zero. While the head flies the ramp written is at least v^2 / 2d, what stops it
+    before its target (the speed may drop: the servo brakes to it); once the head is still, a
+    smaller ramp is written as asked."""
+    core, bus = make_neck_core()
+    assert target(core, 1.0, pan_rad=-2.5, speed_deg_s=200.0, acc_deg_s2=650.0) is None
+    core.tick(1.0)
+    name, values = neck_writes(bus)[-1]
+    assert name == "block" and values["neck"][1] == 74 and values["head"][1] == 68
+    now = fly(core, bus, 1.0, 45)  # 2250 ticks/s: in flight
+    assert core._mover is not None and core._mover.in_flight()
+    bus.writes.clear()
+    with caplog.at_level("INFO"):
+        assert target(core, now, pan_rad=-2.5, speed_deg_s=6.0, acc_deg_s2=10.0) is None
+        now = fly(core, bus, now, 45, ticks=1)
+    name, values = neck_writes(bus)[-1]
+    assert name == "block"
+    need = braking_units(2250.0, 3659 - bus.positions["neck"])  # v^2 / 2d, a fifth in hand
+    assert values["neck"][1] == need > 10, "the least ramp that stops before the target"
+    assert values["head"][1] == 1, "the tilt stands: its ramp as asked"
+    assert values["neck"][4] == speed_ticks(6.0), "the speed as asked: braking to it is safe"
+    assert f"neck ramp {need}/1 units, not the 1/1 asked" in caplog.text
+    bus.writes.clear()
+    now = fly(core, bus, now, 0, ticks=2)  # the head stops: the lease's own ramp is written
+    assert not core._mover.in_flight()
+    name, values = neck_writes(bus)[-1]
+    assert name == "block" and values["neck"][1] == 1, "at rest: the small ramp as asked"
+
+
+def test_a_head_that_crosses_zero_or_passes_a_limit_is_let_go_and_every_goal_refused() -> None:
+    """The watch on the encoder, every tick: a jump over half a turn (the head crossed the
+    encoder's zero) or a reading 60 ticks past a limit is a runaway: torque off that tick, the
+    neck reply and the state line say so, every goal is refused until neck_release (the
+    operator's word) or a restart."""
+    core, bus = make_neck_core()
+    assert target(core, 1.0, pan_rad=-2.5) is None
+    now = fly(core, bus, 1.0, 45)
+    bus.writes.clear()
+    bus.positions["neck"] = 4000  # from ~2183: a jump of 1817 is no wrap...
+    core.tick(now + 0.02)
+    assert core._mover is not None and core._mover.runaway is not None
+    assert "past its limits 163..3929" in core._mover.runaway
+    assert neck_writes(bus)[-1] == RELEASE
+    refused = target(core, now + 0.04)
+    assert refused is not None and "RAN AWAY" in refused["error"]
+    assert "runaway" in core.command({"cmd": "neck"}, now=now + 0.04)
+    assert "neck_runaway" in core.snapshot(now + 0.04)
+    core.tick(now + 0.04)
+    assert neck_writes(bus)[-1] == RELEASE, "nothing else written to a head let go"
+    reply = core.command({"cmd": "neck_release"}, now=now + 0.06)
+    assert reply["released"] is True and "RAN AWAY" in reply["runaway_was"]
+    assert core._mover.runaway is None
+    bus.positions["neck"] = 2048
+    core.tick(now + 0.08)
+    assert target(core, now + 0.1, pan_rad=0.1) is None, "the operator's release re-arms"
+    # the other way to run away: through the encoder's zero
+    core, bus = make_neck_core()
+    bus.positions["neck"] = 200
+    core.tick(1.0)
+    bus.positions["neck"] = 4050  # 200 -> 4050 in one tick: through zero the other way
+    core.tick(1.02)
+    assert core._mover is not None and core._mover.runaway is not None
+    assert "crossed the encoder's zero" in core._mover.runaway
 
 
 def test_a_neck_in_velocity_mode_is_never_given_a_goal() -> None:
@@ -745,8 +885,8 @@ def test_the_tilt_ramps_under_its_own_ceiling_the_pan_at_the_full_one() -> None:
 @pytest.mark.parametrize(
     ("message", "words"),
     [
-        ({"pan_rad": 3.0, "tilt_rad": 0.4}, "outside its limits 257..3812"),  # 172 deg
-        ({"pan_rad": 0.0, "tilt_rad": -1.0}, "outside its limits 1814..2787"),  # 57 deg up
+        ({"pan_rad": 3.0, "tilt_rad": 0.4}, "outside its limits 163..3929"),  # 172 deg
+        ({"pan_rad": 0.0, "tilt_rad": -1.0}, "outside its limits 1814..2737"),  # 57 deg up
         ({"pan_rad": 0.0}, "bad target: tilt_rad is required"),
         ({"pan_rad": "left", "tilt_rad": 0.4}, "bad target: pan_rad must be a number"),
         ({"pan_rad": True, "tilt_rad": 0.4}, "bad target: pan_rad must be a number"),
@@ -890,9 +1030,9 @@ def test_a_move_target_outside_the_configured_limits_is_refused_not_clamped() ->
     core, bus = make_neck_core()
     reply = core.command({"cmd": "neck_goto", "pan_ticks": 4000}, now=1.0)
     assert reply is not None and reply["reached"] is False
-    assert "257..3812" in reply["error"] and "4000" in reply["error"]
+    assert "163..3929" in reply["error"] and "4000" in reply["error"]
     low = core.command({"cmd": "neck_goto", "tilt_ticks": 1000}, now=1.1)
-    assert low is not None and "1814..2787" in low["error"]
+    assert low is not None and "1814..2737" in low["error"]
     assert core.command({"cmd": "neck_goto"}, now=1.2) == {
         "type": "neck_goto",
         "reached": False,
@@ -1116,15 +1256,15 @@ def test_shift_makes_the_jog_slow_and_the_rate_changes_live() -> None:
 
 
 def test_the_goal_never_passes_the_configured_limits() -> None:
-    """Tilting down for ten seconds would be 5920 ticks; the head stops at head.max — 2787 since
+    """Tilting down for ten seconds would be 5920 ticks; the head stops at head.max — 2737 since
     2026-10-04, the head's own stop with the IMU and the display on it."""
     core, bus = make_neck_core()
     run_jog(core, bus, seconds=10.0, tilt=1)
-    assert goals(bus)["head"] == NECK_CFG.tilt.max_ticks == 2787
+    assert goals(bus)["head"] == NECK_CFG.tilt.max_ticks == 2737
     end = run_jog(core, bus, seconds=10.0, tilt=-1, start=11.0)
     assert goals(bus)["head"] == NECK_CFG.tilt.min_ticks == 1814
     run_jog(core, bus, seconds=10.0, pan=-1, start=end)  # right: ticks rise towards pan max
-    assert goals(bus)["neck"] == NECK_CFG.pan.max_ticks == 3812
+    assert goals(bus)["neck"] == NECK_CFG.pan.max_ticks == 3929
 
 
 def test_releasing_the_key_stops_the_head_at_once_and_the_deadman_lets_go() -> None:

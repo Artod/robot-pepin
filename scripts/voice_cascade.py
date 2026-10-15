@@ -5,7 +5,9 @@ The board's array -> a loudness-cut utterance -> Whisper on the Mac (and Praat's
 robot's tools -> Qwen3-TTS on the Mac speaks each sentence as it arrives -> the board's speaker.
 Every turn prints its timeline (person stopped -> cut -> text -> token -> sentence -> tts ->
 play -> end, in ms) with the cache tokens and the price. Every switch: config/voice_cascade.json,
-or --set section.key=value for one run. Logs: data/voice/<day>/cascade_<HHMMSS>/.
+or --set section.key=value for one run. Logs: data/voice/<day>/cascade_<HHMMSS>/; outside a
+conversation each utterance is a row of data/voice/<day>/cascade_heard.jsonl and, unless it is a
+noise line, its audio in data/voice/<day>/heard/<HHMMSS_mmm>.wav (ears.heard_audio).
 
 The key comes from the environment (the repo's gitignored .env, loaded by the shell):
 
@@ -68,11 +70,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pepin.audio_doa import MicDoa, SrpPhat
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
 from pepin.expression.finder import SwitchedFinder, robot_finder
 from pepin.expression.places import GoalPlaces
-from pepin.expression.tracker import SpeakerGazeWorker, robot_gaze
+from pepin.expression.tracker import SpeakerGazeWorker, SpeakerSettings, robot_gaze
 from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
 from pepin.people.worker import robot_people
 from pepin.perception.client import HealthWatch, PerceptionClient
@@ -83,6 +86,7 @@ from pepin.perception.source import VisionSource
 from pepin.tools import TOOLS, Robot
 from pepin.tools.clients import ChannelSightings
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
+from pepin.voice_cascade.barge_in import speech_series
 from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import (
     CONFIG_FILE,
@@ -621,11 +625,33 @@ def main() -> int:
         except (OSError, ValueError, TypeError) as exc:  # the voice starts whatever the knobs say
             print(f"no wheels for expression (config/expression.json wheels: {exc})")
     guards = [WheelsGuard(wheels)] if wheels is not None else []
+    mac_doa: MicDoa | None = None
     if on_robot:  # the robot, its array, its head
         assert isinstance(mic, BoardLink)
-        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face, wheels=wheels)
+        # The Mac's own voice direction from the array's raw microphones (speaker.doa.direction
+        # mac): fed by the link's raw frames, its Silero probabilities the ears' once they exist.
+        try:
+            knobs = SpeakerSettings.load()
+            mac_doa = MicDoa(
+                SrpPhat.load(),
+                voice_p_min=knobs.mac_voice_p_min,
+                peak_ratio=knobs.mac_peak_ratio,
+                reading_s=knobs.mac_reading_s,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"no Mac voice direction (config/audio.json, expression.json: {exc}): the chip's")
+        else:
+            mic.listen_raw(mac_doa.feed)
+            print(
+                f"Mac voice direction ready: the board streams {mic.raw_channels} raw mics (0: the"
+                " 2-channel firmware or raw_mics off, the chip's direction then)",
+                flush=True,
+            )
+        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face, wheels=wheels,
+                          mac=mac_doa)  # fmt: skip
         # the approach tool's speaker: the person this gaze holds, on the channel's own frames
         robot.sightings = ChannelSightings(perception, vision, gaze, wait_s=channel.look_wait_s)
+        robot.gaze = gaze  # and its body turn to the voice, when nobody is in view
 
     body = Body.build(
         args.host,
@@ -702,6 +728,9 @@ def main() -> int:
     holder.append(loop)
     if gaze is not None:
         gaze.journal = loop.record  # the gaze's decisions in each conversation's events.jsonl
+        gaze.series = speech_series(loop.ears.detector)  # the ears' Silero tags the array's DOA
+        if mac_doa is not None:
+            mac_doa.series = gaze.series  # ...and picks the raw chunks the Mac's direction reads
     alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
     body.engine.journal = loop.record  # the gesture space's catchment and repeat rows
     alive.start()

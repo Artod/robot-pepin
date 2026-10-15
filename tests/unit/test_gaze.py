@@ -369,6 +369,20 @@ def test_the_state_as_json() -> None:
     assert data["phase"] == "saccade" and data["source"] == "nav.stall" and data["band"] == 1
     assert data["blind"] is True and data["blind_until"] is None and data["pan_rad"] is None
     assert data["target"]["pan_deg"] == pytest.approx(30.0)
+    assert data["head_stamp"] is None, "no reading yet"
+
+
+def test_the_state_carries_the_newest_reading_with_its_own_stamp() -> None:
+    """The head in the state is the newest encoder reading, and ``head_stamp`` that reading's
+    stamp (the board's clock, /neck/state's header), not the moment the state is asked for."""
+    arb, _head, _out = arbiter()
+    arb.observe(HeadReading(0.1, 0.4, 1_760_000_000.0123))
+    arb.observe(HeadReading(0.2, 0.4, 1_760_000_000.0323))
+    state = arb.state(1_760_000_000.09)
+    assert state.head == Aim(0.2, 0.4) and state.head_stamp == 1_760_000_000.0323
+    data = json.loads(state.to_json())
+    assert data["head_stamp"] == pytest.approx(1_760_000_000.0323, abs=1e-4)
+    assert data["pan_rad"] == pytest.approx(0.2)
 
 
 # ---- geometry ----------------------------------------------------------------------------------
@@ -408,6 +422,44 @@ def test_the_reach_names_what_is_past_it_and_clamps() -> None:
     assert "down" in str(reach.refusal(Aim(0.0, math.radians(80))))
     assert reach.clamp(Aim(0.0, math.radians(80))).tilt_rad == pytest.approx(reach.tilt[1])
     assert lens_at(CFG, HOME)[2] == pytest.approx(CFG.reference.z_m, abs=1e-6)
+
+
+def test_an_angles_look_past_the_tilt_stop_is_held_at_the_stop() -> None:
+    """2026-10-14: a person standing over the robot asked the head for 21.9 deg up, 2 deg past
+    the stop; the arbiter passed the ticks on and the base server refused the 1791-tick target,
+    so the head never moved. Now every angles, scan and direction look keeps its tilt inside the
+    reach; the pan stays as asked (the holder clamps it by travel)."""
+    reach = Reach.of(CFG)
+    up = reach.tilt[0]
+    target = {"pan_rad": math.radians(-33.9), "tilt_rad": up - math.radians(2.0)}
+    past = {"kind": "angles", "band": PERSON, "source": "t", "frames": 0, "target": target}
+    look = look_from_json(past, GazeSettings(), CFG, to_base)
+    assert isinstance(look, Look), look
+    (view,) = look.views
+    assert view.tilt_rad == pytest.approx(up)
+    assert view.pan_rad == pytest.approx(math.radians(-33.9))
+    views = {"views": [target, {"pan_rad": 0.0, "tilt_rad": 9.0}]}
+    look = look_from_json(dict(past, kind="scan", target=views), GazeSettings(), CFG, to_base)
+    assert isinstance(look, Look)
+    assert [v.tilt_rad for v in look.views] == pytest.approx([up, reach.tilt[1]])
+
+
+def test_a_pan_past_the_reach_goes_to_the_end_nearer_the_head_never_across_the_front() -> None:
+    """2026-10-13: a face a hair past straight back on the left (+184) reads -176 by the wrap;
+    by number the right end is nearer, and the head at the left end swept 320 deg through the
+    front to look at the same person from the other side. With the head's own pan the clamp
+    takes the end the head is at; inside the reach nothing changes."""
+    reach = Reach.of(CFG)
+    lo, hi = reach.pan
+    behind = Aim(math.radians(-176.0), HOME.tilt_rad)
+    assert reach.clamp(behind).pan_rad == pytest.approx(lo), "by number alone: the right end"
+    assert reach.clamp(behind, from_pan=math.radians(153.0)).pan_rad == pytest.approx(hi)
+    assert reach.clamp(behind, from_pan=math.radians(-100.0)).pan_rad == pytest.approx(lo)
+    assert reach.clamp(behind, from_pan=0.0).pan_rad == pytest.approx(hi), "from home: 164 < 167"
+    inside = Aim(math.radians(-150.0), HOME.tilt_rad)
+    kept = reach.clamp(inside, from_pan=math.radians(153.0))
+    assert kept.pan_rad == pytest.approx(inside.pan_rad), "inside the reach: as asked"
+    assert kept.tilt_rad == pytest.approx(HOME.tilt_rad)
 
 
 def to_base(frame: str, xyz: dict[str, float]) -> tuple[float, float, float] | str:

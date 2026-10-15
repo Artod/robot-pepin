@@ -133,9 +133,11 @@ class Composition:
     sooner is skipped), how its stroke binds to its word (:data:`Bind`), the arguments a marker
     may give it (``{point:you}``; ``"*"`` any), the family a moment of the same kind is
     absorbed into, whether it is long (over ``short_s``: played only when the speech ahead
-    covers it), and whether a marker may name it (``callable`` False: the engine's own ensemble,
+    covers it), whether a marker may name it (``callable`` False: the engine's own ensemble,
     which its listeners request by name: the pulse's accents, the nods, the held arm's sway;
-    never in the brain's vocabulary, never under the markers' caps)."""
+    never in the brain's vocabulary, never under the markers' caps), and ``style_args``: an
+    argument -> the style words of the part that choose it for a bare marker (``{laugh}`` in a
+    ``{sinister}`` part is ``{laugh:evil}``)."""
 
     name: str
     variants: tuple[Variant, ...]
@@ -146,6 +148,7 @@ class Composition:
     family: str | None = None
     long: bool = False
     callable: bool = True
+    style_args: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -192,11 +195,38 @@ class Space:
 
 
 @dataclass(frozen=True)
+class Oscillation:
+    """One servo's share of a breath: its amplitude, its period and its phase (a share of a
+    turn: 0.5 is the opposite phase)."""
+
+    amp_deg: float
+    period_s: float
+    phase: float = 0.0
+
+
+@dataclass(frozen=True)
+class Breath:
+    """A part's breath layer (config/animation.json's ``breath``, :mod:`pepin.expression.breath`):
+    a slow sinusoid per servo added under whatever the part plays while a unit holds it up
+    (``when`` ``"up"``: never at rest), blended in and out over ``blend_s`` from where a motion
+    left it; the voice's accents swell it (``accent_gain`` per ensemble, decaying over
+    ``accent_decay_s``); the idle clip that carries it alone lasts ``clip_s``."""
+
+    joints: Mapping[str, Oscillation]
+    when: Literal["up"] = "up"
+    blend_s: float = 0.6
+    accent_gain: Mapping[str, float] = field(default_factory=dict)
+    accent_decay_s: float = 1.2
+    clip_s: float = 3.0
+
+
+@dataclass(frozen=True)
 class Book:
     """config/animation.json: the atoms, the compositions (the intents), the arm's poses (pose
     -> joint -> degrees), the idle layers, the robot's moments mapped to intents, the marks'
-    other spellings (``aliases``: ``"beat"`` -> ``"accent"``, ``"point:i"`` -> ``"point:me"``)
-    and the gesture space."""
+    other spellings (``aliases``: ``"beat"`` -> ``"accent"``, ``"point:i"`` -> ``"point:me"``),
+    the gesture space and the breath layers by part (``breath``; a part absent breathes by its
+    older way: the arm's ``arm_sway`` composition, the head's looping idle atom)."""
 
     atoms: Mapping[str, Atom]
     compositions: Mapping[str, Composition]
@@ -205,6 +235,7 @@ class Book:
     moments: Mapping[str, str] = field(default_factory=dict)
     aliases: Mapping[str, str] = field(default_factory=dict)
     space: Space = field(default_factory=Space)
+    breath: Mapping[PartName, Breath] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)

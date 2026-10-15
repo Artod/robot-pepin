@@ -6,9 +6,9 @@ THING has no front of its own, so its front is the side the robot sees and its r
 viewer's right. A relation turns that frame into a standing pose, and two alternatives turn the
 stand point about the target by the ring step either way at the same distance, for the planner
 to refuse one by one. Distances are config/approach.json's (:class:`Distances`); a person is never
-stood nearer than ``person_min_m`` plus two sigma of where they were measured. ``face`` is a turn
-where the robot stands, and ``to`` is one too when the robot already stands within ``near_m`` of
-its stand distance: "come closer" never backs the robot away.
+stood nearer than ``person_min_m`` plus ``sigma_k`` sigmas of where they were measured. ``face``
+is a turn where the robot stands, and ``to`` is one too when the robot already stands within
+``near_m`` of its stand distance: "come closer" never backs the robot away.
 """
 
 from __future__ import annotations
@@ -43,15 +43,20 @@ class Target:
 @dataclass(frozen=True)
 class Distances:
     """How far to stand: in front/behind (``front_m``), at a side (``side_m``), never nearer a
-    person than ``person_min_m``, the alternatives ``ring_deg`` either way, and ``to`` a turn in
-    place when the robot already stands within ``near_m`` of its stand distance."""
+    person than ``person_min_m`` plus ``sigma_k`` times their depth's sigma, the alternatives
+    ``ring_deg`` either way, and ``to`` a turn in place when the robot already stands within
+    ``near_m`` of its stand distance; the approach tool's own waits and refusals beside them
+    (``head_moved_deg``, ``face_wait_s``, ``sighting_age_s``)."""
 
     front_m: float = 0.3
     side_m: float = 0.5
     person_min_m: float = 0.25
+    sigma_k: float = 0.0
     ring_deg: float = 30.0
     head_moved_deg: float = 2.0
     near_m: float = 0.15
+    face_wait_s: float = 12.0
+    sighting_age_s: float = 1.5
 
     @classmethod
     def load(cls, path: str | Path | None = None) -> Distances:
@@ -110,7 +115,7 @@ def stands(
     lateral = relation in ("right_of", "left_of")
     d = distance_m if distance_m is not None else distances.side_m if lateral else distances.front_m
     if target.kind == "person":
-        d = max(d, distances.person_min_m + 2.0 * target.sigma_m)
+        d = max(d, distances.person_min_m + distances.sigma_k * target.sigma_m)
     now = math.hypot(robot.x - target.x, robot.y - target.y)
     if relation == "to" and now <= d + distances.near_m:  # never backs away from "come closer"
         return [_turn(target, robot, f"already {now:.2f} m from it: turn where it stands")]

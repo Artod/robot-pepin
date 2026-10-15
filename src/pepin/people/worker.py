@@ -538,7 +538,7 @@ class People:
     def moment(self, name: str, text: str = "") -> None:
         """Nothing."""
 
-    def drive(self, active: bool) -> None:
+    def drive(self, active: bool, ran: bool = True) -> None:
         """Nothing."""
 
     def closed(self, reason: str) -> None:

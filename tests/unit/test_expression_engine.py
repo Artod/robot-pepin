@@ -181,6 +181,39 @@ def test_a_stroke_lands_at_its_step_s_time_from_the_sync_point() -> None:
     assert peak == pytest.approx(head.stroke_s)
 
 
+def test_every_greeting_and_farewell_with_the_arm_waves_two_strokes_on_the_hold() -> None:
+    """Every greeting variant but the floor (and the farewell's variant with the arm) raises the
+    hand to arrive on the word and waves it two full strokes on the raised pose's hold, after
+    the arrival (2026-10-13: the wave ran under the raise and read as none): the greeting side
+    to side by the pan, the farewell forward and back by the wrist, +-10 deg at least; the arm
+    within 2.5 s."""
+    for name, dof in (("greeting", "shoulder_pan"), ("farewell", "wrist_flex")):
+        composition = BOOK.compositions[name]
+        with_arm = 0
+        for k, variant in enumerate(composition.variants):
+            for seed in range(6):
+                performance = BookRenderer(BOOK).render(name, EVERYTHING, seed, variant=k)
+                arms = [c for c in performance.clips if c.part == "arm"]
+                if not arms:  # the floor; the farewell's nod and rock
+                    assert variant.floor or name == "farewell"
+                    continue
+                (arm,) = arms
+                with_arm += 1
+                arrival = arm.offset_s + arm.stroke_s  # the pose's stroke: arriving
+                assert -0.2 <= arrival <= 0.0
+                (wave,) = [t for t in arm.tracks if t.dof == dof and t.mode == "additive"]
+                first = next(i for i, v in enumerate(wave.values) if abs(v) > 1e-9)
+                stroke = arm.offset_s + wave.times[first]  # the wave's first extreme
+                assert stroke >= arrival - 1e-9, "the first stroke once the hand is up"
+                assert arm.offset_s + wave.times[0] >= arrival - 0.2  # its ramp on the way up
+                extremes = [v for v in wave.values if abs(v) > 1e-9]
+                assert len(extremes) == 4 and min(abs(v) for v in extremes) >= 10.0  # two strokes
+                assert arm.offset_s + wave.times[-1] <= arm.offset_s + arm.duration_s + 1e-9
+                assert arm.duration_s <= 2.5
+        waving = len(composition.variants) - 1 if name == "greeting" else 1
+        assert with_arm == 6 * waving
+
+
 def test_mirror_images_turn_both_ways() -> None:
     signs = set()
     for seed in range(20):

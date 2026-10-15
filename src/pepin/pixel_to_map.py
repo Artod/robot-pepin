@@ -20,10 +20,20 @@ it becomes a map point in five steps:
    it into ``base_link`` (:class:`CameraChain`);
 5. the robot's planar pose on the map (the goal server's ``where``) carries it onto the map.
 
+A box from a frame that carries its stamp (the camera channel's records: the exposure's, on the
+board's clock) takes steps 4 and 5 as ONE: ``map -> camera_link`` at that stamp from the one
+history of the poses (TF, asked through the goal server's ``pose_at``: :class:`Stamped`), the
+neck's pose of that moment inside the chain, then the link-to-optical mount (:func:`locate_at`).
+The neck and the cart of now place only a box drawn without a stamp, or one whose stamp TF has no
+history for: a face seen during the gaze's own turn and placed with the poses of after it sent the
+cart 4.9 m into the kitchen (2026-10-14).
+
 Every input is a protocol — the picture (:class:`PairSource`), the depth (:class:`DepthSource`),
 the head (:class:`HeadSource`), the robot's pose (:class:`PoseSource`) — so :class:`Locator` runs on
-fakes in the tests and on the robot's services live. The robot and the head are taken as still
-while one pair is grabbed: the primitive is for a standing robot.
+fakes in the tests and on the robot's services live. The depth pair is grabbed when the box is
+located, after its frame: the camera must not have moved in between (the caller's check: the
+approach tool compares TF's camera link in ``odom`` at the frame's stamp with the one after
+the grab).
 
 The error is the depth's: ``sigma_z = z^2 / (fx * B) * sigma_d`` for stereo (fx * B is 27.5 px*m
 on this rig, so half a pixel of disparity is 7 cm at 2 m and 16 cm at 3 m), a fraction of z for
@@ -38,7 +48,7 @@ import re
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -46,9 +56,11 @@ from typing import Any, Protocol
 import numpy as np
 import numpy.typing as npt
 
+from pepin.depth import rotation_matrix
 from pepin.mounts import Mount, config_path, load_camera_mounts
 from pepin.neck import NeckAngles, NeckConfig, camera_pose
 from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
+from pepin.tsdf import RigidPose
 
 Array = npt.NDArray[np.float64]
 Image = npt.NDArray[np.uint8]
@@ -188,7 +200,9 @@ class DepthImage:
 class Located:
     """Where a box's thing is: on the map (x, y; z above the floor), in ``base_link``, the depth
     it was measured at with that depth's 1-sigma and the box's own scatter, which source
-    answered and on how many pixels, and the head and robot poses it was taken with."""
+    answered and on how many pixels, the neck's encoders when the depth pair was grabbed, the
+    robot's pose the point was placed with, and the frame's ``stamp`` when it was placed with
+    TF's poses at that stamp (None: with the neck and the pose of now)."""
 
     x: float
     y: float
@@ -202,6 +216,7 @@ class Located:
     pixels: int
     head: Head
     pose: Pose2D
+    stamp: float | None = None
 
     @property
     def range_m(self) -> float:
@@ -226,6 +241,47 @@ class Located:
             "spread_m": round(self.spread_m, 2),
             "depth_source": self.source,
         }
+
+
+@dataclass(frozen=True)
+class Stamped:
+    """Where the camera and the cart were when one frame was exposed, from the one history of
+    the poses (TF, through the goal server's ``pose_at``): ``camera`` is ``map <- camera_link``
+    (the neck's pose of that moment inside it), ``base`` the cart's planar pose, ``stamp`` the
+    frame's (seconds, the board's clock: TF's) and ``age_s`` how old it was when asked."""
+
+    camera: RigidPose
+    base: Pose2D
+    stamp: float
+    age_s: float
+
+    @classmethod
+    def from_answers(cls, camera: Mapping[str, Any], base: Mapping[str, Any]) -> Stamped:
+        """From the goal server's two ``pose_at`` answers at one stamp, ``camera_link``'s and
+        ``base_link``'s (x, y, z, qx, qy, qz, qw, yaw_deg, stamp, age_s)."""
+        yaw = math.radians(float(base["yaw_deg"]))
+        return cls(
+            rigid_pose(camera),
+            Pose2D(float(base["x"]), float(base["y"]), yaw),
+            float(camera["stamp"]),
+            float(camera["age_s"]),
+        )
+
+
+def turned_deg(before: RigidPose, after: RigidPose) -> float:
+    """How far a frame turned between two poses of it in one parent (the camera link in
+    ``odom`` at two stamps: the head's turn and the cart's together), degrees: the angle of the
+    rotation between them."""
+    turn = before.rotation.T @ after.rotation
+    cos = max(-1.0, min(1.0, (float(np.trace(turn)) - 1.0) / 2.0))
+    return math.degrees(math.acos(cos))
+
+
+def rigid_pose(answer: Mapping[str, Any]) -> RigidPose:
+    """A ``pose_at`` answer's transform (x, y, z and the quaternion qx, qy, qz, qw)."""
+    q = (float(answer["qx"]), float(answer["qy"]), float(answer["qz"]), float(answer["qw"]))
+    translation = np.array([float(answer["x"]), float(answer["y"]), float(answer["z"])])
+    return RigidPose(rotation_matrix(*q), translation)
 
 
 # -- the optics: the raw left eye and its rectification ---------------------------------------
@@ -412,15 +468,14 @@ def locate(
     min_valid: float = MIN_VALID,
 ) -> Located | None:
     """The map point under ``box`` (pixels of ``space``: :data:`RECTIFIED_LEFT` or
-    :data:`RAW_LEFT`), or None when ``depth`` has too little there."""
-    rect = rectified(eye, box, space)
-    measured = box_depth(depth, rect, inner, min_valid)
+    :data:`RAW_LEFT`) with the neck at ``head`` and the cart at ``pose``, or None when
+    ``depth`` has too little there."""
+    measured = _in_optical(eye, box, depth, space, inner, min_valid)
     if measured is None:
         return None
-    z, spread, pixels = measured
-    u, v = rect.centre
+    point, z, spread, pixels = measured
     rotation, origin = chain.optical_in_base(head)
-    forward, left, up = (rotation @ (eye.ray(u, v) * z) + origin).tolist()
+    forward, left, up = (rotation @ point + origin).tolist()
     x, y = pose.to_map(forward, left)
     return Located(
         x=x,
@@ -436,6 +491,63 @@ def locate(
         head=head,
         pose=pose,
     )
+
+
+def locate_at(
+    eye: Eye,
+    chain: CameraChain,
+    box: Box,
+    depth: DepthImage,
+    at: Stamped,
+    head: Head,
+    *,
+    space: str,
+    inner: float = INNER,
+    min_valid: float = MIN_VALID,
+) -> Located | None:
+    """The map point under ``box`` with the camera where it was at its frame's stamp: the ray
+    in ``camera_optical``, the link-to-optical mount (``chain.optical``) into ``camera_link``,
+    TF's ``map <- camera_link`` at that stamp (``at.camera``) onto the map; ``forward`` and
+    ``left`` are in the cart's frame at that stamp (``at.base``). ``head`` is recorded only (the
+    neck's encoders when the depth pair was grabbed). None when ``depth`` has too little there."""
+    measured = _in_optical(eye, box, depth, space, inner, min_valid)
+    if measured is None:
+        return None
+    point, z, spread, pixels = measured
+    optical = chain.optical
+    in_link = optical.rotation() @ point + optical.translation()
+    x, y, up = (at.camera.rotation @ in_link + at.camera.translation).tolist()
+    forward, left = at.base.to_base(x, y)
+    return Located(
+        x=x,
+        y=y,
+        z=up,
+        forward=forward,
+        left=left,
+        depth_m=z,
+        sigma_m=depth.error.sigma(z),
+        spread_m=spread,
+        source=depth.source,
+        pixels=pixels,
+        head=head,
+        pose=at.base,
+        stamp=at.stamp,
+    )
+
+
+def _in_optical(
+    eye: Eye, box: Box, depth: DepthImage, space: str, inner: float, min_valid: float
+) -> tuple[Array, float, float, int] | None:
+    """The box centre's ray scaled to the box's depth, in ``camera_optical``, with that depth,
+    its spread and its pixel count; None when ``depth`` has too little there."""
+    rect = rectified(eye, box, space)
+    measured = box_depth(depth, rect, inner, min_valid)
+    if measured is None:
+        return None
+    z, spread, pixels = measured
+    u, v = rect.centre
+    point: Array = eye.ray(u, v) * z
+    return point, z, spread, pixels
 
 
 def disparity_to_depth(disparity: npt.NDArray[Any], fb_px_m: float) -> Depths:
@@ -546,10 +658,12 @@ class Locator:
             self._geometry = CameraGeometry.load()
         return self._geometry
 
-    def locate(self, box: Box, space: str) -> Located:
+    def locate(self, box: Box, space: str, at: Stamped | None = None) -> Located:
         """Where the thing under ``box`` (pixels of ``space``: :data:`RECTIFIED_LEFT`, the
-        camera channel's, or :data:`RAW_LEFT`, a snapshot's) is now; :class:`LocateError`
-        saying why not."""
+        camera channel's, or :data:`RAW_LEFT`, a snapshot's) is; :class:`LocateError` saying
+        why not. ``at``: TF's poses at the box's frame's stamp, which place it
+        (:func:`locate_at`, and the pose source is not asked); None places it with the neck
+        and the cart of now (:func:`locate`)."""
         geometry = self.geometry
         eye = geometry.eye
         if not box.inside(eye.width, eye.height):
@@ -559,7 +673,7 @@ class Locator:
             )
         rectified(eye, box, space)  # a space without the calibration is refused before any grab
         head = self.head_source.head()
-        pose = self.pose_source.pose()
+        pose = self.pose_source.pose() if at is None else at.base
         pair = self.pairs.grab()
         left, right = geometry.rectify(pair.left, pair.right)
         tried: list[str] = []
@@ -569,10 +683,16 @@ class Locator:
             except LocateError as error:
                 tried.append(f"{source.name}: {error}")
                 continue
-            found = locate(
-                eye, geometry.chain, box, depth, head, pose,
-                space=space, inner=self.inner, min_valid=self.min_valid,
-            )  # fmt: skip
+            if at is None:
+                found = locate(
+                    eye, geometry.chain, box, depth, head, pose,
+                    space=space, inner=self.inner, min_valid=self.min_valid,
+                )  # fmt: skip
+            else:
+                found = locate_at(
+                    eye, geometry.chain, box, depth, at, head,
+                    space=space, inner=self.inner, min_valid=self.min_valid,
+                )  # fmt: skip
             if found is not None:
                 return found
             tried.append(f"{source.name}: no depth in that box (a blank or too distant surface)")

@@ -282,6 +282,7 @@ class CascadeConfig:
     lead_s: float = 1.0  # audio kept before the opening: the model says speech ~0.4 s into a word
     floor_min_dbfs: float = -85.0
     continuation_s: float = 0.8
+    heard_audio: bool = True  # outside a conversation each utterance's audio beside its row
     turn_model: str | None = None
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
@@ -336,7 +337,7 @@ class CascadeConfig:
     prosody: ProsodyConfig = field(default_factory=ProsodyConfig)
     # conversation
     idle_close_s: float = 20.0
-    max_session_s: float = 900.0
+    idle_parting: bool = True  # the brain says one parting line before the idle close
     report_drive_start: bool = True
     error_line: str = "Извини, у меня сбой связи."  # noqa: RUF001
     conversation_language: str = "ru"  # at a conversation's start (the fillers' language)
@@ -353,6 +354,11 @@ class CascadeConfig:
     filler_max_s: Mapping[str, float] = field(default_factory=lambda: {"thinking": 0.6})
     # the reply's first audio fades a thinking filler still playing out over this (0: it waits)
     filler_fade_ms: float = 60.0
+    # the body's [scene] line before each brain input, only what changed (voice_cascade.scene)
+    scene_status: bool = True
+    scene_heading_sector_deg: float = 15.0
+    scene_hysteresis_deg: float = 5.0
+    scene_cell_m: float = 0.25
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -386,6 +392,7 @@ class CascadeConfig:
             lead_s=float(ears.get("lead_s", d.lead_s)),
             floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
             continuation_s=float(ears.get("continuation_s", d.continuation_s)),
+            heard_audio=bool(ears.get("heard_audio", d.heard_audio)),
             turn_model=ears.get("turn_model") or None,
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
@@ -446,7 +453,7 @@ class CascadeConfig:
                 stretch_min_s=float(pros.get("stretch_min_s", d.prosody.stretch_min_s)),
             ),
             idle_close_s=float(conv.get("idle_close_s", d.idle_close_s)),
-            max_session_s=float(conv.get("max_session_s", d.max_session_s)),
+            idle_parting=bool(conv.get("idle_parting", d.idle_parting)),
             report_drive_start=bool(conv.get("report_drive_start", d.report_drive_start)),
             error_line=str(conv.get("error_line", d.error_line)),
             conversation_language=language,
@@ -458,6 +465,12 @@ class CascadeConfig:
             filler_cooldown_s=by_context(conv.get("filler_cooldown_s"), d.filler_cooldown_s),
             filler_max_s=by_context(conv.get("filler_max_s"), d.filler_max_s),
             filler_fade_ms=float(conv.get("filler_fade_ms", d.filler_fade_ms)),
+            scene_status=bool(conv.get("scene_status", d.scene_status)),
+            scene_heading_sector_deg=float(
+                conv.get("scene_heading_sector_deg", d.scene_heading_sector_deg)
+            ),
+            scene_hysteresis_deg=float(conv.get("scene_hysteresis_deg", d.scene_hysteresis_deg)),
+            scene_cell_m=float(conv.get("scene_cell_m", d.scene_cell_m)),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -552,8 +565,19 @@ class CascadeConfig:
                 " money.daily_budget_cad > 0"
             )
         self.check_fillers()
+        self.check_scene()
         if b.model not in self.prices:
             raise ValueError(f"no price for {b.model}: add it to money.prices_usd_per_mtok")
+
+    def check_scene(self) -> None:
+        """``ValueError`` when the scene's buckets cannot work."""
+        width, slack = self.scene_heading_sector_deg, self.scene_hysteresis_deg
+        whole = 0 < width <= 90 and abs(360 / width - round(360 / width)) < 1e-9
+        if not whole or not 0 <= slack < width or self.scene_cell_m <= 0:
+            raise ValueError(
+                "conversation.scene_heading_sector_deg: 360 divided by a whole number, up to 90;"
+                " conversation.scene_hysteresis_deg from 0 to under it; scene_cell_m > 0"
+            )
 
     def check_fillers(self) -> None:
         """``ValueError`` when the fillers' knobs cannot work."""

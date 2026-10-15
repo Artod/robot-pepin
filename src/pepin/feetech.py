@@ -63,6 +63,10 @@ REGISTERS = {
     # The torque the servo may use, in RAM, 0..1000 of its maximum (the arm's: a knob while it
     # gestures, written with every energising block).
     "Torque_Limit": Register(48, 2),
+    # The EEPROM write lock: 0 lets an EEPROM register (the position limits, the homing offset)
+    # be written for good, 1 (the servo's default) keeps such a write until the servo loses
+    # power. lerobot's calibration writes it 0 with torque off and 1 with torque on.
+    "Lock": Register(55, 1),
     "Present_Position": Register(56, 2, sign_magnitude=True),
     "Present_Velocity": Register(58, 2, sign_magnitude=True),
     "Present_Temperature": Register(63, 1),  # degrees C; the servo cuts out by itself at 70

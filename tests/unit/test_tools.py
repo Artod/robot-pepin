@@ -535,9 +535,9 @@ def test_status_asks_every_owner_and_lists_what_is_down() -> None:
 
 
 def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel_plan() -> None:
-    """The tools compose the goal server's five commands (plan only asks: never motion); they
-    never mark, re-plan or reach a topic. Every tool is run once with fakes and the commands it
-    sent are collected."""
+    """The tools compose the goal server's six commands (plan only asks: never motion; spin is
+    the turn in place); they never mark, re-plan or reach a topic. Every tool is run once with
+    fakes and the commands it sent are collected."""
     robot = fake_robot()
     world(robot).things = [FakeThing("cup")]
     world(robot).objects_known = [{"id": "o1", "label": "cup", "x": 1.0, "y": 1.0}]
@@ -555,11 +555,12 @@ def test_no_tool_asks_the_goal_server_for_anything_but_where_places_go_cancel_pl
         "gesture": {"name": "greeting"},
         "remember_person": {"name": "Sasha"},
         "forget_person": {"name": "Sasha"},
+        "turn": {"target": "left"},
     }
     for t in TOOLS:
         assert call(robot, t.name, **arguments.get(t.name, {}))["ok"], t.name
     asked = {request["cmd"] for request in goals(robot).asked}
-    assert asked == {"where", "places", "go", "cancel", "plan"}
+    assert asked == {"where", "places", "go", "cancel", "plan", "spin"}
 
 
 def test_a_fake_robot_shares_one_clock() -> None:

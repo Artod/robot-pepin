@@ -40,10 +40,11 @@ from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
 
 if TYPE_CHECKING:  # numpy's modules: loaded by the clients that use them
-    from pepin.expression.speaker import AttentionView
+    from pepin.expression.speaker import Attention, AttentionView
     from pepin.perception.client import Perception
+    from pepin.perception.record import Record
     from pepin.perception.source import VisionSource
-    from pepin.pixel_to_map import Box, Located, Pose2D
+    from pepin.pixel_to_map import Box, Located, Pose2D, Stamped
 
 logger = logging.getLogger(__name__)
 
@@ -92,7 +93,20 @@ class GoalServer(Protocol):
 
     def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
         """Whether a goal there would be driven, asked without motion: the ``plan`` answer
-        (``ok``, ``cell``, ``reason``, ``blames``, ``length_m``) or an ``error`` event."""
+        (``ok``, ``cell``, ``reason``, ``blames``, ``length_m``; a plan found also says where
+        it ends, ``end`` {x, y, yaw_deg} with the heading None when its last pose has none,
+        and how far short of the goal, ``short_m`` and ``short_deg``) or an ``error`` event."""
+        ...
+
+    def pose_at(
+        self, frame: str, stamp: float | None = None, parent: str = "map"
+    ) -> dict[str, Any]:
+        """Where ``frame`` (``base_link`` or ``camera_link``) was in ``parent`` (``map``, or
+        ``odom`` for how it moved, smooth across a localisation update) at ``stamp`` (seconds,
+        the board's clock: a camera record's own stamp), out of TF's history; None, the newest
+        there is. The ``pose_at`` answer (``ok``; x, y, z, qx, qy, qz, qw, yaw_deg; ``stamp``,
+        the server's ``now`` and ``age_s``; else ``kind`` and ``reason``) or an ``error``
+        event (an old build: "unknown command")."""
         ...
 
 
@@ -131,6 +145,18 @@ class GoalServerLink:
         """The ``plan`` answer, waited for as long as the planner may take."""
         request = {"cmd": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
         return self._ask(request, timeout_s=goal_link.PLAN_WAIT_S + 5.0)
+
+    def pose_at(
+        self, frame: str, stamp: float | None = None, parent: str = "map"
+    ) -> dict[str, Any]:
+        """The ``pose_at`` answer (its lookup waits half a second at most, well inside the
+        ask's own timeout)."""
+        request: dict[str, Any] = {"cmd": "pose_at", "frame": frame}
+        if stamp is not None:
+            request["stamp"] = stamp
+        if parent != "map":
+            request["parent"] = parent
+        return self._ask(request)
 
     def _ask(
         self, request: dict[str, Any], timeout_s: float = goal_link.ASK_TIMEOUT_S
@@ -883,7 +909,9 @@ class PersonSighting:
     frame's pixels (``space``: the channel's rectified left eye), whether it is their ``face``
     or their ``body``, their bearing in the cart's frame (degrees, + left), how far their head
     is turned from the camera (degrees, + their own left; a face only), how many people the
-    frame holds, its number in the channel's ring, and how this person was chosen."""
+    frame holds, its number in the channel's ring, how this person was chosen, and the frame's
+    exposure ``stamp`` (seconds, the board's clock: the record's own, as camera_stream dates
+    the frame; None from a source that has none)."""
 
     box: tuple[float, float, float, float]
     space: str
@@ -893,6 +921,7 @@ class PersonSighting:
     people: int
     seq: int
     chosen: str
+    stamp: float | None = None
 
 
 class Sightings(Protocol):
@@ -972,7 +1001,7 @@ class ChannelSightings:
                 near = [s for s in group if abs(_wrap_deg(s.bearing - bearing)) <= self.match_deg]
                 if near:
                     best = min(near, key=lambda s: abs(_wrap_deg(s.bearing - bearing)))
-                    return best.sighting(people, record.seq, "the person the gaze holds")
+                    return best.sighting(people, record, "the person the gaze holds")
             shown = ", ".join(f"{s.bearing:+.0f}" for s in faces or bodies)
             raise ToolError(
                 f"the person the robot talks with is at {bearing:+.0f} deg and the newest"
@@ -981,14 +1010,35 @@ class ChannelSightings:
             )
         if faces:
             return max(faces, key=lambda s: s.size).sighting(
-                people, record.seq, "the widest face (the nearest)"
+                people, record, "the widest face (the nearest)"
             )
         return max(bodies, key=lambda s: s.size).sighting(
-            people, record.seq, "the tallest body (the nearest)"
+            people, record, "the tallest body (the nearest)"
         )
 
 
 IDLE = ("idle", "paused")  # the gaze's phases without a person engaged (a drive pauses it)
+
+
+class Facing(Protocol):
+    """The speaker gaze as a tool reads and asks it (the approach tool: nobody in view, a voice
+    to go by; the turn tool): its snapshot, the body turned to the person it holds, and the
+    person kept through a turn in place someone else makes."""
+
+    def attention(self) -> Attention:
+        """The snapshot now (:class:`pepin.expression.speaker.AttentionView`)."""
+        ...
+
+    def face_person(self, why: str) -> str | None:
+        """Turn the body to the person engaged, the whole bearing in one request; None when the
+        turn runs (or one already does), else why not."""
+        ...
+
+    def keep_person(self, why: str) -> Attention | str:
+        """A turn in place of the body's begins (a drive to the cascade, which pauses the gaze):
+        the person engaged is kept through it, the head on them as the body comes round; the
+        snapshot right after (their bearing as the turn starts), else why not."""
+        ...
 
 
 @dataclass(frozen=True)
@@ -1002,13 +1052,14 @@ class _Seen:
     yaw_deg: float | None
     size: float
 
-    def sighting(self, people: int, seq: int, chosen: str) -> PersonSighting:
-        """As the tools' :class:`PersonSighting`."""
+    def sighting(self, people: int, record: Record, chosen: str) -> PersonSighting:
+        """As the tools' :class:`PersonSighting`, with ``record``'s number and stamp."""
         from pepin.perception.record import RECTIFIED_LEFT
 
         return PersonSighting(
-            self.box, RECTIFIED_LEFT, self.kind, self.bearing, self.yaw_deg, people, seq, chosen
-        )
+            self.box, RECTIFIED_LEFT, self.kind, self.bearing, self.yaw_deg, people, record.seq,
+            chosen, record.stamp,
+        )  # fmt: skip
 
 
 def _wrap_deg(deg: float) -> float:
@@ -1019,11 +1070,12 @@ def _wrap_deg(deg: float) -> float:
 class Eyes(Protocol):
     """Points of the picture as points of the map (:class:`pepin.pixel_to_map.Locator`)."""
 
-    def locate(self, box: Box, space: str) -> Located:
-        """Where the thing under ``box`` is now, the box in pixels of ``space`` (the rectified
+    def locate(self, box: Box, space: str, at: Stamped | None = None) -> Located:
+        """Where the thing under ``box`` is, the box in pixels of ``space`` (the rectified
         left eye of the camera channel's frames, or the raw left eye of a snapshot: the one it
-        was drawn on, rectified here only when raw); :class:`pepin.pixel_to_map.LocateError`
-        saying why not."""
+        was drawn on, rectified here only when raw), placed with TF's poses at its frame's
+        stamp (``at``) or, None, with the neck and the cart of now;
+        :class:`pepin.pixel_to_map.LocateError` saying why not."""
         ...
 
     def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:

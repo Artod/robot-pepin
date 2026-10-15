@@ -22,6 +22,7 @@ from pepin.tools import (  # noqa: F401 -- they register (approach after drive's
     people,
     speech,
     status,
+    turn,
 )
 from pepin.tools.registry import (
     TOOLS,

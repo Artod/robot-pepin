@@ -90,6 +90,7 @@ from pepin.expression.animation import (
     PARTS,
     Book,
     Clip,
+    Composition,
     Event,
     Idle,
     IdleState,
@@ -98,6 +99,7 @@ from pepin.expression.animation import (
     Scene,
 )
 from pepin.expression.book import vocabulary
+from pepin.expression.breath import ArmBreath
 from pepin.expression.conversation import (
     GESTURES,
     AudioTap,
@@ -109,7 +111,7 @@ from pepin.expression.conversation import (
 from pepin.expression.executors import Executor, Outcome, Renewing
 from pepin.expression.markers import Cue, Part, Playout, cues, gesture
 from pepin.expression.mix import stretched
-from pepin.expression.parts import ArmPart, HeadPart
+from pepin.expression.parts import GENTLE_SHARE, ArmPart, HeadPart
 from pepin.expression.render import BookRenderer, Resolver, WeightedChooser
 from pepin.expression.schedule import (
     NOT_YET,
@@ -131,6 +133,7 @@ from pepin.expression.speaker import (
     arm_refusal,
     head_refusal,
 )
+from pepin.expression.trajectory import JOINTS
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +189,8 @@ class EngineConfig:
     arm_speed_scale: float = 0.2
     body_speed_scale: float = 0.4
     head_seen_s: float = HEAD_SEEN_S
+    arm_past_arc: bool = True  # the arm waits while the person stands past the forward arc
+    arm_caps_share: float = GENTLE_SHARE  # the posture's raise and its gentle way down
     caps: Caps = field(default_factory=Caps)
     timing: Timing = field(default_factory=Timing)  # the scheduler's (``timing``, ``units``)
 
@@ -215,6 +220,8 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
         arm_speed_scale=float(arm.get("speed_scale", d.arm_speed_scale)),
         body_speed_scale=float(data.get("wheels", {}).get("speed_scale", d.body_speed_scale)),
         head_seen_s=float(layers.get("head_seen_s", d.head_seen_s)),
+        arm_past_arc=bool(layers.get("arm_past_arc", d.arm_past_arc)),
+        arm_caps_share=float(data.get("pulse", {}).get("arm_up_caps_share", d.arm_caps_share)),
         caps=Caps(
             per_part=int(caps.get("per_part", c.per_part)),
             per_reply=int(caps.get("per_reply", c.per_reply)),
@@ -477,8 +484,8 @@ class GestureEngine:
         person's words at a pause are the listeners'."""
         self._post(lambda: self._moment(name))
 
-    def drive(self, active: bool) -> None:
-        """A drive: every part to rest and nothing new until it ends."""
+    def drive(self, active: bool, ran: bool = True) -> None:
+        """A drive: every part to rest and nothing new until it ends (run or not)."""
         self._post(lambda: self._drive(active))
 
     def closed(self, reason: str) -> None:
@@ -570,11 +577,14 @@ class GestureEngine:
             composition = self.book.compositions.get(marker.name)
             if composition is not None:
                 request = replace(request, bind=composition.bind, family=composition.family)
+                arg = styled_arg(composition, marker.arg, part.style)
+                if arg != marker.arg:  # the part's style chose the bare mark's argument
+                    cue = replace(cue, marker=replace(marker, arg=arg))
             self._request(request, cue)
 
     def _drop_turns(self, turn: int, why: str, only: bool = False) -> None:
         self.scheduler.drop(turn, why, only=only)
-        self._rest_unit(f"the reply is {why}", turn, only=only)
+        self._rest_unit(f"the reply is {why}", turn, only=only, gently=True)
         self._replying = {t for t in self._replying if not (t == turn if only else t <= turn)}
         self._ended["speaking"] = self.clock()
 
@@ -639,9 +649,14 @@ class GestureEngine:
             self.record("faded", {"intent": playing.performance.intent, "part": part, "why": why})
         self._rest_unit(why)
 
-    def _rest_unit(self, why: str, turn: int | None = None, *, only: bool = False) -> bool:
+    def _rest_unit(
+        self, why: str, turn: int | None = None, *, only: bool = False, gently: bool = False
+    ) -> bool:
         """The arm's held unit (of reply ``turn`` and those before it, ``only`` that one, when
-        given) to rest, unless a clip still moves the arm; True when it went."""
+        given) to rest, unless a clip still moves the arm; True when it went. ``gently``: the
+        reply's end, where nothing hurries: the arm's own slow way down
+        (:meth:`pepin.expression.parts.ArmPart.lower`), quiet like the raise; the person's start
+        and the body's turn keep the board's quick way (the arm clears out)."""
         part = self.parts.get("arm")
         if part is None or not _holds(part):
             return False
@@ -654,12 +669,15 @@ class GestureEngine:
         playing = self._playing.get("arm")
         if playing is not None and now < playing.ends:
             return False
-        part.fade("gesture", self.config.fade_s.get("arm", 0.0))
+        lowered = part.lower() if gently and isinstance(part, ArmPart) else None
+        if lowered is None:
+            part.fade("gesture", self.config.fade_s.get("arm", 0.0))
         self.scheduler.reservations.release("arm")
         self._held_turn = None
         latest = self.scheduler.reservations.last("arm")
         self.record("faded", {"intent": latest.performance.intent if latest else "unit",
-                              "part": "arm", "why": why})  # fmt: skip
+                              "part": "arm", "why": why,
+                              **({"down_s": round(lowered, 2)} if lowered else {})})  # fmt: skip
         return True
 
     def _release(self, request: Request, why: str) -> None:
@@ -948,7 +966,7 @@ class GestureEngine:
             if clip.part == "arm":
                 if now < self._arm_free_s:
                     return "the arm went to rest for the body's turn"
-                refusal = arm_refusal(view)
+                refusal = arm_refusal(view, self.config.arm_past_arc)
                 if refusal is not None:
                     return refusal
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
@@ -1081,11 +1099,15 @@ class GestureEngine:
         return wait
 
     def _apply_knobs(self) -> None:
-        """The arm's part checks against the speed scale its clips are stretched by; the head's
-        rest eases back over the head's fade; the scheduler's timing."""
+        """The arm's part checks against the speed scale its clips are stretched by, carries the
+        book's breath for the arm (none when the book has none) and the gentle share; the
+        head's rest eases back over the head's fade; the scheduler's timing."""
         arm = self.parts.get("arm")
         if isinstance(arm, ArmPart):
             arm.speed_scale = self.config.arm_speed_scale
+            arm.gentle_share = self.config.arm_caps_share
+            breath = self.book.breath.get("arm")
+            arm.breath = None if breath is None else ArmBreath(breath, JOINTS, self.clock)
         head = self.parts.get("head")
         if isinstance(head, HeadPart):
             head.fade_s = self.config.fade_s.get("head", head.fade_s)
@@ -1108,6 +1130,19 @@ def _mark(intent: str, cue: Cue | None, arg: str | None = None) -> str:
     if cue is not None:
         arg = cue.marker.arg if cue.marker.name == intent else None
     return intent if arg is None else f"{intent}:{arg}"
+
+
+def styled_arg(composition: Composition, arg: str | None, style: str | None) -> str | None:
+    """A bare marker's argument chosen by its part's style (the composition's ``style_args``:
+    ``{laugh}`` in a ``{sinister}`` part is ``{laugh:evil}``); a marker's own argument, or a
+    part without a style, as given."""
+    if arg is not None or style is None or not composition.style_args:
+        return arg
+    words = set(re.split(r"[\s,;]+", style.lower()))
+    for candidate, cues_ in composition.style_args.items():
+        if words & set(cues_):
+            return candidate
+    return arg
 
 
 def bounded(wait: float | None) -> float | None:

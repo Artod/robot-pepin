@@ -96,7 +96,13 @@ class GoalServerFake(LineServer):
             send({"event": "accepted", "x": 0.0, "y": 0.0, "yaw_deg": 0.0})
             send({"event": "done", "status": 4, "seconds": 1.0})
         elif cmd == "plan":
-            send({"event": "plan", "x": request["x"], "ok": True, "cell": "free"})
+            send({"event": "plan", "x": request["x"], "ok": True, "cell": "free",
+                  "end": {"x": 1.2, "y": -0.5, "yaw_deg": None}, "short_m": 0.3,
+                  "short_deg": None})  # fmt: skip
+        elif cmd == "pose_at":
+            stamp = request.get("stamp", 1000.0)
+            send({"event": "pose_at", "ok": True, "frame": request["frame"], "stamp": stamp,
+                  "now": 1000.0, "age_s": 1000.0 - stamp, "yaw_deg": 35.0})  # fmt: skip
 
 
 @pytest.fixture
@@ -112,9 +118,26 @@ def test_the_goal_server_link_speaks_the_five_commands(goal_server: GoalServerFa
     assert link.places() == {"home": {"x": 0.0, "y": 0.0, "yaw_deg": 0.0}}
     assert [e["event"] for e in link.go({"cmd": "go", "place": "home"})] == ["accepted", "done"]
     assert link.cancel()["event"] == "cancelled"
-    assert link.plan(1.5, -0.5, 90.0) == {"event": "plan", "x": 1.5, "ok": True, "cell": "free"}
+    planned = link.plan(1.5, -0.5, 90.0)
+    assert planned["ok"] is True and planned["cell"] == "free"
+    assert planned["end"] == {"x": 1.2, "y": -0.5, "yaw_deg": None}, "a last pose without heading"
+    assert (planned["short_m"], planned["short_deg"]) == (0.3, None)
     assert [r["cmd"] for r in goal_server.asked] == ["where", "places", "go", "cancel", "plan"]
     assert goal_server.asked[-1] == {"cmd": "plan", "x": 1.5, "y": -0.5, "yaw_deg": 90.0}
+
+
+def test_the_goal_server_link_asks_where_a_frame_was_at_a_stamp(
+    goal_server: GoalServerFake,
+) -> None:
+    """``pose_at`` with the record's own stamp, and without one for the newest pose."""
+    link = GoalServerLink("127.0.0.1", goal_server.port)
+    then = link.pose_at("camera_link", 998.75)
+    assert (then["ok"], then["age_s"], then["yaw_deg"]) == (True, 1.25, 35.0)
+    assert link.pose_at("base_link")["stamp"] == 1000.0
+    assert goal_server.asked == [
+        {"cmd": "pose_at", "frame": "camera_link", "stamp": 998.75},
+        {"cmd": "pose_at", "frame": "base_link"},
+    ]
 
 
 def test_a_goal_server_nobody_runs_is_named() -> None:
@@ -210,7 +233,7 @@ def test_the_neck_reports_a_denial_in_the_arbiter_s_words(gaze: GazeDoorFake) ->
 def test_the_neck_s_reach_and_rest_come_from_its_config() -> None:
     head = GazeNeck(f"http://127.0.0.1:{closed_port()}", NECK)
     reach = head.reach()
-    assert reach.pan_left_deg == pytest.approx(155.7, abs=0.5)
+    assert reach.pan_left_deg == pytest.approx(164.0, abs=0.5)
     assert reach.refusal(0.0, 70.0) is not None and reach.refusal(-150.0, 60.0) is None
     assert head.rest().tilt_deg == 23.8
     with pytest.raises(ServiceDownError, match="gaze arbiter"):

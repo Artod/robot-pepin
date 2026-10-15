@@ -4,7 +4,8 @@
 # The laptop's folders are a spool: recorders write locally, and finished files (closed for at
 # least MIN_AGE) are MOVED to the bucket under the same relative path, "pepin/<path>", by rclone.
 # Small text (events.jsonl, summaries, scripts, databases) stays local for the tools; audio, video,
-# drive recordings with their video, and logs older than a day go. Nothing is deleted on the laptop. Reading a shipped file: the
+# drive recordings with their video, and logs older than a day go (a MOVE: the local copy leaves,
+# the bucket keeps it; nothing is ever pruned). Reading a shipped file: the
 # mount (~/B2/pepin/<path>, the same tree) or `restore`.
 #
 #   ros/tools/b2_ship.sh ship              # move what is finished (what launchd runs every 30 min)
@@ -31,7 +32,8 @@ MIN_AGE="30m"
 # root | min age | rclone filter rules (first match wins; "+" include, "-" exclude; a root
 # without rules ships everything). Logs, audio and video (Artem, 2026-10-13): the voice sessions'
 # audio, the drive recordings with their video and board logs, the ring recorder, the videos
-# folder, the container logs. Scratch, models, databases and Docker never go. Nothing is deleted
+# folder, the container logs. The servo bus tap's logs (data/bus_tap) are a ring kept three
+# days by their sink, never shipped. Scratch, models, databases and Docker never go. Nothing is deleted
 # here: what to keep is decided in the bucket.
 RULES=(
   "data/voice|30m|+ *.wav|- *"

@@ -11,9 +11,11 @@ from pepin.audio_link import (
     DoaReading,
     FrameDecoder,
     ProtocolError,
+    RawFrame,
     encode,
     parse_doa,
     parse_frame,
+    parse_raw,
     play_paced,
 )
 
@@ -75,6 +77,22 @@ def test_malformed_frames_and_directions_are_refused() -> None:
 def test_frame_duration_follows_its_samples() -> None:
     frame = AudioFrame(0, 0.0, b"\x00\x00" * 320)
     assert frame.samples == 320 and frame.duration_s == pytest.approx(0.02)
+
+
+def test_a_raw_microphone_frame_rides_the_wire_beside_the_processed_one() -> None:
+    raw = RawFrame(7, 12.5, b"\x01\x00\x02\x00\x03\x00\x04\x00" * 320, 4)
+    assert raw.samples == 320 and raw.duration_s == pytest.approx(0.02)
+    wire = AudioFrame(7, 12.5, b"\x09\x00" * 320).encode() + raw.encode()
+    (pcm_header, pcm), (raw_header, payload) = FrameDecoder().feed(wire)
+    assert pcm_header["type"] == "pcm" and raw_header == {
+        "type": "raw", "seq": 7, "t": 12.5, "ch": 4, "bytes": 2560
+    }  # fmt: skip
+    assert parse_raw(raw_header, payload) == raw
+    assert parse_frame(pcm_header, pcm).stamp_s == raw.stamp_s, "the same moment, both kinds"
+    with pytest.raises(ValueError):
+        parse_raw({"type": "raw", "seq": 0, "t": 0.0, "ch": 4}, b"\x00" * 6)  # not whole samples
+    with pytest.raises(ValueError):
+        parse_raw({"type": "raw", "seq": 0, "t": 0.0, "ch": 0}, b"")
 
 
 class FakeSpeaker:

@@ -10,9 +10,21 @@ reply's first word, a brain whose first token is late ("Хм…"), a wait that g
 pause mid-utterance (the backchannel). A reply's turn stays open in
 the brain until its audio has played: a barge-in until then keeps only what was heard. A drive
 answers its tool call when the goal server takes it (the brain says its acknowledgement) and
-reports its end as the robot's own turn (``[robot] ...``). "Стоп" heard during a drive halts the
-robot before the brain hears it. A conversation closes after ``idle_close_s`` of quiet, on a
-goodbye, on ``end_conversation`` or at a cap.
+reports its end as the robot's own turn (``[robot] ...``): an arrival at once, in one short
+line with the numbers in brackets (:func:`drive_report`; the goal server's ``arrival``, its
+pivot and tape not waited for), the brain asked while whatever the speaker still plays goes on
+(its reply queues behind it in the one stream); anything else in the tool's own words. A drive
+asked while another runs is the goal server's to decide (pepin_bringup.goal_server, its one
+rule): the same one is already under way (no new goal), another cancels it and starts, its
+answer saying what it replaced (the replaced drive's end is then not reported). A
+``[robot]`` turn whose brain call never got an answer (no connection, a timeout) is asked again
+once; failing again, its message goes in front of the next turn's words. A turn cut short (a
+barge-in, the person going on) leaves its tool calls without an answer to the brain's next
+turn, on a line after its words (:func:`cut_note`: never ran, no answer yet, or the answer that
+came after the cut; a drive cut before the goal server took it still reports its end as any
+drive's). "Стоп" heard during a drive halts the robot before the brain hears it. A conversation
+closes after ``idle_close_s`` of quiet, on a goodbye, on ``end_conversation`` or at the daily
+budget.
 
 The person starting again within ``continuation_s`` of an utterance's close, before the reply
 to it has sent anything to the voice, keeps that reply silent: its brain goes on, its
@@ -59,13 +71,13 @@ loop: the conversation opened, the person started and stopped speaking, paused m
 has landed), a part of a reply went to the voice, had its first chunk with
 the player and was all fed to it, a sentence before it is whole (``text_ahead``, from the
 brain's token stream), a reply was cut or played out, a slow tool's filler, a drive's start and
-end, the close. Every chunk of a reply also goes to the audio taps
-(:class:`pepin.expression.conversation.AudioTap`) on the voice's thread, and each part spoken
-leaves a ``part_audio`` event (its stream span, its leading silence, when each chunk came). None
-is registered by default; one that raises is logged and never stops the voice. A feature's live
-switch (:class:`pepin.expression.conversation.LiveFlag`) is flipped through the control file's
-``flags``. These seams are the gesticulation contract's: its slices (DESIGN.md §11) add no code
-here.
+end (with whether it ran: a goal taken), the close. Every chunk of a reply also goes to the
+audio taps (:class:`pepin.expression.conversation.AudioTap`) on the voice's thread, and each
+part spoken leaves a ``part_audio`` event (its stream span, its leading silence, when each chunk
+came). None is registered by default; one that raises is logged and never stops the voice. A
+feature's live switch (:class:`pepin.expression.conversation.LiveFlag`) is flipped through the
+control file's ``flags``. These seams are the gesticulation contract's: its slices (DESIGN.md
+§11) add no code here.
 """
 
 from __future__ import annotations
@@ -86,9 +98,11 @@ from typing import Any, Literal, Protocol
 
 import numpy as np
 
+from pepin.audio_link import RATE
 from pepin.expression.conversation import (
     LISTENER_PAUSE,
     SLOW_TOOL,
+    SPEAKER_GAZE,
     AudioTap,
     ConversationObserver,
     Heard,
@@ -112,6 +126,15 @@ from pepin.voice_cascade.fillers import (
 )
 from pepin.voice_cascade.log import CascadeLog, append_line, day_dir
 from pepin.voice_cascade.player import FillerFade, Player
+from pepin.voice_cascade.scene import (
+    AttentionReader,
+    Reading,
+    Report,
+    SceneKnobs,
+    SceneStatus,
+    book_of,
+    pose_of,
+)
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import (
     FOLLOW_UP,
@@ -139,7 +162,7 @@ from pepin.voice_cascade.timing import log_rows
 from pepin.voice_cascade.transcriber import read_early, read_timed, transcript_of
 from pepin.voice_cascade.turn import TurnWorker
 from pepin.voice_cascade.turn_text import TextJudge
-from pepin.voice_live.audio import Resampler
+from pepin.voice_live.audio import Resampler, save_wav
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.events import Events, State
 from pepin.voice_live.sources import FrameSink
@@ -150,15 +173,20 @@ logger = logging.getLogger(__name__)
 
 ToolRunner = Callable[[str, dict[str, Any]], Result]
 ROBOT_REPORT = "[robot]"
-UNDER_WAY = (
-    f"under way: a {ROBOT_REPORT} message reports the drive's end; do not call it again meanwhile"
-)
+REPORTED = f"a {ROBOT_REPORT} message reports the drive's end; do not call it again meanwhile"
+UNDER_WAY = f"under way: {REPORTED}"
 ACKNOWLEDGED = "; your acknowledgement is already said"
-UNASKED_DRIVE = (
-    "not driving: no one has asked for another drive since the last one; never repeat a drive"
-    " unless a person asks again"
+# the goal server's `already` for a drive this conversation did not start: no report comes
+NOT_OURS = "it was not started in this conversation, so no [robot] message reports its end"
+# a [robot] message whose turn failed twice, in front of the next turn's words
+NOT_ANSWERED = "[robot, earlier, not answered]"
+ROBOT_RETRY_S = 1.5  # a [robot] turn whose brain call got no answer is asked again after this
+# a brain call that never got an answer (the SDKs' and httpx's names, matched along the error's
+# classes so that no SDK is imported here): worth one more try, unlike a refusal (a 4xx)
+CONNECTION_ERRORS = frozenset(
+    ("APIConnectionError", "APITimeoutError", "TransportError", "TimeoutException")
 )
-END_WAIT_S = 10.0  # a robot report waits this long at most for the robot's line to end
+IDLE_CLOSE = "idle"  # the close's reason after idle_close_s of quiet (the parting line said)
 PLAYOUT_WAIT_S = 120.0  # a reply's audio is waited for this long at most
 PAUSE_SLACK_S = 0.05  # an early read started this much before its pause's start still is its
 # tools that take a while: the robot says its filler when the brain calls one before a word
@@ -174,7 +202,103 @@ HOLD_RELEASE_S = 0.3
 # a reply dropped for the turn after it (the person went on; asked early on other words): it
 # answered no turn of its own
 UNANSWERED = frozenset(("merged", "speculative"))
+# outcomes whose turn the brain's history keeps (its words, its tool rounds)
+KEPT = frozenset(("committed", "interrupted"))
+CUT_SHORT = frozenset(("interrupted", "merged"))  # by a barge-in; by the words after it
+# a cut turn's calls without an answer, told the brain on a line after its next turn's words
+CUT_TOOLS = "[tools of your reply cut short: {calls}]"
+CUT_RESULT_CHARS = 300  # a late answer told at most this long
 LEADING_LEVEL = 32  # a sample under this (16-bit, about -60 dBFS) is the voice's leading silence
+
+
+def call_text(name: str, args: dict[str, Any]) -> str:
+    """``go_to(place='printer')``: a tool call as the brain is told about it."""
+    return f"{name}({', '.join(f'{k}={v!r}' for k, v in args.items())})"
+
+
+@dataclass(eq=False)
+class ToolCall:
+    """A tool the brain called in a turn: whether it ran, and its answer, a late one too (the
+    turn was cut while it ran, and it went on). A cut turn's calls without an answer are told
+    to the brain at its next turn; a late answer at the turn after the one told "no answer
+    yet"."""
+
+    id: str
+    name: str
+    args: dict[str, Any]
+    sid: str = ""  # the conversation's
+    ran: bool = False  # it started (one asked for while the reply was silent waits for words)
+    drive: bool = False  # a drive cut before the goal server took it: a robot report ends it
+    result: str | None = None  # its answer within the turn, as the brain read it
+    late: str | None = None  # its answer after the turn was cut
+    told: bool = False  # the brain has been told it as it stands (or a turn being asked is)
+
+    @property
+    def outcome(self) -> str:
+        """``answered``, ``unanswered`` (it ran, no answer yet) or ``not run``."""
+        return "answered" if self.result is not None else "unanswered" if self.ran else "not run"
+
+    def line(self) -> str:
+        """``approach(target='me'): never ran``: the call as the brain's next turn reads it."""
+        if not self.ran:
+            state = "never ran"
+        elif self.late is not None:
+            state = f"answered after the cut: {self.late[:CUT_RESULT_CHARS]}"
+        elif self.drive:
+            state = f"no answer yet (a {ROBOT_REPORT} message reports the drive's end)"
+        else:
+            state = "no answer yet"
+        return f"{call_text(self.name, self.args)}: {state}"
+
+
+def cut_note(calls: Sequence[ToolCall]) -> str:
+    """The line telling the brain about a cut turn's calls ("" for none)."""
+    return CUT_TOOLS.format(calls="; ".join(c.line() for c in calls)) if calls else ""
+
+
+def connection_error(error: BaseException) -> bool:
+    """``error`` says the brain's call never got an answer (no connection, a timeout), not
+    that it was refused."""
+    if isinstance(error, (TimeoutError, ConnectionError)):
+        return True
+    return any(cls.__name__ in CONNECTION_ERRORS for cls in type(error).__mro__)
+
+
+def drive_report(call: str, result: Result) -> str:
+    """The robot's own turn at a drive's end. Reached (arrived, or turned): one short line,
+    the numbers in brackets, ``[robot] arrived: printer (12 s, off by 4 cm;
+    go_to(place='printer'), run 52)`` (2026-10-14, Artem: the arrival straight to the brain,
+    briefly, the service facts in brackets; the brain speaks, nothing is scripted). Anything
+    else in the tool's whole answer, as before."""
+    reached = "arrived" if result.get("arrived") else "turned" if result.get("turned") else ""
+    if not (result.get("ok") and reached):
+        text, _ = render(result)
+        return f"{ROBOT_REPORT} the drive {call} has ended: {text}"
+    facts: list[str] = []
+    seconds, off, turned = result.get("seconds"), result.get("off_by_m"), result.get("turned_deg")
+    if isinstance(seconds, (int, float)):
+        facts.append(f"{seconds:.0f} s")
+    if isinstance(off, (int, float)):
+        facts.append(f"off by {off * 100:.0f} cm")
+    if isinstance(turned, (int, float)):
+        facts.append(f"turned {turned:+.0f} deg")
+    run = result.get("run")
+    which = call + ("" if run is None else f", run {run}")
+    numbers = ", ".join(facts) + "; " if facts else ""
+    return f"{ROBOT_REPORT} {reached}: {result.get('target') or call} ({numbers}{which})"
+
+
+def drive_ran(task: asyncio.Task[Result], started: asyncio.Future[Result]) -> bool:
+    """Whether a drive's call, now ended, set the body moving: the goal server took its goal
+    (``started``: the tool's interim answer, ``status: driving``) or the same drive was under
+    way (``already``). A refusal, a tool that found nothing to do (a turn already facing its
+    target) and a call that raised before either did not; a call cancelled counts as ran
+    (nobody knows)."""
+    if started.done() or task.cancelled():
+        return True
+    if task.exception() is not None:
+        return False
+    return bool(task.result().get("already"))
 
 
 @dataclass
@@ -224,6 +348,7 @@ class Input:
     eot: dict[str, Any] | None = None  # the end-of-turn model's verdict on the utterance
     fragments: int = 1  # utterances joined into this turn (the person went on)
     speculation: Speculation | None = None  # asked at the early read, before the close
+    carry: bool = True  # a robot report its turn failed to answer goes with the next turn
 
 
 @dataclass(eq=False)
@@ -268,6 +393,12 @@ class Reply:
     usage: Usage = field(default_factory=Usage)
     calls: int = 0
     tools: list[dict[str, Any]] = field(default_factory=list)
+    called: list[ToolCall] = field(default_factory=list)  # every call the brain made, in order
+    told: list[ToolCall] = field(default_factory=list)  # cut turns' calls told with its words
+    note: str = ""  # the line about them after its words (:func:`cut_note`)
+    carried: list[str] = field(default_factory=list)  # robot reports unanswered, before its words
+    retried: str | None = None  # the error its first brain call ended with, asked again after it
+    lost: bool = False  # a robot report it failed to answer: told with the next turn
     audio: bool = False  # some of its audio reached the player
     acted: bool = False  # it ran a tool
     filled: bool = False  # a slow tool was called before a word: the wait is announced
@@ -289,6 +420,7 @@ class Reply:
     # while muted: what it does once free, in order (its voice jobs, the body's cues)
     waiting: list[Callable[[], None]] = field(default_factory=list)
     free: asyncio.Event = field(default_factory=_set_event)  # set while not muted
+    scene: Report | None = None  # the body's scene its input carried (kept with its turn)
 
 
 @dataclass
@@ -385,8 +517,12 @@ class CascadeLoop:
         self.current: Reply | None = None
         self.last_turn = 0  # the id of the latest reply (the mic thread cuts up to it)
         self.inputs: asyncio.Queue[Input] = asyncio.Queue()
+        # the brain's drives not ended (from the call on): the body hears the first start and
+        # the last end; which one runs is the goal server's (its one rule), not this loop's
         self.drives: set[asyncio.Task[Result]] = set()
-        self.heard_since_drive = True
+        self.drive_ran = False  # whether a call of the drives under way set the body moving
+        self.cut_calls: list[ToolCall] = []  # cut turns' calls the next turn's brain is told
+        self.unanswered: list[str] = []  # robot reports whose turn failed: the next turn's
         self.places: list[str] | None = None
         self.turns: list[dict[str, Any]] = []  # every finished turn (the bench reads these)
         self.person_turns = 0
@@ -419,6 +555,17 @@ class CascadeLoop:
         self._log_resampler: tuple[int, int, Resampler] | None = None
         self.observers: list[ConversationObserver] = list(observers)
         self.flags: dict[str, LiveFlag] = {flag.flag: flag for flag in flags}
+        # the body's scene before each brain input, what changed (its own live flag); the person
+        # in it is the speaker gaze's snapshot (the gaze is its own flag), the places' positions
+        # the book read_places reads
+        knobs_of_scene = (config.scene_heading_sector_deg, config.scene_hysteresis_deg,
+                          config.scene_cell_m)  # fmt: skip
+        self.scene = SceneStatus(SceneKnobs(*knobs_of_scene), on=config.scene_status)
+        self.flags[self.scene.flag] = self.scene
+        self.attention: AttentionReader | None = getattr(
+            self.flags.get(SPEAKER_GAZE), "attention", None
+        )
+        self.book: dict[str, tuple[float, float]] = {}
         self.knobs: dict[str, LiveKnob] = {knob.knob: knob for knob in knobs}
         self.cells = list(cells)
         self.taps: list[AudioTap] = list(taps)
@@ -426,6 +573,8 @@ class CascadeLoop:
         self.vocabulary = vocabulary
         self.people = people
         self._people = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="people")
+        # idle utterances' audio to disk, off the event loop (ears.heard_audio)
+        self._heard_wavs = concurrent.futures.ThreadPoolExecutor(1, thread_name_prefix="heard")
         speech.on_audio = self._on_audio
         speech.on_done = self._on_spoken
         speech.on_bill = self._on_bill
@@ -471,6 +620,7 @@ class CascadeLoop:
             self._whisper.shutdown(wait=False)
             self._praat.shutdown(wait=False)
             self._people.shutdown(wait=False)
+            self._heard_wavs.shutdown(wait=True)  # the files queued at the stop are written
 
     def quiet(self) -> bool:
         """Nothing in flight: no utterance being read, no reply, no queued input, no audio, no
@@ -487,13 +637,14 @@ class CascadeLoop:
 
     def read_places(self) -> list[str] | None:
         """The names in the places book (list_places through the registry), None when it
-        cannot be read."""
+        cannot be read; their positions are kept for the scene (:attr:`book`)."""
         if "list_places" not in self.allowed:
             return None
         result = self.tools("list_places", {})
         rows = result.get("places") if result.get("ok") else None
         if not isinstance(rows, list):
             return None
+        self.book = book_of(rows)
         names = [str(r["name"]) for r in rows if isinstance(r, dict) and "name" in r]
         return names or None
 
@@ -1003,6 +1154,18 @@ class CascadeLoop:
         finally:
             self.hearing -= 1
 
+    def _keep_heard(self, day: Path, segment: Segment) -> str:
+        """Queue an idle utterance's audio as ``day/heard/<HHMMSS_mmm>.wav`` on the heard
+        worker and return that path relative to ``day``. The file is the whole segment the ears
+        closed, as the transcriber got it (16 kHz mono 16-bit, the lead-in and the closing quiet
+        included; an early read heard the same audio up to its pause), named by the local time
+        of its last voiced frame (the utterance's end)."""
+        ended = self.wall() - (self.clock() - segment.ended_s)
+        stamp = time.strftime("%H%M%S", time.localtime(ended))
+        name = f"heard/{stamp}_{int(ended % 1 * 1000):03d}.wav"
+        self._heard_wavs.submit(keep_wav, day / name, segment.pcm)
+        return name
+
     async def _read(
         self,
         segment: Segment,
@@ -1054,11 +1217,18 @@ class CascadeLoop:
                 + ("  -> WAKE" if woke else "  (noise line)" if noise else ""),
                 flush=True,
             )
+            # the level and the length: a far call that opens the ears and reads as nothing
+            # (2026-10-13, two empty idle reads the night Artem's call across the room did not
+            # wake it) is told from a creak only by them
             row = {
                 "t": round(self.wall(), 3), "text": text, "wake": woke, "noise": noise,
                 "whisper_ms": whisper_ms, "engine": engine,
+                "seconds": round(segment.duration_s, 2), "voice_peak_db": voice_db,
             }  # fmt: skip
-            append_line(day_dir(self.logs, self.wall()) / "cascade_heard.jsonl", row)
+            day = day_dir(self.logs, self.wall())
+            if self.config.heard_audio and not noise:
+                row["wav"] = self._keep_heard(day, segment)
+            append_line(day / "cascade_heard.jsonl", row)
             if not woke or not self.open(segment.pcm):
                 return
             if people is not None and who is None:  # idle: nobody is looked at before the name
@@ -1082,6 +1252,8 @@ class CascadeLoop:
             self._resume("only noise followed")  # never cancelled, never asked again
             return
         conversation.last_heard_s = read_s
+        if conversation.closing == IDLE_CLOSE:
+            conversation.closing = None  # the person came back: the parting line was no end
         if self.config.filler_language_from == "utterance":
             self.fillers.hear(text)  # the fillers speak the language of the words heard last
         if who is None:
@@ -1104,7 +1276,6 @@ class CascadeLoop:
             answer = await asyncio.to_thread(self.halt)
             conversation.log.event("halt", self.clock(), answer=answer, why="stop heard")
             print(f"  (stop heard during a drive: {answer})", flush=True)
-        self.heard_since_drive = True
         said, words, fragments = (f"{tag} {text}" if tag else text), text, 1
         if spec is not None:
             if said == spec.input.text:
@@ -1155,13 +1326,19 @@ class CascadeLoop:
                 continue  # asked early on words the close did not bring: never begun
             if self.conversation is None and not self.open(b""):
                 continue  # closed meanwhile (a drive's report, a turn heard at the close)
-            if item.kind == "robot":
-                deadline = self.clock() + END_WAIT_S
-                while self.player.speaking() and self.clock() < deadline:
-                    await asyncio.sleep(self.tick_s)
+            # A robot report is asked at once, whatever the speaker still plays (a filler, the
+            # tail of a line): the player is one stream, so its reply's audio queues behind that
+            # and no sentence is cut, while the brain's 1-4 s run alongside (2026-10-14: up to
+            # 10 s were waited here for the speaker to fall silent). A reply of the brain's in
+            # flight is finished first: its turn is not committed until its audio has played.
             self.last_turn += 1
             reply = Reply(self.last_turn, item, brain=self.brain_name, voice=self.voice_name)
             self.replies[reply.id] = reply
+            self._tell_cut(reply)
+            reply.carried, self.unanswered = self.unanswered, []
+            if reply.carried:
+                print(f"  (the brain is told {len(reply.carried)} {ROBOT_REPORT} message(s)"
+                      " left unanswered)", flush=True)  # fmt: skip
             if spec is not None:
                 spec.reply = reply
             if spec is not None and spec.state == "asked":
@@ -1181,7 +1358,7 @@ class CascadeLoop:
 
     async def _reply(self, reply: Reply) -> None:
         try:
-            await self.brain.turn(reply.input.text, self._tool, lambda e: self._heard(reply, e))
+            await self._ask(reply)
             reply.generated = True
             self._say(reply, SpeechJob(reply.id, len(reply.parts), kind="end"))
             await self._played_out(reply)
@@ -1208,6 +1385,8 @@ class CascadeLoop:
             reply.outcome = "error"
             print(f"  !! brain: {reply.error}", flush=True)
             self.brain.abandon()
+            item = reply.input
+            reply.lost = item.kind == "robot" and item.carry and connection_error(error)
             self._unmute(reply, "the brain failed")  # what it said before the error, in order
             if not reply.audio and self.config.error_line:
                 self.speech.say(SpeechJob(reply.id, len(reply.parts), self.config.error_line))
@@ -1215,6 +1394,49 @@ class CascadeLoop:
         finally:
             if reply.outcome in ("committed", "error", "stopped"):
                 self._finish(reply)
+
+    async def _ask(self, reply: Reply) -> None:
+        """The brain answers the turn: the robot's reports left unanswered, the body's scene
+        (what changed, :meth:`_scene`), its input, the cut calls' note. A ``[robot]`` turn whose
+        call never got an answer before it said or did anything is asked once more after
+        :data:`ROBOT_RETRY_S` (2026-10-14: a drive's end lost to one connection error, and the
+        brain later said the report had not come)."""
+        lines = [f"{NOT_ANSWERED} {text}" for text in reply.carried]
+        scene = await self._scene(reply)
+        lines += [scene] if scene else []
+        text = "\n".join([*lines, reply.input.text, *([reply.note] if reply.note else [])])
+        try:
+            await self.brain.turn(text, self._tool, lambda e: self._heard(reply, e))
+        except Exception as error:
+            item = reply.input
+            fresh = not (reply.sentences or reply.called)
+            if not (item.kind == "robot" and fresh and connection_error(error)):
+                raise
+            reply.retried = f"{type(error).__name__}: {error}"[:300]
+            self.brain.abandon()
+            self._event("brain_retry", turn=reply.id, error=reply.retried, after_s=ROBOT_RETRY_S)
+            print(f"  !! brain: {reply.retried}; the {ROBOT_REPORT} turn is asked again in"
+                  f" {ROBOT_RETRY_S:g} s", flush=True)  # fmt: skip
+            await asyncio.sleep(ROBOT_RETRY_S)
+            await self.brain.turn(text, self._tool, lambda e: self._heard(reply, e))
+
+    async def _scene(self, reply: Reply) -> str:
+        """The ``[scene]`` line of ``reply``'s input (:mod:`pepin.voice_cascade.scene`): what
+        changed since the brain's history last kept one, "" when nothing did or the switch is
+        off. One where_am_i through the registry, on a worker; the gaze's snapshot and the
+        drives from memory."""
+        conversation = self.conversation
+        if not self.scene.on or conversation is None:
+            return ""
+        pose, at = pose_of(await asyncio.to_thread(self.tools, "where_am_i", {}))
+        view = self.attention() if self.attention is not None else None
+        reading = Reading(pose, at, self.book, view, bool(self.drives), self.clock())
+        reply.scene = self.scene.report(reading, conversation.sid, self.brain)
+        line = reply.scene.line
+        if line:
+            self._event("scene", turn=reply.id, line=line)
+            print(f"  {line}", flush=True)
+        return line
 
     def _heard(self, reply: Reply, event: BrainEvent) -> None:
         """A brain event of ``reply``, on the event loop."""
@@ -1261,12 +1483,17 @@ class CascadeLoop:
                         reply, lambda: self._say_filler(reply, line, "tool", event.name)
                     )
             reply.acted = True
+            sid = conversation.sid if conversation is not None else ""
+            reply.called.append(ToolCall(event.id, event.name, dict(event.args), sid))
             print(f"  -> {event.name}({json.dumps(event.args, ensure_ascii=False)})", flush=True)
             if log is not None:
                 log.event("tool_call", now, turn=reply.id, id=event.id, name=event.name,
                           args=event.args)  # fmt: skip
         elif isinstance(event, ToolDone):
             reply.tools.append({"name": event.name, "result": event.result[:300], "ms": event.ms})
+            done = next((c for c in reply.called if c.id == event.id and c.result is None), None)
+            if done is not None:
+                done.result = event.result
             print(f"  <- {event.result[:200]}  ({event.ms} ms)", flush=True)
             if log is not None:
                 log.event("tool_result", now, turn=reply.id, id=event.id, name=event.name,
@@ -1332,11 +1559,67 @@ class CascadeLoop:
         if reply.finished.is_set():
             return
         try:
+            self._settle_calls(reply)
+            self._settle_reports(reply)
+            if reply.scene is not None and reply.outcome in KEPT:
+                self.scene.keep(reply.scene)  # the brain's history holds it: the scene it knows
             self._record(reply)
         finally:
             if reply.input.kind == "person" and reply.outcome not in UNANSWERED:
                 self.person_turns += 1
             reply.finished.set()
+
+    def _tell_cut(self, reply: Reply) -> None:
+        """The calls of turns cut before ``reply`` are told with its words (:func:`cut_note`)."""
+        reply.told, self.cut_calls = self.cut_calls, []
+        reply.note = cut_note(reply.told)
+        for call in reply.told:
+            call.told = True
+        if reply.note:
+            print(f"  (the brain is told {reply.note[:200]})", flush=True)
+
+    def _settle_calls(self, reply: Reply) -> None:
+        """What the brain's next turn is told of calls: what ``reply`` was told goes again when
+        its history keeps none of it (dropped, failed); a cut turn's calls without an answer
+        are told (a merged reply's never ran: it was silent; a barge-in's ran on)."""
+        if reply.outcome not in KEPT:
+            for call in reply.told:
+                call.told = False
+            self.cut_calls = [c for c in reply.told if c not in self.cut_calls] + self.cut_calls
+        if reply.outcome in CUT_SHORT:
+            self.cut_calls += [c for c in reply.called if c.result is None]
+
+    def _settle_reports(self, reply: Reply) -> None:
+        """The robot's reports the next turn carries: those ``reply`` carried when its history
+        keeps none of it, and its own report when it failed to answer it (:attr:`Reply.lost`)."""
+        if reply.outcome in KEPT:
+            return
+        text = reply.input.text
+        own = [text.removeprefix(ROBOT_REPORT).lstrip()] if reply.lost else []
+        if own:
+            self._event("unanswered", turn=reply.id, text=own[0])
+            print(f"  (unanswered, told with the next turn: {own[0][:200]})", flush=True)
+        self.unanswered = [*reply.carried, *own, *self.unanswered]
+
+    def _late(self, call: ToolCall | None, work: asyncio.Future[Result]) -> None:
+        """A call whose turn was cut while it ran has answered: the answer is the brain's at the
+        next turn (told with the cut's own note when not told yet)."""
+        if work.cancelled():
+            return
+        error = work.exception()
+        if call is None:
+            return  # no turn of the brain's made it
+        result = fail(f"{type(error).__name__}: {error}") if error is not None else work.result()
+        call.late, _ = render({k: v for k, v in result.items() if k != FOLLOW_UP})
+        conversation = self.conversation
+        if conversation is None or conversation.sid != call.sid:
+            return  # a conversation since: its brain never heard the call
+        conversation.log.event("late_result", self.clock(), id=call.id, name=call.name,
+                               result=call.late)  # fmt: skip
+        print(f"  <- after the cut, {call.name}: {call.late[:200]}", flush=True)
+        if call.told:  # told "no answer yet" (or being asked so): the answer goes next
+            call.told = False
+            self.cut_calls.append(call)
 
     def _record(self, reply: Reply) -> None:
         timeline = reply.input.timeline
@@ -1387,6 +1670,15 @@ class CascadeLoop:
             row["merged"] = reply.input.fragments
         if reply.played is not None:
             row["heard"] = {"sentences": reply.played.sentences, "partial": reply.played.partial}
+        if reply.outcome in CUT_SHORT and reply.called:
+            row["calls"] = [{"name": c.name, "args": c.args, "outcome": c.outcome}
+                            for c in reply.called]  # fmt: skip
+        if reply.note:
+            row["told"] = reply.note
+        if reply.carried:
+            row["carried"] = reply.carried
+        if reply.retried is not None:
+            row["retried"] = reply.retried
         spec = reply.input.speculation
         if spec is not None:  # when the brain was asked, after the person stopped
             row["speculative"] = {"asked_ms": round((spec.asked_s - timeline.stopped) * 1000)}
@@ -1427,11 +1719,17 @@ class CascadeLoop:
 
     async def _tool(self, name: str, args: dict[str, Any]) -> Result:
         """A tool the brain called. A drive answers when the goal server takes it; its end
-        comes back as the robot's own turn. While the person may be going on (the reply is
-        silent) nothing runs: their words drop the reply, and the call with it."""
+        comes back as the robot's own turn (:func:`drive_report`). Which drive runs while
+        another is asked is the goal server's one rule, told in its answer: the same drive
+        already under way (no new goal), or the drive it replaced (whose end is then not
+        reported). While the person may be going on (the reply is silent) nothing runs: their
+        words drop the reply, and the call with it. A call the person cuts in on (a barge-in)
+        goes on: its answer is told at the brain's next turn, a drive's end comes back as any
+        drive's."""
         reply = self.current
         if reply is not None:
             await reply.free.wait()
+        call = self._ran(reply, name, args)
         if name == END_CONVERSATION:
             if self.conversation is not None:
                 self.conversation.closing = self.conversation.closing or END_CONVERSATION
@@ -1439,16 +1737,9 @@ class CascadeLoop:
         if name not in self.allowed:
             return fail(f"{name} is not available in this conversation")
         if name not in self.moving:
-            return await asyncio.to_thread(self.tools, name, args)
-        if not self.heard_since_drive:
-            return fail(UNASKED_DRIVE)
-        self.heard_since_drive = False
-        self._tell("drive", True)
-        if not self.config.report_drive_start:
-            try:
-                return await asyncio.to_thread(self.tools, name, args)
-            finally:
-                self._tell("drive", False)
+            return await self._answer(
+                call, asyncio.ensure_future(asyncio.to_thread(self.tools, name, args))
+            )
         loop = asyncio.get_running_loop()
         started: asyncio.Future[Result] = loop.create_future()
 
@@ -1463,28 +1754,102 @@ class CascadeLoop:
             with progress_to(interim):
                 return self.tools(name, args)
 
+        asked = call_text(name, args)
         task: asyncio.Task[Result] = asyncio.ensure_future(asyncio.to_thread(drive))
-        self.drives.add(task)
-        await asyncio.wait({task, started}, return_when=asyncio.FIRST_COMPLETED)
-        if task.done():
-            self.drives.discard(task)
-            self._tell("drive", False)
-            return task.result()
-        task.add_done_callback(lambda t: self._drive_ended(name, args, t))
+        self._drive_began(task, started)
+        if not self.config.report_drive_start:
+            try:
+                return self._drive_answer(asked, task, await asyncio.shield(task))
+            except asyncio.CancelledError:
+                self._cut_drive(call, asked, task)
+                raise
+        try:
+            await asyncio.wait({task, started}, return_when=asyncio.FIRST_COMPLETED)
+        except asyncio.CancelledError:  # cut before the goal server took it
+            self._cut_drive(call, asked, task)
+            raise
+        if task.done():  # refused, already under way, or over before the goal server's word
+            return self._drive_answer(asked, task, task.result())
+        task.add_done_callback(lambda t: self._drive_ended(asked, t))
         if self.current is not None and self.current.sentences:  # the acknowledgement is said
             return {**started.result(), "note": UNDER_WAY + ACKNOWLEDGED, FOLLOW_UP: False}
         return {**started.result(), "note": UNDER_WAY}
 
-    def _drive_ended(self, name: str, args: dict[str, Any], task: asyncio.Task[Result]) -> None:
+    def _drive_began(self, task: asyncio.Task[Result], started: asyncio.Future[Result]) -> None:
+        """A drive's call has started: the body hears a drive begin when none ran, and end once
+        the last has ended (the goal server may answer two calls with one drive: the same
+        target, or one replacing another), with whether any of them set it moving
+        (:func:`drive_ran`; ``started``: the call's interim answer)."""
+        if not self.drives:
+            self.drive_ran = False
+            self._tell("drive", True)
+        self.drives.add(task)
+        task.add_done_callback(lambda done: self._drive_over(done, started))
+
+    def _drive_over(self, task: asyncio.Task[Result], started: asyncio.Future[Result]) -> None:
+        """A drive's call has ended (its report, if any, follows)."""
         self.drives.discard(task)
-        self._tell("drive", False)
+        self.drive_ran = self.drive_ran or drive_ran(task, started)
+        if not self.drives:
+            self._tell("drive", False, self.drive_ran)
+
+    def _drive_answer(self, asked: str, task: asyncio.Task[Result], result: Result) -> Result:
+        """A drive's answer when its call ended before the drive was under way: a refusal as
+        it is; the goal server's ``already`` (the same drive under way, no new goal) with
+        whether its end comes as a robot report (a drive of this conversation's runs) or not."""
+        if not result.get("already"):
+            return result
+        ours = any(other is not task for other in self.drives)
+        note = f"no new goal: {REPORTED if ours else NOT_OURS}"
+        self._event("drive_again", drive=asked, run=result.get("run"), ours=ours)
+        print(f"  ({asked}: {result.get('detail')}; {'ours' if ours else 'not ours'})", flush=True)
+        if self.current is not None and self.current.sentences:  # the acknowledgement is said
+            return {**result, "note": note + ACKNOWLEDGED, FOLLOW_UP: False}
+        return {**result, "note": note}
+
+    @staticmethod
+    def _ran(reply: Reply | None, name: str, args: dict[str, Any]) -> ToolCall | None:
+        """The call of ``reply`` this run answers (its first of that name and arguments not
+        yet started), marked as started."""
+        for call in reply.called if reply is not None else []:
+            if not call.ran and call.name == name and call.args == args:
+                call.ran = True
+                return call
+        return None
+
+    async def _answer(self, call: ToolCall | None, work: asyncio.Task[Result]) -> Result:
+        """``work``'s answer. The turn cut meanwhile, the work goes on and its answer is the
+        brain's next turn's (:meth:`_late`)."""
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            work.add_done_callback(lambda done: self._late(call, done))
+            raise
+
+    def _cut_drive(self, call: ToolCall | None, asked: str, task: asyncio.Task[Result]) -> None:
+        """A drive whose call was cut before it answered goes on: its end comes back as the
+        robot's own turn, as any drive's."""
+        if call is not None:
+            call.drive = True
+        task.add_done_callback(lambda t: self._drive_ended(asked, t))
+
+    def _drive_ended(self, asked: str, task: asyncio.Task[Result]) -> None:
+        """A drive whose call has answered has ended: its report is the robot's own turn
+        (:func:`drive_report`), logged alone when the goal server cancelled it for another
+        drive of this conversation's (whose answer said so) or when the call only met the one
+        already under way."""
         if task.cancelled():
             return
         error = task.exception()
         result = fail(f"{type(error).__name__}: {error}") if error else task.result()
-        text, _ = render(result)
-        call = ", ".join(f"{k}={v!r}" for k, v in args.items())
-        report = f"{ROBOT_REPORT} the drive {name}({call}) has ended: {text}"
+        replaced_by = result.get("cancelled_for")
+        if (replaced_by and self.drives) or result.get("already"):
+            text, _ = render(result)
+            self._event("drive_ended", drive=asked, replaced_by=replaced_by, result=text)
+            why = f"cancelled for {replaced_by}" if replaced_by else "already under way"
+            print(f"  <~ the drive {asked} ({why}) has ended: {text[:160]}", flush=True)
+            return
+        report = drive_report(asked, result)
         print(f"  <~ {report[:200]}", flush=True)
         self.inputs.put_nowait(Input("robot", report, Timeline(self.clock())))
 
@@ -1501,6 +1866,8 @@ class CascadeLoop:
         log = CascadeLog(self.logs, wall, now, self.speech.voice.rate)
         log.mic.write(wake_pcm)
         self.brain.begin(self.places)
+        self.cut_calls = []  # the last conversation's: this brain never heard them
+        self.unanswered = []
         self.conversation = Conversation(sid, wall, now, log, now)
         cfg = self.config
         self.fillers.open(cfg.conversation_language)
@@ -1582,7 +1949,7 @@ class CascadeLoop:
         self._tell("closed", reason)
 
     async def _watch(self) -> None:
-        """The state shown, the idle close, the caps, the warm cache."""
+        """The state shown, the idle close, the daily budget, the warm cache."""
         while True:
             await asyncio.sleep(self.tick_s)
             cfg = self.config  # a switch may have replaced it
@@ -1624,8 +1991,6 @@ class CascadeLoop:
                 self.events.emit(state)
             if busy or speaking or self.drives:
                 continue
-            if now - conversation.t_open > cfg.max_session_s:
-                conversation.closing = conversation.closing or "max_session_s"
             if self.ledger is not None and self.ledger.over_budget(
                 conversation.sid, conversation.usd
             ):
@@ -1636,7 +2001,25 @@ class CascadeLoop:
             if conversation.closing is not None:
                 self.close(conversation.closing)
             elif now - quiet_since > cfg.idle_close_s:
-                self.close("idle")
+                if cfg.idle_parting:
+                    self._parting(conversation, cfg.idle_close_s)
+                else:
+                    self.close(IDLE_CLOSE)
+
+    def _parting(self, conversation: Conversation, quiet_s: float) -> None:
+        """Nobody has spoken for ``quiet_s``: the brain is asked, as the robot's own turn, for
+        one parting line, and the conversation closes after it; a person speaking meanwhile
+        keeps it open (:meth:`_heard` clears the closing). 2026-10-13: the robot asked a guest
+        to look at it, she said nothing more, and it stood silent 20 s and closed without a
+        word."""
+        conversation.closing = IDLE_CLOSE
+        text = (
+            f"{ROBOT_REPORT} nobody has spoken for {quiet_s:g} s and the conversation closes"
+            " after this reply: say one short parting line, or nothing if a goodbye was said"
+        )
+        print(f"  <~ {text}", flush=True)
+        # stale once a person speaks or the conversation closes: never carried to a later turn
+        self.inputs.put_nowait(Input("robot", text, Timeline(self.clock()), carry=False))
 
     # -- switching ------------------------------------------------------------------------------
 
@@ -1886,6 +2269,17 @@ def heard_of(segment: Segment, text: str, noise: bool, peak_db: float | None = N
     start = segment.ended_s - segment.duration_s
     named = not noise and is_wake(text)
     return Heard(start, segment.ended_s, text, noise, peak_db, named)
+
+
+def keep_wav(path: Path, pcm: bytes) -> None:
+    """``pcm`` (16 kHz mono 16-bit) as the WAV ``path``; a failed write logs one warning and
+    leaves no file (the row that names it is kept)."""
+    try:
+        save_wav(path, pcm, RATE)
+    except Exception as error:  # a worker's exception would vanish in its future
+        logger.warning("heard audio not kept: %s: %s", path, error)
+        with contextlib.suppress(OSError):
+            path.unlink(missing_ok=True)
 
 
 def eot_of(event: EarEvent) -> dict[str, Any] | None:

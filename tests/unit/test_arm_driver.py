@@ -314,6 +314,38 @@ def test_the_speed_scale_slows_the_profile_and_the_rest_after_it() -> None:
     assert block["servo1"][1] == acc_units(MOTION.max_acc_deg_s2 * 0.2**2)
 
 
+def test_a_gentler_trajectory_mid_flight_keeps_the_ramp_in_force_until_the_joints_settle() -> None:
+    """2026-10-13, the neck's runaway, the same register here: the Acceleration a block writes
+    is the servo's brake too, so a slow trajectory (speed 0.2: ramp 10 units) taking the arm
+    from a fast one (254) while a joint still flies would leave it unable to stop. While a joint
+    flies the ramp is at least what stops it before its goal; the new speed applies; at rest the
+    asked ramp is written."""
+    core, bus = make_core()
+    bus.follow = False  # the servos do not snap to the goal: the test moves the wrist
+    assert send(core, wave(seconds=2.0, speed=1.0), 0.12)["status"] == "accepted"
+    t = run(core, 0.12, 0.08)
+    blocks = [v for n, v in arm_writes(bus) if n == "block"]
+    assert blocks and blocks[-1]["servo1"][1] == acc_units(MOTION.max_acc_deg_s2)
+    for _ in range(4):  # the wrist flies: 45 ticks a tick, 2250 ticks/s
+        t += TICK
+        bus.positions["servo4"] += 45
+        core.tick(t)
+    bus.writes.clear()
+    assert send(core, wave(seconds=10.0, speed=0.2, tid="t2"), t)["status"] == "accepted"
+    for _ in range(2):
+        t += TICK
+        bus.positions["servo4"] += 45
+        core.tick(t)
+    blocks = [v for n, v in arm_writes(bus) if n == "block"]
+    asked = acc_units(MOTION.max_acc_deg_s2 * 0.2**2)
+    assert blocks and blocks[-1]["servo1"][1] > asked, "the ramp the flying wrist needs to stop"
+    assert blocks[-1]["servo1"][4] == speed_ticks(MOTION.max_speed_deg_s * 0.2), "the speed asked"
+    bus.writes.clear()
+    t = run(core, t, 0.1)  # the wrist stops: the gentle ramp is written as asked
+    blocks = [v for n, v in arm_writes(bus) if n == "block"]
+    assert blocks and blocks[-1]["servo1"][1] == acc_units(MOTION.max_acc_deg_s2 * 0.2**2)
+
+
 def test_away_from_the_first_knot_the_arm_joins_it_within_the_caps() -> None:
     bus = ArmBus()
     bus.positions["servo4"] = RANGES[WRIST].ticks(40.0)  # moved by hand, torque off
