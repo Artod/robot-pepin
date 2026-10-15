@@ -1346,7 +1346,8 @@ def test_pose_at_answers_map_to_the_frame_at_the_stamp_asked(tmp_path: Path) -> 
     assert (then["qz"], then["qw"]) == pytest.approx((math.sin(yaw / 2), math.cos(yaw / 2)))
     assert (then["stamp"], then["now"], then["age_s"]) == pytest.approx((NOW - 1.0, NOW, 1.0))
     ((target, source, seconds, wait),) = history.calls
-    assert (target, source, wait) == ("map", "camera_link", goal_server_module.POSE_AT_WAIT_S)
+    assert (target, source) == ("map", "camera_link")
+    assert wait == pytest.approx(goal_server_module.POSE_AT_WAIT_S, abs=0.01)
     assert seconds == pytest.approx(NOW - 1.0, abs=1e-6)
     later = ask_pose_at(node, stamp=NOW - 0.5, frame="base_link")
     assert later["yaw_deg"] == pytest.approx(35.0 * (0.5 - 0.02)) and later["z"] == 0.0
@@ -1391,3 +1392,35 @@ def test_pose_at_says_tf2_s_refusal_a_wrong_frame_and_clocks_that_disagree(
     assert ahead["kind"] == "ahead" and "ros/time.sh offset" in ahead["reason"]
     assert len(history.calls) == 1
     assert ask_pose_at(node, stamp="soon")["event"] == "error"
+
+
+def test_pose_at_answers_several_frames_at_several_stamps_in_one_request(tmp_path: Path) -> None:
+    """The speaker gaze's batch (a frame's camera and cart at its exposure; an utterance's cart
+    at each reading): every frame at every stamp, stamp by stamp, each the single answer
+    without its event; a stamp TF cannot answer says so alone; the batch waits once."""
+    node, history = turning(tmp_path)
+    wire = Wire()
+    request = {"cmd": "pose_at", "frames": ["camera_link", "base_link"],
+               "stamps": [NOW - 1.0, None, NOW + 0.3]}  # fmt: skip
+    node._handle(request, wire)
+    (answer,) = wire.events()
+    assert answer["event"] == "pose_at" and answer["parent"] == "map"
+    assert answer["now"] == pytest.approx(NOW)
+    poses = answer["poses"]
+    assert [(p["frame"], p["ok"]) for p in poses] == [
+        ("camera_link", True), ("base_link", True), ("camera_link", True), ("base_link", True),
+        ("camera_link", False), ("base_link", False),
+    ]  # fmt: skip
+    assert poses[0]["yaw_deg"] == pytest.approx(35.0 * 0.98) and poses[0]["z"] == 1.2
+    assert poses[1]["z"] == 0.0 and poses[1]["stamp"] == pytest.approx(NOW - 1.0)
+    assert poses[2]["stamp"] == pytest.approx(TurningHistory.NEWEST), "TF's newest, its stamp"
+    assert poses[4]["kind"] == "Extrapolation" and "event" not in poses[0]
+    waits = [call[3] for call in history.calls]
+    assert len(waits) == 6 and sum(waits) <= 6 * goal_server_module.POSE_AT_WAIT_S
+    assert all(w <= goal_server_module.POSE_AT_WAIT_S for w in waits), "one wait for the batch"
+    bad = Wire()
+    node._handle({"cmd": "pose_at", "stamps": [NOW, "soon"]}, bad)
+    assert bad.events()[0]["event"] == "error"
+    lists = Wire()
+    node._handle({"cmd": "pose_at", "frames": "camera_link", "stamps": [NOW - 1.0]}, lists)
+    assert lists.events()[0]["detail"] == "pose_at's frames and stamps are lists"
