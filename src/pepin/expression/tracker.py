@@ -113,7 +113,8 @@ is at rest. Owner after slice 0: the attention engine's own (nobody of A, B or C
 
 Every decision prints one line (``say``) and, through :class:`pepin.expression.conversation.
 EventSink`, lands in the conversation's events.jsonl on the session clock: ``gaze_wake``,
-``gaze_voice`` (each utterance's bearing, verdict, person and point), ``gaze_doa`` (each
+``gaze_voice`` (each utterance's bearing from the cart, its direction in the map
+``azimuth_deg``, the verdict and the person), ``gaze_doa`` (each
 utterance's readings: ``[seconds before its end on the board's clock, the array's angle, 1
 speech / 0 not / -1 the robot's own voice]`` by the array's own flag, and a fourth number when
 the cart had turned (TF's) between that reading and the utterance's newest: how far, in degrees,
@@ -132,7 +133,8 @@ body), ``gaze_lost`` (a seek, a check or a person that came to nothing; the door
 its ``end``, ``gave_way`` and ``cancelled_for`` when the goal server cancelled it for a person's
 request; the turn tool's, kept through), ``gaze_body_hold`` (a tool's drive held the gaze's own
 body turn, and the person's words gave it back, or the drive never ran: ``ran`` false),
-``gaze_release`` and, at the close, ``gaze_frames`` (the conversation's frames taken and
+``gaze_named`` (person recognition's sure verdict named the person engaged), ``gaze_release``
+and, at the close, ``gaze_frames`` (the conversation's frames taken and
 skipped, by cause: holder, driving, gesture; ``frames_posed`` placed at their exposure's pose,
 ``frames_unposed`` (no stamp) at TF's newest, ``frames_unplaced`` TF could not place,
 ``frames_none`` looks that got no record, ``frames_turning`` records taken while the body
