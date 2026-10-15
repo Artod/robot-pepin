@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wide smile arc, the ticks, the chin mark (smile's variant: the same drawing)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 96 76 C 134.4 100 185.6 100 224 76" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 149 103.5 C 151.2 109.2 168.8 109.2 171 103.5" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="chin"/>
+  <path class="line" d="M 89.22 71.76 C 86.21 69.88 84.19 66.77 83.69 63.25" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 230.78 71.76 C 233.79 69.88 235.81 66.77 236.31 63.25" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

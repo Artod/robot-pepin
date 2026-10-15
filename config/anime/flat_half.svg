@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 116.2 85 C 145.4 85 174.6 85 203.8 85 C 209.66 85 215.29 89.5 213.46 95.07 C 208.41 110.41 184.57 121.72 160 121.72 C 135.43 121.72 111.59 110.41 106.54 95.07 C 104.71 89.5 110.34 85 116.2 85 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 116.2 85 C 145.4 85 174.6 85 203.8 85 C 209.66 85 215.29 89.5 213.46 95.07 C 183.52 100.31 136.48 100.31 106.54 95.07 C 104.71 89.5 110.34 85 116.2 85 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 213.46 95.07 C 183.52 100.31 136.48 100.31 106.54 95.07" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 116.2 85 C 145.4 85 174.6 85 203.8 85 C 209.66 85 215.29 89.5 213.46 95.07 C 208.41 110.41 184.57 121.72 160 121.72 C 135.43 121.72 111.59 110.41 106.54 95.07 C 104.71 89.5 110.34 85 116.2 85 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

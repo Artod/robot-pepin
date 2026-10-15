@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking mouth, a lazy S aside, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 156 78 C 160.18 79.83 168.35 87.27 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 222.75 82.73 228.52 90.17 232 92" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 148.67 74.79 C 145.43 73.36 141.71 73.45 138.53 75.02" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 239.08 95.73 C 242.22 97.38 245.93 97.56 249.21 96.21" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

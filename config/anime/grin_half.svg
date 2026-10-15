@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the smirk arc, the right end higher, a sliver of teeth under it</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 109.75 87.04 C 140.71 94.85 177.75 94.11 208.89 79.04 C 215.06 76.05 222.98 79.86 221.78 86.6 C 216.98 113.59 188.94 133.73 160 133.73 C 131.08 133.73 103.06 117.5 98.23 95.74 C 96.86 89.58 103.63 85.5 109.75 87.04 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 109.75 87.04 C 140.71 94.85 177.75 94.11 208.89 79.04 C 215.06 76.05 222.98 79.86 221.78 86.6 C 187.19 110.44 132.82 110.44 98.23 95.74 C 96.86 89.58 103.63 85.5 109.75 87.04 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 221.78 86.6 C 187.19 110.44 132.82 110.44 98.23 95.74" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 109.75 87.04 C 140.71 94.85 177.75 94.11 208.89 79.04 C 215.06 76.05 222.98 79.86 221.78 86.6 C 216.98 113.59 188.94 133.73 160 133.73 C 131.08 133.73 103.06 117.5 98.23 95.74 C 96.86 89.58 103.63 85.5 109.75 87.04 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

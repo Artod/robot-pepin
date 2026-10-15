@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the short slanted line aside, neutral</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 171.42 88.72 C 185.31 87.16 199.19 85.28 213.08 83.07 C 222.89 81.51 232.39 91.38 225.02 98.04 C 217.67 104.68 206.48 108.94 194 108.94 C 182.55 108.94 172.18 106.69 164.88 103.11 C 157.48 99.48 163.24 89.63 171.42 88.72 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 171.42 88.72 C 185.31 87.16 199.19 85.28 213.08 83.07 C 222.89 81.51 232.39 91.38 225.02 98.04 C 208.18 99.52 181.71 99.52 164.88 103.11 C 157.48 99.48 163.24 89.63 171.42 88.72 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 225.02 98.04 C 208.18 99.52 181.71 99.52 164.88 103.11" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 171.42 88.72 C 185.31 87.16 199.19 85.28 213.08 83.07 C 222.89 81.51 232.39 91.38 225.02 98.04 C 217.67 104.68 206.48 108.94 194 108.94 C 182.55 108.94 172.18 106.69 164.88 103.11 C 157.48 99.48 163.24 89.63 171.42 88.72 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

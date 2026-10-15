@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the laugh, flat on top, round below, rose inside (the toothless laugh, kept as a variant)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 132.99 50 C 151 50 169 50 187.01 50 C 190.85 50 194.04 53.15 193.64 56.98 C 191.23 80.1 177.02 98 160 98 C 142.98 98 128.77 80.1 126.36 56.98 C 125.96 53.15 129.15 50 132.99 50 Z" fill="#DD7487"/>
+  <path class="line" d="M 132.99 50 C 151 50 169 50 187.01 50 C 190.85 50 194.04 53.15 193.64 56.98 C 191.23 80.1 177.02 98 160 98 C 142.98 98 128.77 80.1 126.36 56.98 C 125.96 53.15 129.15 50 132.99 50 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

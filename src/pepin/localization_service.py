@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import logging
 import os
 import time
@@ -63,6 +62,7 @@ from pepin.model_service import (
     lower_keys,
     port_taken,
 )
+from pepin.overlay import read_json
 
 log = logging.getLogger("pepin.localization_service")
 
@@ -142,7 +142,7 @@ def load_config(path: str | Path | None = None) -> LocalizationConfig:
     on the laptop and in a container); the defaults when the file has no such block."""
     from pepin.deployment import config_file
 
-    raw = json.loads(Path(path or config_file(CONFIG_NAME)).read_text())
+    raw = read_json(path or config_file(CONFIG_NAME))
     return LocalizationConfig.from_json(raw.get("localization", {}))
 
 

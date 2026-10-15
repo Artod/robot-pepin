@@ -16,7 +16,9 @@ type   direction    payload (little-endian)
 'M'    host -> ESP  mouth openness u8, 0..255 (~25 Hz while the robot speaks)
 'T'    host -> ESP  info screen: duration ms u16, count u8, items (:func:`encode_info`)
 'Q'    host -> ESP  ping: id u32
-'C'    host -> ESP  config: id u8, IMU rate u16, DLPF u8, accel FS u8, gyro FS u8, brightness u8
+'C'    host -> ESP  config: id u8, IMU rate u16, DLPF u8, accel FS u8, gyro FS u8, brightness u8,
+                    face style u8 (config/face.json's styles in their order: 0 pepin,
+                    1 rose, 2 manga, 3 anime, 4 kawaii, 5 comics)
 =====  ===========  =====================================================================
 
 THE HEAD SERVER'S DOOR (``pepin.head_server``, TCP 3340, JSON lines both ways). Any client::
@@ -31,7 +33,7 @@ THE HEAD SERVER'S DOOR (``pepin.head_server``, TCP 3340, JSON lines both ways). 
     {"cmd": "show", "items": [...], "seconds": 8}  or  {"cmd": "show", "text": "...", ...}
     {"cmd": "lease", "name": "goal_server", "seconds": 6}   a brain is here (sleepy without one)
     {"cmd": "config", "imu_rate_hz": 1000, "dlpf": 3, "accel_fs": 1, "gyro_fs": 1,
-     "brightness": 200}
+     "brightness": 200, "style": "anime"}      any of them; style: the face's style, live
     {"cmd": "subscribe", "imu": true}          this client gets the IMU lines below
     {"cmd": "status"}
 
@@ -79,7 +81,7 @@ EXPRESSION, MOUTH, INFO, PING, CONFIG = ord("E"), ord("M"), ord("T"), ord("Q"), 
 IMU_SAMPLE = struct.Struct("<I6hB")
 STATUS_FIELDS = struct.Struct("<IHHIIIIBBBBBBHI")
 PONG_FIELDS = struct.Struct("<II")
-CONFIG_FIELDS = struct.Struct("<BHBBBB")
+CONFIG_FIELDS = struct.Struct("<BHBBBBB")
 INFO_ITEMS_MAX = 8  # protocol.h kInfoItemsMax
 INFO_TEXT_MAX = 47  # bytes of UTF-8 per string (kInfoTextMax less its terminating zero)
 G = 9.80665
@@ -338,8 +340,8 @@ class ImuConfig:
 FIRMWARE_DEFAULTS = ImuConfig()  # imu.h kImuDefaults: what samples of config id 0 were taken at
 
 
-def encode_config(config: ImuConfig, brightness: int) -> bytes:
-    """A 'C' payload."""
+def encode_config(config: ImuConfig, brightness: int, style: int = 0) -> bytes:
+    """A 'C' payload; ``style`` is the face's style index (``FaceTable.style_id_of``)."""
     return CONFIG_FIELDS.pack(
         config.id,
         config.rate_hz,
@@ -347,6 +349,7 @@ def encode_config(config: ImuConfig, brightness: int) -> bytes:
         config.accel_fs,
         config.gyro_fs,
         min(max(brightness, 0), 255),
+        min(max(style, 0), 255),
     )
 
 
@@ -502,11 +505,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Talk to the head server (pepin.head_server, TCP 3340).",
         epilog="e.g.  express happy 3   |   event arrived   |   show 'Temps|left: 41/70 C' 6"
-        "   |   imu 5   |   status",
+        "   |   style anime   |   imu 5   |   status",
     )
     parser.add_argument("--host", default=os.environ.get("PEPIN_HOST", "10.0.0.187"))
     parser.add_argument("--port", type=int, default=HEAD_PORT)
-    parser.add_argument("command", choices=("status", "express", "event", "clear", "show", "imu"))
+    parser.add_argument(
+        "command", choices=("status", "express", "event", "clear", "show", "style", "imu")
+    )
     parser.add_argument("args", nargs="*")
     args = parser.parse_args(argv)
     a = args.args
@@ -520,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
         request = {"cmd": "clear", "source": "cli"}
     elif args.command == "show":
         request = {"cmd": "show", "text": a[0], "seconds": float(a[1]) if len(a) > 1 else 8.0}
+    elif args.command == "style":  # the face's style, live (config/face.json `styles`)
+        request = {"cmd": "config", "style": a[0]}
     elif args.command == "imu":
         return _print_imu(args.host, args.port, int(a[0]) if a else 5)
     else:

@@ -32,11 +32,12 @@ measured mount. With zero lever arms the chain is a rotation about the camera's 
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 TICKS_PER_TURN = 4096
 RAD_PER_TICK = 2.0 * math.pi / TICKS_PER_TURN
@@ -180,7 +181,7 @@ class NeckConfig:
     @classmethod
     def from_json(cls, path: str | Path) -> NeckConfig:
         """Load config/neck.json; raises ``KeyError`` naming what is missing."""
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         ref, pivot = data["reference"], data.get("pivot", {})
         motion = data.get("motion", {})
         defaults = NeckMotion()
@@ -228,7 +229,7 @@ class NeckConfig:
 def neck_servo_ids(path: str | Path) -> dict[str, int]:
     """Only the servo names and ids of config/neck.json (``{"neck": 9, "head": 10}``): what the
     base server needs to read the encoders, without the reference the geometry needs."""
-    data = json.loads(Path(path).read_text())
+    data = read_json(path)
     return {name: int(data[name]["id"]) for name in (PAN, TILT)}
 
 

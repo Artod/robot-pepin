@@ -19,24 +19,31 @@ ON THE WORD (a request anchored on a character of a part):
   the lead less the forecast's spread (at most 0.3 s): as drawn, the arm from where it will be
   (rest, or the pose a unit holds); its preparation compressed to 0.9 of the caps; for a PHRASE mark
   the same on one of the next two words (no pause between, at most ``phrase_slide_s`` later);
-  another, smaller variant; the floor (the book's head-and-face variant, else the drawn one without
-  the arm and the wheels); else dropped "no time". The arm's preparation is its plan
+  for a LONG mark (hello, bye: the whole utterance's gesture, not a beat) the drawn version IN THE
+  UTTERANCE, the arm sent as soon as it can from the text's arrival and its stroke anywhere before
+  the reply's sure speech ends (a first word's {greeting} still waves, its hand up a little after
+  the word); another, smaller variant (never one that needs the person seen while they are
+  unseen); the floor (the book's head-and-face variant, else the drawn one without the arm and the
+  wheels); else dropped "no time". The arm's preparation is its plan
   (:meth:`pepin.expression.parts.ArmPart.plan`: the board's approach and the stretched stroke); for
   a WORD or PHRASE mark a plan stretched past the caps is a step down, never a silent late stroke. A
   head or face clip that cannot make it is left out, the rest keeps its time (one composition, many
   parts: each anchored on the word). The arm and the wheels play together (one body, each part
   within its own caps); the wheels never bind to a word. A version whose arm or wheels run longer
-  than ``short_s`` plays only when the speech after its stroke covers the motion after it, up to 0.5
-  s past (the fed audio as it is, 0.7 of the forecast of the rest: the stroke's own time is that
-  same forecast, so the share is taken of what follows it, not of the reply from its start), a
-  ``long`` one (hello, bye) up to 1 s past it.
+  than ``short_s`` plays only when the speech after its stroke covers the motion after it, up to
+  ``overrun_s`` past it, every composition alike (the fed audio as it is, 0.7 of the forecast of
+  the rest: the stroke's own time is that same forecast, so the share is taken of what follows it,
+  not of the reply from its start; 2026-10-14, Artem: 1.5 s, no special case, so a lone «{greeting}
+  Привет!» waves; 0.5 s, hello and bye 1 s before).
 * Never in a pause: a WORD or PHRASE mark after its part's last word is dropped (a sentence's
   end is 0.40-1.01 s of silence, MEASURED: no slide crosses it); an UTTERANCE one there takes
   the part's last word; a mark before punctuation already belongs to the word after it.
 * Sent at the last moment: each poll the clock's best estimate (TEXT, START, AUDIO) moves the
   send time; a clip goes when its stroke can still land on time. A WORD or PHRASE stroke is
-  never later than ``stroke_late_s``, an UTTERANCE one never later than ``late_s`` nor past the
-  reply's speech: past that the clip is dropped and the rest of its composition plays.
+  never later than ``stroke_late_s``, an UTTERANCE one never later than ``late_s`` (one fitted
+  in the utterance: any later), its head or face stroke never past the reply's speech, its arm or
+  wheels never running more than ``overrun_s`` past the speech after their stroke (that stroke
+  may fall past the speech): past that the clip is dropped and the rest of its composition plays.
 * Units (§7.10): an arm clip with another arm stroke waiting within ``units.hold_s`` after its
   end goes ``then: hold`` until shortly after that stroke's start, which plans from the held pose
   (at most ``units.strokes`` a unit); otherwise ``then: rest``. The listeners' POSTURE (the arm
@@ -87,6 +94,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any, Literal, Protocol
 
 from pepin.expression.animation import (
+    PERSON,
     Bind,
     Clip,
     Composition,
@@ -95,7 +103,7 @@ from pepin.expression.animation import (
     Scene,
     Track,
 )
-from pepin.expression.book import vocabulary
+from pepin.expression.book import sure_parts, vocabulary
 from pepin.expression.executors import Executor
 from pepin.expression.forecast import (
     SPREAD_INSIDE_S,
@@ -124,8 +132,7 @@ MARGIN_S = 0.3  # the most a forecast's spread holds a preparation back (DESIGN.
 EARLY_S = 0.3  # a stroke this much before its vowel is still on it (early is free: Nirme 2024)
 POST_STROKE_S = 0.15  # a unit's next stroke leaves the last one no sooner after its stroke
 UNIT_SLACK_S = 0.3  # a unit's hold reaches this far past the next stroke's start
-LONG_PAST_S = 1.0  # a long composition (hello, bye) may run this far past the speech
-SHORT_PAST_S = 0.5  # any other this far (DESIGN.md §7.9)
+SHORT_PAST_S = 0.5  # a held arm's hold reaches at most this far past the reply's sure speech
 SURE_SHARE = 0.7  # of the speech still a forecast, the share a long gesture may count on
 PHRASE_WORDS = 2  # a PHRASE mark may slide to one of this many next words
 HOME = "ready"  # the book's pose an arm goes to ahead of a mark it cannot reach from rest
@@ -186,7 +193,9 @@ class Request:
     "tool", "pulse", "idle", ...), how its stroke binds to its word (or ``after`` it: a tail),
     the family a marker of the same kind absorbs it into, and the parts its rendering may use
     (``parts``, None: any ready; the listeners leave out a part they find busy or without the
-    time). A request is itself: :meth:`Scheduler.withdraw` and
+    time), and for one without a cue the argument that chooses its variant (``arg``: the
+    music's dance by its style) and those that set its parameters (``args``, as a mark's list
+    reads them). A request is itself: :meth:`Scheduler.withdraw` and
     :meth:`pepin.expression.animator.GestureEngine.release` find its clips by identity."""
 
     intent: str
@@ -198,6 +207,8 @@ class Request:
     rank: int = 0
     clips: tuple[Clip, ...] = ()
     parts: frozenset[PartName] | None = None
+    arg: str | None = None
+    args: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -215,6 +226,7 @@ class Timing:
     short_s: float = 1.0
     phrase_slide_s: float = 0.5
     after_s: float = 2.5
+    overrun_s: float = 1.5
     unit_hold_s: float = 2.5
     unit_strokes: int = 3
 
@@ -231,6 +243,7 @@ def timing_from(data: Mapping[str, Any]) -> Timing:
         for name in (
             "audio_lag_s", "late_s", "poll_s", "char_s", "tts_first_s", "lead_silence_s",
             "stroke_bias_s", "stroke_late_s", "short_s", "phrase_slide_s", "after_s",
+            "overrun_s",
         )
     }  # fmt: skip
     return Timing(
@@ -389,8 +402,10 @@ class Fit:
     at render (to its aimed stroke, its part's latency off), when its part's text went to the
     voice, its preparation (send to stroke, latency apart; the arm's plan), the first heard
     time of each moment of the word clock, where the arm starts it from, the waiting clip a unit
-    chains it to, its predicted window on the engine's clock, the pose it leaves the arm in, and
-    whether it plays only from a pose a unit holds (a variant that needs the arm up)."""
+    chains it to, its predicted window on the engine's clock, the pose it leaves the arm in,
+    whether it plays only from a pose a unit holds (a variant that needs the arm up), and whether
+    its stroke may land anywhere in its utterance (``late``: a long mark's rung, sent as soon as
+    its part is free, never before ``not_before``, the start the ladder planned)."""
 
     bind: Bind
     step: str
@@ -407,6 +422,8 @@ class Fit:
     end: float = 0.0
     final: dict[str, float] | None = None
     held_only: bool = False
+    late: bool = False
+    not_before: float = 0.0
 
 
 @dataclass(eq=False)
@@ -462,13 +479,15 @@ class ArmFrom:
 
 @dataclass(frozen=True)
 class Candidate:
-    """One rung of the ladder: its name, the performance, the cue its movers aim at, and whether
-    the arm's preparation is compressed."""
+    """One rung of the ladder: its name, the performance, the cue its movers aim at, whether
+    the arm's preparation is compressed, and whether its strokes may land anywhere in the
+    utterance (``late``: up to the reply's sure speech end, not ``late_s`` past the word)."""
 
     step: str
     performance: Performance
     cue: Cue
     compress: bool = False
+    late: bool = False
 
 
 class Rendering(Protocol):
@@ -818,7 +837,7 @@ class Scheduler:
         composition = self._composition(performance.intent)
         reasons: list[str] = []
         for candidate in self._candidates(performance, request, target, composition, now):
-            fitted = self._try(candidate, request, target, composition, text_s, now, reasons)
+            fitted = self._try(candidate, request, target, text_s, now, reasons)
             if fitted:
                 self._log_ladder(performance, request, candidate, fitted, reasons, now)
                 return fitted
@@ -845,13 +864,15 @@ class Scheduler:
                 yield Candidate("slid", drawn, slid)
                 if arm:
                     yield Candidate("slid, compressed", drawn, slid, compress=True)
+        if arm and request.bind == "utterance" and composition is not None and composition.long:
+            yield Candidate("in the utterance", drawn, cue, compress=True, late=True)
         rendering = self._rendering()
         scene = self._scene(request)
         floors: list[Performance] = []
         if composition is not None and rendering is not None:
             for k, variant in enumerate(composition.variants):
-                if k == drawn.variant:
-                    continue
+                if k == drawn.variant or (PERSON in variant.needs and scene.unseen is not None):
+                    continue  # a wave at nobody is no rung
                 other = rendering.render(drawn.intent, scene, drawn.seed, cue, variant=k)
                 if variant.floor:
                     floors.append(other)
@@ -874,7 +895,6 @@ class Scheduler:
         candidate: Candidate,
         request: Request,
         mark: Cue,
-        composition: Composition | None,
         text_s: float,
         now: float,
         reasons: list[str],
@@ -887,6 +907,7 @@ class Scheduler:
         clips = list(candidate.performance.clips)
         allowance = self.timing.late_s if bind == "utterance" else 0.0
         held_only = self._held_only(candidate.performance)
+        end = self._speech_end(mark.turn, now) if candidate.late else None
         fitted: list[Waiting] = []
         for clip in clips:
             cue = mark if clip.part == "face" else candidate.cue  # the face leads, on the mark
@@ -898,9 +919,12 @@ class Scheduler:
             lead = aim - now - latency
             loose = clip.part == "body"
             room = lead + (self.timing.late_s if loose else allowance)
+            late = end is not None and not loose
+            if end is not None and late:  # anywhere in the utterance: until its sure speech ends
+                room = max(room, end - now - latency)
             room -= min(forecast.spread, MARGIN_S)
             fit = Fit("utterance" if loose else bind, candidate.step, "", lead, text_s,
-                      clip.stroke_s)  # fmt: skip
+                      clip.stroke_s, late=late)  # fmt: skip
             fit.heard[forecast.stage] = forecast.heard
             if clip.part == "arm":
                 deadline = now + latency + room
@@ -917,14 +941,15 @@ class Scheduler:
             else:  # an utterance-bound one may land late: it starts as soon as it can
                 fit.start = max(aim - fit.prep_s, now + latency)
                 fit.stroke, fit.end = fit.start + fit.prep_s, fit.start + clip.duration_s
+            fit.not_before = fit.start
             fitted.append(Waiting(candidate.performance, clip, request, cue, fit=fit))
         if not fitted:
             reasons.append(f"{candidate.step}: no part in time")
             return []
-        why = self._too_long(fitted, mark, composition, now)
+        why = self._too_long(fitted, mark, now)
         rest = [w for w in fitted if w.clip.part != "body"]
         shorter = why is not None and rest and len(rest) < len(fitted)
-        if shorter and self._too_long(rest, mark, composition, now) is None:
+        if shorter and self._too_long(rest, mark, now) is None:
             reasons.append(f"{candidate.step}: the wheels left out ({why})")
             fitted, why = rest, None
         if why is not None:
@@ -1039,12 +1064,11 @@ class Scheduler:
         """The board's way back to rest from ``pose``."""
         return arm.approach_s(_knot(arm.base), _knot(pose))
 
-    def _too_long(
-        self, fitted: list[Waiting], mark: Cue, composition: Composition | None, now: float
-    ) -> str | None:
+    def _too_long(self, fitted: list[Waiting], mark: Cue, now: float) -> str | None:
         """Why the arm or the wheels would run past what the speech after their stroke covers
-        (DESIGN.md §7.9: a motion over ``short_s``, the sure speech after the stroke against the
-        motion after it); None when they would not."""
+        (DESIGN.md §7.9: a motion over ``short_s``, the sure speech after the stroke and
+        ``overrun_s`` against the motion after it, every composition alike); None when they
+        would not."""
         movers = [w.fit for w in fitted if w.clip.part in ("arm", "body") and w.fit is not None]
         if not movers:
             return None
@@ -1055,8 +1079,7 @@ class Scheduler:
         ahead = self._speech_after(mark.turn, stroke, now)
         if ahead is None:
             return None
-        long = composition is not None and composition.long
-        if ahead + (LONG_PAST_S if long else SHORT_PAST_S) >= last - stroke:
+        if ahead + self.timing.overrun_s >= last - stroke:
             return None
         return f"{last - stroke:.1f} s of motion after its stroke, {ahead:.1f} s of speech ahead"
 
@@ -1192,7 +1215,12 @@ class Scheduler:
         aim = forecast.heard + self.timing.stroke_bias_s
         latency = self.latency(waiting.clip.part)
         send = aim - latency - fit.prep_s
-        self._rebook(waiting, aim - fit.prep_s, aim)
+        if fit.late:  # as soon as its part is free, its stroke wherever that lands in the speech
+            begin = max(aim - fit.prep_s, now + latency, fit.not_before)
+            send = begin - latency
+            self._rebook(waiting, begin, begin + fit.prep_s)
+        else:
+            self._rebook(waiting, aim - fit.prep_s, aim)
         if now < send:
             return max(0.001, min(self.timing.poll_s, send - now))
         planned: Planned | None = None
@@ -1208,13 +1236,13 @@ class Scheduler:
         prep = planned.stroke_s if planned is not None else fit.prep_s
         stroke = now + latency + prep
         allowed = self.timing.late_s if fit.bind == "utterance" else self.timing.stroke_late_s
-        if stroke - aim > allowed + 1e-9:
+        if stroke - aim > allowed + 1e-9 and not fit.late:
             self._late(waiting, f"{stroke - aim:.2f} s late")
             return None
         if fit.bind == "utterance" and stroke > aim:
-            end = self._speech_end(cue.turn, now)
-            if end is not None and stroke > end:
-                self._late(waiting, "past the speech")
+            why = self._past_speech(waiting, planned, stroke, now)
+            if why is not None:
+                self._late(waiting, why)
                 return None
         if planned is not None:
             arm = self._arm_part()  # where the arm really starts (a posture may have come since)
@@ -1230,6 +1258,25 @@ class Scheduler:
             played = self.playout.played()
             timing = (send - now + played, played)
         return Due(waiting, timing)
+
+    def _past_speech(
+        self, waiting: Waiting, planned: Planned | None, stroke: float, now: float
+    ) -> str | None:
+        """Why a late utterance-bound clip may not go, None when it may: the arm's or the
+        wheels' motion after its stroke runs more than ``overrun_s`` past the sure speech after
+        it (the render's rule again, on the forecast of now: its stroke may fall past the
+        speech); a head's or face's stroke past the reply's sure speech."""
+        clip, cue = waiting.clip, waiting.cue
+        assert cue is not None
+        if clip.part in ("arm", "body"):
+            after = (planned.seconds - planned.stroke_s if planned is not None
+                     else clip.duration_s - clip.stroke_s)  # fmt: skip
+            ahead = self._speech_after(cue.turn, stroke, now)
+            if ahead is not None and ahead + self.timing.overrun_s < after:
+                return f"{after:.1f} s of motion after its stroke, {ahead:.1f} s of speech ahead"
+            return None
+        end = self._speech_end(cue.turn, now)
+        return "past the speech" if end is not None and stroke > end else None
 
     def _check_stream(self, waiting: Waiting) -> Due | float | None:
         """A clip on a stream second (the pulse's): at its second, late by at most its bind's
@@ -1445,8 +1492,7 @@ class Scheduler:
             drawn = rendering.render(marker.name, self._scene(ahead), 0, cue, variant=k)
             if not drawn.clips:
                 continue  # written for another argument
-            if not any(rendering.book.atoms[s.atom].part == "arm" and s.p >= 1.0
-                       for s in variant.steps):  # fmt: skip
+            if not any("arm" in sure_parts(rendering.book, s) for s in variant.steps):
                 return
             clip = next((c for c in drawn.clips if c.part == "arm"), None)
             planned = arm.plan(clip, start=_knot(arm.base)) if clip is not None else "no arm"

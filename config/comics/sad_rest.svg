@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the drooping sad frown, the lower lip's line under it</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 100 92 C 136 73.33 184 73.33 220 92" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 92.9 95.68 C 89.75 97.32 87.48 100.26 86.71 103.72" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 227.1 95.68 C 230.25 97.32 232.52 100.26 233.29 103.72" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 140 93 C 152 96.5 168 96.5 180 93" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="chin"/>
+</svg>

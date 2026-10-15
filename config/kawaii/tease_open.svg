@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the shallow smile with the tongue hanging from its middle, wagging</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 148.25 73.25 C 155.95 75.58 164.05 75.58 171.75 73.25 C 178.38 71.25 186.7 75.81 182.94 81.63 C 177.97 89.33 169.19 94.4 160 94.4 C 150.81 94.4 142.03 89.33 137.06 81.63 C 133.3 75.81 141.62 71.25 148.25 73.25 Z" fill="#DD7487"/>
+  <path class="tongue" d="M 157.88 91.41 C 159.28 91.4 160.68 91.4 162.08 91.39 C 164.02 91.38 165.59 92.94 165.6 94.87 C 165.61 96.04 165.62 97.2 165.62 98.37 C 165.64 101.46 163.15 103.98 160.05 104 C 156.96 104.02 154.44 101.52 154.42 98.43 C 154.42 97.26 154.41 96.1 154.4 94.93 C 154.39 93 155.95 91.42 157.88 91.41 Z" fill="#DD7487"/>
+  <path class="line" d="M 156.02 94.08 C 148.33 92.87 141.3 88.21 137.06 81.63 C 133.3 75.81 141.62 71.25 148.25 73.25 C 155.95 75.58 164.05 75.58 171.75 73.25 C 178.38 71.25 186.7 75.81 182.94 81.63 C 178.69 88.21 171.67 92.87 163.98 94.08" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 165.6 94.87 C 165.61 96.04 165.62 97.2 165.62 98.37 C 165.64 101.46 163.15 103.98 160.05 104 C 156.96 104.02 154.44 101.52 154.42 98.43 C 154.42 97.26 154.41 96.1 154.4 94.93" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+</svg>

@@ -9,7 +9,13 @@ Test tiers:
   skipped unless ``--weights`` is passed.
 """
 
+import os
+
 import pytest
+
+# The tests are the public tree's: a private overlay (pepin.overlay, companion/) present in the
+# checkout never changes what a config file says to them. A test of the overlay sets its own.
+os.environ["PEPIN_OVERLAY"] = "."
 
 GATES = {"hardware": "needs the robot", "weights": "loads real model weights"}
 

@@ -9,13 +9,13 @@ Localisation never uses them.
 
 from __future__ import annotations
 
-import json
 import math
 import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
 from pepin.streams import Connector, JsonLinesClient
 
 TOF_PORT = 3335
@@ -48,8 +48,7 @@ class TofMount:
 
 def load_mounts(path: str | Path) -> dict[str, TofMount]:
     """Sensor mounts from ``config/tof.json``; sensors whose ``mount`` is null are left out."""
-    with open(path) as f:
-        sensors = json.load(f)["sensors"]
+    sensors = read_json(path)["sensors"]
     return {
         name: TofMount(m["x_m"], m["y_m"], m["yaw_deg"], m["height_m"])
         for name, entry in sensors.items()

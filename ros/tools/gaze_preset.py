@@ -32,12 +32,12 @@ reverse_gaze are not part of a preset.
 
 from __future__ import annotations
 
-import json
 import subprocess
 import sys
 from pathlib import Path
 
 from pepin.flags import load_knobs
+from pepin.overlay import read_json
 
 REPO = Path(__file__).resolve().parents[2]
 PRESETS = REPO / "config/gaze_presets.json"
@@ -46,7 +46,7 @@ NAMES = ("baseline", "follow")
 
 def presets(path: Path = PRESETS) -> dict[str, dict[str, float]]:
     """The named sets: {preset: {knob: value}}."""
-    data = json.loads(path.read_text())
+    data = read_json(path)
     return {name: dict(data[name]) for name in NAMES}
 
 

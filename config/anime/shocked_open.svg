@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small tall rounded mouth (the cheeks and the stripes are the overlays')</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 148.1 56 C 156.03 56 163.97 56 171.9 56 C 178.58 56 184 61.42 184 68.1 C 184 89.03 184 109.97 184 130.9 C 184 137.58 178.58 143 171.9 143 C 163.97 143 156.03 143 148.1 143 C 141.42 143 136 137.58 136 130.9 C 136 109.97 136 89.03 136 68.1 C 136 61.42 141.42 56 148.1 56 Z" fill="#EC7488"/>
+  <path class="line" d="M 148.1 56 C 156.03 56 163.97 56 171.9 56 C 178.58 56 184 61.42 184 68.1 C 184 89.03 184 109.97 184 130.9 C 184 137.58 178.58 143 171.9 143 C 163.97 143 156.03 143 148.1 143 C 141.42 143 136 137.58 136 130.9 C 136 109.97 136 89.03 136 68.1 C 136 61.42 141.42 56 148.1 56 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

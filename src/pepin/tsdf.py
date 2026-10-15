@@ -20,7 +20,6 @@ resample that carried a map-frame model with the graph are on the tag alt/volume
 from __future__ import annotations
 
 import dataclasses
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +29,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pepin.depth import NEAR_M, Intrinsics
+from pepin.overlay import read_json
 
 Array = npt.NDArray[np.float64]
 Float32 = npt.NDArray[np.float32]
@@ -65,8 +65,7 @@ class GridSpec:
     @classmethod
     def load(cls, path: str | Path) -> GridSpec:
         """The grid from ``config/fusion.json``."""
-        with open(path) as f:
-            data = json.load(f)
+        data = read_json(path)
         extra: dict[str, Any] = {}
         if "camera_band_m" in data:  # absent in an older file: the default band stands
             lo, hi = data["camera_band_m"]
@@ -188,8 +187,7 @@ def band_half_z_m(path: str | Path | None = None) -> float:
         except FileNotFoundError:
             return BAND_HALF_Z_M
     try:
-        with open(path) as f:
-            return float(json.load(f)["band_half_z_m"])
+        return float(read_json(path)["band_half_z_m"])
     except (OSError, ValueError, KeyError, TypeError):
         return BAND_HALF_Z_M
 
@@ -214,8 +212,7 @@ def window_recentre_m(path: str | Path | None = None) -> float:
         except FileNotFoundError:
             return WINDOW_RECENTRE_M
     try:
-        with open(path) as f:
-            return float(json.load(f)["window_recentre_m"])
+        return float(read_json(path)["window_recentre_m"])
     except (OSError, ValueError, KeyError, TypeError):
         return WINDOW_RECENTRE_M
 

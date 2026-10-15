@@ -242,7 +242,7 @@ class ToolDone:
 
 @dataclass(frozen=True)
 class Usage:
-    """One model call's tokens and its price estimate."""
+    """One model call's tokens, its server-side web searches and its price estimate."""
 
     input: int = 0
     cache_read: int = 0
@@ -251,6 +251,7 @@ class Usage:
     usd: float = 0.0
     stop: str | None = None
     ms: int = 0  # the call's wall time
+    web_searches: int = 0  # the API's own searches in the call (priced in usd)
 
     def plus(self, other: Usage) -> Usage:
         """Two calls summed (the later stop reason kept)."""
@@ -262,6 +263,7 @@ class Usage:
             self.usd + other.usd,
             other.stop or self.stop,
             self.ms + other.ms,
+            self.web_searches + other.web_searches,
         )
 
 

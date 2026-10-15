@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the bowl with the band and the dome (happy's variant: the same drawing)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 95.8 50.7 C 135.6 55.45 184.4 55.45 224.2 50.7 C 229.87 50.02 235.03 54.46 234.37 60.13 C 229.57 101.25 197.96 133.26 160 133.26 C 122.04 133.26 90.43 101.25 85.63 60.13 C 84.97 54.46 90.13 50.02 95.8 50.7 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 95.8 50.7 C 135.6 55.45 184.4 55.45 224.2 50.7 C 229.87 50.02 235.03 54.46 234.37 60.13 C 192.72 70.97 127.28 70.97 85.63 60.13 C 84.97 54.46 90.13 50.02 95.8 50.7 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 234.37 60.13 C 192.72 70.97 127.28 70.97 85.63 60.13" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 108.02 94.82 C 140.23 82.23 179.77 82.23 211.98 94.82 C 216.58 96.62 218.19 102.36 215.04 106.17 C 201.32 122.8 181.69 133.26 160 133.26 C 138.31 133.26 118.69 122.8 104.96 106.17 C 101.81 102.36 103.42 96.62 108.02 94.82 Z" fill="#F09AA8"/>
+  <path class="line" d="M 99.39 98.58 C 135.76 80.97 184.24 80.97 220.61 98.58" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 95.8 50.7 C 135.6 55.45 184.4 55.45 224.2 50.7 C 229.87 50.02 235.03 54.46 234.37 60.13 C 229.57 101.25 197.96 133.26 160 133.26 C 122.04 133.26 90.43 101.25 85.63 60.13 C 84.97 54.46 90.13 50.02 95.8 50.7 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

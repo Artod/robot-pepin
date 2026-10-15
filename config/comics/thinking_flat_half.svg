@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed line aside, nearly level, a tick</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 164.13 86.16 C 183.25 84.09 202.38 86.7 221.5 84.38 C 225.9 83.85 230.37 87.38 228.38 91.34 C 223.39 101.25 208.24 108.41 194 108.41 C 179.18 108.41 163.39 101.88 159.07 93 C 157.5 89.77 160.55 86.55 164.13 86.16 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 179.22 95.75 C 188.29 94.69 197.92 94.69 206.99 95.77 C 212.65 96.45 214 104.29 208.57 106.05 C 203.91 107.57 198.9 108.41 194 108.41 C 188.49 108.41 182.85 107.51 177.72 105.92 C 172.29 104.25 173.58 96.42 179.22 95.75 Z" fill="#DE5B55"/>
+  <path class="line" d="M 164.13 86.16 C 183.25 84.09 202.38 86.7 221.5 84.38 C 225.9 83.85 230.37 87.38 228.38 91.34 C 223.39 101.25 208.24 108.41 194 108.41 C 179.18 108.41 163.39 101.88 159.07 93 C 157.5 89.77 160.55 86.55 164.13 86.16 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 237.83 81.37 C 241.3 80.64 244.92 81.49 247.71 83.69" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

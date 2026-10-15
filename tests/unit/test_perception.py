@@ -579,7 +579,8 @@ def test_a_knob_travels_in_the_control_file_and_the_config_names_the_start_value
     assert back.knobs == {"vision.source": "snapshot"} and back.id == request.id
     assert Request.from_dict({"knobs": {"a": 1, "b": " "}}).knobs == {}
     config = PerceptionConfig.load()
-    assert config.port == 8792 and config.source == "service" and config.detect_hz == 10.0
+    # detect_hz 20 since 2026-10-14 (the camera lock on a person while the body turns)
+    assert config.port == 8792 and config.source == "service" and config.detect_hz == 20.0
     assert VisionSource.load().value == config.source
     with pytest.raises(ValueError):
         PerceptionConfig.from_dict({"faces": "gpu"})

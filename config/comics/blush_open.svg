@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the whistle parted into the small oval</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 145.46 89 C 145.46 78.51 151.72 70 159.46 70 C 167.19 70 173.46 78.51 173.46 89 C 173.46 99.49 167.19 108 159.46 108 C 151.72 108 145.46 99.49 145.46 89 Z" fill="#1D1D1B"/>
+  <path class="line" d="M 145.46 89 C 145.46 78.51 151.72 70 159.46 70 C 167.19 70 173.46 78.51 173.46 89 C 173.46 99.49 167.19 108 159.46 108 C 151.72 108 145.46 99.49 145.46 89 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

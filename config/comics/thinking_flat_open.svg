@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed line aside, nearly level, a tick</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 161.77 86.44 C 182.69 83.73 203.61 87.1 224.53 83.98 C 227.36 83.55 230.01 85.7 229.76 88.55 C 227.83 110.23 214.59 127.13 194 127.13 C 172.98 127.13 159.62 111.11 158.14 90.81 C 157.98 88.62 159.6 86.72 161.77 86.44 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 161.77 86.44 C 182.69 83.73 203.61 87.1 224.53 83.98 C 227.36 83.55 230.01 85.7 229.76 88.55 C 209.7 103.95 178.19 103.95 158.14 90.81 C 157.98 88.62 159.6 86.72 161.77 86.44 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 193.95 86.38 C 194.15 90.38 194.35 94.38 194.55 98.38" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 171.92 106.43 C 185.66 101.79 201.53 101.81 215.26 106.48 C 219.66 107.97 221.27 113.46 218.08 116.84 C 212.03 123.26 203.86 127.13 194 127.13 C 183.67 127.13 175.2 123.27 169.07 116.93 C 165.79 113.53 167.44 107.94 171.92 106.43 Z" fill="#DE5B55"/>
+  <path class="line" d="M 161.77 86.44 C 182.69 83.73 203.61 87.1 224.53 83.98 C 227.36 83.55 230.01 85.7 229.76 88.55 C 227.83 110.23 214.59 127.13 194 127.13 C 172.98 127.13 159.62 111.11 158.14 90.81 C 157.98 88.62 159.6 86.72 161.77 86.44 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 237.83 81.37 C 241.3 80.64 244.92 81.49 247.71 83.69" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

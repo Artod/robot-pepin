@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed frown, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 135.02 85.68 C 150.72 79.44 169.28 79.44 184.98 85.68 C 189.21 87.36 191.87 92.69 188.04 95.15 C 182.17 98.92 170.79 101.48 160 101.48 C 149.21 101.48 137.83 98.92 131.96 95.15 C 128.13 92.69 130.79 87.36 135.02 85.68 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 147.54 90.95 C 155.7 89.7 164.3 89.7 172.46 90.95 C 177.79 91.76 178.13 99.4 172.82 100.34 C 168.71 101.07 164.31 101.48 160 101.48 C 155.69 101.48 151.29 101.07 147.18 100.34 C 141.87 99.4 142.21 91.76 147.54 90.95 Z" fill="#DE5B55"/>
+  <path class="line" d="M 135.02 85.68 C 150.72 79.44 169.28 79.44 184.98 85.68 C 189.21 87.36 191.87 92.69 188.04 95.15 C 182.17 98.92 170.79 101.48 160 101.48 C 149.21 101.48 137.83 98.92 131.96 95.15 C 128.13 92.69 130.79 87.36 135.02 85.68 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 121.01 92.89 C 117.91 94.61 115.73 97.61 115.05 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 198.99 92.89 C 202.09 94.61 204.27 97.61 204.95 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

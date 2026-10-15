@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the 3 parted into a small o</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 148.42 65 C 148.42 56.72 153.34 50 159.42 50 C 165.49 50 170.42 56.72 170.42 65 C 170.42 73.28 165.49 80 159.42 80 C 153.34 80 148.42 73.28 148.42 65 Z" fill="#504743"/>
+  <path class="line" d="M 148.42 65 C 148.42 56.72 153.34 50 159.42 50 C 165.49 50 170.42 56.72 170.42 65 C 170.42 73.28 165.49 80 159.42 80 C 153.34 80 148.42 73.28 148.42 65 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

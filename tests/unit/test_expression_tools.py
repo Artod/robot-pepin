@@ -22,10 +22,13 @@ BOOK = with_rest(load_book(CONFIG / "animation.json"), MOTION.rest_deg)
 
 
 def test_the_tool_s_names_are_the_book_s_intents() -> None:
-    # the book's feelings, in its order; its co-speech primitives are inline marks only
+    # the book's feelings, in its order; its co-speech primitives, the snap and the atoms'
+    # auto-wrappers (single basic moves) are inline marks only
     assert tuple(n for n in BOOK.compositions if n in GESTURES) == GESTURES
-    assert set(intents(BOOK)) - set(GESTURES) == {
-        "accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer",
+    singles = {n for n, c in BOOK.compositions.items() if c.wraps is not None and c.callable}
+    assert set(intents(BOOK)) - set(GESTURES) - singles == {
+        "accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer", "snap",
+        "dance",
     }  # fmt: skip
     schema = TOOLS["gesture"].input_schema()
     assert schema["properties"]["name"]["enum"] == list(GESTURES)

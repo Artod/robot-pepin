@@ -275,13 +275,13 @@ class ArmModel:
     @classmethod
     def load(cls, path: str | Path | None = None) -> ArmModel:
         """From config/arm.json wherever this library runs, or ``path``."""
-        import json
+        from pepin.overlay import read_json
 
         if path is None:
             from pepin.deployment import config_file
 
             path = config_file(ARM_FILE)
-        return cls.from_dict(json.loads(Path(path).read_text()))
+        return cls.from_dict(read_json(path))
 
     @property
     def joint_names(self) -> tuple[str, ...]:

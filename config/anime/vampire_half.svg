@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the bowl with the band, two fangs hanging from it</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 103.31 55.19 C 139.09 58.11 180.91 58.11 216.69 55.19 C 225.93 54.44 234.55 62.96 229.21 70.54 C 217.85 86.64 191.05 98.02 160 98.02 C 128.95 98.02 102.15 86.64 90.79 70.54 C 85.45 62.96 94.07 54.44 103.31 55.19 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 103.31 55.19 C 139.09 58.11 180.91 58.11 216.69 55.19 C 225.93 54.44 234.55 62.96 229.21 70.54 C 190.45 71.66 129.55 71.66 90.79 70.54 C 85.45 62.96 94.07 54.44 103.31 55.19 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 229.21 70.54 C 190.45 71.66 129.55 71.66 90.79 70.54" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 122.15 75.74 C 146.47 72.33 173.53 72.33 197.85 75.74 C 206 76.88 208.03 88.02 200.35 90.96 C 188.68 95.42 174.82 98.02 160 98.02 C 145.18 98.02 131.32 95.42 119.65 90.96 C 111.97 88.02 114 76.88 122.15 75.74 Z" fill="#F09AA8"/>
+  <path class="line" d="M 99.94 80.03 C 135.97 70.9 184.03 70.9 220.06 80.03" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 103.31 55.19 C 139.09 58.11 180.91 58.11 216.69 55.19 C 225.93 54.44 234.55 62.96 229.21 70.54 C 217.85 86.64 191.05 98.02 160 98.02 C 128.95 98.02 102.15 86.64 90.79 70.54 C 85.45 62.96 94.07 54.44 103.31 55.19 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="fang" d="M 118 70.17 C 121.33 70.17 124.67 70.17 128 70.17 C 126.2 77.17 124.4 84.17 122.6 91.17 C 121.07 84.17 119.53 77.17 118 70.17 Z" fill="#FFFFFF"/>
+  <path class="fang" d="M 192 70.17 C 195.33 70.17 198.67 70.17 202 70.17 C 200.47 77.17 198.93 84.17 197.4 91.17 C 195.6 84.17 193.8 77.17 192 70.17 Z" fill="#FFFFFF"/>
+</svg>

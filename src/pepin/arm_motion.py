@@ -12,13 +12,13 @@ closed end, ``(ticks - min) * 360 / 4096 - 10``. The calibration lives in the se
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from pepin.expression.trajectory import JOINTS
+from pepin.overlay import read_json
 
 TICKS_PER_TURN = 4096
 DEG_PER_TICK = 360.0 / TICKS_PER_TURN
@@ -105,7 +105,7 @@ def load_arm_motion(path: str | Path | None = None) -> ArmMotion:
         from pepin.deployment import config_file
 
         path = config_file("arm.json")
-    return arm_motion(json.loads(Path(path).read_text()))
+    return arm_motion(read_json(path))
 
 
 @dataclass(frozen=True)

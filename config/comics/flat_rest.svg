@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line, a tick at each end</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 104 85 C 141.33 85 178.67 85 216 85" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 96 85 C 92.45 85 89.09 86.57 86.81 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 224 85 C 227.55 85 230.91 86.57 233.19 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

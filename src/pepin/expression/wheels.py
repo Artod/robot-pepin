@@ -60,7 +60,6 @@ final.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import threading
@@ -98,6 +97,7 @@ from pepin.expression.parts import move_speed, needed_acc
 from pepin.expression.plan import BodyLimits, BoundedTurn, Step
 from pepin.kinematics import Twist
 from pepin.odometry import Pose2D
+from pepin.overlay import read_json
 
 logger = logging.getLogger(__name__)
 
@@ -196,7 +196,7 @@ class WheelsSettings:
             from pepin.deployment import config_file
 
             path = config_file(CONFIG_FILE)
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         if not isinstance(data, dict):
             raise ValueError(f"{path} holds no JSON object")
         return cls.from_config(data)
@@ -223,7 +223,7 @@ def footprint_of(path: str | Path | None = None) -> Footprint:
         from pepin.deployment import config_file
 
         path = config_file("base.json")
-    return Footprint.from_config(json.loads(Path(path).read_text()))
+    return Footprint.from_config(read_json(path))
 
 
 # ---- what the wheels read ----------------------------------------------------------------------

@@ -75,6 +75,13 @@ EVERYTHING = Scene(frozenset({"arm", "head", "face", "body"}))
 RENDERER = BookRenderer(BOOK)
 
 
+def idle_clip(name: str, seed: int) -> Clip:
+    """The idle layer's head clip of composition ``name`` (an atom's auto-wrapper, or the
+    breath's own: three cycles, looping), as the engine renders an idle entry."""
+    (clip,) = RENDERER.render(name, Scene(frozenset({"head"})), seed, layer="idle").clips
+    return clip
+
+
 def nod(amp: float = 5.0, period: float = 0.4, layer: str = "gesture") -> Clip:
     params = {"amp_deg": amp, "period_s": period, "repeats": 1.0}
     return RENDERER.atom_clip("head_nod", params, layer=layer)  # type: ignore[arg-type]
@@ -148,11 +155,11 @@ def test_a_hold_writes_nothing_and_a_merged_clip_s_steps_add_up() -> None:
     assert clip_look(still, GESTURE) is None  # moves nothing
 
 
-def test_the_idle_layer_s_clip_is_marked_idle_and_a_looping_atom_loops() -> None:
-    drift = clip_look(RENDERER.render_atom("head_drift", 5), IDLE_LOOK)
+def test_the_idle_layer_s_clip_is_marked_idle_and_a_looping_step_loops() -> None:
+    drift = clip_look(idle_clip("head_drift", 5), IDLE_LOOK)
     assert drift is not None and drift["target"].get("idle") is True
     assert "loop" not in drift["target"]
-    breath = RENDERER.render_atom("breath", 5)
+    breath = idle_clip("breath", 5)
     assert breath.loop and breath.layer == "idle"
     look = clip_look(breath, IDLE_LOOK)
     assert look is not None and look["target"].get("loop") is True
@@ -171,7 +178,7 @@ def test_the_idle_layer_s_keys_glide_and_a_gesture_s_strike_at_the_neck_s_ramp()
     to key; a gesture's keys carry none (the neck's own ramp, a nod's stroke on its word)."""
     melody = head_clip(((0.0, 0.0, 0.0), (0.6, 0.0, -0.9), (1.3, 0.0, 0.5), (2.0, 0.0, 0.0)), 0.0,
                        layer="idle")  # fmt: skip
-    for clip in (melody, RENDERER.render_atom("breath", 5), RENDERER.render_atom("head_drift", 5)):
+    for clip in (melody, idle_clip("breath", 5), idle_clip("head_drift", 5)):
         look = clip_look(clip, IDLE_LOOK)
         assert look is not None
         pairs = itertools.pairwise(keyframes(clip))
@@ -197,7 +204,7 @@ def test_the_glide_s_ramp_reaches_the_neck_with_each_key() -> None:
     arbiter = Arbiter(driver, home_aim(NECK), GazeSettings(), None)
     door = OverlayDoor(client=lambda s, a=arbiter, c=clock: ArbiterClient(s, a, c))
     head = HeadPart(door, run=inline)
-    breath = RENDERER.render_atom("breath", 5)
+    breath = idle_clip("breath", 5)
     clock.now = 1.0
     assert head.play(breath).ok
     while clock.now < 1.0 + breath.duration_s:
@@ -274,7 +281,7 @@ def test_the_breath_is_one_slow_oscillation_with_a_stop_only_at_its_turns() -> N
     down over the other half, so between its turns the head never stops (the four-key cycle
     before stopped at the middle every pass: a floating drift, 2026-10-13); each key a glide
     at the Acceleration register's gentlest unit, ~2.3 deg/s, still (never blinds)."""
-    breath = RENDERER.render_atom("breath", 5)
+    breath = idle_clip("breath", 5)
     frames = keyframes(breath)
     tilts = [t for _, _, t in frames]
     assert tilts == pytest.approx([0.0, -2.0, 2.0, -2.0, 2.0, -2.0, 2.0])  # three cycles
@@ -345,7 +352,7 @@ def test_the_head_part_posts_each_layer_as_its_source_and_releases_it_over_the_f
     head = HeadPart(door, run=inline, fade_s=0.35)
     assert head.ready() is None and head.latency_s == 0.1
     assert head.play(nod()).ok
-    assert head.play(RENDERER.render_atom("head_drift", 3)).ok
+    assert head.play(idle_clip("head_drift", 3)).ok
     gesture, idle = door.looks()
     assert gesture["source"] == GESTURE and "idle" not in gesture["target"]
     assert idle["source"] == IDLE_LOOK and idle["target"]["idle"] is True
@@ -457,7 +464,7 @@ def test_the_overlay_door_sends_a_source_s_clip_and_reads_the_answer() -> None:
     assert door.look(look) is None  # no refusal within answer_wait_s: it plays
     away = door.look(look)
     assert away is not None and away.startswith(AWAY)
-    breath = clip_look(RENDERER.render_atom("breath", 1), IDLE_LOOK)
+    breath = clip_look(idle_clip("breath", 1), IDLE_LOOK)
     assert breath is not None and door.look(breath) is None  # a loop is answered at once
     name, sent = clients[GESTURE].calls[0]
     assert name == "clip" and sent["timeout_s"] == 0.2 and sent["band"] == IDLE
@@ -562,7 +569,7 @@ def test_a_looping_breath_plays_on_while_renewed_and_lapses_without_it() -> None
         arbiter = Arbiter(TargetHead(), home_aim(NECK), GazeSettings(), None)
         door = OverlayDoor(client=lambda s, a=arbiter, c=clock: ArbiterClient(s, a, c))
         head = HeadPart(door, run=inline)
-        breath = RENDERER.render_atom("breath", 5)
+        breath = idle_clip("breath", 5)
         clock.now = 1.0
         assert head.play(breath).ok
         due = clock.now + breath.duration_s

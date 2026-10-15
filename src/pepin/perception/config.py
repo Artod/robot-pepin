@@ -5,11 +5,11 @@ that loads them, so the service and the snapshot fallback run the same networks.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
 from pepin.perception import PORT
 from pepin.perception.source import SERVICE, SOURCES
 
@@ -59,7 +59,7 @@ class PerceptionConfig:
             from pepin.deployment import config_file
 
             path = config_file("models.json")
-        block = json.loads(Path(path).read_text()).get("perception", {})
+        block = read_json(path).get("perception", {})
         return cls.from_dict(block if isinstance(block, dict) else {})
 
     def check(self) -> None:

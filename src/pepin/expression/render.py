@@ -13,7 +13,21 @@ is left out by chance, the most likely one that can play still plays.
 The chooser draws among the variants a scene allows by their ``needs`` and never a floor; the
 lead and the ladder are the scheduler's (:mod:`pepin.expression.schedule`), which renders a
 given variant (``variant=``) for each rung. A variant that needs its marker's argument
-(``needs: {"arg": ...}``) renders only for that argument; another renders to no clips.
+(``needs: {"arg": ...}``) renders only for that argument; another renders to no clips. One that
+needs the person seen (``needs: {"person": "seen"}``: the waves of hello and bye) is never drawn
+while the scene says why they are unseen (:attr:`pepin.expression.animation.Scene.unseen`), nor
+a rung of the ladder: the floor plays.
+
+A mark's arguments that set parameters (:attr:`pepin.expression.markers.Marker.args`: the
+composition's ``settings``, an auto-wrapper's numbers in its atom's order, ``key=value``)
+replace the ranges of the steps they name before anything is drawn; one that names nothing
+here is left out (the parser left out the rest). A NESTED composition (a step that names one)
+draws its own variant, by the same scene rules and with no memory of the last (the floor when
+nothing else fits), and its own parameters, from ``random.Random`` of a seed derived from its
+parent's and the step's index (:func:`sub_seed`): the parent's seed replays it. Its steps land
+at the parent step's ``at_s`` plus their own, merge into the parts' clips as any step's (a later
+one on the same part cuts the earlier), take no argument of the mark, and are listed in
+:attr:`pepin.expression.animation.Performance.nested`.
 
 THE RESOLVER (:class:`Resolver`; DESIGN.md §4.3-§4.6, the gesture space of config/animation.json's
 ``space``). A pose named ``@...`` in an atom's key or a step's ``pose`` is a place in the space:
@@ -24,10 +38,16 @@ THE RESOLVER (:class:`Resolver`; DESIGN.md §4.3-§4.6, the gesture space of con
   space inward of ``space.via_pan_deg`` or a pose of ``space.via``: straight from rest the hand
   passes the speaker box at 1.1 cm on its way to the middle, and the ways between ``stop``,
   ``tucked`` and the sweep's top pass the head (scratch/gesticulation_space/cells.py); its time
-  divides the way so both legs run at one share of the caps; otherwise no key; and a step that
-  ends there, inward of ``space.via_pan_deg``, goes back home after its hold (the board's own
-  straight way to rest from the middle would pass the speaker box at 0.2-1.1 cm);
-* ``@pose:NAME``: the book's pose NAME as a place of the space (the via applies);
+  divides the way so both legs run at one share of the caps; otherwise no key; and a
+  performance's LAST arm step that ends there, inward of ``space.via_pan_deg``, goes back home
+  after its hold (the board's own straight way to rest from the middle would pass the speaker
+  box at 0.2-1.1 cm), or to the pose ``space.home_after`` names for its pose (``down`` to
+  ``down_near``: straight to rest the hand would drag down the cart's front, 2026-10-14); an
+  earlier arm step hands its pose to the next one as it is (``up_low``, then ``up``);
+* ``@pose:NAME``: the book's pose NAME as a place of the space (the via applies); none while
+  the head looks further right than ``space.head_pan_min_deg`` allows NAME (where the head
+  looks: at the person engaged, as a head step's glance reckons it; the ways to and from
+  ``back`` pass the head's pan sweep: 1.6 cm at -10 deg, 0.7 at -15: the variant's floor plays);
 * ``@toward``: the open hand (``space.open_hand``) turned at the person engaged (the attention
   view's bearing and distance), ``@bearing``: the shut hand at the marker's place (the room's);
   a bearing past the clear pan range (``space.pan_deg``) gets the range's edge nearest it: the
@@ -58,6 +78,7 @@ Owners after slice 0: B (the chooser, the scenes, the ladder's renderings), C (t
 
 from __future__ import annotations
 
+import hashlib
 import itertools
 import logging
 import math
@@ -66,9 +87,12 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from pepin.arm_motion import GRIPPER_ZERO_DEG
 from pepin.expression.animation import (
     HOLD,
+    NUMBER,
     PERIOD,
+    PERSON,
     REPEATS,
     Atom,
     Book,
@@ -79,12 +103,14 @@ from pepin.expression.animation import (
     Layer,
     PartName,
     Performance,
+    Range,
     Scene,
+    Setting,
     Step,
     Track,
     Variant,
 )
-from pepin.expression.markers import Cue
+from pepin.expression.markers import Cue, number_of
 from pepin.expression.places import Room
 from pepin.expression.speaker import AttentionView
 
@@ -95,10 +121,15 @@ Pose = Mapping[str, float]
 REF = "@"  # a pose that names a place of the gesture space
 FROM, VIA, THERE, PATH = "@from", "@via", "@pose:", "@path:"
 ARG_NEED = "arg"  # a variant's need of its marker's argument
+ATTENTION = "attention"  # a variant's need of attention's phase
 # The kinds of a pointing argument: the person, the robot, a place of the room, a referent, and
 # a name no room was there to tell (its floor only: never a referent's cell for a place)
 YOU, ME, PLACE, THING, NAME = "you", "me", "place", "thing", "name"
-SHUT = {"gripper": 0.0}  # a referent's spot is pointed at with the gripper shut (the finger)
+# A referent's spot is pointed at with the gripper shut (the finger): the jaw's closed end,
+# config/arm.json's gripper limit (-10; 2026-10-14: the jaw pressed shut by hand reads -12, so
+# the 0 of before left the tip a centimetre open; the book's shut poses and gripper_snap's
+# shut_deg stand on the same number, a test holds them together)
+SHUT = {"gripper": GRIPPER_ZERO_DEG}
 # A place further than this from the person gets no head glance: behind their back the glance
 # reads as looking away (90 until 2026-10-13: the printer at ~95 deg from Artem got none)
 AWAY_DEG = 120.0
@@ -239,7 +270,11 @@ class Resolver:
         if not ref.startswith(REF):
             return book.poses.get(ref)
         if ref.startswith(THERE):
-            return book.poses.get(ref[len(THERE) :])
+            name = ref[len(THERE) :]
+            least = space.head_pan_min_deg.get(name)
+            if least is not None and _seen_from(space.neck_m, self._person(book)) < least:
+                return None  # its ways pass the head turned this far right
+            return book.poses.get(name)
         if ref.startswith(PATH):
             path = space.paths.get(f"{ctx.composition.name}:{meaning.arg}", ())
             k = ref[len(PATH) :]
@@ -265,15 +300,21 @@ class Resolver:
         return None
 
     def back(self, ctx: Context, final: Pose, final_ref: str) -> Pose | None:
-        """Home, where an arm step that ends on a place of the space inward of
-        ``space.via_pan_deg`` goes after its hold: the board's own way to rest from there (a
-        straight line, when the hold lapses or the clip ends) would pass the speaker box at
-        0.2-1.1 cm; from home it keeps 1.7 cm. None: it stays."""
+        """Where the performance's last arm step goes after its hold when it ends on a place of
+        the space: home for one inward of ``space.via_pan_deg`` (the board's own way to rest
+        from there, a straight line when the hold lapses or the clip ends, would pass the
+        speaker box at 0.2-1.1 cm; from home it keeps 1.7 cm), the pose ``space.home_after``
+        names for a pose named there (``down``: straight to rest the hand would drag down the
+        cart's front). None: it stays."""
         space, book = ctx.book.space, ctx.book
         home = book.poses.get(space.home)
-        if home is None or space.via_pan_deg is None or not final_ref.startswith(REF):
+        if home is None or not final_ref.startswith(REF) or final_ref in (FROM, VIA):
             return None
-        if final_ref in (FROM, VIA) or _same(final, home):
+        named = final_ref[len(THERE) :] if final_ref.startswith(THERE) else ""
+        after = book.poses.get(space.home_after.get(named, ""))
+        if after is not None:
+            return after
+        if space.via_pan_deg is None or _same(final, home):
             return None
         return home if final["shoulder_pan"] < space.via_pan_deg else None
 
@@ -460,9 +501,23 @@ class WeightedChooser:
 def allowed(variant: Variant, scene: Scene) -> bool:
     """Whether ``scene`` allows ``variant``: the arm is where it needs it (``rest``: at rest or
     unknown, ready or not: a variant that leaves it alone; ``up``: holding a pose; ``any``:
-    anywhere) and every other part it needs is ready."""
+    anywhere), the face shows the expression it names (``any``: the face ready), attention is
+    in the phase it names, the person is seen when it needs them (``person``: no
+    ``scene.unseen``), and every other part it needs is ready."""
     for part, state in variant.needs.items():
         if part == ARG_NEED:
+            continue
+        if part == PERSON:
+            if scene.unseen is not None:
+                return False
+            continue
+        if part == ATTENTION:
+            if scene.attention != state:
+                return False
+            continue
+        if part == "face" and state not in ("any", "rest", "up"):
+            if scene.face != state:
+                return False
             continue
         down = part != "arm" or scene.arm_at in (None, "rest")
         if state == "rest":
@@ -477,7 +532,8 @@ def allowed(variant: Variant, scene: Scene) -> bool:
 @dataclass(frozen=True)
 class Drawn:
     """One step as drawn: whether it plays by its odds, where its stroke lands from the sync
-    point, its parameters, its names and whether it is the mirror image."""
+    point, its parameters, its names, whether it is the mirror image, and the rendering it
+    resolves its places in (None: the performance's own; a nested composition's)."""
 
     step: Step
     atom: Atom
@@ -486,6 +542,7 @@ class Drawn:
     params: Mapping[str, float]
     names: Mapping[str, str]
     mirrored: bool
+    ctx: Context | None = field(default=None, compare=False)
 
 
 Keyed = list[tuple[Key, float, Pose]]  # an atom's keys with their shares and resolved poses
@@ -516,13 +573,19 @@ class BookRenderer:
         *,
         variant: int | None = None,
         arg: str | None = None,
+        args: tuple[str, ...] = (),
+        layer: Layer = "gesture",
     ) -> Performance:
         """The performance of ``intent`` (``variant`` forces one, for a replay or a rung of the
-        ladder; ``arg``: a person's ask's argument, with no cue); ``KeyError`` for an intent the
-        book does not hold. The brain's marker rendered first (``cue`` and no ``variant``), or
-        an ask with its argument, places its catchment; a repeat of the marker in the same
-        reply, or a variant written for another argument, renders no clips."""
+        ladder; ``arg`` and ``args``: a person's ask's arguments, with no cue; ``layer``: the
+        idle layer's own); ``KeyError`` for an intent the book does not hold. The brain's
+        marker rendered first (``cue`` and no ``variant``), or an ask with its argument, places
+        its catchment; a repeat of the marker in the same reply, or a variant written for
+        another argument, renders no clips."""
         composition = self.book.compositions[intent]
+        if cue is not None and cue.marker.name == intent:
+            args = cue.marker.args
+        settings = self.settings(composition, args)
         rng = random.Random(seed)
         resolver = self.resolver
         meaning = resolver.meaning(composition, cue, arg)
@@ -547,23 +610,116 @@ class BookRenderer:
             return Performance(intent, seed, index, (), cue)
         if first and resolver.repeated(self.book, composition, meaning):
             return Performance(intent, seed, index, (), cue)
-        drawn = [self._aimed(self._draw(step, rng), ctx) for step in chosen.steps]
-        if any(self._unplaced(d, ctx) for d in drawn):  # the arm's strokes need their place
-            drawn = [d for d in drawn if d.atom.part != "arm"]
-        able = [d for d in drawn if d.atom.part in scene.ready and self._can(d, ctx)]
+        nested: list[tuple[str, int]] = []
+        drawn = self._drawn(chosen.steps, scene, rng, seed, ctx, nested, settings)
+        if any(self._unplaced(d, d.ctx or ctx) for d in drawn):  # the arm's strokes need their
+            drawn = [d for d in drawn if d.atom.part != "arm"]  # place
+        able = [d for d in drawn if d.atom.part in scene.ready and self._can(d, d.ctx or ctx)]
         playing = [d for d in able if d.plays]
         if not playing and able:
             playing = [max(able, key=lambda d: d.step.p)]
         keyed = self._keyed_all(playing, ctx)  # the brain's first rendering places here
         clips = merge([self._unroll(d, *keyed[id(d)]) for d in playing if id(d) in keyed],
-                      "gesture")  # fmt: skip
-        return Performance(intent, seed, index, clips, cue)
+                      layer)  # fmt: skip
+        looping = {d.atom.part for d in playing if d.step.loop}
+        clips = tuple(replace(c, loop=True) if c.part in looping else c for c in clips)
+        return Performance(intent, seed, index, clips, cue, tuple(nested))
 
-    def render_atom(self, name: str, seed: int, layer: Layer = "idle") -> Clip:
-        """One atom alone, its parameters drawn from its own ranges (the idle layer's); a
-        looping atom's clip is marked to repeat on its owner."""
-        drawn = self._draw(Step(name), random.Random(seed))
-        return self._alone(drawn, layer)
+    def settings(self, composition: Composition, args: Sequence[str]) -> tuple[Setting, ...]:
+        """What a mark's arguments set in ``composition``'s steps, in order (later wins): its
+        words' settings, its number (an auto-wrapper's: one alone its repeats, several its
+        atom's parameters in their order), then each ``key=value``; an argument that sets
+        nothing here is left out."""
+        out: list[Setting] = []
+        numbers = [v for v in (number_of(a) for a in args if "=" not in a) if v is not None]
+        for word in args:
+            out += [s for s in composition.settings.get(word, ()) if s.value is not None]
+        if composition.wraps is not None:
+            order = list(self.book.atoms[composition.wraps].params)
+            pairs = (
+                [(REPEATS, numbers[0])]
+                if len(numbers) == 1
+                else list(zip(order, numbers, strict=False))
+            )
+            out += [Setting(param, None, Range(v, v)) for param, v in pairs]
+        elif numbers:
+            out += [replace(s, value=Range(numbers[0], numbers[0]))
+                    for s in composition.settings.get(NUMBER, ())]  # fmt: skip
+        for written in args:
+            key, equals, raw = written.partition("=")
+            value = number_of(raw) if equals else None
+            if value is None:
+                continue
+            if composition.wraps is not None:
+                out.append(Setting(key, None, Range(value, value)))
+                continue
+            named = {(s.param, s.atom) for found in composition.settings.values() for s in found}
+            out += [Setting(p, a, Range(value, value)) for p, a in sorted(named, key=str)
+                    if p == key]  # fmt: skip
+        return tuple(out)
+
+    def _drawn(
+        self,
+        steps: Sequence[Step],
+        scene: Scene,
+        rng: random.Random,
+        seed: int,
+        ctx: Context,
+        nested: list[tuple[str, int]],
+        settings: Sequence[Setting] = (),
+    ) -> list[Drawn]:
+        """``steps`` drawn in order (each atom's step aimed; a nested composition's variant and
+        steps drawn from its own seed, placed from its step's ``at_s``, listed in ``nested``)."""
+        out: list[Drawn] = []
+        for index, step in enumerate(steps):
+            if step.composition is None:
+                out.append(self._aimed(self._draw(self._set(step, settings), rng), ctx))
+                continue
+            plays = rng.random() < step.p
+            at_s = rng.uniform(step.at_s.lo, step.at_s.hi)
+            child = self.book.compositions[step.composition]
+            child_seed = sub_seed(seed, index)
+            child_rng = random.Random(child_seed)
+            child_ctx = Context(self.book, child, self.resolver.meaning(child, None), commit=False)
+            k = self._child_variant(child, scene, child_rng, child_ctx)
+            if k is None:
+                continue
+            nested.append((child.name, k))
+            inner = self._drawn(child.variants[k].steps, scene, child_rng, child_seed, child_ctx,
+                                nested)  # fmt: skip
+            out += [replace(d, step=replace(d.step, p=d.step.p * step.p), at_s=d.at_s + at_s,
+                            plays=d.plays and plays, ctx=d.ctx or child_ctx)
+                    for d in inner]  # fmt: skip
+        return out
+
+    def _child_variant(
+        self, composition: Composition, scene: Scene, rng: random.Random, ctx: Context
+    ) -> int | None:
+        """A nested composition's variant: drawn by weight among those the scene allows and
+        that are no floor, else among its allowed floors, else among its floors (no memory of
+        the last: the seed alone decides); None when it has none of these."""
+        variants = composition.variants
+        able = [i for i, v in enumerate(variants)
+                if allowed(v, scene) and self.resolver.fits(v, ctx.meaning)
+                and self._resolvable(v, ctx)]  # fmt: skip
+        drawable = [i for i in able if not variants[i].floor]
+        drawable = drawable or able or [i for i, v in enumerate(variants) if v.floor]
+        if not drawable:
+            return None
+        return rng.choices(drawable, [variants[i].weight for i in drawable])[0]
+
+    def _set(self, step: Step, settings: Sequence[Setting]) -> Step:
+        """``step`` with the ranges a mark's arguments set on it (a setting for its atom, or
+        for any step whose atom takes the parameter: ``repeats`` and ``hold_s`` any step)."""
+        if not settings:
+            return step
+        atom = self.book.atoms[step.atom]
+        params = dict(step.params)
+        for s in settings:
+            takes = s.param in atom.params or s.param in (REPEATS, HOLD)
+            if s.value is not None and takes and s.atom in (None, step.atom):
+                params[s.param] = s.value
+        return replace(step, params=params) if params != step.params else step
 
     def atom_clip(
         self,
@@ -585,7 +741,7 @@ class BookRenderer:
         if keyed is None:
             raise KeyError(f"{drawn.atom.name}: a pose it names is not in the book")
         (clip,) = merge([self._unroll(drawn, keyed, None)], layer)
-        return replace(clip, loop=drawn.atom.loop)
+        return replace(clip, loop=drawn.step.loop)
 
     def _draw(self, step: Step, rng: random.Random) -> Drawn:
         atom = self.book.atoms[step.atom]
@@ -601,8 +757,11 @@ class BookRenderer:
 
     def _resolvable(self, variant: Variant, ctx: Context) -> bool:
         """Whether every place a sure arm step of ``variant`` names resolves (a head step's
-        direction that does not is left out alone, as a step left to chance may be)."""
+        direction that does not is left out alone, as a step left to chance may be; a nested
+        composition resolves its own when it draws its variant)."""
         for step in variant.steps:
+            if step.composition is not None:
+                continue
             atom = self.book.atoms[step.atom]
             if step.p < 1.0 or atom.part != "arm":
                 continue
@@ -655,28 +814,30 @@ class BookRenderer:
     def _keyed_all(
         self, drawn: Sequence[Drawn], ctx: Context
     ) -> dict[int, tuple[Keyed, Pose | None]]:
-        """Each step's keys resolved (a step that cannot resolve is absent) and the pose its
-        arm goes back to after its hold (home from the middle: :meth:`Resolver.back`; None:
-        none), the arm's steps in the order they start, each from where the one before leaves
-        the arm."""
+        """Each step's keys resolved (a step that cannot resolve is absent) and, for the last
+        absolute arm step, the pose the arm goes on to after its hold (home from the middle,
+        ``space.home_after``'s: :meth:`Resolver.back`; None: none), the arm's steps in the
+        order they start, each from where the one before leaves the arm (an earlier step's
+        pose as it is: ``up_low``, then ``up``)."""
         out: dict[int, tuple[Keyed, Pose | None]] = {}
         start: Pose = {}
+        tail: tuple[Drawn, Pose, str] | None = None
         arm = sorted(
             (d for d in drawn if d.atom.part == "arm"),
             key=lambda d: d.at_s - d.atom.stroke * d.params[PERIOD],
         )
         for d in [*arm, *(d for d in drawn if d.atom.part != "arm")]:
-            keyed = self._keyed(d, ctx, start)
+            keyed = self._keyed(d, d.ctx or ctx, start)
             if keyed is None:
                 continue
-            back = None
             if d.atom.part == "arm" and d.atom.mode == "absolute" and keyed:
                 last = keyed[-1]
                 start = {**last[2], **_numbers(last[0], d.params)}
-                final = pose_name(d.atom.keys[-1].pose, d.names)
-                back = self.resolver.back(ctx, start, final)
-                start = back or start
-            out[id(d)] = (keyed, back)
+                tail = (d, start, pose_name(d.atom.keys[-1].pose, d.names))
+            out[id(d)] = (keyed, None)
+        if tail is not None:
+            d, final, final_ref = tail
+            out[id(d)] = (out[id(d)][0], self.resolver.back(d.ctx or ctx, final, final_ref))
         return out
 
     def _keyed(self, drawn: Drawn, ctx: Context, start: Pose) -> Keyed | None:
@@ -762,6 +923,13 @@ class BookRenderer:
                     values[dof].append(back[dof])
         tracks = [Track(dof, atom.mode, tuple(times[dof]), tuple(values[dof])) for dof in times]
         return atom.part, start, stroke, duration, tracks, events
+
+
+def sub_seed(seed: int, index: int) -> int:
+    """The seed a nested composition draws from: its parent's seed and its step's index mixed
+    (the same pair, the same seed, on any machine)."""
+    digest = hashlib.blake2b(f"{seed}:{index}".encode(), digest_size=4).digest()
+    return int.from_bytes(digest, "big") & 0x7FFFFFFF
 
 
 def _traced(keyed: Keyed, legs: int) -> Keyed:

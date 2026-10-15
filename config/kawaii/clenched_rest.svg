@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the pillow of teeth, slightly upturned, the bite dashed unevenly</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 134.1 58.38 C 147.87 59.91 172.13 59.91 185.9 58.38 C 189.08 57.87 191.41 60.32 191.11 63.55 C 190.8 66.95 190.8 70.19 191.11 73.47 C 191.41 76.58 189.08 79.87 185.9 80.38 C 168.63 82.13 151.37 82.13 134.1 80.38 C 130.92 79.87 128.59 76.58 128.89 73.47 C 129.2 70.18 129.2 66.95 128.89 63.54 C 128.59 60.32 130.92 57.87 134.1 58.38 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 134.1 58.38 C 147.87 59.91 172.13 59.91 185.9 58.38 C 189.08 57.87 191.41 60.32 191.11 63.55 C 190.8 66.95 190.8 70.19 191.11 73.47 C 191.41 76.58 189.08 79.87 185.9 80.38 C 168.63 82.13 151.37 82.13 134.1 80.38 C 130.92 79.87 128.59 76.58 128.89 73.47 C 129.2 70.18 129.2 66.95 128.89 63.54 C 128.59 60.32 130.92 57.87 134.1 58.38 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 132 69.55 C 136.11 70.17 140.21 70.7 144.32 71.12" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 154.12 71.74 C 155.43 71.78 156.73 71.81 158.04 71.83" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 179.6 70.72 C 182.4 70.37 185.2 69.98 188 69.55" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+</svg>

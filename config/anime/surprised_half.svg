@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the tall oval with the band</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 133 78.4 C 133 63.82 145.09 52 160 52 C 174.91 52 187 63.82 187 78.4 C 187 92.98 174.91 104.8 160 104.8 C 145.09 104.8 133 92.98 133 78.4 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 138.84 62 C 143.79 55.91 151.43 52 160 52 C 168.57 52 176.21 55.91 181.16 62 C 168.46 70 151.54 70 138.84 62 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 181.16 62 C 168.46 70 151.54 70 138.84 62" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 133 78.4 C 133 63.82 145.09 52 160 52 C 174.91 52 187 63.82 187 78.4 C 187 92.98 174.91 104.8 160 104.8 C 145.09 104.8 133 92.98 133 78.4 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the shock's three stripes down the left cheek, the overlay drawn at a look's stripes</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 112.5 48 C 112.5 56 112.5 64 112.5 72" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="stripe"/>
+  <path class="line" d="M 118 48 C 118 56 118 64 118 72" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="stripe"/>
+  <path class="line" d="M 123.5 48 C 123.5 56 123.5 64 123.5 72" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="stripe"/>
+</svg>

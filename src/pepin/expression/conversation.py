@@ -40,19 +40,17 @@ SLOW_TOOL = "slow_tool"  # a slow tool runs before the reply says a word (the fi
 THINK_WAIT = "think_wait"  # the turn closed and no reply audio by think_glance_s
 LISTENER_PAUSE = "listener_pause"  # the ears' pause inside the person's utterance
 ACKNOWLEDGED = "acknowledged"  # the person finished a statement (not a question)
-GREETING_DUE = "greeting_due"  # the wake or an utterance holds a greeting
-FAREWELL_DUE = "farewell_due"  # an utterance holds a goodbye
 YES_FIRST = "yes_first"  # the reply's first word says yes
 NO_FIRST = "no_first"  # the reply's first word says no
 QUESTION_END = "question_end"  # a part of the reply ends with a question mark
 LONG_REPLY = "long_reply"  # an inner pause of a reply over aversion_reply_s
 FACE_FOUND = "face_found"  # the attention engine's first clear face of the conversation
 # Which moment goes first when two want the head at once (priority 4 of DESIGN.md §6.5, its
-# order: greeting and farewell, yes and no, the thinking glance, the acknowledgement, the
-# listener's nod); a moment not listed goes after these.
+# order: yes and no, the thinking glance, the acknowledgement, the listener's nod; hello and bye
+# are the brain's own marks since 2026-10-14); a moment not listed goes after these.
 MOMENTS: tuple[str, ...] = (
-    GREETING_DUE, FAREWELL_DUE, YES_FIRST, NO_FIRST, SLOW_TOOL, THINK_WAIT, QUESTION_END,
-    LONG_REPLY, FACE_FOUND, ACKNOWLEDGED, LISTENER_PAUSE,
+    YES_FIRST, NO_FIRST, SLOW_TOOL, THINK_WAIT, QUESTION_END, LONG_REPLY, FACE_FOUND,
+    ACKNOWLEDGED, LISTENER_PAUSE,
 )  # fmt: skip
 
 

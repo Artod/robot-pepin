@@ -77,6 +77,7 @@ from pepin.expression.finder import SwitchedFinder, robot_finder
 from pepin.expression.places import GoalPlaces
 from pepin.expression.tracker import SpeakerGazeWorker, SpeakerSettings, robot_gaze
 from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
+from pepin.overlay import read_json
 from pepin.people.worker import robot_people
 from pepin.perception.client import HealthWatch, PerceptionClient
 from pepin.perception.config import PerceptionConfig
@@ -207,7 +208,7 @@ def expression_flags() -> set[str]:
     (config/people.json, ``pepin.people.config.FLAG``)."""
     from pepin.people.config import FLAG as PEOPLE_FLAG
 
-    data = json.loads(config_file("expression.json").read_text())
+    data = read_json(config_file("expression.json"))
     return {name for name in data.get("flags", {}) if name != "note"} | {PEOPLE_FLAG}
 
 
@@ -265,10 +266,10 @@ class Body:
                             "why": refusal or ""})  # fmt: skip
 
         motion = load_arm_motion()
-        knobs = json.loads(config_file("expression.json").read_text())
+        knobs = read_json(config_file("expression.json"))
 
         def load() -> Any:
-            data = json.loads(config_file("expression.json").read_text())
+            data = read_json(config_file("expression.json"))
             return with_rest(load_book(), motion.rest_deg), engine_config(data)
 
         closers: list[Any] = []
@@ -356,7 +357,7 @@ def switch(argv: list[str]) -> int:
     except ValueError as error:
         print(error)
         return 2
-    data = json.loads((args.config or config_file(CONFIG_FILE)).read_text())
+    data = read_json(args.config or config_file(CONFIG_FILE))
     brains = [*data.get("brain", {}).get("presets", {}), ECHO]
     if args.brain and args.brain not in brains:
         print(f"brain {args.brain!r}: one of {', '.join(brains)}")

@@ -159,7 +159,6 @@ observer hook is one queue put: the gaze never delays the ears, the brain or the
 from __future__ import annotations
 
 import itertools
-import json
 import logging
 import math
 import queue
@@ -214,6 +213,7 @@ from pepin.expression.speaker import (
 )
 from pepin.expression.tracks import Sighting, Track, Tracks, VoiceSources, sightings, wrap
 from pepin.gaze import Aim, GazeSettings, Reach, Speed
+from pepin.overlay import read_json
 
 if TYPE_CHECKING:
     from pepin.audio_doa import MicDoa
@@ -514,7 +514,7 @@ def _read_config(path: str | Path | None) -> dict[str, Any]:
         from pepin.deployment import config_file
 
         path = config_file(CONFIG_FILE)
-    data = json.loads(Path(path).read_text())
+    data = read_json(path)
     if not isinstance(data, dict):
         raise ValueError(f"{path} holds no JSON object")
     return data

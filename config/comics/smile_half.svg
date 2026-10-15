@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wide smile arc, the ticks, the chin mark</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 103.37 80.23 C 138.27 98.59 181.73 98.59 216.63 80.23 C 220 78.46 224.28 80.71 223.83 84.49 C 220.44 112.93 189.16 134.96 160 134.96 C 130.84 134.96 99.56 112.93 96.17 84.49 C 95.72 80.71 100 78.46 103.37 80.23 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 121.13 109.45 C 145.56 102.6 174.44 102.6 198.87 109.45 C 203.97 110.88 205.43 117.5 201.19 120.68 C 189.36 129.57 174.42 134.96 160 134.96 C 145.58 134.96 130.64 129.57 118.81 120.68 C 114.57 117.5 116.03 110.88 121.13 109.45 Z" fill="#DE5B55"/>
+  <path class="line" d="M 103.37 80.23 C 138.27 98.59 181.73 98.59 216.63 80.23 C 220 78.46 224.28 80.71 223.83 84.49 C 220.44 112.93 189.16 134.96 160 134.96 C 130.84 134.96 99.56 112.93 96.17 84.49 C 95.72 80.71 100 78.46 103.37 80.23 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 149 144.46 C 151.2 150.16 168.8 150.16 171 144.46" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="chin"/>
+  <path class="line" d="M 89.22 71.76 C 86.21 69.88 84.19 66.77 83.69 63.25" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 230.78 71.76 C 233.79 69.88 235.81 66.77 236.31 63.25" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

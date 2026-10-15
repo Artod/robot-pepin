@@ -93,7 +93,8 @@ def test_pong_expression_mouth_and_config_payloads() -> None:
     assert encode_mouth(0.5) == bytes((128,))
     assert encode_mouth(-1) == bytes((0,))
     config = ImuConfig(id=2, rate_hz=500, dlpf=4, accel_fs=2, gyro_fs=3)
-    assert encode_config(config, 300) == bytes((2, 0xF4, 0x01, 4, 2, 3, 255))
+    assert encode_config(config, 300) == bytes((2, 0xF4, 0x01, 4, 2, 3, 255, 0))
+    assert encode_config(config, 300, style=1)[-1] == 1  # the face's style, config/face.json
 
 
 def test_imu_config_scales_delay_and_refusals() -> None:

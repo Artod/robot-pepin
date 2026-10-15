@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the bracket pout: a short level line, a bracket at each end, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 145.89 86.75 C 155.18 87.08 164.82 87.08 174.11 86.75 C 184.68 86.36 193.69 98.32 184.31 103.23 C 177.71 106.68 169.23 108.76 160 108.76 C 150.77 108.76 142.29 106.68 135.69 103.23 C 126.31 98.32 135.32 86.36 145.89 86.75 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 145.89 86.75 C 155.18 87.08 164.82 87.08 174.11 86.75 C 184.68 86.36 193.69 98.32 184.31 103.23 C 170.7 100.26 149.3 100.26 135.69 103.23 C 126.31 98.32 135.32 86.36 145.89 86.75 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 184.31 103.23 C 170.7 100.26 149.3 100.26 135.69 103.23" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 145.89 86.75 C 155.18 87.08 164.82 87.08 174.11 86.75 C 184.68 86.36 193.69 98.32 184.31 103.23 C 177.71 106.68 169.23 108.76 160 108.76 C 150.77 108.76 142.29 106.68 135.69 103.23 C 126.31 98.32 135.32 86.36 145.89 86.75 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

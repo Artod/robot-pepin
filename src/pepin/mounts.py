@@ -18,7 +18,6 @@ not take it down at start.
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Mapping
 from dataclasses import dataclass, fields
@@ -31,6 +30,7 @@ import numpy.typing as npt
 from pepin.camera import OPTICAL_RPY, CameraConfig, active_camera
 from pepin.deployment import config_file
 from pepin.lidar import LidarMount
+from pepin.overlay import read_json
 
 Array = npt.NDArray[np.float64]
 Transform = tuple[float, float, float, float, float, float]
@@ -235,7 +235,7 @@ def load_camera_mounts(
     rig the robot is wearing: a stereo head's mount is its LEFT eye's, which is the frame both
     eyes' pictures are stamped in.
     """
-    data = json.loads(config_path(config_dir, "camera.json").read_text())
+    data = read_json(config_path(config_dir, "camera.json"))
     name = active_camera(data, camera)
     return CameraMounts.from_config(CameraConfig.from_json(data[name], name))
 
@@ -262,7 +262,7 @@ class Mounts:
         it has no use for."""
 
         def read(name: str) -> Any:
-            return json.loads(config_path(config_dir, name).read_text())
+            return read_json(config_path(config_dir, name))
 
         sensor = load_lidar(config_dir)
         imu = Mount.from_json(read("imu.json")["mount"])

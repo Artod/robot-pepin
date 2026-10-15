@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the gritted grid, the bite line and six gaps</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 73.76 96.65 C 117.72 44.29 202.28 44.29 246.24 96.65 C 247.29 97.91 247.34 99.74 246.34 101.05 C 202.38 158.83 117.62 158.83 73.66 101.05 C 72.66 99.74 72.71 97.91 73.76 96.65 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 73.76 96.65 C 117.72 44.29 202.28 44.29 246.24 96.65 C 247.29 97.91 247.34 99.74 246.34 101.05 C 202.38 158.83 117.62 158.83 73.66 101.05 C 72.66 99.74 72.71 97.91 73.76 96.65 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 72.94 98.93 C 107.2 95.24 212.8 95.24 247.06 98.93" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 103.33 73.72 C 103.46 91.3 103.59 108.88 103.73 126.45" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 126 63.9 C 126.13 88.36 126.26 112.83 126.4 137.29" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 148.67 58.99 C 148.8 86.9 148.93 114.8 149.07 142.7" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 171.33 58.99 C 171.47 86.9 171.6 114.8 171.73 142.7" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 194 63.9 C 194.14 88.36 194.27 112.83 194.4 137.29" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 216.67 73.72 C 216.81 91.3 216.94 108.88 217.07 126.45" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+</svg>

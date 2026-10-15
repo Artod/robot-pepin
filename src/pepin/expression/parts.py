@@ -30,7 +30,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
-from pepin.arm_driver import ARRIVED_DEG
+from pepin.arm_driver import ARRIVED_DEG, WIRE_SLACK
 from pepin.arm_motion import ArmMotion
 from pepin.expression.animation import Clip, Layer, PartName, Track
 from pepin.expression.breath import ArmBreath
@@ -177,7 +177,10 @@ class ArmPart:
         """``clip`` as the trajectory to send over ``base`` (the rest pose by default; a unit's
         next stroke: the held pose, the clip started there, the breath under it) and when its
         stroke lands, or why it cannot be played. The board's approach is from ``start`` (the
-        arm's angles when the board takes it; None: the newest state line's)."""
+        arm's angles when the board takes it; None: the newest state line's). The curve is
+        checked against the exact caps and its knots as the board will see them (:func:`refused`:
+        rounded to the wire's 1 ms and 0.01 deg, a jaw shut on its limit samples a hair past it
+        between two keys)."""
         if clip.part != "arm":
             return f"an {clip.part} clip is not the arm's"
         motion = self.motion
@@ -187,27 +190,29 @@ class ArmPart:
             clip = rebased(clip, pose, self.base)
         # a clip stretched by 1 / speed_scale needs no more knots than at full speed
         sampled = sample(clip, pose, JOINTS, self.knot_hz * min(1.0, self.speed_scale))
-        knots = stretch_to_caps(sampled, max_speed * STRETCH_MARGIN, max_acc * STRETCH_MARGIN)
+        stretched = stretch_to_caps(sampled, max_speed * STRETCH_MARGIN, max_acc * STRETCH_MARGIN)
+        span = sampled[-1][0] - sampled[0][0]
+        stretch = (stretched[-1][0] - stretched[0][0]) / span if span > 0 else 1.0
+        knots = wire(stretched)
         # a stroke too fast for the caps takes longer rather than being refused
         if knots[-1][0] > motion.max_duration_s:
             return f"{knots[-1][0]:.1f} s is longer than the board's {motion.max_duration_s:.0f} s"
-        refusal = check_knots(knots, motion.limits(), max_speed, max_acc, JOINTS)
+        refusal = refused(stretched, motion.limits(), max_speed, max_acc)
         if refusal is not None:
             return refusal
         final = tuple(knots[-1][1])
         offset = (0.0,) * len(JOINTS)
         if self.breath is not None and base is not None:  # never from rest
             t0 = self.clock() + self.latency_s
-            breathed = self.breath.breathe(knots, t0, self.held_offset, live=clip.then == "hold")
-            why = check_knots(breathed, motion.limits(), max_speed, max_acc, JOINTS)
+            curve = self.breath.breathe(stretched, t0, self.held_offset, live=clip.then == "hold")
+            why = refused(curve, motion.limits(), max_speed, max_acc)
             if why is None:
+                breathed = wire(curve)
                 offset = self.breath.final_offset(knots, breathed)
                 knots = breathed
             elif why != self._breath_refused:  # the gesture plays without its breath
                 logger.info("arm breath left out of a clip: %s", why)
                 self._breath_refused = why
-        span = sampled[-1][0] - sampled[0][0]
-        stretch = (knots[-1][0] - knots[0][0]) / span if span > 0 else 1.0
         trajectory = Trajectory(
             f"{name or 'gesture'}-{next(self._ids)}",
             self.source,
@@ -332,6 +337,29 @@ class ArmPart:
     @staticmethod
     def _knot(pose: Mapping[str, float]) -> tuple[float, ...]:
         return tuple(pose[j] for j in JOINTS)
+
+
+def wire(knots: Sequence[tuple[float, Sequence[float]]]) -> list[tuple[float, list[float]]]:
+    """``knots`` as the wire carries them (:mod:`pepin.expression.trajectory`): times to the
+    millisecond, angles to 0.01 deg; the board checks these, so the laptop checks the same."""
+    return [(round(t, 3), [round(d, 2) for d in deg]) for t, deg in knots]
+
+
+def refused(
+    curve: Sequence[tuple[float, Sequence[float]]],
+    limits: Sequence[tuple[float, float]],
+    max_speed: float,
+    max_acc: float,
+) -> str | None:
+    """Why ``curve`` may not be sent, None when it may: the curve over the exact caps (the
+    laptop's rule), or its knots as the wire carries them (:func:`wire`) refused by the board's
+    own check: outside a limit (no slack) or over the caps by more than the rounding's noise the
+    board forgives (:data:`pepin.arm_driver.WIRE_SLACK`: the times' millisecond alone moves a
+    40 ms step's speed by up to 2.5 %)."""
+    free = [(-math.inf, math.inf)] * len(limits)
+    return check_knots(curve, free, max_speed, max_acc, JOINTS) or check_knots(
+        wire(curve), limits, max_speed, max_acc, JOINTS, slack=WIRE_SLACK
+    )
 
 
 class FacePart:

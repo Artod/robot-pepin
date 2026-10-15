@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the evil grin, the band with two fangs, the tongue, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 76.87 47.06 C 127.75 73.41 192.52 73.51 243.36 50.47 C 246.41 49.08 249.97 51.3 249.68 54.64 C 245.59 101.84 202.79 139.28 160 139.28 C 117.24 139.28 74.49 100.29 70.33 51.12 C 70.03 47.67 73.8 45.46 76.87 47.06 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 76.87 47.06 C 127.75 73.41 192.52 73.51 243.36 50.47 C 246.41 49.08 249.97 51.3 249.68 54.64 C 199.46 101.42 120.54 101.42 70.33 51.12 C 70.03 47.67 73.8 45.46 76.87 47.06 Z" fill="#FFFFFF"/>
+  <path class="tongue" d="M 98.43 99.01 C 136.71 83.85 184.45 83.85 222.73 99 C 226.78 100.6 228.02 105.75 225.07 108.94 C 207.91 127.55 183.95 139.28 160 139.28 C 136.58 139.28 113.16 127.59 96.09 108.93 C 93.16 105.73 94.4 100.61 98.43 99.01 Z" fill="#DE5B55"/>
+  <path class="line" d="M 76.87 47.06 C 127.75 73.41 192.52 73.51 243.36 50.47 C 246.41 49.08 249.97 51.3 249.68 54.64 C 245.59 101.84 202.79 139.28 160 139.28 C 117.24 139.28 74.49 100.29 70.33 51.12 C 70.03 47.67 73.8 45.46 76.87 47.06 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="fang" d="M 109.5 79.49 C 113.83 79.49 118.16 79.49 122.5 79.49 C 120.33 86.66 118.16 93.82 116 100.99 C 113.83 93.82 111.66 86.66 109.5 79.49 Z" fill="#FFFFFF"/>
+  <path class="fang" d="M 197.5 80.79 C 201.83 80.79 206.16 80.79 210.5 80.79 C 208.33 87.95 206.16 95.12 204 102.29 C 201.83 95.12 199.66 87.95 197.5 80.79 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 69.77 43.38 C 66.62 41.75 64.35 38.81 63.58 35.34" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 250.64 47.16 C 253.87 45.7 256.29 42.88 257.24 39.46" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the closed D of teeth, the bite dashed unevenly</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 139.47 58 C 153.16 58 166.84 58 180.53 58 C 187.58 58 193.75 64.9 189.18 70.28 C 183.23 77.28 172.36 82 160 82 C 147.64 82 136.77 77.28 130.82 70.28 C 126.25 64.9 132.42 58 139.47 58 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 139.47 58 C 153.16 58 166.84 58 180.53 58 C 187.58 58 193.75 64.9 189.18 70.28 C 183.23 77.28 172.36 82 160 82 C 147.64 82 136.77 77.28 130.82 70.28 C 126.25 64.9 132.42 58 139.47 58 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 132 67.25 C 136.48 67.37 140.96 67.49 145.44 67.61" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 153.56 67.83 C 154.87 67.86 156.17 67.9 157.48 67.93" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 180.16 68.54 C 182.77 68.61 185.39 68.68 188 68.75" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+</svg>

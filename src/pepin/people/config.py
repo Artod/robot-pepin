@@ -3,12 +3,12 @@ threshold of person recognition; the file's notes give the reasons and the measu
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
 from pepin.people.matcher import Thresholds
 
 CONFIG_FILE = "people.json"
@@ -109,7 +109,7 @@ class PeopleConfig:
             from pepin.deployment import config_file
 
             path = config_file(CONFIG_FILE)
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         if not isinstance(data, dict):
             raise ValueError(f"{path} holds no JSON object")
         return cls.from_dict(data)

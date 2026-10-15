@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the cat's w with its hooks up (the cheeks are the overlay's)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 100.29 77.19 C 100.29 79.62 101.75 81.81 104 82.73 C 117.44 88.28 121.92 92.81 130.88 92.81 C 139.51 92.81 148.15 89.82 154.73 86.6 C 158.05 84.97 161.95 84.97 165.27 86.6 C 171.85 89.82 180.49 92.81 189.12 92.81 C 198.08 92.81 202.56 88.28 216 82.73 C 218.25 81.81 219.71 79.62 219.71 77.19" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

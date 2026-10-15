@@ -9,7 +9,6 @@ ahead and angles grow counter-clockwise, matching ``pepin.kinematics``.
 from __future__ import annotations
 
 import contextlib
-import json
 import logging
 import math
 import queue
@@ -25,6 +24,7 @@ from typing import Protocol
 import numpy as np
 from numpy.typing import NDArray
 
+from pepin.overlay import read_json
 from pepin.transport import LIDAR_PORT
 
 logger = logging.getLogger(__name__)
@@ -50,8 +50,7 @@ for _i in range(256):
 def scan_stamp_from_json(path: str | Path) -> str:
     """``config/lidar.json``'s ``scan_stamp``: the moment of the sweep the board's driver stamps
     /scan with, one of :data:`SCAN_STAMPS`. Missing or anything else raises ``ValueError``."""
-    with open(path) as f:
-        value = json.load(f).get("scan_stamp")
+    value = read_json(path).get("scan_stamp")
     if value not in SCAN_STAMPS:
         raise ValueError(f"{path}: scan_stamp must be one of {SCAN_STAMPS}, not {value!r}")
     return str(value)
@@ -156,8 +155,7 @@ class LidarMount:
     @classmethod
     def from_json(cls, path: str | Path) -> LidarMount:
         """Load the mount calibration written by the alignment scripts (``config/lidar.json``)."""
-        with open(path) as f:
-            data = json.load(f)
+        data = read_json(path)
         data["masked_sectors_deg"] = tuple(tuple(s) for s in data.get("masked_sectors_deg", ()))
         known = {f.name for f in fields(cls)}  # a "note" in the file is for people, not here
         return cls(**{k: v for k, v in data.items() if k in known})

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small black oval</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 142 91.25 C 142 73.99 150.06 60 160 60 C 169.94 60 178 73.99 178 91.25 C 178 108.51 169.94 122.5 160 122.5 C 150.06 122.5 142 108.51 142 91.25 Z" fill="#1D1D1B"/>
+  <path class="line" d="M 142 91.25 C 142 73.99 150.06 60 160 60 C 169.94 60 178 73.99 178 91.25 C 178 108.51 169.94 122.5 160 122.5 C 150.06 122.5 142 108.51 142 91.25 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

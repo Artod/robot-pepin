@@ -1,15 +1,24 @@
 """config/animation.json read into a :class:`pepin.expression.animation.Book`, checked whole.
 
-The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, loop, note),
+The file: ``atoms`` (name -> part, mode, stroke, params, keys, mirror, callable, note),
 ``compositions`` (name -> cooldown_s, bind, args, family, long, callable, variants of steps
 with their weight, needs and floor, note), ``poses`` (name -> joint ->
 degrees and an optional note; taught by hand with ``scripts/gesture.py teach`` or authored
-from the URDF), ``idle`` (the idle layers),
+from the URDF), ``idle`` (the idle layers, naming compositions),
 ``moments`` (a moment of the robot -> a composition), ``aliases`` (another spelling of a
 marker -> its canonical ``name`` or ``name:arg``) and ``space`` (the gesture space:
 :class:`pepin.expression.animation.Space`). A parameter is a number or ``[lo, hi]``;
 in a step, a string or a list of strings is a named parameter (a face's or a pose's name, one
-drawn). A key value is a number, ``"$param"`` or ``"-$param"``; on the face a name or
+drawn); ``repeats`` and ``hold_s`` are a step's (an atom refuses them), and so is ``loop``
+(``"loop": true``, only in the engine's own compositions). A step names an ``atom``, or a
+``composition`` to nest (``at_s`` and ``p`` alone; no cycle, at most :data:`MAX_DEPTH` deep:
+the error names the chain). A composition's ``args`` is a list of the arguments that choose a
+variant or a place, or a map: an argument -> null (one that chooses), ``"number"`` -> the
+parameter a mark's number sets (``"repeats"``, ``"gripper_snap.repeats"``: only that atom's
+steps), a word -> parameter -> a number or ``[lo, hi]``. Every atom that renders bare (no
+``$name``/``$pose``, no place of the gesture space but ``@from`` and ``@via``) and has no
+composition of its name gets a generated one (:func:`wrapper`; a hand-written one of the name
+wins). A key value is a number, ``"$param"`` or ``"-$param"``; on the face a name or
 ``"$name"``; a key's ``pose`` is a pose's name, ``"$pose"`` or a reference into the gesture space
 (``"@from"``, ``"@via"``, ``"@path:0"``; :mod:`pepin.expression.render` resolves them, as it
 does a step's ``pose`` that starts with ``@``). Every mistake is a ``ValueError``
@@ -24,21 +33,23 @@ Owners after slice 0: C (``space``, poses, compositions, ``aliases``), A (``mome
 
 from __future__ import annotations
 
-import json
 import math
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, cast, get_args
 
 from pepin.expression.animation import (
     BINDS,
     HOLD,
     IDLE_STATES,
+    NUMBER,
     PARTS,
     PERIOD,
+    PERSON,
     REPEATS,
+    SEEN,
     Atom,
     Bind,
     Book,
@@ -50,14 +61,18 @@ from pepin.expression.animation import (
     Oscillation,
     PartName,
     Range,
+    Setting,
     Space,
     Step,
     Value,
     Variant,
 )
-from pepin.expression.markers import ANY, Vocabulary
+from pepin.expression.markers import ANY, Takes, Vocabulary
 from pepin.expression.markers import ARG as ARG_ANY
+from pepin.expression.speaker import AttentionPhase
 from pepin.expression.trajectory import JOINTS
+from pepin.overlay import read_json
+from pepin.sounds import SOUND, SOUND_LINE
 
 BOOK_FILE = "animation.json"
 REST = "rest"  # the arm's base pose, from config/arm.json
@@ -68,9 +83,22 @@ DOFS: dict[PartName, tuple[str, ...]] = {
     "body": ("yaw_deg", "x_m"),
 }
 RESERVED = (PERIOD, REPEATS, HOLD)
+STEP_ONLY = (REPEATS, HOLD)  # a step's reserved parameters, never an atom's (2026-10-14)
 NAMED = ("name", "pose")  # the named parameters a key may refer to
 ARG = "arg"  # a variant's need of its marker's argument (beside the parts' states)
+ATTENTION = "attention"  # a variant's need of attention's phase (Scene.attention)
+PHASES: tuple[str, ...] = get_args(AttentionPhase)  # attention's phases a variant may need
 SPELLING = re.compile(r"^[^\s:{}]+(?::[^:{}]+)?$")  # an alias: a name, or name:arg
+MAX_DEPTH = 3  # a composition, one nested in it and one nested in that
+BARE_REFS = ("@from", "@via")  # the gesture space's places an atom finds with no marker
+# The words a wrapper's line names its atom's degrees of freedom by (the brain's vocabulary)
+SAID = {
+    "pan_deg": "pan", "tilt_deg": "tilt", "yaw_deg": "turn", "x_m": "forward and back",
+    "expression": "expression", "shoulder_pan": "shoulder pan", "shoulder_lift": "shoulder lift",
+    "elbow_flex": "elbow", "wrist_flex": "wrist flex", "wrist_roll": "wrist roll",
+    "gripper": "gripper",
+}  # fmt: skip
+CLAUSE = re.compile(r"[:;,(]")  # a note's first clause ends at the first of these
 
 
 def load_book(path: str | Path | None = None) -> Book:
@@ -79,7 +107,7 @@ def load_book(path: str | Path | None = None) -> Book:
         from pepin.deployment import config_file
 
         path = config_file(BOOK_FILE)
-    return book_from(json.loads(Path(path).read_text()))
+    return book_from(read_json(path))
 
 
 def book_from(data: Mapping[str, Any]) -> Book:
@@ -97,12 +125,14 @@ def book_from(data: Mapping[str, Any]) -> Book:
         for name, body in data.get("atoms", {}).items()
         if isinstance(body, dict)
     }
-    compositions = {
-        name: _composition(name, body, atoms)
-        for name, body in data.get("compositions", {}).items()
-        if isinstance(body, dict)
-    }
-    idle = tuple(_idle(i, body, atoms) for i, body in enumerate(data.get("idle", [])))
+    written = {n: b for n, b in data.get("compositions", {}).items() if isinstance(b, dict)}
+    wrapped = [a for n, a in atoms.items() if n not in written and bare(a)]
+    known = set(written) | {a.name for a in wrapped}
+    compositions = {name: _composition(name, body, atoms, known) for name, body in written.items()}
+    compositions.update((a.name, wrapper(a)) for a in wrapped)
+    for name in compositions:
+        _nesting(compositions, atoms, (name,))
+    idle = tuple(_idle(i, body, compositions, atoms) for i, body in enumerate(data.get("idle", [])))
     moments = {k: str(v) for k, v in data.get("moments", {}).items() if k != "note"}
     for moment, intent in moments.items():
         if intent not in compositions:
@@ -120,11 +150,71 @@ def with_rest(book: Book, rest: Mapping[str, float]) -> Book:
 
 def vocabulary(book: Book, faces: frozenset[str]) -> Vocabulary:
     """What a marker may name: the book's callable compositions (the engine's own ensembles
-    are not a marker's) with the arguments each takes and their other spellings, and the
-    face's expressions."""
+    are not a marker's) with the arguments each takes (those that choose, and those that set
+    its parameters: :func:`takes`) and their other spellings, the face's expressions, and the
+    sound tool's reserved mark (:data:`pepin.sounds.SOUND`: ``{sound:NAME}``, any short name;
+    the engine logs it until the tool lands)."""
     names = intents(book)
     args = {name: book.compositions[name].args for name in names if book.compositions[name].args}
-    return Vocabulary(frozenset(names), faces, args, dict(book.aliases))
+    taken = {name: takes(book, book.compositions[name]) for name in names}
+    args[SOUND] = (ANY,)
+    return Vocabulary(frozenset((*names, SOUND)), faces, args, dict(book.aliases),
+                      {name: t for name, t in taken.items() if t != Takes()})  # fmt: skip
+
+
+def takes(book: Book, composition: Composition) -> Takes:
+    """The arguments of ``composition``'s mark that set its steps' parameters: an auto-wrapper's
+    numbers fill its atom's parameters in their order (one alone: its repeats) and ``key=value``
+    sets any of them or a step's own; a hand-written one's words and number are its
+    ``settings``, and ``key=value`` sets a parameter those name."""
+    if composition.wraps is not None:
+        params = tuple(book.atoms[composition.wraps].params)
+        return Takes(frozenset(), len(params), frozenset({*params, *STEP_ONLY}))
+    settings = composition.settings
+    keys = frozenset(s.param for found in settings.values() for s in found)
+    words = frozenset(w for w in settings if w != NUMBER)
+    return Takes(words, 1 if NUMBER in settings else 0, keys)
+
+
+def mark_lines(book: Book) -> tuple[str, ...]:
+    """The brain's vocabulary of gestures, one line per composition a mark reaches (callable,
+    not another mark's spelling: ``emphasis`` is the accent's; hello and bye are the brain's
+    own since 2026-10-14), in the book's order: its name and arguments (``a|b`` one of them,
+    ``NAME`` any short name, ``[...]`` optional, ``N`` a number, an auto-wrapper's parameters
+    in their order), a dash, and at most six words: the note's first clause, or for an
+    auto-wrapper its part and what it moves; last, the sound tool's reserved ``sound:NAME``
+    (:data:`pepin.sounds.SOUND_LINE`)."""
+    lines = []
+    for name in intents(book):
+        if name in book.aliases:
+            continue
+        composition = book.compositions[name]
+        lines.append(f"{name}{_spelled(book, composition)} — {brief(book, composition)}")
+    lines.append(SOUND_LINE)
+    return tuple(lines)
+
+
+def brief(book: Book, composition: Composition) -> str:
+    """``composition`` in a few words: an auto-wrapper's part and the degrees of freedom its
+    atom's keys move (``head: pan, tilt``); else its note's first clause."""
+    if composition.wraps is not None:
+        atom = book.atoms[composition.wraps]
+        moved = dict.fromkeys(d for k in atom.keys for d in k.values)
+        return f"{atom.part}: {', '.join(SAID.get(d, d) for d in moved)}"
+    return CLAUSE.split(composition.note, maxsplit=1)[0].strip()
+
+
+def _spelled(book: Book, composition: Composition) -> str:
+    """A mark line's arguments (:func:`mark_lines`)."""
+    choose = "|".join("NAME" if a == ANY else a for a in composition.args)
+    if composition.wraps is not None:
+        sets = "N|" + ",".join(book.atoms[composition.wraps].params)
+    else:
+        words = "|".join(w for w in composition.settings if w != NUMBER)
+        sets = ",".join(x for x in ("N" if NUMBER in composition.settings else "", words) if x)
+    if choose:
+        return f":{choose}" + (f"[,{sets}]" if sets else "")
+    return f"[:{sets}]" if sets else ""
 
 
 def face_names(path: str | Path | None = None) -> frozenset[str]:
@@ -133,7 +223,7 @@ def face_names(path: str | Path | None = None) -> frozenset[str]:
         from pepin.deployment import config_file
 
         path = config_file("face.json")
-    data = json.loads(Path(path).read_text())
+    data = read_json(path)
     return frozenset(str(row["name"]) for row in data.get("expressions", []))
 
 
@@ -142,27 +232,117 @@ def intents(book: Book) -> tuple[str, ...]:
     return tuple(name for name, c in book.compositions.items() if c.callable)
 
 
-def span(book: Book, intent: str, part: PartName, stretch: float = 1.0) -> tuple[float, float]:
+def span(
+    book: Book,
+    intent: str,
+    part: PartName,
+    stretch: float = 1.0,
+    fits: Callable[[Variant], bool] | None = None,
+) -> tuple[float, float]:
     """How long before its sync point ``intent``'s steps on ``part`` may start moving it and how
-    long after it they may end, at the widest their ranges allow over every variant, each step
-    played ``stretch`` times slower round its stroke (the engine's speed scales); (0, 0) when no
-    step moves the part (or the book lacks the intent)."""
+    long after it they may end, at the widest their ranges allow over every variant (over those
+    ``fits`` admits when given: one style of the dance with the arm where it is; a nested
+    composition's steps from its step's ``at_s``), each step played ``stretch`` times slower
+    round its stroke (the engine's speed scales); (0, 0) when no step moves the part (or the
+    book lacks the intent)."""
     composition = book.compositions.get(intent)
     if composition is None:
         return 0.0, 0.0
-    before, after = 0.0, 0.0
+    if fits is not None:
+        composition = replace(composition, variants=tuple(filter(fits, composition.variants)))
+    return _span(book, composition, part, stretch) or (0.0, 0.0)
+
+
+def _span(
+    book: Book, composition: Composition, part: PartName, stretch: float
+) -> tuple[float, float] | None:
+    """:func:`span` of one composition, None when none of its steps moves ``part``."""
+    found: tuple[float, float] | None = None
     for variant in composition.variants:
         for step in variant.steps:
-            atom = book.atoms[step.atom]
-            if atom.part != part:
-                continue
-            ranges = {**atom.params, **step.params}
-            period = ranges[PERIOD].hi
-            repeats = ranges[REPEATS].hi if REPEATS in ranges else 1.0
-            hold = ranges[HOLD].hi if HOLD in ranges else 0.0
-            before = max(before, stretch * atom.stroke * period - step.at_s.lo)
-            after = max(after, step.at_s.hi + stretch * ((repeats - atom.stroke) * period + hold))
-    return before, after
+            if step.composition is not None:
+                inner = _span(book, book.compositions[step.composition], part, stretch)
+                if inner is None:
+                    continue
+                edges = (inner[0] - step.at_s.lo, step.at_s.hi + inner[1])
+            else:
+                atom = book.atoms[step.atom]
+                if atom.part != part:
+                    continue
+                ranges = {**atom.params, **step.params}
+                period = ranges[PERIOD].hi
+                repeats = ranges[REPEATS].hi if REPEATS in ranges else 1.0
+                hold = ranges[HOLD].hi if HOLD in ranges else 0.0
+                late = (repeats - atom.stroke) * period + hold
+                edges = (stretch * atom.stroke * period - step.at_s.lo,
+                         step.at_s.hi + stretch * late)  # fmt: skip
+            before, after = found or (0.0, 0.0)
+            found = max(before, edges[0]), max(after, edges[1])
+    return found
+
+
+def step_parts(book: Book, step: Step) -> frozenset[PartName]:
+    """The parts ``step`` may move: its atom's, or every part its nested composition's
+    variants move."""
+    if step.composition is None:
+        return frozenset({book.atoms[step.atom].part})
+    return composition_parts(book.compositions, book.atoms, step.composition)
+
+
+def sure_parts(book: Book, step: Step) -> frozenset[PartName]:
+    """The parts ``step`` moves whenever it plays by its odds alone (p 1): its atom's, or those
+    every variant of its nested composition moves for sure (the floors aside, unless it has
+    only floors)."""
+    if step.p < 1.0:
+        return frozenset()
+    if step.composition is None:
+        return frozenset({book.atoms[step.atom].part})
+    variants = book.compositions[step.composition].variants
+    drawn = [v for v in variants if not v.floor] or list(variants)
+    each = [frozenset().union(*(sure_parts(book, s) for s in v.steps)) for v in drawn]
+    return frozenset.intersection(*each) if each else frozenset()
+
+
+def composition_parts(
+    compositions: Mapping[str, Composition], atoms: Mapping[str, Atom], name: str
+) -> frozenset[PartName]:
+    """Every part a composition's variants may move, its nested ones' included."""
+    parts: set[PartName] = set()
+    for variant in compositions[name].variants:
+        for step in variant.steps:
+            if step.composition is None:
+                parts.add(atoms[step.atom].part)
+            else:
+                parts |= composition_parts(compositions, atoms, step.composition)
+    return frozenset(parts)
+
+
+def loops(book: Book, name: str) -> bool:
+    """Whether a step of composition ``name`` loops (its clip repeats until withdrawn)."""
+    composition = book.compositions.get(name)
+    return composition is not None and any(s.loop for v in composition.variants for s in v.steps)
+
+
+def bare(atom: Atom) -> bool:
+    """Whether ``atom`` renders with nothing chosen for it: no named parameter (a face's or a
+    pose's name) and no place of the gesture space a marker's argument finds (``@from`` and
+    ``@via`` aside)."""
+    if _named_params(atom):
+        return False
+    return all(k.pose is None or k.pose in BARE_REFS for k in atom.keys)
+
+
+def wrapper(atom: Atom) -> Composition:
+    """``atom``'s auto-wrapper: one variant of one step, its own ranges (repeats 1, hold 0),
+    callable as the atom is; an arm atom that moves a joint other than the gripper needs the
+    arm up (it plays on a held pose, never from rest: the folded arm stands by the speaker
+    box), and so does an absolute one (``gripper_snap``: from rest it shuts a jaw that stands
+    shut); any other needs nothing."""
+    moved = {d for k in atom.keys for d in k.values}
+    up = atom.part == "arm" and (bool(moved - {"gripper"}) or atom.mode == "absolute")
+    needs = {"arm": "up"} if up else {}
+    variant = Variant((Step(atom.name),), needs=needs)
+    return Composition(atom.name, (variant,), callable=atom.callable, wraps=atom.name)
 
 
 def _range(where: str, value: Any) -> Range:
@@ -192,6 +372,11 @@ def _atom(name: str, body: Mapping[str, Any]) -> Atom:
     params = {k: _range(f"{where}.params.{k}", v) for k, v in body.get("params", {}).items()}
     if PERIOD not in params or params[PERIOD].lo <= 0:
         raise ValueError(f"{where}.params.{PERIOD}: required, above 0")
+    for reserved in STEP_ONLY:
+        if reserved in params:
+            raise ValueError(f"{where}.params.{reserved}: a step's, not an atom's (2026-10-14)")
+    if "loop" in body:
+        raise ValueError(f"{where}.loop: a step's, not an atom's (2026-10-14)")
     keys: list[Key] = []
     for i, raw in enumerate(body.get("keys", [])):
         at = float(raw.get("at", -1))
@@ -223,7 +408,6 @@ def _atom(name: str, body: Mapping[str, Any]) -> Atom:
         str(body.get("note", "")),
         mirror,
         bool(body.get("callable", True)),
-        bool(body.get("loop", False)),
     )
 
 
@@ -246,18 +430,28 @@ def _value(where: str, value: Any, params: Mapping[str, Range], named: bool) -> 
     )
 
 
-def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) -> Composition:
+def _composition(
+    name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom], known: set[str]
+) -> Composition:
     where = f"compositions.{name}"
+    callable_ = bool(body.get("callable", True))
     variants = []
     for v, raw in enumerate(body.get("variants", [])):
         steps = []
         for s, step in enumerate(raw.get("steps", [])):
             at = f"{where}.variants[{v}].steps[{s}]"
+            if "composition" in step:
+                steps.append(_nested(at, step, known))
+                continue
             atom = atoms.get(str(step.get("atom")))
             if atom is None:
                 raise ValueError(f"{at}.atom: no atom {step.get('atom')!r}")
-            if not atom.callable:
-                raise ValueError(f"{at}.atom: {atom.name} is the idle layer's, not a composition's")
+            if not atom.callable and callable_:
+                raise ValueError(f"{at}.atom: {atom.name} is the idle layer's, not a callable "
+                                 "composition's")  # fmt: skip
+            loop = step.get("loop", False)
+            if not isinstance(loop, bool) or (loop and callable_):
+                raise ValueError(f"{at}.loop: true only in the engine's own (callable false)")
             params: dict[str, Range] = {}
             choices: dict[str, tuple[str, ...]] = {}
             for key, value in step.get("params", {}).items():
@@ -280,18 +474,23 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
             if not 0.0 < p <= 1.0:
                 raise ValueError(f"{at}.p: in (0, 1]")
             steps.append(Step(atom.name, _range(f"{at}.at_s", step.get("at_s", 0.0)), p, params,
-                              choices))  # fmt: skip
+                              choices, loop=loop))  # fmt: skip
         if not steps:
             raise ValueError(f"{where}.variants[{v}].steps: at least one")
         weight = float(raw.get("weight", 1.0))
         if weight <= 0:
             raise ValueError(f"{where}.variants[{v}].weight: above 0")
         needs = raw.get("needs", {})
-        if not isinstance(needs, dict) or not set(needs) <= {*PARTS, ARG}:
+        if not isinstance(needs, dict) or not set(needs) <= {*PARTS, ARG, ATTENTION, PERSON}:
             raise ValueError(
-                f"{where}.variants[{v}].needs: part -> state, parts of {PARTS}, or {ARG}"
+                f"{where}.variants[{v}].needs: part -> state, parts of {PARTS}, {ARG}, "
+                f"{ATTENTION} or {PERSON}"
             )
         needs = {str(k): str(x) for k, x in needs.items()}
+        if needs.get(ATTENTION, PHASES[0]) not in PHASES:
+            raise ValueError(f"{where}.variants[{v}].needs.{ATTENTION}: one of {PHASES}")
+        if needs.get(PERSON, SEEN) != SEEN:
+            raise ValueError(f"{where}.variants[{v}].needs.{PERSON}: {SEEN}")
         variants.append(Variant(tuple(steps), weight, needs, bool(raw.get("floor", False))))
     if not variants:
         raise ValueError(f"{where}.variants: at least one")
@@ -299,7 +498,7 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
     if bind not in BINDS:
         raise ValueError(f"{where}.bind: one of {', '.join(BINDS)}")
     family = body.get("family")
-    args = tuple(str(a) for a in body.get("args", []))
+    args, settings = _args(where, body.get("args", []), variants, atoms)
     style_args = body.get("style_args", {})
     if not isinstance(style_args, dict):
         raise ValueError(f"{where}.style_args: arg -> the style words that choose it")
@@ -316,9 +515,92 @@ def _composition(name: str, body: Mapping[str, Any], atoms: Mapping[str, Atom]) 
         args,
         None if family is None else str(family),
         bool(body.get("long", False)),
-        bool(body.get("callable", True)),
+        callable_,
         {str(a): tuple(str(w).lower() for w in ws) for a, ws in style_args.items()},
+        settings,
     )
+
+
+def _nested(at: str, step: Mapping[str, Any], known: set[str]) -> Step:
+    """A step that nests a composition: its name, ``at_s`` and ``p`` (nothing else)."""
+    name = str(step.get("composition"))
+    if name not in known:
+        raise ValueError(f"{at}.composition: no composition {name!r}")
+    extra = set(step) - {"composition", "at_s", "p"}
+    if extra:
+        raise ValueError(f"{at}: a nested composition's step takes at_s and p, not "
+                         f"{', '.join(sorted(extra))}")  # fmt: skip
+    p = float(step.get("p", 1.0))
+    if not 0.0 < p <= 1.0:
+        raise ValueError(f"{at}.p: in (0, 1]")
+    return Step("", _range(f"{at}.at_s", step.get("at_s", 0.0)), p, composition=name)
+
+
+def _nesting(
+    compositions: Mapping[str, Composition], atoms: Mapping[str, Atom], chain: tuple[str, ...]
+) -> None:
+    """The compositions nested under ``chain``'s last: no cycle, at most :data:`MAX_DEPTH`
+    deep, and none playing the idle layer's atoms under a callable one (the chain's first)."""
+    root = compositions[chain[0]]
+    for variant in compositions[chain[-1]].variants:
+        for step in variant.steps:
+            if step.composition is None:
+                if len(chain) > 1 and root.callable and not atoms[step.atom].callable:
+                    raise ValueError(f"compositions.{chain[0]}: {' > '.join(chain)} plays "
+                                     f"{step.atom}, the idle layer's")  # fmt: skip
+                continue
+            nested = (*chain, step.composition)
+            if step.composition in chain:
+                raise ValueError(f"compositions.{chain[0]}: a cycle: {' > '.join(nested)}")
+            if len(nested) > MAX_DEPTH:
+                raise ValueError(f"compositions.{chain[0]}: nested deeper than {MAX_DEPTH}: "
+                                 f"{' > '.join(nested)}")  # fmt: skip
+            _nesting(compositions, atoms, nested)
+
+
+def _args(
+    where: str, raw: Any, variants: list[Variant], atoms: Mapping[str, Atom]
+) -> tuple[tuple[str, ...], dict[str, tuple[Setting, ...]]]:
+    """``args``: the arguments that choose (a list, or a map's keys to null) and the settings
+    (a map: ``number`` -> the parameters a mark's number sets, a word -> parameter -> range);
+    each parameter ``param`` (every step whose atom takes it) or ``atom.param``."""
+    if isinstance(raw, list):
+        return tuple(str(a) for a in raw), {}
+    if not isinstance(raw, dict):
+        raise ValueError(f"{where}.args: a list, or argument -> null | parameters")
+    used = {s.atom for v in variants for s in v.steps if s.composition is None}
+    choose: list[str] = []
+    settings: dict[str, tuple[Setting, ...]] = {}
+    for arg, value in raw.items():
+        at = f"{where}.args.{arg}"
+        if value is None:
+            choose.append(str(arg))
+        elif arg == NUMBER:
+            targets = [value] if isinstance(value, str) else value
+            if not isinstance(targets, list) or not targets:
+                raise ValueError(f"{at}: a parameter or a list of them")
+            settings[NUMBER] = tuple(_setting(at, str(t), None, used, atoms) for t in targets)
+        elif isinstance(value, dict) and value and arg != ANY:
+            settings[str(arg)] = tuple(
+                _setting(f"{at}.{t}", str(t), _range(f"{at}.{t}", r), used, atoms)
+                for t, r in value.items()
+            )
+        else:
+            raise ValueError(f"{at}: null (it chooses) or parameter -> a number or [lo, hi]")
+    return tuple(choose), settings
+
+
+def _setting(
+    at: str, target: str, value: Range | None, used: set[str], atoms: Mapping[str, Atom]
+) -> Setting:
+    """``param`` or ``atom.param`` as a setting, checked against the composition's atoms."""
+    atom, dot, param = target.rpartition(".")
+    if dot and atom not in used:
+        raise ValueError(f"{at}: no step of the composition plays {atom!r}")
+    takers = [atom] if dot else sorted(used)
+    if param not in RESERVED and not any(param in atoms[a].params for a in takers):
+        raise ValueError(f"{at}: no step's atom takes {param!r}")
+    return Setting(param, atom if dot else None, value)
 
 
 def _breaths(raw: Any, compositions: Mapping[str, Composition]) -> dict[PartName, Breath]:
@@ -375,18 +657,23 @@ def _named_params(atom: Atom) -> set[str]:
     return needed
 
 
-def _idle(i: int, body: Mapping[str, Any], atoms: Mapping[str, Atom]) -> Idle:
+def _idle(
+    i: int,
+    body: Mapping[str, Any],
+    compositions: Mapping[str, Composition],
+    atoms: Mapping[str, Atom],
+) -> Idle:
     where = f"idle[{i}]"
     part = body.get("part")
     if part not in PARTS:
         raise ValueError(f"{where}.part: one of {', '.join(PARTS)}")
-    names = tuple(str(a) for a in body.get("atoms", []))
+    names = tuple(str(a) for a in body.get("compositions", []))
     for name in names:
-        atom = atoms.get(name)
-        if atom is None or atom.part != part or _named_params(atom):
-            raise ValueError(f"{where}.atoms: {name!r} is no {part} atom without names")
+        if name not in compositions or composition_parts(compositions, atoms, name) != {part}:
+            raise ValueError(f"{where}.compositions: {name!r} is no composition of the {part} "
+                             "alone")  # fmt: skip
     if not names:
-        raise ValueError(f"{where}.atoms: at least one")
+        raise ValueError(f"{where}.compositions: at least one")
     when = body.get("when", "conversation")
     if when not in ("conversation", "always"):
         raise ValueError(f"{where}.when: conversation or always")
@@ -466,10 +753,22 @@ def _space(raw: Any, poses: Mapping[str, Mapping[str, float]]) -> Space:
         if k != "note"
     }
     via_pan = raw.get("via_pan_deg")
+    home_after = {
+        pose("home_after", k): pose(f"home_after.{k}", v)
+        for k, v in raw.get("home_after", {}).items()
+        if k != "note"
+    }
+    head_pan_min = {
+        pose("head_pan_min_deg", k): float(v)
+        for k, v in raw.get("head_pan_min_deg", {}).items()
+        if k != "note"
+    }
     return Space(
         home=pose("home", raw.get("home", d.home)),
         via_pan_deg=None if via_pan is None else float(via_pan),
         via=tuple(pose("via", p) for p in raw.get("via", [])),
+        home_after=home_after,
+        head_pan_min_deg=head_pan_min,
         loci=tuple(pose("loci", p) for p in raw.get("loci", [])),
         paths=paths,
         head=head,

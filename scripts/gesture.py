@@ -8,6 +8,7 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py play greeting --speed 0.2
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
     uv run python scripts/gesture.py play point:printer --dry-run   # a mark with its argument
+    uv run python scripts/gesture.py play snap:2,fast --dry-run      # ... and its settings
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
     uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
     uv run python scripts/gesture.py turn 10                  # the wheels: 10 deg left in place
@@ -48,10 +49,10 @@ from pepin.arm_motion import ArmMotion, load_arm_motion
 from pepin.audio_link import board_host
 from pepin.expression.animation import Book, Clip, Scene, Track
 from pepin.expression.arm_link import ArmClient
-from pepin.expression.book import book_from, load_book, vocabulary, with_rest
+from pepin.expression.book import book_from, composition_parts, load_book, vocabulary, with_rest
 from pepin.expression.door import OverlayDoor
 from pepin.expression.head import GESTURE, ClipLook
-from pepin.expression.markers import ANY, gesture
+from pepin.expression.markers import ANY, mark
 from pepin.expression.mix import stretched
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
 from pepin.expression.places import GoalPlaces, Room
@@ -87,7 +88,7 @@ def connect(host: str) -> ArmClient:
 def show_list(motion: ArmMotion) -> int:
     book = load_book(BOOK)
     for name, composition in book.compositions.items():
-        parts = sorted({book.atoms[s.atom].part for v in composition.variants for s in v.steps})
+        parts = sorted(composition_parts(book.compositions, book.atoms, name))
         print(f"{name:13} {len(composition.variants)} variant(s), {', '.join(parts)}: "
               f"{composition.note}")  # fmt: skip
     taught = ", ".join(book.poses) or "none (scripts/gesture.py teach NAME)"
@@ -120,14 +121,16 @@ def simple(host: str, cmd: str) -> int:
     return 0 if reply is not None else 3
 
 
-def asked(text: str, book: Book) -> tuple[str, str | None] | None:
-    """``play``'s NAME as a composition and its argument: a composition's name as it is (its
-    first argument when it takes one), else as the brain writes a mark (``point:printer``,
-    ``count:second``, ``!``)."""
+def asked(text: str, book: Book) -> tuple[str, str | None, tuple[str, ...]] | None:
+    """``play``'s NAME as a composition, its argument and those that set its parameters: a
+    composition's name as it is (its first argument when it takes one), else as the brain
+    writes a mark (``point:printer``, ``count:second``, ``!``, ``snap:2,fast``)."""
     if text in book.compositions:
-        return text, None
-    named = gesture(text, vocabulary(book, frozenset()))
-    return None if named is None else (named[1], named[2])
+        return text, None, ()
+    found = mark(text, vocabulary(book, frozenset()))
+    if found is not None and found.ignored:
+        print(f"  left out (not {found.name}'s): {', '.join(found.ignored)}")
+    return None if found is None else (found.name, found.arg, found.args)
 
 
 def room_for(book: Book, name: str, arg: str | None) -> Room | None:
@@ -158,16 +161,18 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         print(f"no gesture {args.name!r}; the gestures are {', '.join(book.compositions)}"
               " (an argument after a colon: point:printer)")  # fmt: skip
         return 2
-    name, arg = found
+    name, arg, settings = found
     if not 0.0 < args.speed <= 1.0:
         print("--speed: above 0, at most 1")
         return 2
     seed = args.seed if args.seed is not None else int(time.time()) % 2**31
     scene = Scene(frozenset({"arm", "face", "head"}))
     renderer = BookRenderer(book, resolver=Resolver(room=room_for(book, name, arg)))
-    performance = renderer.render(name, scene, seed, variant=args.variant, arg=arg)
-    mark = name if arg is None else f"{name}:{arg}"
-    print(f"{mark}: seed {seed}, variant {performance.variant}"
+    performance = renderer.render(name, scene, seed, variant=args.variant, arg=arg, args=settings)
+    spelled = ",".join(x for x in (arg, *settings) if x is not None)
+    written = name if not spelled else f"{name}:{spelled}"
+    nested = "".join(f", {n} variant {k}" for n, k in performance.nested)
+    print(f"{written}: seed {seed}, variant {performance.variant}{nested}"
           f" (replay: --seed {seed} --variant {performance.variant})")  # fmt: skip
     if not performance.clips:
         print("  nothing plays: a variant written for another argument, or a place past both the"

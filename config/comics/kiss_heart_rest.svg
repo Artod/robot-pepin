@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small smile with the red heart on it (a heart flies)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 124 80.5 C 145.6 92.5 174.4 92.5 196 80.5" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 117.01 76.61 C 113.91 74.89 111.73 71.89 111.05 68.4" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 202.99 76.61 C 206.09 74.89 208.27 71.89 208.95 68.4" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="tongue" d="M 156.57 81.99 C 151.67 78.54 144.53 79.84 145 87.3 C 145.54 94.08 152.46 100.37 158.21 104.62 C 159.28 105.4 160.72 105.4 161.79 104.62 C 167.54 100.37 174.46 94.08 175 87.3 C 175.47 79.84 168.33 78.54 163.43 81.99 C 161.37 83.44 158.63 83.44 156.57 81.99 Z" fill="#DE5B55"/>
+</svg>

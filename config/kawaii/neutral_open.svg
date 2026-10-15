@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the tiny u</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 152.76 71.51 C 157.47 73.5 162.53 73.5 167.24 71.51 C 170.21 70.26 173.91 71.95 173.54 75.16 C 171.95 88.84 166.47 99 160 99 C 153.53 99 148.05 88.84 146.46 75.16 C 146.09 71.95 149.79 70.26 152.76 71.51 Z" fill="#DD7487"/>
+  <path class="line" d="M 152.76 71.51 C 157.47 73.5 162.53 73.5 167.24 71.51 C 170.21 70.26 173.91 71.95 173.54 75.16 C 171.95 88.84 166.47 99 160 99 C 153.53 99 148.05 88.84 146.46 75.16 C 146.09 71.95 149.79 70.26 152.76 71.51 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

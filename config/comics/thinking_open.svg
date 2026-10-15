@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking mouth, a lazy S aside, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 163.02 82.22 C 167.25 84.8 172.63 87.57 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 220.98 82.6 226.3 87.69 229.87 90.52 C 231.13 91.52 232.02 92.99 231.92 94.59 C 230.77 114.14 216.57 129.71 194 129.71 C 172.75 129.71 158.91 110.77 156.41 86.18 C 156.05 82.65 159.98 80.37 163.02 82.22 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 163.02 82.22 C 167.25 84.8 172.63 87.57 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 220.98 82.6 226.3 87.69 229.87 90.52 C 231.13 91.52 232.02 92.99 231.92 94.59 C 210.78 104.04 177.55 104.04 156.41 86.18 C 156.05 82.65 159.98 80.37 163.02 82.22 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 194.17 86.63 C 194.37 90.63 194.57 94.63 194.77 98.63" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 170.96 107.34 C 186.39 101.54 204.56 101.5 220.03 107.23 C 224.26 108.79 225.9 114.03 222.93 117.43 C 216.36 124.97 206.45 129.71 194 129.71 C 183.38 129.71 174.6 124.97 168.18 117.17 C 165.44 113.85 166.93 108.86 170.96 107.34 Z" fill="#DE5B55"/>
+  <path class="line" d="M 163.02 82.22 C 167.25 84.8 172.63 87.57 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 220.98 82.6 226.3 87.69 229.87 90.52 C 231.13 91.52 232.02 92.99 231.92 94.59 C 230.77 114.14 216.57 129.71 194 129.71 C 172.75 129.71 158.91 110.77 156.41 86.18 C 156.05 82.65 159.98 80.37 163.02 82.22 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 148.67 74.79 C 145.43 73.36 141.71 73.45 138.53 75.02" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 239.08 95.73 C 242.22 97.38 245.93 97.56 249.21 96.21" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

@@ -66,7 +66,6 @@ and the camera rig is config/camera.json's own ``"active"`` or ``PEPIN_CAMERA``
 (:func:`camera_rig` resolves it once for the whole launch and the report line names it).
 """
 
-import json
 import os
 from pathlib import Path
 
@@ -94,6 +93,7 @@ from pepin.global_descriptor import (
     global_descriptor_setting,
     rtabmap_keeps_descriptors,
 )
+from pepin.overlay import read_json
 
 # How long a node of this launch is given to end on SIGINT before the launch escalates to
 # SIGTERM, and then how long before SIGKILL. launch's own defaults are 5 s and 5 s, which is
@@ -685,7 +685,7 @@ def camera_rig(name: str = "") -> str:
     one node on another camera. The other readers of that file — the depth node, the contact
     scan — answer the same question from the same file and the same variable.
     """
-    return active_camera(json.loads(config_file("camera.json").read_text()), name)
+    return active_camera(read_json(config_file("camera.json")), name)
 
 
 def depth_source(rig: str) -> str:

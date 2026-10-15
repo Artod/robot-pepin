@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the pursed lips parted into a small oval</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 141.32 84 C 141.32 71.85 149.38 62 159.32 62 C 169.27 62 177.32 71.85 177.32 84 C 177.32 96.15 169.27 106 159.32 106 C 149.38 106 141.32 96.15 141.32 84 Z" fill="#EC7488"/>
+  <path class="line" d="M 141.32 84 C 141.32 71.85 149.38 62 159.32 62 C 169.27 62 177.32 71.85 177.32 84 C 177.32 96.15 169.27 106 159.32 106 C 149.38 106 141.32 96.15 141.32 84 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

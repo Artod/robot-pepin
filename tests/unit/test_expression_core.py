@@ -91,7 +91,7 @@ def breathing(after: float | None = 0.0) -> Book:
     """The book with its breath (a looping idle entry of the head, no breath while the robot
     speaks) drawn every 0.5 s and given ``after``, beside the drift."""
     breath = Idle("head", ("breath",), Range(0.5, 0.5), "conversation", ("speaking",), after)
-    others = tuple(i for i in BOOK.idle if "breath" not in i.atoms)
+    others = tuple(i for i in BOOK.idle if "breath" not in i.compositions)
     return Book(BOOK.atoms, BOOK.compositions, BOOK.poses, (breath, *others), BOOK.moments)
 
 
@@ -154,7 +154,8 @@ def test_an_idle_entry_s_own_after_speech_s_lets_a_breath_follow_a_reply_at_once
     assert after_reply(Rig(breathing(after=0.0), idle_after_speech_s=5.0))
     assert not after_reply(Rig(breathing(after=None), idle_after_speech_s=5.0))
     data = json.loads((CONFIG / "animation.json").read_text())
-    data["idle"] = [{"part": "head", "atoms": ["breath"], "every_s": 1, "after_speech_s": 0}]
+    data["idle"] = [{"part": "head", "compositions": ["breath"], "every_s": 1,
+                     "after_speech_s": 0}]  # fmt: skip
     assert book_from(data).idle[0].after_speech_s == 0.0
     data["idle"][0]["after_speech_s"] = -1
     with pytest.raises(ValueError, match=r"idle\[0\]\.after_speech_s"):
@@ -254,18 +255,19 @@ def test_a_tail_starts_at_its_second_and_goes_while_its_stroke_lands_within_afte
 
 
 def test_the_arm_is_counted_on_the_ladder_s_final_version() -> None:
-    """With one arm gesture a minute: a hello drawn with the raised hand on the reply's first word
-    has no time to raise it and the ladder plays its smaller version (face and nod), which uses
-    no arm, so the next mark keeps its arm."""
+    """With one arm gesture a minute: sympathy drawn with the arm on the reply's first word has
+    no time to move it and the ladder plays a smaller version (its head and face), which uses no
+    arm, so the next mark keeps its arm. (A hello there waves since 2026-10-14: its stroke may
+    land anywhere in the utterance and run timing.overrun_s past the speech.)"""
     rig = Rig(caps=Caps(per_part=1, per_reply=3, arm_per_minute=1), seed=4)
     arm = ArmPart(FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off")), MOTION,
                   latency_s=0.06, clock=lambda: rig.now)  # fmt: skip
     rig.engine.parts["arm"] = arm
     rig.engine.scheduler.attach(rig.engine.parts, lambda: rig.engine.renderer,
                                 hooks=rig.engine.scene_hooks)  # fmt: skip
-    rig.engine.part_queued(1, 0, Part("Привет.", None, (Marker("gesture", "greeting", 0),)))
+    rig.engine.part_queued(1, 0, Part("Ох, жаль.", None, (Marker("gesture", "sympathy", 0),)))
     rig.engine.step()
-    (drawn,) = rig.rows("performance", intent="greeting")
+    (drawn,) = rig.rows("performance", intent="sympathy")
     (first,) = rig.rows("ladder")
     assert "arm" in drawn["parts"] and "arm" not in first["parts"], (drawn, first)
     text = "Ну и вот, всё у нас получилось, как мы хотели, правда здорово."

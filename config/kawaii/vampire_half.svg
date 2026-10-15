@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dark laugh with the band, two fangs hanging from the upper gum, the band and the fangs outlined</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 135.94 50 C 151.98 50 168.02 50 184.06 50 C 189.44 50 194.12 54.72 192.01 59.67 C 187.3 70.79 174.7 78.8 160 78.8 C 145.3 78.8 132.7 70.79 127.99 59.67 C 125.88 54.72 130.56 50 135.94 50 Z" fill="#504743"/>
+  <path class="teeth" d="M 135.94 50 C 151.98 50 168.02 50 184.06 50 C 189.44 50 194.12 54.72 192.01 59.67 C 172.81 60.11 147.19 60.11 127.99 59.67 C 125.88 54.72 130.56 50 135.94 50 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 192.01 59.67 C 172.81 60.11 147.19 60.11 127.99 59.67" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 148.21 64.55 C 155.93 63.58 164.07 63.58 171.79 64.55 C 178.1 65.35 179.98 73.91 174.05 76.21 C 169.77 77.87 165 78.8 160 78.8 C 155 78.8 150.23 77.87 145.95 76.21 C 140.02 73.91 141.9 65.35 148.21 64.55 Z" fill="#DD7487"/>
+  <path class="line" d="M 135.94 50 C 151.98 50 168.02 50 184.06 50 C 189.44 50 194.12 54.72 192.01 59.67 C 187.3 70.79 174.7 78.8 160 78.8 C 145.3 78.8 132.7 70.79 127.99 59.67 C 125.88 54.72 130.56 50 135.94 50 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="fang" d="M 136.5 59.37 C 138.83 59.37 141.17 59.37 143.5 59.37 C 142.21 63.71 140.93 68.04 139.64 72.37 C 138.59 68.04 137.55 63.71 136.5 59.37 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 143.5 59.37 C 142.21 63.71 140.93 68.04 139.64 72.37 C 138.59 68.04 137.55 63.71 136.5 59.37" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="fang"/>
+  <path class="fang" d="M 176.5 59.37 C 178.83 59.37 181.17 59.37 183.5 59.37 C 182.45 63.71 181.41 68.04 180.36 72.37 C 179.07 68.04 177.79 63.71 176.5 59.37 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 183.5 59.37 C 182.45 63.71 181.41 68.04 180.36 72.37 C 179.07 68.04 177.79 63.71 176.5 59.37" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="fang"/>
+</svg>

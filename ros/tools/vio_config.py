@@ -67,6 +67,8 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
+from pepin.overlay import read_json
+
 Array = npt.NDArray[np.float64]
 HERE = Path(__file__).resolve()
 # The same file runs in a laptop container (ros/laptop.sh vio does), where ros/tools is /tools and
@@ -196,7 +198,7 @@ def with_stamp_lag(
     sys.path.insert(0, str(SRC))
     from pepin.camera import active_camera, camera_rate
 
-    data = json.loads((config_dir / "camera.json").read_text())
+    data = read_json(config_dir / "camera.json")
     block = data[active_camera(data, camera)].get("head_imu")
     if not block:
         return rig

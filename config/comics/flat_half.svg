@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line, a tick at each end</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 109.29 85 C 143.1 85 176.9 85 210.71 85 C 213.7 85 216.35 87.33 215.83 90.26 C 212.77 107.5 185.46 120.84 160 120.84 C 134.54 120.84 107.23 107.5 104.17 90.26 C 103.65 87.33 106.3 85 109.29 85 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 133.52 102.64 C 150.62 100.15 169.38 100.15 186.48 102.64 C 193.37 103.64 194.97 113.08 188.47 115.55 C 179.67 118.9 169.7 120.84 160 120.84 C 150.3 120.84 140.33 118.9 131.53 115.55 C 125.03 113.08 126.63 103.64 133.52 102.64 Z" fill="#DE5B55"/>
+  <path class="line" d="M 109.29 85 C 143.1 85 176.9 85 210.71 85 C 213.7 85 216.35 87.33 215.83 90.26 C 212.77 107.5 185.46 120.84 160 120.84 C 134.54 120.84 107.23 107.5 104.17 90.26 C 103.65 87.33 106.3 85 109.29 85 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 96 85 C 92.45 85 89.09 86.57 86.81 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 224 85 C 227.55 85 230.91 86.57 233.19 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

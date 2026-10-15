@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the worried wave, its ends curling up</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 102.49 84.66 C 109.46 84.06 120.84 83.01 129 83.24 C 139.33 83.54 149.67 86.79 160 86.79 C 170.33 86.79 180.67 83.54 191 83.24 C 199.16 83.01 210.54 84.06 217.51 84.66 C 220.09 84.88 222.28 86.92 222.03 89.5 C 220.04 110.21 188.94 126.47 160 126.47 C 131.06 126.47 99.96 110.21 97.97 89.5 C 97.72 86.92 99.91 84.88 102.49 84.66 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 125.01 105.39 C 147.3 101.19 172.7 101.2 194.99 105.39 C 201.29 106.58 202.9 115.03 197.16 117.85 C 186.18 123.25 172.88 126.47 160 126.47 C 147.12 126.47 133.82 123.25 122.84 117.85 C 117.1 115.03 118.71 106.58 125.01 105.39 Z" fill="#DE5B55"/>
+  <path class="line" d="M 102.49 84.66 C 109.46 84.06 120.84 83.01 129 83.24 C 139.33 83.54 149.67 86.79 160 86.79 C 170.33 86.79 180.67 83.54 191 83.24 C 199.16 83.01 210.54 84.06 217.51 84.66 C 220.09 84.88 222.28 86.92 222.03 89.5 C 220.04 110.21 188.94 126.47 160 126.47 C 131.06 126.47 99.96 110.21 97.97 89.5 C 97.72 86.92 99.91 84.88 102.49 84.66 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 90.01 85.46 C 86.47 85.66 83.02 84.28 80.59 81.7" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 229.99 85.46 C 233.53 85.66 236.98 84.28 239.41 81.7" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

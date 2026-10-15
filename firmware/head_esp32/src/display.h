@@ -4,6 +4,7 @@
 
 #include <stdint.h>
 
+#include "face_anime.h"
 #include "face_render.h"
 #include "protocol.h"
 
@@ -17,6 +18,9 @@ void display_brightness(uint8_t brightness);
 
 // One face frame: each strip rendered while the other one is on its way to the panel.
 void display_face(const face::Layout& layout);
+
+// The same for the shape engine's frame (the anime style).
+void display_anime(const face::AnimeFrame& frame);
 
 // The info screen, drawn once (the face resumes with the next display_face).
 void display_info(const InfoScreen& info);

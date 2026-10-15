@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the hooked line, its corners a touch up, the hooks up</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 119.44 87.32 C 144.93 89.66 175.07 89.66 200.56 87.32 C 206.88 86.74 213.28 91.43 211.21 97.42 C 205.82 113.02 183.25 124.43 160 124.43 C 136.75 124.43 114.18 113.02 108.79 97.42 C 106.72 91.43 113.12 86.74 119.44 87.32 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 119.44 87.32 C 144.93 89.66 175.07 89.66 200.56 87.32 C 206.88 86.74 213.28 91.43 211.21 97.42 C 182.53 104.96 137.47 104.96 108.79 97.42 C 106.72 91.43 113.12 86.74 119.44 87.32 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 211.21 97.42 C 182.53 104.96 137.47 104.96 108.79 97.42" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 119.44 87.32 C 144.93 89.66 175.07 89.66 200.56 87.32 C 206.88 86.74 213.28 91.43 211.21 97.42 C 205.82 113.02 183.25 124.43 160 124.43 C 136.75 124.43 114.18 113.02 108.79 97.42 C 106.72 91.43 113.12 86.74 119.44 87.32 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -238,6 +238,8 @@ ros/           pepin_bringup (nodes, launch files), pepin_base_cpp (the C++ base
 board/         the board's systemd units, udev rules, ser2net, ToF init, chrony, overlays
 apps/macos/    the menu-bar app
 config/        geometry, mounts, calibrations, knobs and the board's process manifest (JSON)
+companion/     optional private overlay (a submodule), read before config/: persona, prompts,
+               sounds, own faces and gestures (docs/PRIVATE_OVERLAY.md)
 scripts/       laptop entry points: voice, health check, dashboard, calibration, map building
 tests/         unit (fast, no robot) and hardware (--hardware)
 ```

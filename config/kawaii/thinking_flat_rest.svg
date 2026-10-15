@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dot, aside</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 189 70 C 189 66.41 191.24 63.5 194 63.5 C 196.76 63.5 199 66.41 199 70 C 199 73.59 196.76 76.5 194 76.5 C 191.24 76.5 189 73.59 189 70 Z" fill="#504743"/>
+  <path class="line" d="M 189 70 C 189 66.41 191.24 63.5 194 63.5 C 196.76 63.5 199 66.41 199 70 C 199 73.59 196.76 76.5 194 76.5 C 191.24 76.5 189 73.59 189 70 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

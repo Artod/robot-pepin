@@ -21,10 +21,11 @@ holds the two to the same numbers.
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 
 @dataclass(frozen=True)
@@ -58,8 +59,7 @@ class WheelNoiseLaw:
     @classmethod
     def from_json(cls, path: str | Path) -> WheelNoiseLaw:
         """From config/base.json (or a copy); a file without the block gives the defaults."""
-        with open(path) as f:
-            return cls.from_dict(json.load(f).get("odometry_noise", {}))
+        return cls.from_dict(read_json(path).get("odometry_noise", {}))
 
     def moving(self, v: float, w: float) -> bool:
         """The wheels' measured twist is motion, not rest."""

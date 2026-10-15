@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wide smile arc</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 112.09 83.52 C 142.18 96.16 177.82 96.16 207.91 83.52 C 214.23 80.87 222.04 84.84 220.65 91.55 C 215.58 116.18 188.22 134.48 160 134.48 C 131.78 134.48 104.42 116.18 99.35 91.55 C 97.96 84.84 105.77 80.87 112.09 83.52 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 112.09 83.52 C 142.18 96.16 177.82 96.16 207.91 83.52 C 214.23 80.87 222.04 84.84 220.65 91.55 C 186.69 112.15 133.31 112.15 99.35 91.55 C 97.96 84.84 105.77 80.87 112.09 83.52 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 220.65 91.55 C 186.69 112.15 133.31 112.15 99.35 91.55" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 112.09 83.52 C 142.18 96.16 177.82 96.16 207.91 83.52 C 214.23 80.87 222.04 84.84 220.65 91.55 C 215.58 116.18 188.22 134.48 160 134.48 C 131.78 134.48 104.42 116.18 99.35 91.55 C 97.96 84.84 105.77 80.87 112.09 83.52 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

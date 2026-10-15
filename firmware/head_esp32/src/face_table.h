@@ -5,29 +5,85 @@
 
 namespace face {
 
-constexpr int kParamCount = 16;
+constexpr int kParamCount = 34;
 enum Param : uint8_t {
   kWidth = 0,  // the mouth's width, a share of the screen's
   kOpen = 1,  // the opening at the middle, a share of max_open_px
   kSmile = 2,  // the corners lifted (+) or dropped (-), smile_px at 1
-  kUpper = 3,  // the share of the opening above the mouth's line: 0 keeps the upper lip on the line (a D-shaped grin)
+  kUpper = 3,  // the share of the opening above the mouth's line: 0 keeps the upper lip on the line (a D-shaped grin, the manga bowl)
   kCornerExp = 4,  // the opening's profile: 1.2 a lens with pointed corners, 2 an ellipse, 8 a rounded rectangle
   kTeeth = 5,  // 0 none, 0.5 the upper row, 1 both rows meeting at the bite (clenched)
   kWave = 6,  // a wave along the mouth, wave_px at 1: worried wobble or the zigzag
   kWaveN = 7,  // wave periods across the mouth
   kWaveSharp = 8,  // 0 a sine, 1 a zigzag
-  kWaveSpeed = 9,  // the wave crawls along the mouth, periods per second
+  kWaveSpeed = 9,  // the wave crawls along the mouth, periods per second; at 0 a wave settles to its home phase (the cat's w reads only there)
   kAsym = 10,  // the right corner (as seen) up (+) and the left down, asym_px at 1
   kShiftX = 11,  // the mouth moved sideways, shift_x_px at 1 (+ right as seen)
   kShiftY = 12,  // the mouth moved down (+), shift_y_px at 1
   kThick = 13,  // the lip line, thick_min_px..thick_max_px
   kBreathe = 14,  // a slow idle breath of the width and the opening (breathe_hz)
   kDrift = 15,  // a slow idle drift sideways (drift_hz), shift_x_px/3 at 1
+  kBow = 16,  // Cupid's bow: the upper lip dips at the middle, bow_px at 1 (puckered lips, a pout)
+  kTongue = 17,  // the tongue out under the mouth's line, tongue_px long at 1
+  kTongueX = 18,  // where along the mouth the tongue comes out: -1 the left corner, 1 the right (as seen)
+  kCheeks = 19,  // the blush beside the mouth: pink ellipses with three strokes, their opacity
+  kDimples = 20,  // the cheek folds round the corners, an arc of dimple_px radius; 1 its full length
+  kMoustache = 21,  // a short block moustache above the mouth, moustache_h_px high at 1
+  kFangs = 22,  // two fangs hanging from the upper lip (from the teeth band when there is one), fang_px long at 1
+  kTongueLean = 23,  // the tongue's tip sideways, a share of its length (+ right as seen): a limp tongue hangs aside
+  kPucker = 24,  // the kiss: the lips pursed into a "3", pucker_px tall at 1, the mouth's line shrinking into it
+  kHooks = 25,  // corner hooks: the line's ends curl down (+) or up (-), an arc of hook_px radius at 1 (the manga convention's ticks)
+  kHeartLips = 26,  // the mouth drawn as a filled heart, heart_lips_px tall at 1, the mouth's line shrinking into it (the manga kiss_heart)
+  kBulb = 27,  // the opening's profile swells at the corners into round ends and thins in the middle: a dumbbell, lips pressed (the manga 'mm')
+  kFangSide = 28,  // which fangs: 0 both, -1 the left one only (as seen), 1 the right one only
+  kDrool = 29,  // a drop of drool hanging from the lower lip at drool_at, drool_px long at 1
+  kPatch = 30,  // the tongue patch inside an open mouth: a lighter dome rising from the bottom of the opening, this share of the opening's height at the dome's peak, its top one upward curve from corner to corner (the manga bowl)
+  kWag = 31,  // the tongue out wags: its tip sways sideways by this share of its half length at wag_hz
+  kFangAt = 32,  // the fangs' place either side of the middle, a share of the mouth's half width (0.42 the pepin vampire's; near 1 the corners; near 0 one tooth at the middle)
+  kStripes = 33,  // the shock's vertical stripes down one cheek, their opacity: the shape engine's overlay (config/<style>/stripes_rest.svg, as cheeks draws config/<style>/cheeks_rest.svg over any look); the parametric engine draws none
 };
-constexpr float kParamMin[kParamCount] = {0.08f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.0f, -3.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f};
-constexpr float kParamMax[kParamCount] = {0.95f, 1.0f, 1.0f, 1.0f, 12.0f, 1.0f, 1.0f, 12.0f, 1.0f, 3.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
+constexpr float kParamMin[kParamCount] = {0.08f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.0f, -3.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, -1.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+constexpr float kParamMax[kParamCount] = {0.95f, 1.0f, 1.0f, 1.0f, 12.0f, 1.0f, 1.0f, 12.0f, 1.0f, 3.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 0.8f, 1.0f, 1.0f, 1.0f};
 
-constexpr int kExpressionCount = 15;
+// the styles: the same expressions drawn several ways; the host's 'C' config picks one
+constexpr int kStyleCount = 6;
+enum Style : uint8_t {
+  kStylePepin = 0,
+  kStyleRose = 1,
+  kStyleManga = 2,
+  kStyleAnime = 3,
+  kStyleKawaii = 4,
+  kStyleComics = 5,
+};
+constexpr const char* kStyleNames[kStyleCount] = {"pepin", "rose", "manga", "anime", "kawaii", "comics"};
+constexpr int kStyleDefault = 0;  // config/face.json `style`
+// (a shapes style's entry: flap_shapes and the background; its <style>_table.h has
+// the rest)
+struct StyleSpec {
+  float thick_min_px;   // the line's thickness at thick 0
+  float thick_max_px;   // and at thick 1
+  float tooth_gap_px;   // the dark gap between two teeth (0: one band)
+  float tongue_w_px;    // the tongue's width
+  float shade;          // the share of an open mouth's bottom in the shade's colour
+  float teeth_line_px;  // a line in the lip's colour under the teeth band (0: none)
+  float deco_line_px;   // an outline in the lip's colour round the decorations
+  float pucker_line;    // the kiss's stroke, a share of a lobe's radius (0: the line's)
+  float tongue_shine;   // the tongue's highlight, a share of its radius (0: a crease)
+  float patch_x;        // where the tongue patch's dome peaks along the mouth, -1..1
+  float teeth_span;     // the teeth band's reach, a share of the half width
+  float flap_shapes;    // the speech level as this many mouth shapes (0: continuous)
+  uint16_t background;  // RGB565
+};
+constexpr StyleSpec kStyles[kStyleCount] = {
+  {3.0f, 14.0f, 2.0f, 26.0f, 0.0f, 0.0f, 0.0f, 0.48f, 0.0f, 0.0f, 1.0f, 0.0f, 0x0000},  // pepin
+  {2.0f, 5.0f, 0.0f, 26.0f, 0.32f, 1.3f, 1.6f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0xFFBE},  // rose
+  {2.0f, 5.0f, 0.0f, 40.0f, 0.0f, 1.3f, 1.6f, 0.0f, 0.55f, 0.0f, 0.85f, 3.0f, 0xFFBE},  // manga
+  {3.0f, 14.0f, 2.0f, 26.0f, 0.0f, 0.0f, 0.0f, 0.48f, 0.0f, 0.0f, 1.0f, 3.0f, 0xFFBE},  // anime
+  {3.0f, 14.0f, 2.0f, 26.0f, 0.0f, 0.0f, 0.0f, 0.48f, 0.0f, 0.0f, 1.0f, 3.0f, 0xFFFF},  // kawaii
+  {3.0f, 14.0f, 2.0f, 26.0f, 0.0f, 0.0f, 0.0f, 0.48f, 0.0f, 0.0f, 1.0f, 3.0f, 0xFFFF},  // comics
+};
+
+constexpr int kExpressionCount = 32;
 constexpr const char* kExpressionNames[kExpressionCount] = {
   "neutral",
   "smile",
@@ -44,26 +100,503 @@ constexpr const char* kExpressionNames[kExpressionCount] = {
   "focused",
   "listening",
   "sinister",
+  "kiss",
+  "kiss_heart",
+  "pout",
+  "thinking_flat",
+  "moustache",
+  "o_mouth",
+  "vampire",
+  "terminator",
+  "blush",
+  "tease",
+  "tired",
+  "cat",
+  "cat_blush",
+  "smile_wide",
+  "happy_plain",
+  "angry",
+  "shocked",
 };
-constexpr float kExpressions[kExpressionCount][kParamCount] = {
-  {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f},  // 0 neutral
-  {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f},  // 1 smile
-  {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f},  // 2 happy
-  {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f},  // 3 grin
-  {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f},  // 4 clenched
-  {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f},  // 5 sad
-  {0.46f, 0.05f, -0.28f, 0.5f, 1.6f, 0.0f, 0.35f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f},  // 6 worried
-  {0.2f, 0.62f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f},  // 7 surprised
-  {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f},  // 8 thinking
-  {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.7f, 7.0f, 1.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f},  // 9 struggling
-  {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f},  // 10 flat
-  {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 1.0f, 0.0f},  // 11 sleepy
-  {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f},  // 12 focused
-  {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f},  // 13 listening
-  {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.45f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f},  // 14 sinister
+// each expression's values, by style
+constexpr float kExpressions[kStyleCount][kExpressionCount][kParamCount] = {
+  {  // pepin
+    {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.46f, 0.05f, -0.28f, 0.5f, 1.6f, 0.0f, 0.35f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.2f, 0.62f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.7f, 7.0f, 1.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.45f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.15f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.22f, 0.5f, 0.15f, 2.4f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.45f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 21 vampire
+    {0.62f, 0.34f, 0.0f, 0.5f, 9.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.28f, 0.04f, -0.05f, 0.5f, 2.0f, 0.0f, 0.35f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.24f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.2f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.85f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 24 tease
+    {0.26f, 0.16f, -0.18f, 0.6f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -0.12f, 0.0f, 0.1f, 0.45f, 0.5f, 0.0f, 0.0f, 1.0f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.4f, 0.22f, -0.35f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
+  {  // rose
+    {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.32f, 0.26f, -0.15f, 0.5f, 1.8f, 0.0f, 0.45f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.16f, 0.7f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.7f, 7.0f, 1.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.13f, 0.2f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.18f, 0.0f, 0.0f, 0.35f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.16f, 0.2f, 0.5f, 2.0f, 0.3f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.0f, 0.45f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -1.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.15f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.22f, 0.5f, 0.15f, 2.4f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.45f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 21 vampire
+    {0.62f, 0.34f, 0.0f, 0.5f, 9.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.28f, 0.04f, -0.05f, 0.5f, 2.0f, 0.0f, 0.35f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.24f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.2f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.85f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 24 tease
+    {0.22f, 0.17f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.4f, 0.22f, -0.35f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
+  {  // manga
+    {0.24f, 0.0f, 0.35f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.44f, 0.0f, 0.6f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.5f, 0.55f, 0.12f, 0.0f, 2.0f, 0.22f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.68f, 0.26f, 0.15f, 0.0f, 2.4f, 0.3f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.6f, 0.2f, 0.05f, 0.5f, 1.4f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.34f, 0.28f, -0.4f, 0.2f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.4f, 0.0f, -0.1f, 0.0f, 1.6f, 0.25f, 0.4f, 2.5f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.17f, 0.72f, 0.0f, 0.5f, 2.0f, 0.18f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.14f, 0.0f, 0.0f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.45f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.46f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.55f, 4.5f, 0.2f, 1.2f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.13f, 0.2f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.18f, 0.0f, 0.0f, 0.5f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.2f, 0.05f, 0.3f, 5.0f, 0.2f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.66f, 0.3f, 0.2f, 0.0f, 2.2f, 0.26f, 0.0f, 6.0f, 1.0f, 0.0f, 0.35f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.42f, 0.0f, 0.7f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.75f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.75f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, -0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.14f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.3f, 0.3f, 0.0f, 2.2f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.5f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.5f, 0.0f},  // 21 vampire
+    {0.6f, 0.2f, 0.0f, 0.5f, 1.4f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.26f, 0.1f, 0.05f, 0.0f, 3.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.28f, 0.0f, 0.3f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.25f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.9f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.0f, -0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.5f, 0.42f, 0.0f},  // 24 tease
+    {0.28f, 0.14f, -0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -0.12f, 0.0f, 0.0f, 0.5f, 0.5f, 0.0f, 0.0f, 1.0f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.0f, 2.0f, 0.25f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.0f, 2.0f, 0.25f, 0.9f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.44f, 0.0f, 0.6f, 0.0f, 2.0f, 0.25f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.5f, 0.55f, 0.12f, 0.0f, 2.0f, 0.22f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.38f, 0.18f, -0.3f, 0.5f, 1.4f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
+  {  // anime
+    {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.46f, 0.05f, -0.28f, 0.5f, 1.6f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.2f, 0.62f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.12f, 2.0f, 0.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.0f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.15f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.22f, 0.5f, 0.15f, 2.4f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.45f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 21 vampire
+    {0.62f, 0.34f, 0.0f, 0.5f, 9.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.28f, 0.04f, -0.05f, 0.5f, 2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.24f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.2f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.85f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.42f, 0.0f},  // 24 tease
+    {0.26f, 0.16f, -0.18f, 0.6f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -0.12f, 0.0f, 0.1f, 0.45f, 0.5f, 0.0f, 0.0f, 1.0f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.4f, 0.22f, -0.35f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
+  {  // kawaii
+    {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.46f, 0.05f, -0.28f, 0.5f, 1.6f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.2f, 0.62f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.0f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.15f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.22f, 0.5f, 0.15f, 2.4f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.45f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 21 vampire
+    {0.62f, 0.34f, 0.0f, 0.5f, 9.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.28f, 0.04f, -0.05f, 0.5f, 2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.24f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.2f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.85f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.42f, 0.0f},  // 24 tease
+    {0.26f, 0.16f, -0.18f, 0.6f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -0.12f, 0.0f, 0.1f, 0.45f, 0.5f, 0.0f, 0.0f, 1.0f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.4f, 0.22f, -0.35f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
+  {  // comics
+    {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 0 neutral
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 1 smile
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 2 happy
+    {0.7f, 0.3f, 0.45f, 0.2f, 3.0f, 0.5f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 3 grin
+    {0.66f, 0.36f, 0.05f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 4 clenched
+    {0.44f, 0.0f, -0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 5 sad
+    {0.46f, 0.05f, -0.28f, 0.5f, 1.6f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 6 worried
+    {0.2f, 0.62f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 7 surprised
+    {0.3f, 0.0f, -0.08f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.55f, 0.45f, 0.0f, 0.5f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 8 thinking
+    {0.62f, 0.0f, -0.1f, 0.5f, 2.0f, 0.0f, 0.12f, 2.0f, 0.0f, 1.2f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 9 struggling
+    {0.42f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 10 flat
+    {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 11 sleepy
+    {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 12 focused
+    {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 13 listening
+    {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.0f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 14 sinister
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 15 kiss
+    {0.2f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 16 kiss_heart
+    {0.15f, 0.12f, -0.3f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.1f, 0.85f, 0.1f, 0.0f, 0.4f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 17 pout
+    {0.26f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.12f, 0.45f, 0.0f, 0.55f, 0.05f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 18 thinking_flat
+    {0.24f, 0.0f, 0.15f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.4f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 19 moustache
+    {0.15f, 0.3f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 20 o_mouth
+    {0.5f, 0.22f, 0.5f, 0.15f, 2.4f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.45f, 0.05f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.9f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 21 vampire
+    {0.62f, 0.34f, 0.0f, 0.5f, 9.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 22 terminator
+    {0.28f, 0.04f, -0.05f, 0.5f, 2.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.1f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 23 blush
+    {0.24f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.2f, 0.3f, 0.0f, 0.5f, 0.05f, 0.3f, 0.0f, 0.85f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.42f, 0.0f},  // 24 tease
+    {0.26f, 0.16f, -0.18f, 0.6f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, -0.12f, 0.0f, 0.1f, 0.45f, 0.5f, 0.0f, 0.0f, 1.0f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 25 tired
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 26 cat
+    {0.3f, 0.0f, 0.5f, 0.5f, 2.0f, 0.0f, 0.0f, 1.5f, 0.3f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.8f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 27 cat_blush
+    {0.54f, 0.0f, 0.62f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 28 smile_wide
+    {0.6f, 0.42f, 0.7f, 0.08f, 2.4f, 0.32f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 29 happy_plain
+    {0.4f, 0.22f, -0.35f, 0.5f, 7.0f, 1.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 0.0f},  // 30 angry
+    {0.14f, 0.5f, 0.0f, 0.5f, 8.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.5f, 0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.42f, 1.0f},  // 31 shocked
+  },
 };
 constexpr int kNeutral = 0;
 constexpr int kSleepy = 11;
+
+// the face's elements: each expression's colour of each, 0xRRGGBB, by style
+constexpr int kElementCount = 8;
+enum Element : uint8_t {
+  kElLip = 0,
+  kElCavity = 1,
+  kElTeeth = 2,
+  kElTongue = 3,
+  kElCheek = 4,
+  kElMoustache = 5,
+  kElHeart = 6,
+  kElShade = 7,
+};
+constexpr uint32_t kExpressionColors[kStyleCount][kExpressionCount][kElementCount] = {
+  {  // pepin
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 0 neutral
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 1 smile
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 2 happy
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 3 grin
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 4 clenched
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 5 sad
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 6 worried
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 7 surprised
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 8 thinking
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 9 struggling
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 10 flat
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 11 sleepy
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 12 focused
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 13 listening
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 14 sinister
+    {0xFF4F86u, 0x6E0F2Eu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 15 kiss
+    {0xFF4F86u, 0x6E0F2Eu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 16 kiss_heart
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 17 pout
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 18 thinking_flat
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 19 moustache
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 20 o_mouth
+    {0xD0002Eu, 0x2A0008u, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 21 vampire
+    {0x7D8A94u, 0x6A0000u, 0xCBD5DDu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 22 terminator
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 23 blush
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 24 tease
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 25 tired
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 26 cat
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 27 cat_blush
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 28 smile_wide
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 29 happy_plain
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 30 angry
+    {0x7FE8FFu, 0x08313Cu, 0xF4FBFFu, 0xFF7A9Cu, 0xFF6F9Au, 0x383D42u, 0xFF2E63u, 0x08313Cu},  // 31 shocked
+  },
+  {  // rose
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 0 neutral
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 1 smile
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 2 happy
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 3 grin
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 4 clenched
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 5 sad
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 6 worried
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 7 surprised
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 8 thinking
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 9 struggling
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 10 flat
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 11 sleepy
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 12 focused
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 13 listening
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 14 sinister
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 15 kiss
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 16 kiss_heart
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 17 pout
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 18 thinking_flat
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 19 moustache
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 20 o_mouth
+    {0xB8505Cu, 0xC9405Au, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xD9606Fu},  // 21 vampire
+    {0x5A6670u, 0x7A0000u, 0xD9E1E8u, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0x8A1010u},  // 22 terminator
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 23 blush
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 24 tease
+    {0xA3A8B2u, 0xF2F0F2u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xE4E1E6u},  // 25 tired
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 26 cat
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 27 cat_blush
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 28 smile_wide
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 29 happy_plain
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 30 angry
+    {0xB8505Cu, 0xF28C96u, 0xFFFFFFu, 0xEE7E8Au, 0xF6A6AEu, 0x3C2A30u, 0xE9667Au, 0xF8B9BFu},  // 31 shocked
+  },
+  {  // manga
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 0 neutral
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 1 smile
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 2 happy
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 3 grin
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 4 clenched
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 5 sad
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 6 worried
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 7 surprised
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 8 thinking
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 9 struggling
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 10 flat
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 11 sleepy
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 12 focused
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 13 listening
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 14 sinister
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 15 kiss
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 16 kiss_heart
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 17 pout
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 18 thinking_flat
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 19 moustache
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 20 o_mouth
+    {0xB8505Cu, 0xC9344Au, 0xFFFFFFu, 0xE07A86u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 21 vampire
+    {0x5A6670u, 0x7A0000u, 0xD9E1E8u, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 22 terminator
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 23 blush
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 24 tease
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 25 tired
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 26 cat
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 27 cat_blush
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 28 smile_wide
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 29 happy_plain
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 30 angry
+    {0xB8505Cu, 0xEC6672u, 0xFFFFFFu, 0xF5A0A8u, 0xF3949Eu, 0x3C2A30u, 0xE9566Cu, 0xFAC6CBu},  // 31 shocked
+  },
+  {  // anime
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 0 neutral
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 1 smile
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 2 happy
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 3 grin
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 4 clenched
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 5 sad
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 6 worried
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 7 surprised
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 8 thinking
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 9 struggling
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 10 flat
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 11 sleepy
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 12 focused
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 13 listening
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 14 sinister
+    {0xD8456Eu, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 15 kiss
+    {0xD8456Eu, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 16 kiss_heart
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 17 pout
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 18 thinking_flat
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 19 moustache
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 20 o_mouth
+    {0xC04860u, 0xC9344Au, 0xFFFFFFu, 0xE07A86u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 21 vampire
+    {0x5A6670u, 0x7A0000u, 0xD9E1E8u, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 22 terminator
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 23 blush
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 24 tease
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 25 tired
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 26 cat
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 27 cat_blush
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 28 smile_wide
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 29 happy_plain
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 30 angry
+    {0xC04860u, 0xEC7488u, 0xFFFFFFu, 0xF09AA8u, 0xF4A6B0u, 0x3C2A30u, 0xE9667Au, 0xF8C8D0u},  // 31 shocked
+  },
+  {  // kawaii
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 0 neutral
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 1 smile
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 2 happy
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 3 grin
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 4 clenched
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 5 sad
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 6 worried
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 7 surprised
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 8 thinking
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 9 struggling
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 10 flat
+    {0x504743u, 0x504743u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 11 sleepy
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 12 focused
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 13 listening
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 14 sinister
+    {0x504743u, 0x504743u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 15 kiss
+    {0x504743u, 0x504743u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 16 kiss_heart
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 17 pout
+    {0x504743u, 0x504743u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 18 thinking_flat
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 19 moustache
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 20 o_mouth
+    {0x504743u, 0xC9344Au, 0xFFFFFFu, 0xE07A86u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 21 vampire
+    {0x5A6670u, 0x7A0000u, 0xD9E1E8u, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 22 terminator
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 23 blush
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 24 tease
+    {0x504743u, 0x504743u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 25 tired
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 26 cat
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 27 cat_blush
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 28 smile_wide
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 29 happy_plain
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 30 angry
+    {0x504743u, 0xDD7487u, 0xFFFFFFu, 0xDD7487u, 0xEAB1B7u, 0x504743u, 0xDD7487u, 0x90C1E9u},  // 31 shocked
+  },
+  {  // comics
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 0 neutral
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 1 smile
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 2 happy
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 3 grin
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 4 clenched
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 5 sad
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 6 worried
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 7 surprised
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 8 thinking
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 9 struggling
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 10 flat
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 11 sleepy
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 12 focused
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 13 listening
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 14 sinister
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 15 kiss
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 16 kiss_heart
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 17 pout
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 18 thinking_flat
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 19 moustache
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 20 o_mouth
+    {0x1D1D1Bu, 0xC9344Au, 0xFFFFFFu, 0xE07A86u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 21 vampire
+    {0x5A6670u, 0x7A0000u, 0xD9E1E8u, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 22 terminator
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 23 blush
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 24 tease
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 25 tired
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 26 cat
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 27 cat_blush
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 28 smile_wide
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 29 happy_plain
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 30 angry
+    {0x1D1D1Bu, 0x1D1D1Bu, 0xFFFFFFu, 0xDE5B55u, 0xDE5B55u, 0x1D1D1Bu, 0xDE5B55u, 0xC1D5FAu},  // 31 shocked
+  },
+};
+
+// the expressions shown instead of each at random (-1: none), and each one's effects
+constexpr int kMaxVariants = 3;
+constexpr uint8_t kVariantCount[kExpressionCount] = {0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
+constexpr int8_t kVariants[kExpressionCount][kMaxVariants] = {
+  {-1, -1, -1},  // 0 neutral
+  {-1, -1, -1},  // 1 smile
+  {-1, -1, -1},  // 2 happy
+  {-1, -1, -1},  // 3 grin
+  {-1, -1, -1},  // 4 clenched
+  {-1, -1, -1},  // 5 sad
+  {-1, -1, -1},  // 6 worried
+  {-1, -1, -1},  // 7 surprised
+  {18, -1, -1},  // 8 thinking
+  {-1, -1, -1},  // 9 struggling
+  {-1, -1, -1},  // 10 flat
+  {-1, -1, -1},  // 11 sleepy
+  {-1, -1, -1},  // 12 focused
+  {-1, -1, -1},  // 13 listening
+  {-1, -1, -1},  // 14 sinister
+  {-1, -1, -1},  // 15 kiss
+  {-1, -1, -1},  // 16 kiss_heart
+  {-1, -1, -1},  // 17 pout
+  {-1, -1, -1},  // 18 thinking_flat
+  {-1, -1, -1},  // 19 moustache
+  {-1, -1, -1},  // 20 o_mouth
+  {-1, -1, -1},  // 21 vampire
+  {-1, -1, -1},  // 22 terminator
+  {-1, -1, -1},  // 23 blush
+  {-1, -1, -1},  // 24 tease
+  {-1, -1, -1},  // 25 tired
+  {-1, -1, -1},  // 26 cat
+  {-1, -1, -1},  // 27 cat_blush
+  {-1, -1, -1},  // 28 smile_wide
+  {-1, -1, -1},  // 29 happy_plain
+  {-1, -1, -1},  // 30 angry
+  {-1, -1, -1},  // 31 shocked
+};
+enum Effect : uint8_t {
+  kEffectHeart = 1,
+  kEffectZ = 2,
+};
+// each expression's effects, by style
+constexpr uint8_t kExpressionEffects[kStyleCount][kExpressionCount] = {
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // pepin
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // rose
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectZ, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // manga
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectZ, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // anime
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectZ, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // kawaii
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, kEffectZ, 0, 0, 0, 0, kEffectHeart, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0},  // comics
+};
 
 // screen
 constexpr int kScreenWidth = 320;
@@ -85,6 +618,31 @@ constexpr float kSpeechOpen = 0.55f;
 constexpr float kSpeechNarrow = 0.18f;
 constexpr float kBreatheHz = 0.25f;
 constexpr float kDriftHz = 0.33f;
+constexpr float kWagHz = 1.1f;
+constexpr float kBowPx = 10.0f;
+constexpr float kTonguePx = 44.0f;
+constexpr float kTongueWPx = 26.0f;
+constexpr float kCheekXPx = 110.0f;
+constexpr float kCheekYPx = 24.0f;
+constexpr float kCheekRxPx = 26.0f;
+constexpr float kCheekRyPx = 13.0f;
+constexpr float kDimplePx = 13.0f;
+constexpr float kMoustacheWPx = 46.0f;
+constexpr float kMoustacheHPx = 26.0f;
+constexpr float kMoustacheGapPx = 3.0f;
+constexpr float kFangPx = 22.0f;
+constexpr float kFangWPx = 6.0f;
+constexpr float kHeartPx = 15.0f;
+constexpr float kHeartRisePx = 70.0f;
+constexpr float kPuckerPx = 38.0f;
+constexpr float kMoustacheRimPx = 0.0f;
+constexpr float kMarginPx = 6.0f;
+constexpr float kHookPx = 9.0f;
+constexpr float kHeartLipsPx = 46.0f;
+constexpr float kDroolPx = 30.0f;
+constexpr float kDroolAt = 0.55f;
+constexpr float kZGlyphPx = 14.0f;
+constexpr float kZGlyphRisePx = 60.0f;
 
 // timing
 constexpr float kTransitionMs = 280.0f;
@@ -92,6 +650,9 @@ constexpr float kHostSilentS = 3.0f;
 constexpr float kMouthAttackS = 0.03f;
 constexpr float kMouthReleaseS = 0.09f;
 constexpr float kMouthStaleS = 0.25f;
+constexpr float kHeartS = 1.8f;
+constexpr float kZS = 1.8f;
+constexpr float kZEveryS = 2.4f;
 
 // idle: the face alive at rest
 constexpr bool kIdleOn = true;
@@ -100,16 +661,20 @@ constexpr float kIdleEveryMinS = 4.0f;
 constexpr float kIdleEveryMaxS = 10.0f;
 constexpr float kIdleSettleS = 3.0f;
 constexpr float kIdleFadeS = 0.25f;
-constexpr int kIdleGestureCount = 5;
-constexpr float kIdleGestureWeight[kIdleGestureCount] = {2.0f, 3.0f, 1.5f, 1.5f, 1.0f};
-constexpr float kIdleGestureDurationS[kIdleGestureCount] = {2.0f, 2.6f, 2.2f, 2.6f, 0.4f};
-constexpr bool kIdleGestureMirror[kIdleGestureCount] = {false, true, true, true, false};
+constexpr int kIdleGestureCount = 8;
+constexpr float kIdleGestureWeight[kIdleGestureCount] = {2.0f, 3.0f, 1.5f, 1.5f, 1.0f, 2.0f, 1.5f, 1.5f};
+constexpr float kIdleGestureDurationS[kIdleGestureCount] = {2.0f, 2.6f, 2.2f, 2.6f, 0.4f, 0.35f, 0.9f, 2.6f};
+constexpr bool kIdleGestureMirror[kIdleGestureCount] = {false, true, true, true, false, true, false, false};
+constexpr uint8_t kIdleGestureStyles[kIdleGestureCount] = {0x3F, 0x3F, 0x3F, 0x3F, 0x3F, 0x3C, 0x3C, 0x38};  // a bit per Style
 constexpr float kIdleGestures[kIdleGestureCount][kParamCount] = {
-  {0.12f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // grin
-  {0.0f, 0.0f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f},  // smirk
-  {-0.18f, 0.0f, -0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f},  // hmm
-  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f},  // tilt
-  {-0.06f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.4f, 0.0f, 0.0f},  // blink
+  {0.12f, 0.0f, 0.45f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // grin
+  {0.0f, 0.0f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // smirk
+  {-0.18f, 0.0f, -0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.3f, 0.35f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // hmm
+  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.55f, 0.25f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // tilt
+  {-0.06f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, -0.4f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // blink
+  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.15f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.7f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // twitch
+  {-0.2f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.6f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // eps
+  {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},  // breath
 };
 
 // colors, RGB565
@@ -117,6 +682,11 @@ constexpr uint16_t kColorBackground = 0x0000;  // #000000
 constexpr uint16_t kColorLip = 0x7F5F;  // #7FE8FF
 constexpr uint16_t kColorCavity = 0x0987;  // #08313C
 constexpr uint16_t kColorTeeth = 0xF7DF;  // #F4FBFF
+constexpr uint16_t kColorTongue = 0xFBD3;  // #FF7A9C
+constexpr uint16_t kColorCheek = 0xFB73;  // #FF6F9A
+constexpr uint16_t kColorMoustache = 0x39E8;  // #383D42
+constexpr uint16_t kColorHeart = 0xF96C;  // #FF2E63
+constexpr uint16_t kColorShade = 0x0987;  // #08313C
 constexpr uint16_t kColorText = 0xDFBF;  // #D8F6FF
 constexpr uint16_t kColorAccent = 0x7F5F;  // #7FE8FF
 

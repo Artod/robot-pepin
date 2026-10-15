@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the smile with the tongue hanging down out of its right corner (the tongue id's drawing; tease took it on 2026-10-15 night)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="tongue" d="M 180.64 88 C 186.54 87.06 192.44 86.12 198.35 85.18 C 200.59 84.83 202.91 85.64 204.11 87.56 C 207.29 92.6 206.74 96.11 208.41 102.19 C 211.19 108.73 208.14 116.3 201.6 119.08 C 195.05 121.87 187.49 118.82 184.7 112.27 C 181.81 107.42 177.91 101.59 175.75 95.24 C 174.61 91.89 177.14 88.56 180.64 88 Z" fill="#F09AA8"/>
+  <path class="shine" d="M 190.12 97.83 C 189.77 95.63 191.96 93.46 195.01 92.97 C 198.07 92.49 200.83 93.87 201.18 96.07 C 201.53 98.27 199.34 100.45 196.28 100.94 C 193.23 101.42 190.47 100.03 190.12 97.83 Z" fill="#F8C8D0" data-follow="tongue"/>
+  <path class="line" d="M 102 80 C 136.8 93.33 183.2 93.33 218 80" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 204.11 87.56 C 207.29 92.6 206.74 96.11 208.41 102.19 C 211.19 108.73 208.14 116.3 201.6 119.08 C 195.05 121.87 187.49 118.82 184.7 112.27 C 181.81 107.42 177.91 101.59 175.75 95.24" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <path class="line" d="M 189.89 91.55 C 192.65 97.03 195.31 103.28 197.34 109.07" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="crease" data-follow="tongue"/>
+</svg>

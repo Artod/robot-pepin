@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small smile bowl with the two front teeth, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 136.16 71.39 C 151.23 78.45 168.77 78.45 183.84 71.39 C 187.43 69.7 191.87 72.16 191.17 76.07 C 187.7 95.58 173.85 110.29 160 110.29 C 146.15 110.29 132.3 95.58 128.83 76.07 C 128.13 72.16 132.57 69.7 136.16 71.39 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 150 74.77 C 156.67 74.77 163.33 74.77 170 74.77 C 170 78.07 170 81.36 170 84.66 C 170 86.33 168.65 87.69 166.98 87.69 C 162.33 87.69 157.67 87.69 153.02 87.69 C 151.35 87.69 150 86.33 150 84.66 C 150 81.36 150 78.07 150 74.77 Z" fill="#FFFFFF" data-part="hint"/>
+  <path class="line" d="M 160 76.69 C 160 79.69 160 82.69 160 85.69" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 136.16 71.39 C 151.23 78.45 168.77 78.45 183.84 71.39 C 187.43 69.7 191.87 72.16 191.17 76.07 C 187.7 95.58 173.85 110.29 160 110.29 C 146.15 110.29 132.3 95.58 128.83 76.07 C 128.13 72.16 132.57 69.7 136.16 71.39 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 128.92 68 C 125.71 66.49 123.33 63.64 122.42 60.21" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 191.08 68 C 194.29 66.49 196.67 63.64 197.58 60.21" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

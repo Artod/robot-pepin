@@ -39,7 +39,6 @@ from __future__ import annotations
 
 import argparse
 import contextlib
-import json
 import logging
 import math
 import os
@@ -82,6 +81,7 @@ from pepin.head_link import (
     encode_ping,
     show_items,
 )
+from pepin.overlay import read_json
 from pepin.streams import JsonLinesServer
 from pepin.streams import encode as encode_line
 
@@ -520,7 +520,7 @@ class HeadSettings:
     @classmethod
     def from_json(cls, path: str | Path) -> HeadSettings:
         """The settings in ``path``; the head IMU's config takes id 1."""
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         imu = data.get("imu", {})
         return cls(
             device=str(data["serial"]["device"]),
@@ -582,6 +582,7 @@ class HeadService:
         self._config = settings.imu
         self._configs: dict[int, ImuConfig] = {0: FIRMWARE_DEFAULTS, self._config.id: self._config}
         self._brightness = settings.brightness
+        self._style = table.style  # the face's style, sent with every 'C' (config/face.json)
         self._sent_face: tuple[str, float] | None = None
         self._subscribers: set[Subscriber] = set()
         self._rate = ChipRate()  # the IMU's rate in ESP32 time
@@ -687,8 +688,10 @@ class HeadService:
         self._mismatches = 0
         self._sent_face = None
         self.resyncs += 1
-        logger.info("head: sending config %s and the face (%s)", self._config.id, why)
-        self._send(CONFIG, encode_config(self._config, self._brightness))
+        logger.info("head: sending config %s, style %s and the face (%s)", self._config.id,
+                    self._style, why)  # fmt: skip
+        style = self._table.style_id_of(self._style)
+        self._send(CONFIG, encode_config(self._config, self._brightness, style))
         self._next_ping = 0.0
 
     # -- from the ESP32 -----------------------------------------------------------------------
@@ -898,15 +901,18 @@ class HeadService:
             gyro_fs=int(message.get("gyro_fs", self._config.gyro_fs)),
         )
         self._brightness = min(max(int(message.get("brightness", self._brightness)), 0), 255)
+        style = str(message.get("style", self._style))
+        style_byte = self._table.style_id_of(style)  # KeyError naming the known styles
+        self._style = style
         self._config = config
         self._configs[config.id] = config
         self._mismatches = 0
-        sent = self._send(CONFIG, encode_config(config, self._brightness))
+        sent = self._send(CONFIG, encode_config(config, self._brightness, style_byte))
         line = encode_line(self.imu_config_line(config))
         for subscriber in self._subscribers:
             subscriber.post(line)
         return {"type": "ack", "cmd": "config", "config": asdict(config),
-                "brightness": self._brightness, "sent": sent}  # fmt: skip
+                "brightness": self._brightness, "style": self._style, "sent": sent}  # fmt: skip
 
     # -- the clocks ---------------------------------------------------------------------------
 
@@ -975,6 +981,7 @@ class HeadService:
             "clock": self.clock_map.state(),
             "config": asdict(self._config),
             "brightness": self._brightness,
+            "style": self._style,
             "showing": showing.name if showing else self._settings.resting,
             "by": showing.source if showing else None,
             "sources": self.arbiter.sources(),

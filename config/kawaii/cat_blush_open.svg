@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the w (the cheeks are the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 145.38 71.96 C 154.77 72.47 165.23 72.47 174.62 71.96 C 179.09 71.72 183.06 75.3 182.26 79.7 C 179.67 93.95 170.65 104.54 160 104.54 C 149.35 104.54 140.33 93.95 137.74 79.7 C 136.94 75.3 140.91 71.72 145.38 71.96 Z" fill="#DD7487"/>
+  <path class="line" d="M 145.38 71.96 C 154.77 72.47 165.23 72.47 174.62 71.96 C 179.09 71.72 183.06 75.3 182.26 79.7 C 179.67 93.95 170.65 104.54 160 104.54 C 149.35 104.54 140.33 93.95 137.74 79.7 C 136.94 75.3 140.91 71.72 145.38 71.96 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

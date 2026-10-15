@@ -2,22 +2,30 @@
 and what a rendered performance is.
 
 ATOMS are the vocabulary of primitives, each on one body part with a few parameters (a nod: an
-amplitude, a period, repeats). An atom is ONE CYCLE of keyframes at shares of its period
-(``at`` 0..1); a value is a number, a parameter (``"$amp_deg"``, ``"-$amp_deg"``) or, on the
-face, an expression's name; a key may name a pose of the book (taught by hand) for every joint
-its values leave out. ``mode`` says whether the values are positions (``absolute``: an arm pose)
-or offsets on the layer below (``additive``: a nod on the head that tracks the person). Reserved
-parameters: ``period_s`` (one cycle, required), ``repeats`` (cycles, 1 when absent) and
-``hold_s`` (the last key held before the atom ends, 0 when absent). ``stroke`` is the share of
-the first cycle where the atom's meaningful moment lands (BML's stroke sync point).
+amplitude, a period). An atom is ONE CYCLE of keyframes at shares of its period (``at`` 0..1);
+a value is a number, a parameter (``"$amp_deg"``, ``"-$amp_deg"``) or, on the face, an
+expression's name; a key may name a pose of the book (taught by hand) for every joint its values
+leave out. ``mode`` says whether the values are positions (``absolute``: an arm pose) or offsets
+on the layer below (``additive``: a nod on the head that tracks the person). ``period_s`` (one
+cycle) is the atom's required parameter; ``stroke`` is the share of the first cycle where the
+atom's meaningful moment lands (BML's stroke sync point). How often the cycle plays is its
+user's, not the atom's: ``repeats`` (cycles, 1 when absent) and ``hold_s`` (the last key held
+before the step ends, 0 when absent) are a STEP's reserved parameters, set by the step or by a
+mark's arguments, and ``loop`` (repeat until withdrawn: the breath) is a step's flag
+(2026-10-14; the atoms carried all three before).
 
 A COMPOSITION is an intent the brain names (``laugh``): weighted variants, each a list of steps;
-a step plays one atom with probability ``p``, its parameters drawn from ranges, its stroke placed
-``at_s`` from the composition's sync point (the marker's word). Rendering draws the variant, the
-steps and every parameter from one seeded generator, so the same intent moves a little
-differently every time and a logged seed replays it exactly. A step whose part cannot play now
-(the head held by a better band, the wheels turning toward the speaker) is left out and the rest
-still plays.
+a step plays one atom, or another composition (NESTING, at most three deep), with probability
+``p``, its parameters drawn from ranges, its stroke placed ``at_s`` from the composition's sync
+point (the marker's word). Rendering draws the variant, the steps and every parameter from one
+seeded generator, so the same intent moves a little differently every time and a logged seed
+replays it exactly. A step whose part cannot play now (the head held by a better band, the
+wheels turning toward the speaker) is left out and the rest still plays. A nested composition
+draws its own variant and parameters from a seed derived from its parent's and the step's
+index, its steps placed relative to the parent step's ``at_s``; the caps and the cooldowns count
+the parent alone. Every atom that renders bare (no name to choose, no place of the gesture space
+to find) and has no composition of its name gets one generated (an AUTO-WRAPPER: one step, the
+atom's own ranges, ``wraps`` naming the atom), so the brain may name a single basic move.
 
 The degrees of freedom, per part: the arm's joints (:data:`pepin.expression.trajectory.JOINTS`,
 degrees, config/arm.json's convention), the head's ``pan_deg`` (+ left) and ``tilt_deg`` (+ down),
@@ -30,11 +38,12 @@ layers fades over the ``fade_s`` knob. The person starting to speak fades the ge
 on every part; the base layer (the head on the person) stays.
 
 Owners of what this file declares (co-speech gesticulation, DESIGN.md §11): ``Composition.bind,
-args, family, long``, ``Variant.needs, floor``, ``Book.aliases`` and :class:`Space` are authored
-by C (the book's primitives and the gesture space; the resolver reads them) and
+args, settings, family, long``, ``Variant.needs, floor``, ``Book.aliases`` and :class:`Space`
+are authored by C (the book's primitives and the gesture space; the resolver reads them) and
 read by B (the ladder); ``Idle.unless`` by A (the breath, the melody); ``Scene``'s
 ``lead_s``/``arm_at`` are filled by B, ``quiet``/``energy`` by A, ``distance_m`` from the
-attention view; ``Clip.then``/``hold_s`` by B (arm units).
+attention view, ``face``/``attention``/``unseen`` by the engine; ``Clip.then``/``hold_s`` by B
+(arm units).
 """
 
 from __future__ import annotations
@@ -61,6 +70,8 @@ IdleState = Literal["speaking", "listening"]  # who speaks: the robot, the perso
 IDLE_STATES: tuple[IdleState, ...] = ("speaking", "listening")
 
 PERIOD, REPEATS, HOLD = "period_s", "repeats", "hold_s"  # the reserved parameters
+NUMBER = "number"  # a composition's argument that is a mark's number ({snap:3})
+PERSON, SEEN = "person", "seen"  # a variant's need of the person engaged: seen (Scene.unseen)
 
 
 @dataclass(frozen=True)
@@ -86,8 +97,8 @@ class Atom:
     """A parametrised motion primitive of one part (config/animation.json's ``atoms``);
     ``mirror`` names the degrees of freedom whose values change sign when a rendering draws
     the mirror image (a glance left or right), ``callable`` False keeps it out of every
-    composition the brain may name (the idle layer's own), ``loop`` marks the idle layer's
-    clip of it as repeating on its part's owner until withdrawn (the breath)."""
+    composition the brain may name (the idle layer's own; its auto-wrapper is not callable
+    either)."""
 
     name: str
     part: PartName
@@ -98,28 +109,36 @@ class Atom:
     note: str = ""
     mirror: tuple[str, ...] = ()
     callable: bool = True
-    loop: bool = False
 
 
 @dataclass(frozen=True)
 class Step:
-    """One atom in a composition: its stroke ``at_s`` from the sync point (negative: before),
-    the chance it plays, its parameter ranges over the atom's own, and its named parameters
-    (``"$name"`` of a face key, ``"$pose"`` of a pose key), one drawn from each list."""
+    """One atom in a composition, or a nested composition (``composition``; ``atom`` is then
+    ""): its stroke ``at_s`` from the sync point (negative: before; a nested composition's sync
+    point), the chance it plays, its parameter ranges over the atom's own (``repeats`` and
+    ``hold_s`` among them), its named parameters (``"$name"`` of a face key, ``"$pose"`` of a
+    pose key), one drawn from each list, and whether its clip repeats on its part's owner
+    until withdrawn (``loop``: the idle layer's breath; never in a callable composition)."""
 
     atom: str
     at_s: Range = Range(0.0, 0.0)
     p: float = 1.0
     params: Mapping[str, Range] = field(default_factory=dict)
     choices: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    composition: str | None = None
+    loop: bool = False
 
 
 @dataclass(frozen=True)
 class Variant:
     """One way to perform an intent, how often it is drawn against the others, what it needs of
-    the body (``needs``: a part -> a state, e.g. ``{"arm": "any"}``; none: anything) and of its
-    marker (``"arg"``: the argument, or its kind: ``you``, ``me``, ``place``, ``thing``), and
-    whether it is the floor (``floor``: the head and face version that always fits)."""
+    the body (``needs``: a part -> a state, e.g. ``{"arm": "any"}``; the face's state other
+    than ``any`` is the expression it shows, ``{"face": "grin"}``; ``attention``: its phase,
+    ``{"attention": "track"}``; ``person``: ``seen``, the person engaged seen lately, never
+    while :attr:`Scene.unseen` says why not: a wave at nobody; none: anything; :class:`Scene`)
+    and of its marker (``"arg"``: the argument, or its kind: ``you``, ``me``, ``place``,
+    ``thing``), and whether it is the floor (``floor``: the head and face version that always
+    fits)."""
 
     steps: tuple[Step, ...]
     weight: float = 1.0
@@ -128,16 +147,30 @@ class Variant:
 
 
 @dataclass(frozen=True)
+class Setting:
+    """A step parameter a mark's argument sets: ``param`` on the steps of ``atom`` (None: every
+    step whose atom takes it, every step for ``repeats`` and ``hold_s``), to ``value`` (None:
+    the mark's number)."""
+
+    param: str
+    atom: str | None = None
+    value: Range | None = None
+
+
+@dataclass(frozen=True)
 class Composition:
     """An intent: its variants, the least time between two of its performances (a second one
     sooner is skipped), how its stroke binds to its word (:data:`Bind`), the arguments a marker
-    may give it (``{point:you}``; ``"*"`` any), the family a moment of the same kind is
-    absorbed into, whether it is long (over ``short_s``: played only when the speech ahead
-    covers it), whether a marker may name it (``callable`` False: the engine's own ensemble,
-    which its listeners request by name: the pulse's accents, the nods, the held arm's sway;
-    never in the brain's vocabulary, never under the markers' caps), and ``style_args``: an
-    argument -> the style words of the part that choose it for a bare marker (``{laugh}`` in a
-    ``{sinister}`` part is ``{laugh:evil}``)."""
+    may give it that choose a variant or a place (``{point:you}``; ``"*"`` any), the family a
+    moment of the same kind is absorbed into, whether it is long (hello, bye: the utterance's
+    gesture, not a beat, its stroke anywhere in the utterance when it cannot make its word: the
+    ladder's in-the-utterance rung), whether a marker may name it (``callable`` False: the
+    engine's own ensemble, which its listeners request by name: the pulse's accents, the nods,
+    the held arm's sway; never in the brain's vocabulary, never under the markers' caps),
+    ``style_args``: an argument -> the style words of the part that choose it for a bare marker
+    (``{laugh}`` in a ``{sinister}`` part is ``{laugh:evil}``), ``settings``: the arguments that
+    set its steps' parameters instead (a word, or :data:`NUMBER` for a mark's number:
+    ``{snap:3,fast}``), and ``wraps``: the atom an auto-wrapper plays (None: written by hand)."""
 
     name: str
     variants: tuple[Variant, ...]
@@ -149,11 +182,15 @@ class Composition:
     long: bool = False
     callable: bool = True
     style_args: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
+    settings: Mapping[str, tuple[Setting, ...]] = field(default_factory=dict)
+    wraps: str | None = None
 
 
 @dataclass(frozen=True)
 class Idle:
-    """The idle layer of one part: atoms drawn every ``every_s`` while nothing else plays on it,
+    """The idle layer of one part: compositions of that part alone (an atom's auto-wrapper, or
+    one written for the idle layer: the breath's, looping) drawn every ``every_s`` while nothing
+    else plays on it,
     during a conversation only or always, unless one of ``unless`` holds (the robot speaking,
     the person speaking; by default either: idle only while nobody speaks). A clip of it plays
     on while a state it allows begins (a breath while the person speaks) and fades when one it
@@ -161,7 +198,7 @@ class Idle:
     engine's ``layers.idle_after_speech_s``; 0: a breath right after a reply)."""
 
     part: PartName
-    atoms: tuple[str, ...]
+    compositions: tuple[str, ...]
     every_s: Range
     when: Literal["conversation", "always"] = "conversation"
     unless: tuple[IdleState, ...] = IDLE_STATES
@@ -177,11 +214,18 @@ class Space:
     ``"arc:up"`` -> cells); the head's (pan, tilt) offset for a mark whose head turns its
     argument's way (``head``, ``"arc:up"`` -> degrees); the pointing hand (the open and the shut
     hand's poses straight ahead, the clear pan range, the arm's pan axis and the neck's in the
-    cart frame, a person's distance when unknown); the marks the brain may repeat in a reply."""
+    cart frame, a person's distance when unknown); the marks the brain may repeat in a reply;
+    the poses the arm leaves for another after its hold (``home_after``, a pose -> the pose
+    the clip ends on: the board's own straight way to rest from the first would pass the
+    body; a pose inward of ``via_pan_deg`` goes home); the poses whose ways pass the head's pan
+    sweep (``head_pan_min_deg``, a pose -> the least head pan, degrees + left, they keep clear
+    at: with the head turned further right they do not resolve)."""
 
     home: str = "ready"
     via_pan_deg: float | None = None
     via: tuple[str, ...] = ()
+    home_after: Mapping[str, str] = field(default_factory=dict)
+    head_pan_min_deg: Mapping[str, float] = field(default_factory=dict)
     loci: tuple[str, ...] = ()
     paths: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     head: Mapping[str, tuple[float, float]] = field(default_factory=dict)
@@ -263,7 +307,7 @@ class Clip:
     """What one part plays of a performance: its tracks and events, when it starts relative to
     the performance's sync point (negative: before the word), where its stroke and its end are
     (seconds from its start), the layer it plays on, and whether its owner repeats it until
-    withdrawn (``loop``: an idle atom's, :attr:`Atom.loop`)."""
+    withdrawn (``loop``: a looping step's, :attr:`Step.loop`)."""
 
     part: PartName
     offset_s: float
@@ -280,13 +324,15 @@ class Clip:
 @dataclass(frozen=True)
 class Performance:
     """An intent rendered: the seed it was drawn with, the variant drawn, one clip per part
-    that plays, and the cue it is placed on (None: now)."""
+    that plays, the cue it is placed on (None: now), and the nested compositions with the
+    variant each drew (depth first, as their steps stand)."""
 
     intent: str
     seed: int
     variant: int
     clips: tuple[Clip, ...]
     cue: Cue | None = None
+    nested: tuple[tuple[str, int], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -295,7 +341,13 @@ class Scene:
     whether a conversation is open; the seconds until the anchor word is heard (``lead_s``,
     None: unknown or now), where the arm is (``arm_at``: ``"rest"``, a pose's name, None:
     unknown), the person's rough distance (None: unknown), whether the moment is quiet (head
-    and face only) and the reply's energy (amplitude x, 1 as authored)."""
+    and face only), the reply's energy (amplitude x, 1 as authored), the expression the face
+    shows now (``face``: the engine's own face clip still holding, by name; None: none of the
+    engine's) and attention's phase (``attention``: :data:`pepin.expression.speaker.
+    AttentionPhase`, ``"track"`` while it holds a person; None: no attention view), and why the
+    person engaged counts as unseen (``unseen``: no face or body of theirs lately, with eyes to
+    tell; None: seen, or nobody can tell). A variant may need the last three by name
+    (``{"face": "grin"}``, ``{"attention": "track"}``, ``{"person": "seen"}``)."""
 
     ready: frozenset[PartName]
     speaking: bool = False
@@ -305,6 +357,9 @@ class Scene:
     distance_m: float | None = None
     quiet: bool = False
     energy: float = 1.0
+    face: str | None = None
+    attention: str | None = None
+    unseen: str | None = None
 
 
 class Chooser(Protocol):

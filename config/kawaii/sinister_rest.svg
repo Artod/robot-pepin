@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the lopsided v, the right end higher, a sharp fang under it</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 132 66.66 C 140.11 71.29 148.21 75.92 156.32 80.55 C 158.53 81.81 161.29 81.55 163.22 79.9 C 171.48 72.82 179.74 65.74 188 58.66" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="fang" d="M 173 64.29 C 177.67 64.29 182.33 64.29 187 64.29 C 184.3 71.96 181.6 79.63 178.9 87.29 C 176.93 79.63 174.97 71.96 173 64.29 Z" fill="#FFFFFF"/>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the cat's w, its ends curling up (the cheeks are the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 110 79.84 C 127.46 91.84 144.92 92.95 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 175.08 92.95 192.54 91.84 210 79.84" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 103.41 75.31 C 100.48 73.3 98.6 70.1 98.26 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 216.59 75.31 C 219.52 73.3 221.4 70.1 221.74 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

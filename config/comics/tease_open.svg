@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the smile with the tongue out of its right corner, the ticks (the tongue id's drawing; tease took it on 2026-10-15 night)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 104.92 81.2 C 138.84 95.6 181.16 95.6 215.08 81.2 C 218.28 79.84 221.96 82.16 221.54 85.61 C 218.09 113.95 195.33 136 160 136 C 124.67 136 101.91 113.95 98.46 85.61 C 98.04 82.16 101.72 79.84 104.92 81.2 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 104.92 81.2 C 138.84 95.6 181.16 95.6 215.08 81.2 C 218.28 79.84 221.96 82.16 221.54 85.61 C 187.08 114.13 132.92 114.13 98.46 85.61 C 98.04 82.16 101.72 79.84 104.92 81.2 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 93 C 160.2 97 160.4 101 160.6 105" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 186.75 126.78 C 188.42 125.99 190.09 125.19 191.76 124.4 C 194.62 123.04 198.48 122.46 199.76 125.35 C 200.49 126.97 200.78 128.91 201.36 130.36 C 204.28 133.67 203.96 138.71 200.65 141.63 C 197.35 144.55 192.3 144.23 189.38 140.93 C 187.97 140.15 185.57 138.13 183.62 135.8 C 181.08 132.77 183.18 128.48 186.75 126.78 Z" fill="#DE5B55"/>
+  <path class="line" d="M 184.04 132.11 C 176.88 134.62 168.83 136 160 136 C 124.67 136 101.91 113.95 98.46 85.61 C 98.04 82.16 101.72 79.84 104.92 81.2 C 138.84 95.6 181.16 95.6 215.08 81.2 C 218.28 79.84 221.96 82.16 221.54 85.61 C 219.46 102.73 210.33 117.56 195.63 126.61" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 199.76 125.35 C 200.49 126.97 200.78 128.91 201.36 130.36 C 204.28 133.67 203.96 138.71 200.65 141.63 C 197.35 144.55 192.3 144.23 189.38 140.93 C 187.97 140.15 185.57 138.13 183.62 135.8" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <path class="line" d="M 90.85 74.41 C 87.68 72.82 85.38 69.91 84.56 66.46" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 229.15 74.41 C 232.32 72.82 234.62 69.91 235.44 66.46" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

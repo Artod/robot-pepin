@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wide grin crescent with the two front teeth, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 79.57 61.41 C 129.25 83.26 190.75 83.26 240.43 61.41 C 245.25 59.28 251.09 63.45 248.37 67.97 C 236.06 88.41 194.78 103.59 160 103.59 C 125.22 103.59 83.94 88.41 71.63 67.97 C 68.91 63.45 74.75 59.28 79.57 61.41 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 140 75.77 C 153.33 75.77 166.67 75.77 180 75.77 C 180 82.04 180 88.31 180 94.58 C 180 96.25 178.65 97.6 176.98 97.6 C 165.66 97.6 154.34 97.6 143.02 97.6 C 141.35 97.6 140 96.25 140 94.58 C 140 88.31 140 82.04 140 75.77 Z" fill="#FFFFFF" data-part="hint"/>
+  <path class="line" d="M 160 77.8 C 160 83.73 160 89.67 160 95.6" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 79.57 61.41 C 129.25 83.26 190.75 83.26 240.43 61.41 C 245.25 59.28 251.09 63.45 248.37 67.97 C 236.06 88.41 194.78 103.59 160 103.59 C 125.22 103.59 83.94 88.41 71.63 67.97 C 68.91 63.45 74.75 59.28 79.57 61.41 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 72.25 58.18 C 69 56.76 66.55 53.96 65.56 50.56" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 247.75 58.18 C 251 56.76 253.45 53.96 254.44 50.56" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

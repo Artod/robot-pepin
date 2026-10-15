@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the hooked line, its corners a touch up, the hooks up</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 116.59 87.05 C 143.61 89.75 176.39 89.75 203.41 87.05 C 207.95 86.6 212.03 90.17 211.52 94.7 C 208.03 125.49 186.2 149.39 160 149.39 C 133.8 149.39 111.97 125.49 108.48 94.7 C 107.97 90.17 112.05 86.6 116.59 87.05 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 116.59 87.05 C 143.61 89.75 176.39 89.75 203.41 87.05 C 207.95 86.6 212.03 90.17 211.52 94.7 C 182.67 105.86 137.33 105.86 108.48 94.7 C 107.97 90.17 112.05 86.6 116.59 87.05 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 211.52 94.7 C 182.67 105.86 137.33 105.86 108.48 94.7" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 126.3 119.4 C 147.4 111.18 172.6 111.18 193.7 119.4 C 198.29 121.19 199.9 126.91 196.78 130.72 C 187.35 142.24 174.33 149.39 160 149.39 C 145.67 149.39 132.65 142.24 123.22 130.72 C 120.1 126.91 121.71 121.19 126.3 119.4 Z" fill="#F09AA8"/>
+  <path class="line" d="M 117.95 123.21 C 143.18 109.91 176.82 109.91 202.05 123.21" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 116.59 87.05 C 143.61 89.75 176.39 89.75 203.41 87.05 C 207.95 86.6 212.03 90.17 211.52 94.7 C 208.03 125.49 186.2 149.39 160 149.39 C 133.8 149.39 111.97 125.49 108.48 94.7 C 107.97 90.17 112.05 86.6 116.59 87.05 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

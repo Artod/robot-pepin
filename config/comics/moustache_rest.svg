@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line under the moustache</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 106 85 C 142 85 178 85 214 85" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 98 85 C 94.45 85 91.09 86.57 88.81 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 222 85 C 225.55 85 228.91 86.57 231.19 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="moustache" d="M 138.04 58 C 152.68 58 167.32 58 181.96 58 C 184.74 58 187 60.26 187 63.04 C 187 67.01 187 70.99 187 74.96 C 187 77.74 184.74 80 181.96 80 C 167.32 80 152.68 80 138.04 80 C 135.26 80 133 77.74 133 74.96 C 133 70.99 133 67.01 133 63.04 C 133 60.26 135.26 58 138.04 58 Z" fill="#1D1D1B"/>
+</svg>

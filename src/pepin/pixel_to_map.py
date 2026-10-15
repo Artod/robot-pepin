@@ -42,7 +42,6 @@ the mono network. Each :class:`Located` carries the sigma of the source that ans
 
 from __future__ import annotations
 
-import json
 import math
 import re
 import time
@@ -59,6 +58,7 @@ import numpy.typing as npt
 from pepin.depth import rotation_matrix
 from pepin.mounts import Mount, config_path, load_camera_mounts
 from pepin.neck import NeckAngles, NeckConfig, camera_pose
+from pepin.overlay import read_json
 from pepin.perception.record import RAW_LEFT, RECTIFIED_LEFT
 from pepin.tsdf import RigidPose
 
@@ -614,7 +614,7 @@ class CameraGeometry:
         from pepin.camera import CameraConfig, active_camera
         from pepin.stereo import Rectifier, StereoCalibration
 
-        data = json.loads(config_path(config_dir, "camera.json").read_text())
+        data = read_json(config_path(config_dir, "camera.json"))
         name = active_camera(data)
         cfg = CameraConfig.from_json(data[name], name)
         if cfg.rig is None:
@@ -740,7 +740,7 @@ class UstreamerPairs:
             from pepin.camera import active_camera
             from pepin.deployment import config_file
 
-            data = json.loads(config_file("camera.json").read_text())
+            data = read_json(config_file("camera.json"))
             rig = data[active_camera(data)].get("rig") or {}
             self._upside_down = bool(rig.get("upside_down", False))
         return self._upside_down

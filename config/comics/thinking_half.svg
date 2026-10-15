@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking mouth, a lazy S aside, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 166.17 84.03 C 169.81 85.96 174.07 87.67 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 219.8 82.51 224.66 86.28 228.16 89.13 C 230.51 91.05 232.56 93.97 231.1 96.63 C 226.91 104.28 209.92 109.95 194 109.95 C 179.37 109.95 163.85 101.43 158.17 89.49 C 156.05 85.05 161.83 81.72 166.17 84.03 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 180.8 95.37 C 190.57 94.04 200.98 93.91 210.87 94.99 C 217.9 95.76 219.64 105.58 212.81 107.44 C 206.97 109.03 200.4 109.95 194 109.95 C 188.88 109.95 183.64 108.9 178.76 107.03 C 172.86 104.77 174.54 96.22 180.8 95.37 Z" fill="#DE5B55"/>
+  <path class="line" d="M 166.17 84.03 C 169.81 85.96 174.07 87.67 178.8 88 C 189.25 88.73 203.25 81.27 213 82 C 219.8 82.51 224.66 86.28 228.16 89.13 C 230.51 91.05 232.56 93.97 231.1 96.63 C 226.91 104.28 209.92 109.95 194 109.95 C 179.37 109.95 163.85 101.43 158.17 89.49 C 156.05 85.05 161.83 81.72 166.17 84.03 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 148.67 74.79 C 145.43 73.36 141.71 73.45 138.53 75.02" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 239.08 95.73 C 242.22 97.38 245.93 97.56 249.21 96.21" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

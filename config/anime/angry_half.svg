@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the lens of teeth, short, its ends turned down, the bite line</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="teeth" d="M 126.45 81.75 C 146.49 71.07 173.51 71.07 193.55 81.75 C 200.61 86.21 201.57 96.14 195.04 98.06 C 174.38 106.16 145.62 106.16 124.96 98.06 C 118.43 96.14 119.39 86.21 126.45 81.75 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 126.45 81.75 C 146.49 71.07 173.51 71.07 193.55 81.75 C 200.61 86.21 201.57 96.14 195.04 98.06 C 174.38 106.16 145.62 106.16 124.96 98.06 C 118.43 96.14 119.39 86.21 126.45 81.75 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 120.57 91.67 C 145.9 93.27 174.1 93.27 199.43 91.67" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+</svg>

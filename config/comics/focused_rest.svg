@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the firm line, a slight frown</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 102 88 C 136.8 80 183.2 80 218 88" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

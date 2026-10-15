@@ -46,7 +46,6 @@ instead of 100-150); a network CoreML refuses runs on the CPU.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import threading
@@ -63,6 +62,7 @@ from numpy.typing import NDArray
 from pepin.expression.speaker import BodySighting, FaceFinder, FaceFrame, FaceSighting
 from pepin.face_sensor.geometry import Lens
 from pepin.face_sensor.models import Detection, Detector
+from pepin.overlay import read_json
 
 if TYPE_CHECKING:
     from pepin.perception.client import Perception
@@ -520,5 +520,5 @@ def _finder_block(path: str | Path | None = None) -> dict[str, Any]:
         from pepin.deployment import config_file
 
         path = config_file("expression.json")
-    block = json.loads(Path(path).read_text()).get("finder", {})
+    block = read_json(path).get("finder", {})
     return block if isinstance(block, dict) else {}

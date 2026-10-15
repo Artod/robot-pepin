@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 from pepin.audio_link import RATE
+from pepin.overlay import read_json
 from pepin.voice_cascade.barge_in import SileroVad, model_path
 from pepin.voice_cascade.config import CascadeConfig, apply_overrides
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
@@ -155,7 +156,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     ap.add_argument("-v", "--verbose", action="store_true", help="every cut and wait")
     args = ap.parse_args(argv)
 
-    data = json.loads((ROOT / "config" / "voice_cascade.json").read_text())
+    data = read_json(ROOT / "config" / "voice_cascade.json")
     base = CascadeConfig.from_dict(apply_overrides(data, args.set))
     names = method_names()
     chosen = [names[n] for n in args.methods] if args.methods else list(METHODS)

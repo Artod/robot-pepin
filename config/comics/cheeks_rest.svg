@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat red ovals, the overlay drawn over any look at its cheeks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="blush" d="M 26 65 C 26 58.37 37.64 53 52 53 C 66.36 53 78 58.37 78 65 C 78 71.63 66.36 77 52 77 C 37.64 77 26 71.63 26 65 Z" fill="#DE5B55" fill-opacity="0.45"/>
+  <path class="blush" d="M 242 65 C 242 58.37 253.64 53 268 53 C 282.36 53 294 58.37 294 65 C 294 71.63 282.36 77 268 77 C 253.64 77 242 71.63 242 65 Z" fill="#DE5B55" fill-opacity="0.45"/>
+</svg>

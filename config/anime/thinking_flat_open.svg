@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking line, nearly level</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 164.62 86.06 C 184.14 86.22 203.66 85.73 223.19 84.6 C 228.95 84.27 234.09 89.06 232.49 94.61 C 227.72 111.09 212.23 123.25 194 123.25 C 175.89 123.25 160.48 111.86 155.61 96.37 C 153.88 90.89 158.87 86.01 164.62 86.06 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 164.62 86.06 C 184.14 86.22 203.66 85.73 223.19 84.6 C 228.95 84.27 234.09 89.06 232.49 94.61 C 210.96 101.26 177.13 101.26 155.61 96.37 C 153.88 90.89 158.87 86.01 164.62 86.06 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 232.49 94.61 C 210.96 101.26 177.13 101.26 155.61 96.37" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 174.94 102.74 C 187.13 100.19 200.44 100.2 212.61 102.78 C 219.4 104.22 221.72 113.02 215.89 116.8 C 209.59 120.87 202.06 123.25 194 123.25 C 185.75 123.25 178.06 120.89 171.68 116.85 C 165.74 113.1 168.07 104.18 174.94 102.74 Z" fill="#F09AA8"/>
+  <path class="line" d="M 161.05 107.02 C 180.63 98.77 206.74 98.77 226.32 107.02" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 164.62 86.06 C 184.14 86.22 203.66 85.73 223.19 84.6 C 228.95 84.27 234.09 89.06 232.49 94.61 C 227.72 111.09 212.23 123.25 194 123.25 C 175.89 123.25 160.48 111.86 155.61 96.37 C 153.88 90.89 158.87 86.01 164.62 86.06 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

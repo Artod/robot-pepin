@@ -175,7 +175,9 @@ def test_the_book_s_breath_block_is_read_and_checked() -> None:
     assert set(BOOK.breath) == {"arm"}
     layer = BOOK.breath["arm"]
     assert set(layer.joints) == set(JOINTS) and layer.when == "up"
-    assert all(o.amp_deg > 0.0 and o.period_s > 0.0 for o in layer.joints.values())
+    assert all(o.amp_deg >= 0.0 and o.period_s > 0.0 for o in layer.joints.values())
+    assert layer.joints["gripper"].amp_deg == 0.0  # the shut jaw stands on its limit (10-14)
+    assert all(o.amp_deg > 0.0 for j, o in layer.joints.items() if j != "gripper")
     assert set(layer.accent_gain) <= set(BOOK.compositions)
     assert layer.accent_gain["pulse_weak"] < layer.accent_gain["pulse_peak"]
     data: dict[str, Any] = {

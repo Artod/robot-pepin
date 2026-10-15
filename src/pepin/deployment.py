@@ -95,20 +95,17 @@ IMU_RATE_HZ = 100.0
 
 
 def config_file(name: str) -> Path:
-    """The path of ``config/<name>`` wherever this library runs: ``$PEPIN_CONFIG_DIR`` when
-    set; else the ``config`` directory beside the ``pepin`` package (the board's container:
-    /ws/pepin_src/config, put there by ros/sync.sh — the container mounts no /ws/config); else
-    the one beside the source tree (a checkout: src/pepin/../../config; the laptop's containers:
-    /ws/config). Raises ``FileNotFoundError`` naming every place looked, never a guess."""
-    import os
+    """The path of ``config/<name>`` wherever this library runs, through the private overlay
+    (:func:`pepin.overlay.resolve`): a private tree's copy of a file it supplies whole, the
+    public base of a JSON file the trees merge (parse it with :func:`pepin.overlay.read_json`).
+    The public ``config`` is ``$PEPIN_CONFIG_DIR`` when set; else the directory beside the
+    ``pepin`` package (the board's container: /ws/pepin_src/config, put there by ros/sync.sh —
+    the container mounts no /ws/config); else the one beside the source tree (a checkout:
+    src/pepin/../../config; the laptop's containers: /ws/config). Raises ``FileNotFoundError``
+    naming every place looked, never a guess."""
+    from pepin.overlay import resolve
 
-    package = Path(__file__).resolve().parent
-    homes = [Path(os.environ["PEPIN_CONFIG_DIR"])] if os.environ.get("PEPIN_CONFIG_DIR") else []
-    homes += [package.parent / "config", package.parents[1] / "config"]
-    for home in homes:
-        if (home / name).is_file():
-            return home / name
-    raise FileNotFoundError(f"config/{name} is in none of {[str(h) for h in homes]}")
+    return resolve(f"config/{name}")
 
 
 # The QoS every endpoint of these cross-machine topics uses, on BOTH sides. A reader and a writer

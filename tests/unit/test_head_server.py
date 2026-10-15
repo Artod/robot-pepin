@@ -188,7 +188,16 @@ def test_mouth_show_and_config_go_straight_down(table: FaceTable) -> None:
     assert head.sent("T")[0][:3] == bytes((0x88, 0x13, 2))
     reply = ask(service, server, {"cmd": "config", "imu_rate_hz": 500, "brightness": 90})
     assert reply["config"]["id"] == 2 and reply["config"]["rate_hz"] == 500
-    assert head.sent("C")[-1] == bytes((2, 0xF4, 0x01, 3, 1, 1, 90))
+    assert reply["style"] == table.style == "pepin"
+    assert head.sent("C")[-1] == bytes((2, 0xF4, 0x01, 3, 1, 1, 90, 0))
+    # the face's style is live: named in a config, sent as the 'C' frame's last byte
+    reply = ask(service, server, {"cmd": "config", "style": "manga"})
+    assert reply["style"] == "manga" and head.sent("C")[-1][-1] == 2  # pepin 0, rose 1, manga 2
+    assert head.sent("C")[-1][:7] == bytes((3, 0xF4, 0x01, 3, 1, 1, 90))
+    assert ask(service, server, {"cmd": "status"})["style"] == "manga"
+    bad = ask(service, server, {"cmd": "config", "style": "neon"})
+    assert bad["type"] == "error" and "no face style 'neon'" in bad["error"]
+    assert ask(service, server, {"cmd": "status"})["style"] == "manga"
 
 
 def test_subscribers_get_samples_on_the_board_clock_across_the_wrap(table: FaceTable) -> None:

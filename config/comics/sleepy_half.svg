@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the sleeper's small oval, the tongue at its bottom, the chin mark, a drop of drool (the z floats)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 142 91.5 C 142 73.55 150.06 59 160 59 C 169.94 59 178 73.55 178 91.5 C 178 109.45 169.94 124 160 124 C 150.06 124 142 109.45 142 91.5 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 146.66 101.62 C 155 95.06 165 95.06 173.34 101.62 C 175.44 103.26 176.17 106.09 175.31 108.61 C 172.13 117.85 166.46 124 160 124 C 153.54 124 147.87 117.85 144.69 108.61 C 143.83 106.09 144.56 103.26 146.66 101.62 Z" fill="#DE5B55"/>
+  <path class="line" d="M 142 91.5 C 142 73.55 150.06 59 160 59 C 169.94 59 178 73.55 178 91.5 C 178 109.45 169.94 124 160 124 C 150.06 124 142 109.45 142 91.5 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle class="drool" cx="173" cy="118" r="3.5" fill="#C1D5FA"/>
+  <path class="line" d="M 149 133.5 C 151.2 139.2 168.8 139.2 171 133.5" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="chin"/>
+</svg>

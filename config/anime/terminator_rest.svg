@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wedge of teeth, the bite line and three gaps</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="teeth" d="M 91.84 74.16 C 137.64 69.72 188.13 64.05 224.01 62.96 C 230.16 62.77 235.02 68.06 234.49 74.19 C 233.83 82.01 233.16 89.83 232.5 97.65 C 232.05 102.83 227.77 106.86 222.56 106.92 C 178.59 107.49 127.53 105.93 92.33 104.96 C 88.51 104.85 85.47 101.73 85.47 97.91 C 85.47 92.33 85.47 86.75 85.47 81.17 C 85.47 77.54 88.23 74.51 91.84 74.16 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 91.84 74.16 C 137.64 69.72 188.13 64.05 224.01 62.96 C 230.16 62.77 235.02 68.06 234.49 74.19 C 233.83 82.01 233.16 89.83 232.5 97.65 C 232.05 102.83 227.77 106.86 222.56 106.92 C 178.59 107.49 127.53 105.93 92.33 104.96 C 88.51 104.85 85.47 101.73 85.47 97.91 C 85.47 92.33 85.47 86.75 85.47 81.17 C 85.47 77.54 88.23 74.51 91.84 74.16 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 85.47 89.54 C 137.97 87.54 190.47 86.92 233.49 85.92" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 126.72 91.18 C 127.05 93.26 127.38 95.34 127.72 97.42" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 164.22 90.36 C 164.55 93.21 164.88 96.07 165.22 98.92" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 197.97 89.68 C 198.3 93.21 198.63 96.74 198.97 100.27" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+</svg>

@@ -84,6 +84,11 @@
     "speculative": false,
     "speculative_min_words": 2,
     "first_sentence_words": 0,
+    "web_search": true,
+    "web_search_tool": "web_search_20250305",
+    "web_search_max_uses": 1,
+    "web_search_allowed_domains": [],
+    "web_search_note": "2026-10-14 (Artem): the Anthropic brains get Anthropic's server-side web search (the API searches inside the call and the reply streams on after it; pepin.voice_cascade.brain); Gemini and Groq ignore it. The persona: only for fresh or specific facts the model does not know, never small talk, at most once a reply, announced like a slow tool, a spoken digest naming the source in words, never a link. web_search_tool: web_search_20250305 (basic: the results reach the model as they come) or web_search_20260209 (dynamic filtering: the model writes code to filter the results first; Opus and Sonnet only, not Haiku; that code is output under max_tokens 400 and a step of latency more, unmeasured here). web_search_max_uses: the searches one API call may make (one more comes back as a max_uses_exceeded result, not an error). web_search_allowed_domains: only these sites ([]: any). Cost: money.prices_usd_per_mtok.web_search_per_1000 a search, plus its results as input tokens, kept (cached) in the history for the rest of the conversation; the usage rows count web_searches. The tool sits in the cached prefix: switching it writes the cache anew once. false: no tool sent, as before",
     "presets": {
       "haiku": {"provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "disabled", "effort": "low", "keep_warm_s": 270},
       "sonnet": {"provider": "anthropic", "model": "claude-sonnet-5-5", "thinking": "between_tools", "effort": "low", "keep_warm_s": 270},
@@ -254,7 +259,8 @@
       "qwen/qwen3.8-27b": {"input": 0.80, "output": 4.00, "cache_read": 0.80, "cache_write": 0.80},
       "gemini-3.8-flash-lite-tts": {"input": 0.50, "output": 6.00, "cache_read": 0.50, "cache_write": 0.50},
       "gemini-3.8-flash-tts": {"input": 0.50, "output": 9.00, "cache_read": 0.50, "cache_write": 0.50},
-      "note": "Anthropic list prices (the claude-api reference, cached 2026-10-06): cache reads 0.1x input (0.05x on Opus 5.5), 5-minute cache writes 1.25x. Haiku 5.5 prompts over 100k tokens cost more (never reached here). Gemini (the coordinator's figures, 2026-10-09): cached input at the cached rate, no write premium. Gemini TTS (the coordinator's figures, 2026-10-09): text in, audio out at 25 tokens a second of speech, no cache"
+      "web_search_per_1000": 10.0,
+      "note": "Anthropic list prices (the claude-api reference, cached 2026-10-06): cache reads 0.1x input (0.05x on Opus 5.5), 5-minute cache writes 1.25x. Haiku 5.5 prompts over 100k tokens cost more (never reached here). Gemini (the coordinator's figures, 2026-10-09): cached input at the cached rate, no write premium. Gemini TTS (the coordinator's figures, 2026-10-09): text in, audio out at 25 tokens a second of speech, no cache. web_search_per_1000: USD per thousand Anthropic server-side web searches (brain.web_search; 10, the claude-api reference 2026-10-14), the results' tokens billed as input besides"
     },
     "note": "a conversation that would break a cap is never opened; the estimates (brain and cloud voice) are kept in data/voice/cascade_ledger.jsonl"
   }

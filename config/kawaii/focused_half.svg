@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the firm line, its ends a hair up (round 2: turned down it read sad)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 150.13 70.14 C 156.45 70.95 163.55 70.95 169.87 70.14 C 172.5 69.8 175.01 71.82 174.46 74.42 C 172.71 82.66 166.88 88.75 160 88.75 C 153.12 88.75 147.29 82.66 145.54 74.42 C 144.99 71.82 147.5 69.8 150.13 70.14 Z" fill="#DD7487"/>
+  <path class="line" d="M 150.13 70.14 C 156.45 70.95 163.55 70.95 169.87 70.14 C 172.5 69.8 175.01 71.82 174.46 74.42 C 172.71 82.66 166.88 88.75 160 88.75 C 153.12 88.75 147.29 82.66 145.54 74.42 C 144.99 71.82 147.5 69.8 150.13 70.14 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

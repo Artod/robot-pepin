@@ -14,6 +14,7 @@
   const image = ctx.createImageData(F.W, F.H);
   const px = new Uint16Array(F.W * F.H);
   const model = new F.FaceModel();
+  const anime = new Anime.AnimeModel();  // the shape engine, following the model in a shapes style
 
   // -- the head server's arbiter: each source one standing and one timed request, newest wins
   class Arbiter {
@@ -172,7 +173,12 @@
       info = null;
       model.update(t);
       const t0 = now();
-      F.render(model.shape(), px);
+      if (Anime.tableOf(model.style) !== null) {
+        anime.follow(model, t);
+        Anime.render(anime, px);
+      } else {
+        F.render(model.shape(), px);
+      }
       renderMs = 0.9 * renderMs + 0.1 * (now() - t0);
       F.toRGBA(px, image.data);
       ctx.putImageData(image, 0, 0);
@@ -183,7 +189,8 @@
       frames = 0;
       fpsAt = t;
     }
-    $("st-expr").textContent = T.expressions[model.expression].name;
+    const shown = model.shown !== model.expression ? ` (${T.expressions[model.shown].name})` : "";
+    $("st-expr").textContent = T.expressions[model.expression].name + shown;
     $("st-by").textContent = mode === "asleep" ? "firmware (host silent)" : shownBy || "-";
     $("st-mode").textContent = showingInfo ? "info" : mode;
     $("st-level").textContent = model.level.toFixed(2);
@@ -201,7 +208,7 @@
   for (const e of T.expressions) {
     const b = document.createElement("button");
     b.textContent = e.name;
-    b.title = e.note;
+    b.title = e.brief ? `${e.brief}: ${e.note}` : e.note;
     b.onclick = () => arbiter.set("llm", e.name, intensity(), transition(), null, now());
     $("expressions").appendChild(b);
   }
@@ -249,6 +256,14 @@
   $("events").appendChild(voiceDone);
 
   $("host").onchange = () => { hostConnected = $("host").checked; if (hostConnected) sentKey = null; };
+  T.styles.forEach((s, i) => {  // the 'C' config's style byte, live
+    const option = document.createElement("option");
+    option.value = String(i);
+    option.textContent = s.name;
+    option.selected = i === T.style;
+    $("style").appendChild(option);
+  });
+  $("style").onchange = () => model.setStyle(Number($("style").value), now());
   $("smooth").onchange = () => canvas.classList.toggle("smooth", $("smooth").checked);
   $("info-s").oninput = () => { $("info-s-v").textContent = $("info-s").value; };
   $("info-show").onclick = () => {

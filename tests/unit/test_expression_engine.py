@@ -29,7 +29,7 @@ from pepin.expression.mix import (
     track_value,
 )
 from pepin.expression.parts import Absent, ArmPart, FacePart, Planned
-from pepin.expression.render import BookRenderer, WeightedChooser
+from pepin.expression.render import SHUT, BookRenderer, WeightedChooser
 from pepin.expression.trajectory import JOINTS, ArmStatus
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
@@ -45,6 +45,16 @@ PRIMITIVES = {"accent", "point", "arc", "size", "weigh", "count", "draw", "stop"
 # the engine's own ensembles, which its listeners ask for by name (never a mark)
 OWN = {"pulse_weak", "pulse_strong", "pulse_peak", "pulse_laugh", "listen_nod", "ack_nod",
        "arm_sway"}  # fmt: skip
+IDLE = {"breath", "head_drift"}  # the idle layer's (the breath's written, the drift's wrapper)
+SNAP = {"snap"}  # the gripper that really shuts (2026-10-14)
+DANCE = {"dance"}  # the beats' family (2026-10-14): a style an argument, one step a beat
+SHAPED = {"salute", "crazy"}  # on the poses Artem shaped by hand (2026-10-14)
+# ... of which the salute and the twirl are the engine's own (callable false) until Artem has
+# seen the hand clear the head on the robot (poses.salute)
+WAITING = {"salute", "crazy"}
+SOUND = {"sound"}  # the reserved mark of the brain's sound tool (pepin.sounds), no composition
+# the atoms an auto-wrapper cannot play bare (a pose, a path, a face's name to choose)
+UNWRAPPED = {"arm_pose", "arm_arc", "arm_trace", "face"}
 RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wrist_flex": 30.0,
           "wrist_roll": -54.1, "gripper": -0.4}  # fmt: skip
 
@@ -53,15 +63,25 @@ RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wr
 
 
 def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
-    assert set(BOOK.compositions) == RESEARCH_NAMES | PRIMITIVES | OWN
-    assert {n for n, c in BOOK.compositions.items() if not c.callable} == OWN
+    written = {n for n, c in BOOK.compositions.items() if c.wraps is None}
+    assert written == RESEARCH_NAMES | PRIMITIVES | OWN | SNAP | DANCE | SHAPED | {"breath"}
+    wrapped = {n for n, c in BOOK.compositions.items() if c.wraps is not None}
+    assert wrapped == set(BOOK.atoms) - UNWRAPPED - written  # every atom that plays bare
+    assert all(BOOK.compositions[n].wraps == n for n in wrapped)
+    assert {n for n, c in BOOK.compositions.items() if not c.callable} == OWN | IDLE | WAITING
     assert len(BOOK.atoms) >= 19
     assert not BOOK.atoms["breath"].callable and not BOOK.atoms["head_drift"].callable
     assert BOOK.moments["slow_tool"] == "thinking"  # the listeners' moments name compositions too
-    assert (BOOK.moments["greeting_due"], BOOK.moments["farewell_due"]) == ("greeting", "farewell")
+    # hello and bye are the brain's own marks (2026-10-14): no moment of the engine plays them
+    assert {"greeting", "farewell"}.isdisjoint(BOOK.moments.values())
+    assert "greeting_due" not in BOOK.moments and "farewell_due" not in BOOK.moments
     assert set(BOOK.moments.values()) <= set(BOOK.compositions)
     words = vocabulary(BOOK, face_names(CONFIG / "face.json"))
-    assert words.intents == frozenset(RESEARCH_NAMES | PRIMITIVES) and "smile" in words.faces
+    singles = wrapped - IDLE
+    assert words.intents == frozenset(
+        RESEARCH_NAMES | PRIMITIVES | SNAP | DANCE | SOUND | (SHAPED - WAITING) | singles
+    )
+    assert "smile" in words.faces
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps
              for n in s.choices.get("name", ())}  # fmt: skip
     assert faces <= words.faces  # every face a composition names exists
@@ -99,7 +119,7 @@ def _data() -> dict[str, Any]:
          "needs one"),
         (lambda d: d["compositions"]["laugh"]["variants"][0]["steps"].append({"atom": "breath"}),
          "idle layer"),
-        (lambda d: d["moments"].update(slow_tool="dance"), "moments.slow_tool"),
+        (lambda d: d["moments"].update(slow_tool="tango"), "moments.slow_tool"),
         (lambda d: d["poses"].update(raised={"gripper": 1.0}), "poses.raised"),
     ],
 )  # fmt: skip
@@ -136,8 +156,14 @@ def test_a_part_not_ready_and_a_pose_not_taught_are_left_out_the_rest_plays() ->
     for seed in range(30):
         clips = renderer.render("greeting", Scene(frozenset({"face", "arm"})), seed).clips
         assert {c.part for c in clips} <= {"face", "arm"} and "face" in {c.part for c in clips}
-        for clip in clips:  # no pose is taught: the arm never leaves rest absolutely
-            assert all(t.mode == "additive" for t in clip.tracks)
+        for clip in clips:  # no pose is taught: the arm never leaves rest absolutely (but the
+            # snap left without its raise: the jaw from rest's -0.4 to the book's shut and back)
+            rest = BOOK.poses["rest"]
+            assert all(
+                t.mode == "additive"
+                or all(abs(v - rest[t.dof]) <= 0.5 or v == SHUT["gripper"] for v in t.values)
+                for t in clip.tracks
+            )
     taught = Book(BOOK.atoms, BOOK.compositions, {**untaught.poses, "raised": RAISED})
     clips = BookRenderer(taught).render("greeting", EVERYTHING, 3, variant=0).clips
     arm = next(c for c in clips if c.part == "arm")
@@ -294,19 +320,25 @@ def test_every_intent_s_arm_clip_keeps_the_caps_at_full_speed_and_at_the_first_t
     """The book is sized to config/arm.json's caps and its poses: nothing it renders is
     refused, every step playing, its ranges at either end or drawn, mirrored or not (at speed
     0.2 too, but evil_click: its live-tuned 3-4 s passes the board's 30 s there; speed 1 since
-    2026-10-12)."""
+    2026-10-12); a variant that needs the arm up (the accent's flick, an arm atom's
+    auto-wrapper, the snap on a held pose) planned over the posture's ``ready``, the pose a
+    unit holds most, the others from rest."""
     fast, slow = ArmPart(FakeArmLink(), MOTION), ArmPart(FakeArmLink(), MOTION, speed_scale=0.2)
     books = (_every_step(BOOK, "lo"), _every_step(BOOK, "hi"), _every_step(BOOK))
     for intent, composition in BOOK.compositions.items():
         for variant, book, seed in itertools.product(range(len(composition.variants)), books,
                                                      range(2)):  # fmt: skip
+            up = composition.variants[variant].needs.get("arm") == "up"
+            base = dict(BOOK.poses["ready"]) if up else None
             performance = BookRenderer(book).render(intent, EVERYTHING, seed, variant=variant)
             for clip in performance.clips:
                 if clip.part == "arm":
                     where = (intent, variant, seed)
-                    assert isinstance(fast.plan(clip), Planned), (where, fast.plan(clip))
+                    planned = fast.plan(clip, base=base)
+                    assert isinstance(planned, Planned), (where, planned)
                     if intent != "evil_click":
-                        assert isinstance(slow.plan(stretched(clip, 5.0)), Planned), where
+                        planned = slow.plan(stretched(clip, 5.0), base=base)
+                        assert isinstance(planned, Planned), (where, planned)
 
 
 def test_every_arm_clip_fits_the_board_s_longest_trajectory_at_the_first_test_s_speed() -> None:
@@ -700,7 +732,7 @@ def test_a_tool_s_perform_is_answered_from_the_engine_s_thread() -> None:
     try:
         outcome = rig.engine.perform("agreement", source="tool")
         assert outcome.ok and "seed" in outcome.why
-        missing = rig.engine.perform("dance", source="tool")
+        missing = rig.engine.perform("tango", source="tool")
         assert not missing.ok and "greeting" in missing.why
         assert rig.engine.last() is not None
     finally:

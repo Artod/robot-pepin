@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the short slanted line aside, neutral</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 158 90.5 C 182 88.03 206 84.37 230 79.5" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

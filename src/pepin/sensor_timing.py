@@ -10,11 +10,12 @@ numbers were measured.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 # The MPU-6050 register map (rev 4.2), CONFIG 0x1A: the gyro's group delay by DLPF_CFG, seconds.
 # mpu6050.hpp writes kDlpfConfig and carries the same table; config/imu.json's filter_delay_s is
@@ -56,7 +57,7 @@ def _block(name: str, path: str | Path | None) -> dict[str, Any]:
     from pepin.deployment import config_file  # lazy: the helpers below stay import-light
 
     source = Path(path) if path is not None else config_file(name)
-    block = json.loads(source.read_text())["timing"]
+    block = read_json(source)["timing"]
     if not isinstance(block, dict):
         raise ValueError(f"{source}: timing is a mapping")
     return block

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the heart smile parted</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 133.61 84.89 C 150.32 91.04 169.68 91.04 186.39 84.89 C 190.84 83.26 196.16 86.45 194.44 90.86 C 189.51 103.44 174.3 112.54 160 112.54 C 145.7 112.54 130.49 103.44 125.56 90.86 C 123.84 86.45 129.16 83.26 133.61 84.89 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 147 98 C 155.49 96.74 164.51 96.74 173 98 C 179.01 98.88 180.57 107.03 174.98 109.39 C 170.2 111.41 165.04 112.54 160 112.54 C 154.96 112.54 149.8 111.41 145.02 109.39 C 139.43 107.03 140.99 98.88 147 98 Z" fill="#DE5B55"/>
+  <path class="line" d="M 133.61 84.89 C 150.32 91.04 169.68 91.04 186.39 84.89 C 190.84 83.26 196.16 86.45 194.44 90.86 C 189.51 103.44 174.3 112.54 160 112.54 C 145.7 112.54 130.49 103.44 125.56 90.86 C 123.84 86.45 129.16 83.26 133.61 84.89 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 117.01 76.61 C 113.91 74.89 111.73 71.89 111.05 68.4" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 202.99 76.61 C 206.09 74.89 208.27 71.89 208.95 68.4" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

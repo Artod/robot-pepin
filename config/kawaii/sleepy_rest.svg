@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dot of a doze (the z floats)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 155.5 70 C 155.5 66.69 157.51 64 160 64 C 162.49 64 164.5 66.69 164.5 70 C 164.5 73.31 162.49 76 160 76 C 157.51 76 155.5 73.31 155.5 70 Z" fill="#504743"/>
+  <path class="line" d="M 155.5 70 C 155.5 66.69 157.51 64 160 64 C 162.49 64 164.5 66.69 164.5 70 C 164.5 73.31 162.49 76 160 76 C 157.51 76 155.5 73.31 155.5 70 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

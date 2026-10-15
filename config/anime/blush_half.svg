@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small drop between the cheeks (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 136 73.7 C 136 58.97 184 58.97 184 73.7 C 184 82.39 170.46 91.81 163.28 95.63 C 161.23 96.72 158.77 96.72 156.72 95.63 C 149.54 91.81 136 82.39 136 73.7 Z" fill="#EC7488"/>
+  <path class="line" d="M 136 73.7 C 136 58.97 184 58.97 184 73.7 C 184 82.39 170.46 91.81 163.28 95.63 C 161.23 96.72 158.77 96.72 156.72 95.63 C 149.54 91.81 136 82.39 136 73.7 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

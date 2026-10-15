@@ -12,9 +12,10 @@ The start value is config/models.json's ``perception.source``.
 
 from __future__ import annotations
 
-import json
 import threading
 from pathlib import Path
+
+from pepin.overlay import read_json
 
 SERVICE, SNAPSHOT = "service", "snapshot"
 SOURCES = (SERVICE, SNAPSHOT)
@@ -40,7 +41,7 @@ class VisionSource:
 
             path = config_file(CONFIG_FILE)
         try:
-            block = json.loads(Path(path).read_text()).get("perception", {})
+            block = read_json(path).get("perception", {})
         except (OSError, ValueError):
             return cls()
         value = block.get("source", SERVICE) if isinstance(block, dict) else SERVICE

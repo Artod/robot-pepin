@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wobbly oval</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 140 74.58 C 140 67.51 148.95 61.78 160 61.78 C 171.05 61.78 180 67.51 180 74.58 C 180 86.1 171 90.58 165 86.74 C 161 84.18 159 84.18 155 86.74 C 149 90.58 140 86.1 140 74.58 Z" fill="#DD7487"/>
+  <path class="line" d="M 140 74.58 C 140 67.51 148.95 61.78 160 61.78 C 171.05 61.78 180 67.51 180 74.58 C 180 86.1 171 90.58 165 86.74 C 161 84.18 159 84.18 155 86.74 C 149 90.58 140 86.1 140 74.58 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

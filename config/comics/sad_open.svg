@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the drooping sad frown, the lower lip's line under it</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 102.36 90.81 C 137.29 73.73 182.71 73.73 217.64 90.81 C 219.1 91.52 220.01 93.02 219.94 94.64 C 218.67 124.01 196.12 147.6 160 147.6 C 123.88 147.6 101.33 124.01 100.06 94.64 C 99.99 93.02 100.9 91.52 102.36 90.81 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 102.36 90.81 C 137.29 73.73 182.71 73.73 217.64 90.81 C 219.1 91.52 220.01 93.02 219.94 94.64 C 186.37 100.29 133.63 100.29 100.06 94.64 C 99.99 93.02 100.9 91.52 102.36 90.81 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 79 C 160.2 84.96 160.4 90.92 160.6 96.88" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 114.65 116.59 C 142.75 105.97 177.25 105.97 205.35 116.59 C 209.4 118.13 210.99 123.11 208.28 126.49 C 198.01 139.33 181.38 147.6 160 147.6 C 138.62 147.6 121.99 139.33 111.72 126.49 C 109.01 123.11 110.6 118.13 114.65 116.59 Z" fill="#DE5B55"/>
+  <path class="line" d="M 102.36 90.81 C 137.29 73.73 182.71 73.73 217.64 90.81 C 219.1 91.52 220.01 93.02 219.94 94.64 C 218.67 124.01 196.12 147.6 160 147.6 C 123.88 147.6 101.33 124.01 100.06 94.64 C 99.99 93.02 100.9 91.52 102.36 90.81 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 92.9 95.68 C 89.75 97.32 87.48 100.26 86.71 103.72" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 227.1 95.68 C 230.25 97.32 232.52 100.26 233.29 103.72" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

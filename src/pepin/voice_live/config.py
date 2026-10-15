@@ -3,11 +3,12 @@ estimate, the session's timings, the persona's lines and the wake gate."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 CONFIG_FILE = "voice_live.json"
 MIC_WHILE_DRIVING = ("gated", "streamed")
@@ -113,7 +114,7 @@ class LiveConfig:
             from pepin.deployment import config_file
 
             path = config_file(CONFIG_FILE)
-        return cls.from_dict(json.loads(Path(path).read_text()))
+        return cls.from_dict(read_json(path))
 
     def check(self) -> None:
         """``ValueError`` when a cap is missing its point (zero, negative, absurd)."""

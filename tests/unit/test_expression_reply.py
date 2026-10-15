@@ -792,7 +792,9 @@ def test_the_raised_arm_breathes_in_every_joint_under_the_book_s_layer(
             assert travel <= layer.joints[joint].amp_deg * swell + 0.05, joint
     moved = {j for b in breaths for j, joint in enumerate(JOINTS)
              if max(abs(k.deg[j] - READY[joint]) for k in b.knots) > 0.5}  # fmt: skip
-    assert moved == set(range(len(JOINTS))), "every joint breathes"
+    assert moved == set(range(len(JOINTS))) - {JOINTS.index("gripper")}, "every joint breathes"
+    # ... but the jaw (2026-10-14 evening: a shut jaw stands on its limit, where a breath
+    # would cost the clip its breath)
     for earlier, later in itertools.pairwise(sends):
         if later.name == "down":
             continue

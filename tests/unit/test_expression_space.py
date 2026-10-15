@@ -33,7 +33,7 @@ from pepin.expression.markers import Cue, Marker, Part
 from pepin.expression.mix import track_value
 from pepin.expression.parts import ArmPart, NeckLimits, clip_look
 from pepin.expression.places import GoalPlaces, bearing, latin
-from pepin.expression.render import CAPS_DEG_S, CAPS_DEG_S2, BookRenderer, Resolver
+from pepin.expression.render import CAPS_DEG_S, CAPS_DEG_S2, SHUT, BookRenderer, Resolver
 from pepin.expression.trajectory import JOINTS
 from pepin.gaze import GazeSettings, overlay_from_json
 from pepin.neck import NeckConfig
@@ -46,6 +46,9 @@ CELLS = {n: p for n, p in BOOK.poses.items() if n.startswith("cell_")}
 HOLDS = {**CELLS, "ready": BOOK.poses["ready"]}  # where a unit may hold the arm
 PRIMITIVES = ("accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer")
 ARM_S = 2.0  # the most a primitive holds the arm (DESIGN.md §7.9; critic_feasibility #3)
+# ... but for the way home from the floor (point:down, 2026-10-14 evening: 0.7 s back to home,
+# the board's straight way to rest from down would slide the hand down the cart's front)
+LONG_WAY_HOME: dict[tuple[str, str | None], float] = {("point", "down"): 2.4}
 HAND = ("wrist_link", "gripper_link", "moving_jaw_so101_v1_link")
 
 
@@ -136,6 +139,8 @@ def test_every_pose_of_the_space_keeps_the_limits_with_room_to_spare() -> None:
         assert name is not None
         for joint, deg in BOOK.poses[name].items():
             low, high = limits[joint]
+            if joint == "gripper" and deg == SHUT["gripper"]:
+                continue  # a shut jaw stands on its limit by design (2026-10-14 evening)
             assert low + 8.0 <= deg <= high - 8.0, (name, joint)
     lo, hi = space.pan_deg
     assert limits["shoulder_pan"][0] < lo < hi < limits["shoulder_pan"][1]
@@ -205,7 +210,8 @@ def test_every_primitive_plans_within_the_caps_from_rest_and_from_every_cell() -
                 assert not isinstance(planned, str), (where, planned)
                 assert planned.stretch <= 1.0 + 1e-6, (where, planned.stretch)
                 if base is None:
-                    assert planned.trajectory.knots[-1].t_s <= ARM_S + 1e-6, where
+                    budget = LONG_WAY_HOME.get((name, arg), ARM_S)
+                    assert planned.trajectory.knots[-1].t_s <= budget + 1e-6, where
     assert seen == set(PRIMITIVES)
 
 
@@ -223,7 +229,8 @@ def test_a_way_to_the_middle_stop_and_me_goes_through_home_the_others_straight()
 
     assert home in lifts("count", "1")  # the middle: through home
     assert home not in lifts("count", "2")  # the outer side: straight
-    assert home in lifts("stop", None) and home in lifts("point", "me", 2)
+    assert home not in lifts("stop", None, 0)  # the spread jaw on up: straight from rest
+    assert home in lifts("stop", None, 1) and home in lifts("point", "me", 2)
     assert home in lifts("sympathy", None, 0, _pinned(BOOK, "hi"))  # the feeling's tucked too
     assert home not in lifts("offer", None)  # a plain pose: straight
     # after its hold the middle goes back home: the board's own way to rest from there would
@@ -282,7 +289,7 @@ def test_a_place_gets_the_shut_hand_and_a_glance_past_the_pans_the_edge_behind_n
     performance = renderer.render("point", EVERYTHING, 5, cue("point", "принтер"))
     arm, head = arm_of(performance), head_of(performance)
     assert arm is not None and head is not None
-    assert at_stroke(arm, "gripper") == 0.0  # the finger
+    assert at_stroke(arm, "gripper") == SHUT["gripper"]  # the finger, the jaw shut to its limit
     assert pan_of(performance) == pytest.approx(-27.0 + 30.0, abs=3.0)  # 3 m: little parallax
     assert min(track(head, "pan_deg")[1]) == pytest.approx(-25.0)  # 40 deg off: the most
     assert not reached

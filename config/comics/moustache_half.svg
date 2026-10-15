@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line under the moustache</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 111.38 85 C 143.79 85 176.21 85 208.62 85 C 211.65 85 214.37 87.38 213.79 90.36 C 210.59 106.85 184.41 119.56 160 119.56 C 135.59 119.56 109.41 106.85 106.21 90.36 C 105.63 87.38 108.35 85 111.38 85 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 135.54 101.86 C 151.38 99.66 168.62 99.66 184.46 101.86 C 191.44 102.83 193.06 112.43 186.43 114.84 C 178.2 117.84 168.98 119.56 160 119.56 C 151.02 119.56 141.8 117.84 133.57 114.84 C 126.94 112.43 128.56 102.83 135.54 101.86 Z" fill="#DE5B55"/>
+  <path class="line" d="M 111.38 85 C 143.79 85 176.21 85 208.62 85 C 211.65 85 214.37 87.38 213.79 90.36 C 210.59 106.85 184.41 119.56 160 119.56 C 135.59 119.56 109.41 106.85 106.21 90.36 C 105.63 87.38 108.35 85 111.38 85 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 98 85 C 94.45 85 91.09 86.57 88.81 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 222 85 C 225.55 85 228.91 86.57 231.19 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="moustache" d="M 138.04 58 C 152.68 58 167.32 58 181.96 58 C 184.74 58 187 60.26 187 63.04 C 187 67.01 187 70.99 187 74.96 C 187 77.74 184.74 80 181.96 80 C 167.32 80 152.68 80 138.04 80 C 135.26 80 133 77.74 133 74.96 C 133 70.99 133 67.01 133 63.04 C 133 60.26 135.26 58 138.04 58 Z" fill="#1D1D1B"/>
+</svg>

@@ -33,7 +33,6 @@ convention, the same signs ``pepin.mounts.rotation_from_rpy`` composes.
 
 from __future__ import annotations
 
-import json
 import math
 import threading
 from bisect import bisect_left
@@ -45,6 +44,7 @@ from typing import Protocol
 import numpy as np
 
 from pepin.depth import UP_LEVEL, Array
+from pepin.overlay import read_json
 
 GRAVITY = 9.81
 LEAN_TAU_S = 10.0  # the accelerometer's up vector, low-passed: a push or a bump is not a slope
@@ -437,7 +437,7 @@ class LevelPose:
         """config/imu.json's ``level`` block as a :class:`LevelPose`, or ``None`` when the file
         carries none (nothing is subtracted, which is what every run did before it was
         measured). Raises ``ValueError`` for a block that is there but malformed."""
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         block = data.get("level")
         if block is None:
             return None

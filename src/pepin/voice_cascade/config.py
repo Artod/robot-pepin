@@ -17,6 +17,8 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
+
 CONFIG_FILE = "voice_cascade.json"
 WAKE_MODES = ("name", "always")
 THINKING_MODES = ("disabled", "between_tools", "adaptive")
@@ -24,6 +26,9 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 PROVIDERS = ("anthropic", "gemini", "openai")  # openai: any OpenAI-compatible endpoint (Groq)
 TOOL_CHOICES = ("auto", "required")
 THINKING_LEVELS = ("minimal", "low", "medium", "high")  # Gemini's
+# Anthropic's server-side web search: the results as they come, or filtered by code the model
+# writes first (dynamic filtering: Opus and Sonnet, not Haiku)
+WEB_SEARCH_TOOLS = ("web_search_20250305", "web_search_20260209")
 VOICE_ENGINES = ("qwen3", "gemini", "say")  # gemini: a cloud voice with a local fallback
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
@@ -49,12 +54,14 @@ COREML_UNITS = ("ane", "all", "gpu", "cpu")  # pepin.voice_live.whisper_cpp
 
 @dataclass(frozen=True)
 class ModelPrice:
-    """USD per million tokens: fresh input, output, cache reads and 5-minute cache writes."""
+    """USD per million tokens: fresh input, output, cache reads and 5-minute cache writes; and
+    USD per thousand server-side web searches."""
 
     input: float
     output: float
     cache_read: float
     cache_write: float
+    web_search_per_1000: float = 0.0
 
 
 DEFAULT_PRICES = {
@@ -124,6 +131,11 @@ class BrainConfig:
     speculative: bool = False
     speculative_min_words: int = 2  # fewer words never ask early ("да" alone)
     first_sentence_words: int = 0  # the persona's first-sentence limit (0: the persona's own)
+    # Anthropic's server-side web search (the other providers ignore it)
+    web_search: bool = True
+    web_search_tool: str = "web_search_20250305"  # one of WEB_SEARCH_TOOLS
+    web_search_max_uses: int = 1  # searches one API call may make
+    web_search_allowed_domains: tuple[str, ...] = ()  # empty: any site
 
 
 @dataclass(frozen=True)
@@ -364,6 +376,7 @@ class CascadeConfig:
     max_sessions_per_hour: int = 60
     usd_to_cad: float = 1.38
     prices: Mapping[str, ModelPrice] = field(default_factory=lambda: dict(DEFAULT_PRICES))
+    web_search_per_1000: float = 10.0  # USD per thousand Anthropic web searches
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CascadeConfig:
@@ -475,6 +488,11 @@ class CascadeConfig:
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
             prices={**DEFAULT_PRICES, **prices_of(money.get("prices_usd_per_mtok", {}))},
+            web_search_per_1000=float(
+                money.get("prices_usd_per_mtok", {}).get(
+                    "web_search_per_1000", d.web_search_per_1000
+                )
+            ),
         )
         config.check()
         return config
@@ -487,7 +505,7 @@ class CascadeConfig:
             from pepin.deployment import config_file
 
             path = config_file(CONFIG_FILE)
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         return cls.from_dict(apply_overrides(data, overrides))
 
     def check(self) -> None:
@@ -507,6 +525,11 @@ class CascadeConfig:
             raise ValueError(f"brain.thinking: one of {', '.join(THINKING_MODES)} or null")
         if b.effort is not None and b.effort not in EFFORTS:
             raise ValueError(f"brain.effort: one of {', '.join(EFFORTS)} or null")
+        if b.web_search_tool not in WEB_SEARCH_TOOLS or b.web_search_max_uses < 1:
+            raise ValueError(
+                f"brain.web_search_tool: one of {', '.join(WEB_SEARCH_TOOLS)};"
+                " brain.web_search_max_uses >= 1"
+            )
         if b.max_tokens < 16 or b.max_tool_rounds < 0:
             raise ValueError("brain.max_tokens >= 16 and brain.max_tool_rounds >= 0")
         if b.speculative_min_words < 1 or b.first_sentence_words < 0:
@@ -662,8 +685,8 @@ class CascadeConfig:
 
     @property
     def price(self) -> ModelPrice:
-        """The brain model's prices."""
-        return self.prices[self.brain.model]
+        """The brain model's prices, its web searches' included."""
+        return replace(self.prices[self.brain.model], web_search_per_1000=self.web_search_per_1000)
 
     @property
     def daily_budget_usd(self) -> float:
@@ -788,7 +811,20 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         speculative=bool(merged.get("speculative", d.speculative)),
         speculative_min_words=int(merged.get("speculative_min_words", d.speculative_min_words)),
         first_sentence_words=int(merged.get("first_sentence_words", d.first_sentence_words)),
+        web_search=bool(merged.get("web_search", d.web_search)),
+        web_search_tool=str(merged.get("web_search_tool", d.web_search_tool)),
+        web_search_max_uses=int(merged.get("web_search_max_uses", d.web_search_max_uses)),
+        web_search_allowed_domains=domains(merged.get("web_search_allowed_domains")),
     )
+
+
+def domains(value: Any) -> tuple[str, ...]:
+    """A list of sites (a lone name for one; null or empty for none)."""
+    if not value:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(str(name) for name in value)
 
 
 def voice_preset(section: Mapping[str, Any], name: str) -> str:
@@ -845,8 +881,8 @@ def voice_config(
 
 
 def prices_of(table: Mapping[str, Any]) -> dict[str, ModelPrice]:
-    """``{model: {input, output, cache_read, cache_write}}`` as :class:`ModelPrice` (notes
-    skipped)."""
+    """``{model: {input, output, cache_read, cache_write}}`` as :class:`ModelPrice` (notes and
+    the web search's price, not rows, skipped)."""
     return {
         model: ModelPrice(
             float(row["input"]),

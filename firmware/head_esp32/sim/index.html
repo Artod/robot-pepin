@@ -87,6 +87,7 @@
         <span><b id="st-fps">0</b> fps</span>
       </div>
       <label><input type="checkbox" id="smooth"> smooth pixels (the panel itself is not)</label>
+      <label>style <select id="style"></select> (the head server's 'C' config carries it; <code>config/face.json</code> <code>style</code>)</label>
     </section>
     <section>
       <h2>Info screen ('T', the show tool)</h2>
@@ -148,6 +149,15 @@ mode: idle</textarea>
 </main>
 <script src="face_table.js"></script>
 <script src="face.js"></script>
+<script>
+  // the shape engine's tables, one per shapes style of config/face.json (<style>_table.js),
+  // loaded in the table's order before their index
+  for (const s of FACE_TABLE.styles) {
+    if (s.engine === "shapes") document.write(`<script src="${s.name}_table.js"><\/script>`);
+  }
+</script>
+<script src="shape_tables.js"></script>
+<script src="anime.js"></script>
 <script src="sim.js"></script>
 </body>
 </html>

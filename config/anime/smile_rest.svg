@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the wide smile arc</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 99 77 C 135.6 98.33 184.4 98.33 221 77" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dazed lens with the tongue hanging limp out of it, a drop of drool</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 122.71 80.85 C 141.5 62.37 174.63 59.47 196.34 74.41 C 199.69 76.71 200.39 81.34 197.95 84.59 C 179.53 109.14 145.3 112.14 122.89 91.15 C 119.92 88.38 119.81 83.7 122.71 80.85 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 165.24 101.27 C 170.59 99.32 175.95 97.38 181.31 95.43 C 184.23 94.37 187.59 95.36 189.01 98.13 C 192.76 105.47 193.86 113.6 195.81 120.65 C 198.47 127.25 195.27 134.75 188.68 137.41 C 182.08 140.07 174.57 136.88 171.91 130.28 C 168.47 123.92 163.62 116.7 161.18 108.67 C 160.23 105.55 162.17 102.38 165.24 101.27 Z" fill="#DE5B55"/>
+  <path class="line" d="M 162.77 104.87 C 148.84 106.33 134.33 101.86 122.89 91.15 C 119.92 88.38 119.81 83.7 122.71 80.85 C 141.5 62.37 174.63 59.47 196.34 74.41 C 199.69 76.71 200.39 81.34 197.95 84.59 C 194.11 89.7 189.59 93.88 184.63 97.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 189.01 98.13 C 192.76 105.47 193.86 113.6 195.81 120.65 C 198.47 127.25 195.27 134.75 188.68 137.41 C 182.08 140.07 174.57 136.88 171.91 130.28 C 168.47 123.92 163.62 116.7 161.18 108.67" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <circle class="drool" cx="129.72" cy="94.83" r="3.5" fill="#C1D5FA"/>
+</svg>

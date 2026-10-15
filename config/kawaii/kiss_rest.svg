@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the 3</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 151.88 53.62 C 153.99 50.58 158.42 49.23 162.39 50.44 C 166.36 51.64 168.72 55.04 167.98 58.51 C 167.25 61.97 163.64 64.5 159.42 64.5 C 155.77 64.5 152.82 66.96 152.82 70 C 152.82 73.04 155.77 75.5 159.42 75.5 C 163.64 75.5 167.25 78.03 167.98 81.49 C 168.72 84.96 166.36 88.36 162.39 89.56 C 158.42 90.77 153.99 89.42 151.88 86.38" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

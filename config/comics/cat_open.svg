@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the cat's w, its ends curling up</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 117.37 84.28 C 132.25 91.98 146.44 91.88 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 173.56 91.88 187.75 91.98 202.63 84.28 C 205.88 82.6 209.94 84.8 209.59 88.44 C 206.67 118.6 188.36 142 160 142 C 131.64 142 113.33 118.6 110.41 88.44 C 110.06 84.8 114.12 82.6 117.37 84.28 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 117.37 84.28 C 132.25 91.98 146.44 91.88 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 173.56 91.88 187.75 91.98 202.63 84.28 C 205.88 82.6 209.94 84.8 209.59 88.44 C 181.82 105.72 138.18 105.72 110.41 88.44 C 110.06 84.8 114.12 82.6 117.37 84.28 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 85 C 160.2 89.8 160.4 94.6 160.6 99.4" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 127.27 115.52 C 147.7 107.52 172.3 107.52 192.73 115.52 C 196.69 117.07 198.1 122.02 195.38 125.3 C 186.82 135.65 174.77 142 160 142 C 145.23 142 133.18 135.65 124.62 125.3 C 121.9 122.02 123.31 117.07 127.27 115.52 Z" fill="#DE5B55"/>
+  <path class="line" d="M 117.37 84.28 C 132.25 91.98 146.44 91.88 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 173.56 91.88 187.75 91.98 202.63 84.28 C 205.88 82.6 209.94 84.8 209.59 88.44 C 206.67 118.6 188.36 142 160 142 C 131.64 142 113.33 118.6 110.41 88.44 C 110.06 84.8 114.12 82.6 117.37 84.28 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 103.41 75.31 C 100.48 73.3 98.6 70.1 98.26 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 216.59 75.31 C 219.52 73.3 221.4 70.1 221.74 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

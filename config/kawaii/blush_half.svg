@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small laugh between the cheeks (the cheeks are the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 153.9 58.5 C 157.97 58.5 162.03 58.5 166.1 58.5 C 173.23 58.5 179.41 65.99 173.84 70.43 C 170.24 73.29 165.35 75.06 160 75.06 C 154.65 75.06 149.76 73.29 146.16 70.43 C 140.59 65.99 146.77 58.5 153.9 58.5 Z" fill="#DD7487"/>
+  <path class="line" d="M 153.9 58.5 C 157.97 58.5 162.03 58.5 166.1 58.5 C 173.23 58.5 179.41 65.99 173.84 70.43 C 170.24 73.29 165.35 75.06 160 75.06 C 154.65 75.06 149.76 73.29 146.16 70.43 C 140.59 65.99 146.77 58.5 153.9 58.5 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

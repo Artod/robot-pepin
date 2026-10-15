@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the evil grin, the band with two fangs, the tongue, the ticks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 77.26 47.26 C 127.95 73.34 192.3 73.46 242.95 50.65 C 246.17 49.2 249.94 51.57 249.47 55.07 C 244.34 93.25 202.17 123.28 160 123.28 C 117.85 123.28 75.7 91.7 70.53 51.54 C 70.06 47.94 74.03 45.6 77.26 47.26 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 77.26 47.26 C 127.95 73.34 192.3 73.46 242.95 50.65 C 246.17 49.2 249.94 51.57 249.47 55.07 C 199.37 101.28 120.63 101.28 70.53 51.54 C 70.06 47.94 74.03 45.6 77.26 47.26 Z" fill="#FFFFFF"/>
+  <path class="tongue" d="M 100.93 89.38 C 137.97 77.83 183.4 77.82 220.45 89.36 C 225.23 90.84 226.61 97 222.77 100.21 C 205.8 114.43 182.9 123.28 160 123.28 C 137.71 123.28 115.42 114.45 98.6 100.19 C 94.8 96.97 96.18 90.86 100.93 89.38 Z" fill="#DE5B55"/>
+  <path class="line" d="M 77.26 47.26 C 127.95 73.34 192.3 73.46 242.95 50.65 C 246.17 49.2 249.94 51.57 249.47 55.07 C 244.34 93.25 202.17 123.28 160 123.28 C 117.85 123.28 75.7 91.7 70.53 51.54 C 70.06 47.94 74.03 45.6 77.26 47.26 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="fang" d="M 109.5 79.58 C 113.83 79.58 118.16 79.58 122.5 79.58 C 120.33 86.75 118.16 93.91 116 101.08 C 113.83 93.91 111.66 86.75 109.5 79.58 Z" fill="#FFFFFF"/>
+  <path class="fang" d="M 197.5 80.88 C 201.83 80.88 206.16 80.88 210.5 80.88 C 208.33 88.04 206.16 95.21 204 102.38 C 201.83 95.21 199.66 88.04 197.5 80.88 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 70.15 43.6 C 66.99 41.97 64.72 39.04 63.93 35.58" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 250.24 47.37 C 253.48 45.91 255.9 43.1 256.87 39.68" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

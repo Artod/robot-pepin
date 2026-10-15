@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the bracket pout: a short level line, a bracket at each end, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 126 85 C 146.4 87.67 173.6 87.67 194 85" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 198.1 94.9 C 192.63 89.43 192.63 80.57 198.1 75.1" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bracket"/>
+  <path class="line" d="M 121.9 75.1 C 127.37 80.57 127.37 89.43 121.9 94.9" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bracket"/>
+</svg>

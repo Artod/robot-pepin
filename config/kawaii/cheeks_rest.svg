@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the cheek pair, the overlay drawn over any look at its cheeks</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="cheek" d="M 105 64 C 105 60.41 110.82 57.5 118 57.5 C 125.18 57.5 131 60.41 131 64 C 131 67.59 125.18 70.5 118 70.5 C 110.82 70.5 105 67.59 105 64 Z" fill="#EAB1B7"/>
+  <path class="cheek" d="M 189 64 C 189 60.41 194.82 57.5 202 57.5 C 209.18 57.5 215 60.41 215 64 C 215 67.59 209.18 70.5 202 70.5 C 194.82 70.5 189 67.59 189 64 Z" fill="#EAB1B7"/>
+</svg>

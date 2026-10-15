@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the hooked line, its corners a touch up, the hooks up</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 102.82 80.93 C 103.18 83.62 105.31 85.73 108 86.07 C 139.2 90.07 180.8 90.07 212 86.07 C 214.69 85.73 216.82 83.62 217.18 80.93" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed frown, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 130.47 87.7 C 148.52 78.77 171.48 78.77 189.53 87.7 C 191.07 88.47 192.03 90.07 191.88 91.78 C 190.55 106.51 178.68 118.12 160 118.12 C 141.32 118.12 129.45 106.51 128.12 91.78 C 127.97 90.07 128.93 88.47 130.47 87.7 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 130.47 87.7 C 148.52 78.77 171.48 78.77 189.53 87.7 C 191.07 88.47 192.03 90.07 191.88 91.78 C 174.03 97.41 145.97 97.41 128.12 91.78 C 127.97 90.07 128.93 88.47 130.47 87.7 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 82 C 160.2 86 160.4 90 160.6 94" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 141.8 99.64 C 153.48 96.56 166.52 96.56 178.2 99.64 C 183.62 101.07 185.76 107.93 181.34 111.39 C 175.96 115.59 168.72 118.12 160 118.12 C 151.28 118.12 144.04 115.59 138.66 111.39 C 134.24 107.93 136.38 101.07 141.8 99.64 Z" fill="#DE5B55"/>
+  <path class="line" d="M 130.47 87.7 C 148.52 78.77 171.48 78.77 189.53 87.7 C 191.07 88.47 192.03 90.07 191.88 91.78 C 190.55 106.51 178.68 118.12 160 118.12 C 141.32 118.12 129.45 106.51 128.12 91.78 C 127.97 90.07 128.93 88.47 130.47 87.7 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 121.01 92.89 C 117.91 94.61 115.73 97.61 115.05 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 198.99 92.89 C 202.09 94.61 204.27 97.61 204.95 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

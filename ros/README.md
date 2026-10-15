@@ -825,8 +825,10 @@ into the reply's first sound when it comes sooner); at the person's pause after 
 `listen_nod` (5 s apart, never while their words so far, when the ears read them in time, or else
 their last utterance were a question): its nod with `moments.listener_nod_p` (0.6), the cart's 0.5
 cm rock with `moments.nod_rock_p` (0.3); after a statement `ack_nod`, its nod with
-`moments.ack_nod_p` (0.3), its rock with `nod_rock_p`; hello and bye played in the brain's wait from
-the person's own words (after the body's turn toward them; the book's `moments` name them); the
+`moments.ack_nod_p` (0.3), its rock with `nod_rock_p` (neither the nod nor the glance for a hello or
+a bye); hello and bye are the brain's own `{greeting}` and `{farewell}` on its word, never the
+engine's (2026-10-14), their waves only at a person seen within 3 s (a face or a body: the book's
+`needs: {"person": "seen"}`; else the floor, a smile and a nod, and an `unseen` row); the
 brain's `{laugh}` is its composition whole (the grin, the head thrown back, the gripper's click, the
 cart's rock or sway); a smile at the first face (the face's one writer: the speaker gaze's own smile
 is off, `speaker.smile` null). Every discrete head move keeps `moments.head_gap_s` (1 s) from the
@@ -855,10 +857,15 @@ the text (its p10, so a stroke errs early), its leading silence of 0.16 s, the c
 of the sentence at 0.09 s a character until the conversation's own sentences give their median,
 then the speaker's `audio_lag_s`; exact from the sentence's first fed chunk on. The gesture is
 fitted to the time left (a `ladder` line): as written; with the arm's rise compressed to 0.9 of
-its caps; a smaller version; or its head-and-face floor (each composition has one). Each clip
+its caps; for hello and bye (`long`) `in the utterance`, the arm sent as soon as it is free and
+its stroke anywhere in the reply's sure speech (a `{greeting}` on the first word still waves,
+the hand up a little after the word); a smaller version; or its head-and-face floor (each
+composition has one). Each clip
 then goes at the last moment that lands its stroke `stroke_bias_s` (0.05 s) before the vowel (a
 `send` line). A word's stroke is never more than `stroke_late_s` (0.15 s) late, a feeling's
-never more than `late_s` (0.5 s) nor after the reply's speech, and none lands in the pause after
+never more than `late_s` (0.5 s; hello and bye in the utterance: any later), its arm or wheels
+never running more than `overrun_s` past the speech after their stroke, and none lands in the
+pause after
 a sentence; one that cannot is left out and the rest of its gesture keeps its time. The wheels
 never bind to a word: a mark's rock or sway is fitted as a feeling's (its stroke within `late_s`
 of the word, inside the speech) and left out alone when it has no time or would run past what
@@ -867,7 +874,9 @@ gestures within `units.hold_s` (2.5 s) share one raise: the first holds its last
 board's `then: hold`; with nothing after it the board rests the arm by itself) and the second
 starts from there (a third from the second's: one unit is at most three strokes). An arm motion
 longer than `short_s` (1 s) plays only when the speech after its stroke covers what follows the
-stroke, up to 0.5 s past it (hello and bye 1 s; the fed audio as it is, 0.7 of a forecast). A
+stroke, up to `timing.overrun_s` (1.5 s) past it, every gesture alike (the fed audio as it is, 0.7
+of a forecast; 2026-10-14, Artem: a lone «{greeting} Привет!» waves; 0.5 s, hello and bye 1 s
+before). A
 marker on a reply's first words, seen in the token stream (read with the book's arguments and
 spellings), may send the arm to `ready` and hold it there first: a preparation, never a stroke.
 Where the arm is when a mark is rendered (at rest, or up in a unit: `arm_at` in the
@@ -882,10 +891,12 @@ and its fade); a barge-in's record of what the person heard reads the same clock
 `pepin.expression.places`; `config/animation.json` `space` and `aliases`; it rides `gestures`).
 The brain marks the word that carries the meaning, inside the sentence (the persona's examples
 stand at least 11 characters in, where the arm has its lead from rest): `{!}` this word (a head
-nod; a wrist flick inside an arm unit), `{point:you|me|NAME}`, `{arc:up|down|out|in|side}`,
-`{size:big|small}`, `{weigh}`, `{count:1|2|3}`, `{draw:round|line|wave}`, `{stop}`, `{offer}`.
+nod; a wrist flick inside an arm unit), `{point:you|me|up|far|down|back|right|NAME}`,
+`{arc:up|down|out|in|side}`, `{size:big|small}`, `{weigh}`, `{count:1|2|3}`,
+`{draw:round|line|wave}`, `{stop}`, `{offer}`.
 Other spellings are the book's `aliases` (`{beat}` and `{emphasis}` are `{!}`, `{point:i}` is
-`{point:me}`, `{size:huge}` is `{size:big}`); a NAME is any short name in any script, read
+`{point:me}`, `{size:huge}` is `{size:big}`, `{point:sky}` is `{point:up}`, `{point:upward}` is
+`{point:far}`); a NAME is any short name in any script, read
 lower-case (`{point:План А}` is `план а`). A mark that names nothing (`{nod}`, `{wave:hi}`,
 `{arc:sideways}`, `{point}` without its argument) is dropped and printed, never taken for a voice
 manner. The same mark with the same argument twice in one reply plays once (`repeat`); pointing
@@ -898,10 +909,13 @@ left: three columns (the middle, y -0.06 m; the right, -0.13; the outer side, -0
 to end), three rows (0.97, 1.03, 1.12 m: the high ones 7-22 % in the camera's level view, brief
 strokes only), far and, in the right column, near; authored by FK with the hand at least 4 cm
 from the body and from the head's whole reach. A way from rest (or from a held cell) to the
-middle column, to `stop` and to `tucked` goes through home (`ready`): straight, the hand would
-pass the speaker box at 1.1 cm, and the ways between `stop`, `tucked` and the sweep's top pass
-the head; a gesture that ends in the middle goes back home after its hold (the board's own
-straight way to rest from there would pass the speaker box): every primitive's way, from rest
+middle column, to `stop`, to `tucked` and to `down_near` goes through home (`ready`): straight,
+the hand would pass the speaker box at 1.1 cm (drag along the rim at 0.4 on its way down), and
+the ways between `stop`, `tucked` and the sweep's top pass the head; a gesture whose last arm
+step ends in the middle goes back home after its hold (the board's own straight way to rest from
+there would pass the speaker box), one that ends on `down` goes home too (`space.home_after`:
+straight to rest the hand would slide down the cart's front), and an earlier arm step hands its
+pose to the next as it is (`up_low`, then `up`): every primitive's way, from rest
 and from every cell, keeps the hand 1.7 cm from the body. `{point:you}` turns the open hand (palm up) at the person engaged by the attention
 view's bearing and distance; `{point:printer}`, a place of the goal server's book (matched by
 case, spaces and transliteration: `принтер` is `printer`), turns the shut hand toward it from
@@ -930,6 +944,66 @@ gesture tool's engine door and `gesture.py play` read `point:printer`, `count:se
 uv run python scripts/gesture.py play point --dry-run    # a tool's ask: the first argument (you)
 uv run python scripts/gesture.py play point:printer --dry-run   # the goal server's place, read once
 grep -h '"event": "catchment"\|"event": "repeat"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
+```
+
+**Nesting, single moves and arguments** (`pepin.expression.book`, `pepin.expression.render`,
+`pepin.expression.markers`; 2026-10-14). A composition's step may name another composition
+instead of an atom (`{"composition": "surprise", "at_s": 0.4}`; at most three deep, no cycle,
+both checked at load): the child draws its own variant by the same scene rules (its floor when
+nothing else fits) and its own parameters from a seed derived from the parent's seed and the
+step's index, so a logged seed replays the whole tree; its steps land at the parent step's
+`at_s` plus their own and merge into the parts' clips like any step's; the caps and the cooldown
+count the parent alone, and the `performance` row lists every nested composition with its
+variant. An atom is one cycle with its parameter ranges: `repeats`, `hold_s` and `loop` are its
+steps' (the book's numbers moved there unchanged: every composition renders the same motion for
+the same seed). Every atom that renders without a choice (no pose or face to name, no place of
+the gesture space to find) gets an AUTO-WRAPPER, a one-step composition of its name the brain
+may mark (`{head_nod}`; an arm atom that moves more than the gripper plays only on a held pose),
+counted under `caps.per_part` alone unless `caps.atoms_counted`; the idle layer plays
+compositions too (the breath's loop is its step's). The brain's list of marks is generated from
+the book when the persona loads, one line per mark (`pepin.expression.book.mark_lines`, about
+400 tokens), in place of a hand-kept list. A mark takes a list of arguments: `{snap:2,fast}`
+(the composition's `args` map: a word or `number` to the step parameters it sets),
+`{head_nod:6,0.4}` (an auto-wrapper: one number is its repeats, several fill its atom's
+parameters in order), `{head_nod:amp_deg=6}`; an argument the mark does not take is logged
+(`ignored`) and the rest of the mark plays. A variant may need the face's expression or
+attention's phase (`{"face": "grin"}`, `{"attention": "track"}`: the engine fills both into
+every rendering's scene). `{snap}` closes the gripper to the book's shut and opens it
+again to the held pose's opening (the planner moves the clip's `@from` keys onto the pose a
+unit holds): on its word from a held pose, else after a raise to `ready`, else a glance. The
+shut is the jaw's limit, -10 deg (`config/arm.json`; the evening of 2026-10-14: the jaw pressed
+shut by hand reads -12, a snap to 0 left the tip a centimetre open), for the snap, the pointing
+finger and every shut pose alike; a 24.5 deg close from `raised` takes 0.26 s at the caps, so a
+snap's period is 0.75 s at the least (0.6 before), and the breath leaves the jaw alone.
+
+**The shaped poses** (the evening of 2026-10-14: Artem placed the limp arm by hand, thirteen
+captures, `scratch/arm_poses/capture.py`; the book's `poses` name each by its id). Far
+(the arm straight out and up at 45 deg: `{point:far}`), the heart (the hand on the chest
+before the mast: `{point:me}`), the
+finger straight up beside the head (`{point:up}`: folded up to `up_low`, the jab to `up` on the
+word; with the jaw spread 70 deg the stop's new pose), down ahead of the cart (`{point:down}`:
+through home to `down_near`, the jab to `down`, home after: 2.3 s of arm, the one primitive over
+the others' 2 s), behind the robot
+(`{point:back}`: the forearm up over the right shoulder to `back_near`, the jab to `back`), out
+to the robot's right (`{point:right}`: `right_out`, the jab to `right_up`; the right-side limit,
+the upper arm 1.9 cm from the mast). Each way was judged in the box model from rest and from
+every pose a unit may hold (`tests/unit/test_expression_poses.py`: the hand and the arm 1.5 cm
+from the body, the head's whole reach, the board's way back to rest): far's straight way
+from rest is the tightest there is (the tip in a 45 cm line); the heart and the salute go
+through home both ways. Two captures stood past the pan servo's calibrated range (-86.9 deg):
+the heart by 3 deg and the salute (the hand at the temple) by 36; the book holds both 3 deg
+inside the limit, the salute's hand 4 cm forward of Artem's, just ahead of the head's right
+eye, and the model has it touching the head at pan 0 on its way, clear only with the head
+turned left 20-50 deg: `salute` and `crazy` (the same hand, the wrist rolled 26-30 deg there and
+back: крутит у виска) are the engine's own (`callable` false, `scripts/gesture.py play salute
+--dry-run`) until Artem has seen them on the robot or the pan's range is widened. Pointing back
+passes the head's pan sweep by nature: clear while the head faces ahead or left (pans -10..+60),
+touched when it is turned 20-30 deg to the right, so its glance goes over the left shoulder; a
+variant's need of the head's pan is a mechanism not built yet.
+
+```bash
+uv run python scripts/gesture.py play snap:2,fast --dry-run      # a mark and its settings
+grep -h '"nested"\|"kind": "ignored"' data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl | tail
 ```
 
 **The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms

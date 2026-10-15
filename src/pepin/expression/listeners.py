@@ -64,19 +64,18 @@ Between turns and while the person speaks (``moments``):
   held until ``think_back_s`` into the reply as this conversation's waits predict it, or
   ended by the engine (:meth:`pepin.expression.animator.GestureEngine.release`) that long into
   the reply's first sound when the reply comes sooner (the face ``thinking`` half the time);
-  never when the audio came first;
+  never when the audio came first, never for a hello or a bye;
 * the LISTENER NOD on the ears' ``listener_pause``: after ``listener_min_speech_s`` of their
   speech, ``listener_gap_s`` apart, never while their last words were a question (their words
   so far when the pause brings them, else their last utterance): ``listen_nod``, its nod with
   ``listener_nod_p``, the cart's 0.5 cm rock with ``nod_rock_p``;
-* the ACKNOWLEDGEMENT: a statement of ``ack_min_s`` or more (not a question: ``question``) gets
-  ``ack_nod`` ``predict_delay_s`` after its close, once a turn: its nod with ``ack_nod_p``, the
-  cart's 0.5 cm rock with ``nod_rock_p``;
-* GREETING and FAREWELL DUE: the person's words (``greeting``; the voice loop's goodbye rule)
-  play the book's ``greeting`` or ``farewell`` (or what its ``moments`` map ``greeting_due``,
-  ``farewell_due`` to) ``predict_delay_s`` after the close, in the brain's wait, under the
-  engine's caps; while the body turns toward the person it waits for the turn's end; a later
-  marker of it is absorbed by its cooldown;
+* the ACKNOWLEDGEMENT: a statement of ``ack_min_s`` or more (not a question: ``question``; not
+  a hello or a bye: ``greeting``, the voice loop's goodbye rule) gets ``ack_nod``
+  ``predict_delay_s`` after its close, once a turn: its nod with ``ack_nod_p``, the cart's
+  0.5 cm rock with ``nod_rock_p``;
+* no HELLO or BYE of the engine's own: the person's hello or bye only keeps the nod and the
+  glance off its wait; the wave is the brain's ``{greeting}`` or ``{farewell}`` on its own word
+  (Artem 2026-10-14: the brain decides, as it does every other gesture);
 * FACE FOUND: the attention engine's first clear face of the conversation brings a smile;
 * the LISTENING SHIFT (``listen_shift_deg`` 0: off): a still shift of the head every
   ``listen_shift_s`` while the person speaks;
@@ -112,13 +111,11 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from pepin.expression.animation import Clip, Event, Layer, PartName, Scene, Track
-from pepin.expression.book import span
+from pepin.expression.animation import Clip, Event, Layer, PartName, Scene, Track, Variant
+from pepin.expression.book import ARG, span
 from pepin.expression.conversation import (
     ACKNOWLEDGED,
     FACE_FOUND,
-    FAREWELL_DUE,
-    GREETING_DUE,
     LISTENER_PAUSE,
     LONG_REPLY,
     QUESTION_END,
@@ -145,6 +142,8 @@ from pepin.expression.schedule import (
 )
 from pepin.expression.speaker import Attention
 from pepin.gaze import GazeSettings
+from pepin.overlay import read_json
+from pepin.sounds import DANCE, MusicKnobs, Playing, dance_style, load_music_knobs
 from pepin.voice_live.wake import is_goodbye
 
 if TYPE_CHECKING:
@@ -166,10 +165,6 @@ WAITS_KEPT = 10  # the conversation's last waits the glance's hold is predicted 
 THINK_MAX_S = 3.5  # a thinking glance never holds longer
 THINK_FACE_P = 0.5  # the thinking face with the glance
 PAUSE_GAP_S = 0.35  # two nuclei this far apart have a pause between them
-DEFER_MAX_S = 3.0  # a greeting waits for the body's turn at most this long
-GREET_SEEN_MAX_S = 6.0  # a greeting waits for the person to be SEEN at most this long
-GREET_SEEN_FRESH_S = 3.0  # seen this recently counts (a track's sighting may be minutes old)
-DEFER_STEP_S = 0.1
 POLL_S = 0.2  # the head's holder and attention read this often in a conversation
 IDLE_WAIT_S = 1.0  # the thread's longest sleep with nothing due
 DECIDE_MARGIN_S = 0.05  # a causal beat is decided this long before its lead runs out
@@ -190,9 +185,6 @@ LISTEN_NOD, ACK_NOD = "listen_nod", "ack_nod"  # the nods of the person's pause 
 ARM_SWAY = "arm_sway"  # the held arm's breath, the book's older way: the wrist alone
 ARM_BREATH = "arm_breath"  # the held arm's breath in every joint (the book's breath layer)
 LAUGH_SOUND = "laugh_sound"  # the moment of the voice's laughing
-# The composition a moment due from the person's words plays, unless config/animation.json's
-# moments map it to another
-DUE = {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
 MINE = frozenset(
     (WEAK, STRONG, PEAK, LAUGHING, LISTEN_NOD, ACK_NOD, ARM_SWAY, ARM_BREATH, "melody",
      "question", "think_glance", "aversion", "smile", "listen_shift", POSTURE)
@@ -201,7 +193,7 @@ QUESTION = (  # a question: its mark, or a question word first
     r"\?|^\W*(?:(?:а|и|ну)\W+)?"  # noqa: RUF001
     r"(?:кто|где|когда|почему|зачем|куда|откуда|сколько|разве|неужели)\b"
 )
-GREETING = (  # a greeting among the person's words
+GREETING = (  # a greeting among the person's words (no nod, no glance in its wait)
     r"\b(?:привет\w*|здравствуй\w*|добр(?:ое|ый) (?:утро|день|вечер)|салют|hello|hi|hey)\b"  # noqa: RUF001
 )
 
@@ -354,13 +346,11 @@ def alive_knobs(data: Mapping[str, Any]) -> AliveKnobs:
 
 def load_alive_knobs(path: str | Path | None = None) -> AliveKnobs:
     """config/expression.json (wherever this library runs, or ``path``)."""
-    import json
-
     if path is None:
         from pepin.deployment import config_file
 
         path = config_file("expression.json")
-    return alive_knobs(json.loads(Path(path).read_text()))
+    return alive_knobs(read_json(path))
 
 
 def head_clip(
@@ -688,7 +678,7 @@ class Alive:
         self._close_s: float | None = None
         self._awaiting = False
         self._asked = False
-        self._greeted = -1
+        self._greeted = -1  # the close whose words were a hello or a bye
         self._slow_tool = -1
         self._acked = -1
         self._last_dir: str | None = None
@@ -706,7 +696,7 @@ class Alive:
         self._quiet: str | None = None
         self._finishing = False
         self._shift_at: float | None = None
-        kinds = MINE | {"greeting", "farewell", "arm_hold"}  # arm_hold: the posture sent again
+        kinds = MINE | {"arm_hold"}  # arm_hold: the posture sent again
         self._counts: dict[str, int] = dict.fromkeys(sorted(kinds), 0)
         self._head_moves = 0  # the listeners' discrete head moves (the minute's rate)
         self._sway = 0.0  # the weak accents' share of the cart's sway owed (wheel_accent_share)
@@ -759,13 +749,8 @@ class Alive:
         m = self.knobs.moments
         text = heard.text.strip()
         self._asked = bool(re.search(m.question, text, re.IGNORECASE))
-        due = self._close_s + m.predict_delay_s
-        if re.search(m.greeting, text.lower()):
-            self._greeted = close_id
-            self._at(due, lambda: self._due(GREETING_DUE, close_id, due))
-        elif is_goodbye(text):
-            self._greeted = close_id
-            self._at(due, lambda: self._due(FAREWELL_DUE, close_id, due))
+        if re.search(m.greeting, text.lower()) or is_goodbye(text):
+            self._greeted = close_id  # the brain's own {greeting} or {farewell} answers it
         else:
             self._ack(heard, close_id, now)
         self._at(self._close_s + m.think_glance_s, lambda: self._think(close_id))
@@ -1344,7 +1329,7 @@ class Alive:
         elif not self._conversation or not self.engine.on or self._driving:
             why = "no conversation, off or driving"
         elif self._greeted == close_id:
-            why = "a greeting or a farewell takes the wait"
+            why = "a hello or a bye"
         elif self._slow_tool == close_id:
             why = "a slow tool's thinking takes the wait"
         elif self.rng.random() >= m.think_p:
@@ -1502,35 +1487,6 @@ class Alive:
                           rank=moment_rank(ACKNOWLEDGED))  # fmt: skip
                 self._acked = close_id
         self._moment_log(ACKNOWLEDGED, why)
-
-    def _due(self, name: str, close_id: int, first: float) -> None:
-        """A greeting or a farewell due from the person's words: the book's composition now, or
-        once the body's turn toward the person is over; a greeting only once the person is
-        SEEN (a face or a body, with eyes to see: a wave at a voice from behind reads as a wave
-        at nobody, Artem 2026-10-13), dropped when nobody is within GREET_SEEN_MAX_S."""
-        now = self.clock()
-        if not self._conversation or not self.engine.on or self._driving:
-            self._moment_log(name, "no conversation, off or driving")
-            return
-        view = self._view()
-        turning = view is not None and (view.phase == "turning" or self._past_arc(view))
-        if turning and now - first < DEFER_MAX_S:
-            self._at(now + DEFER_STEP_S, lambda: self._due(name, close_id, first))
-            return
-        if name == GREETING_DUE and view is not None and view.eyes:
-            seen = view.seen_s is not None and now - view.seen_s <= GREET_SEEN_FRESH_S
-            if not seen:
-                if now - first < GREET_SEEN_MAX_S:
-                    self._at(now + DEFER_STEP_S, lambda: self._due(name, close_id, first))
-                    return
-                self._moment_log(name, f"nobody seen within {GREET_SEEN_MAX_S:.0f} s")
-                return
-        intent = self.engine.book.moments.get(name, DUE[name])
-        request = Request(intent, None, Priority.MOMENT, "moment", rank=moment_rank(name),
-                          family=intent)  # fmt: skip
-        self.engine.request(request)
-        self._counts["greeting" if name == GREETING_DUE else "farewell"] += 1
-        self._moment_log(name, None, deferred_s=round(now - first, 2) if now > first + 0.05 else 0)
 
     def _turning(self) -> str | None:
         """Why the cart is not the gestures' now (the speaker gaze turns it, or will), None
@@ -2041,3 +1997,201 @@ def _between(a: Key, b: Key, t: float) -> float:
         return b[1]
     share = (t - a[0]) / (b[0] - a[0])
     return round(a[1] + (b[1] - a[1]) * min(1.0, max(0.0, share)), 3)
+
+
+# -- the music -----------------------------------------------------------------------------------
+
+MUSIC = "music"  # the source the beats' requests carry
+TOLD_LATE = "told late"  # a beat told nearer than pulse.lead_min_s: every part sits it out
+SOUND_ENDED = "the sound ended"  # why the steps still to come or under way are let go
+BEAT_PARTS: tuple[PartName, ...] = ("head", "face", "arm", "body")
+WEAK_PARTS: frozenset[PartName] = frozenset(("head", "face"))  # a beat under pulse.strong
+UP, REST = "up", "rest"  # a variant's need of the arm, as the book writes it
+
+
+class MusicPulse:
+    """The beat listener (:class:`pepin.sounds.BeatListener`): each beat of the sound playing
+    becomes the book's ``dance`` (:data:`pepin.sounds.DANCE`) with the sound's style as its
+    argument, a word-bound request at ``PULSE`` on the engine's clock (:class:`AtTime`, the
+    stroke on the beat), on the parts free for it: every part at or over ``pulse.strong``
+    (config/sounds.json), the head and the face under it. A part sits a beat out when the style
+    has no step for it with the arm where it is, when the beat comes nearer than its
+    preparation (its latency and the style's way to the stroke,
+    :func:`pepin.expression.book.span`), while its last step of the dance, a reservation of
+    anyone's but the idle layer's, or a waiting clip of another source still holds it at the
+    step's start; every part sits out a beat told nearer than ``pulse.lead_min_s``. A style the
+    family has no variants for dances nothing (a laugh, a voice). The sound's end (or its stop)
+    lets go of every step asked for it that is still to come or under way
+    (:meth:`pepin.expression.animator.GestureEngine.release`: the waiting ones dropped, the
+    parts playing one faded back): the dance ends with the music, and a stop does not leave a
+    lead's worth of steps dancing to nothing. While a sound plays, a bare ``{dance}`` of the
+    brain's takes its style (:attr:`pepin.expression.animator.GestureEngine.arg_hooks`,
+    :meth:`attach`). The player's calls come on its thread: everything here posts to the engine
+    under one lock. Journaled: ``music`` at a start (the sound, its beats, the dance) and an end
+    (the counts, the steps let go), ``beat`` per beat (its time, lead, strength, style, parts and
+    why the others sat out)."""
+
+    def __init__(
+        self,
+        engine: GestureEngine,
+        *,
+        knobs: Callable[[], MusicKnobs] = load_music_knobs,
+        clock: Callable[[], float] = time.monotonic,
+        journal: EventSink | None = None,
+    ) -> None:
+        """``knobs`` read again at each sound's start; ``clock`` the engine's; ``journal`` the
+        conversation's events.jsonl."""
+        self.engine = engine
+        self.load_knobs = knobs
+        self.clock = clock
+        self.journal = journal
+        self.knobs = knobs()
+        self._lock = threading.Lock()
+        self._playing: Playing | None = None
+        self._busy: dict[PartName, float] = {}  # a part's end of the last step asked of it
+        self._asked: list[tuple[float, Request]] = []  # the steps asked, each with its end
+        self.counts: dict[str, int] = {}  # this sound's beats, asks, and why parts sat out
+
+    def attach(self) -> MusicPulse:
+        """The engine's bare ``{dance}`` takes the style of the sound playing from now."""
+        self.engine.arg_hooks[DANCE] = self.style
+        return self
+
+    @property
+    def playing(self) -> Playing | None:
+        """The sound playing, if any."""
+        return self._playing
+
+    def style(self) -> str | None:
+        """The dance style of the sound playing: its style when the family has a variant for
+        it; None with no sound, or one of another style (the book's first then: rock)."""
+        return dance_style(self._playing, self._styles())
+
+    # -- the player's calls (its thread) ----------------------------------------------------
+
+    def sound_started(self, playing: Playing) -> None:
+        """A sound scheduled: its beats dance from now."""
+        with self._lock:
+            self.knobs = self.load_knobs()
+            self._playing = playing
+            self._busy.clear()
+            self._asked = []
+            self.counts = {}
+        self._journal("music", name=playing.sound.name, style=playing.sound.style,
+                      t0=round(playing.t0, 3), seconds=playing.sound.seconds,
+                      beats=len(playing.beats), dance=self.style())  # fmt: skip
+
+    def beat(self, t_beat: float, strength: float) -> None:
+        """A beat at ``t_beat`` (engine clock): one step of the dance on the parts free."""
+        with self._lock:
+            if self._playing is None:
+                return
+            self._count("beats")
+            now = self.clock()
+            style = self.style()
+            if style is None:
+                self._count("no dance")
+                return
+            if not self.engine.on:
+                self._count("off")
+                return
+            parts: set[PartName] = set()
+            whys: dict[str, str] = {}
+            told_late = t_beat - now < self.knobs.lead_min_s  # no part prepares in time
+            for part in BEAT_PARTS:
+                why = TOLD_LATE if told_late else self._room(part, style, t_beat, now)
+                if why is None:
+                    parts.add(part)
+                else:
+                    whys[part] = why
+            if strength < self.knobs.strong:
+                parts &= WEAK_PARTS
+            if parts:
+                request = Request(
+                    DANCE,
+                    AtTime(t_beat),
+                    Priority.PULSE,
+                    MUSIC,
+                    bind="word",
+                    parts=frozenset(parts),
+                    arg=style,
+                )
+                self.engine.request(request)
+                self._count("asked")
+                ends = t_beat
+                for part in parts:
+                    self._busy[part] = t_beat + self._reach(style, part)[1]
+                    ends = max(ends, self._busy[part])
+                self._asked = [(e, r) for e, r in self._asked if e > now] + [(ends, request)]
+            for why in whys.values():
+                self._count(why)
+        self._journal("beat", t=round(t_beat, 3), lead_s=round(t_beat - now, 3),
+                      strength=round(strength, 2), style=style, parts=sorted(parts),
+                      skipped=whys)  # fmt: skip
+
+    def sound_ended(self, playing: Playing) -> None:
+        """The sound is over (or stopped): the beats end with it, and the steps asked for it
+        that are still to come or under way are let go."""
+        with self._lock:
+            if self._playing is not playing:
+                return
+            self._playing = None
+            self._busy.clear()
+            now = self.clock()
+            going = [request for end, request in self._asked if end > now]
+            self._asked = []
+            counts = dict(self.counts)
+        for request in going:
+            self.engine.release(request, SOUND_ENDED)
+        self._journal("music", name=playing.sound.name, ended=True, counts=counts,
+                      let_go=len(going))  # fmt: skip
+
+    # -- the room ---------------------------------------------------------------------------
+
+    def _room(self, part: PartName, style: str, stroke: float, now: float) -> str | None:
+        """Why ``part`` sits this beat out, None when it is free for the step."""
+        if self.engine.parts.get(part) is None:
+            return "absent"
+        pre, post = self._reach(style, part)
+        if pre == 0.0 and post == 0.0:
+            return "no step"
+        start = stroke - pre
+        if start < now + self._latency(part):
+            return "late"
+        if self._busy.get(part, -math.inf) > start:
+            return "its last step"
+        held = self.engine.scheduler.reservations.last(part)
+        if held is not None and held.priority != Priority.IDLE and start < held.ends:
+            return f"{held.performance.intent} plays ({held.source})"
+        for waiting in self.engine.pending(part):
+            if waiting.source != MUSIC and waiting.end > start and waiting.start < stroke + post:
+                return f"{waiting.intent} waits ({waiting.source})"
+        return None
+
+    def _reach(self, style: str, part: PartName) -> tuple[float, float]:
+        """How long before its stroke the dance of ``style`` moves ``part`` and how long after,
+        over the variants the arm's state admits (the book's widest, the arm's and the wheels'
+        stretched as the engine plays them)."""
+        config = self.engine.config
+        scale = {"arm": config.arm_speed_scale, "body": config.body_speed_scale}.get(part, 1.0)
+        state = UP if _holds(self.engine.parts.get("arm")) else REST
+
+        def fits(variant: Variant) -> bool:
+            return variant.needs.get(ARG) == style and variant.needs.get("arm", state) == state
+
+        return span(self.engine.book, DANCE, part, 1.0 / scale if scale > 0.0 else 1.0, fits)
+
+    def _styles(self) -> tuple[str, ...]:
+        composition = self.engine.book.compositions.get(DANCE)
+        return composition.args if composition is not None else ()
+
+    def _latency(self, part: PartName) -> float:
+        executor = self.engine.parts.get(part)
+        return float(executor.latency_s) if executor is not None else 0.0
+
+    def _count(self, key: str) -> None:
+        self.counts[key] = self.counts.get(key, 0) + 1
+
+    def _journal(self, kind: str, **fields: Any) -> None:
+        if self.journal is not None:
+            self.journal(kind, self.clock(), **fields)

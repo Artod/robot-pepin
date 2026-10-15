@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from pepin.deployment import config_file
+from pepin.overlay import read_json
 
 MANIFEST_FILE = "board_manifest.json"
 
@@ -277,7 +278,7 @@ def parse_load(text: str) -> Load:
 def load_manifest(path: Path | None = None) -> Manifest:
     """Read ``config/board_manifest.json`` (or the file given) into a :class:`Manifest`."""
     path = path or config_file(MANIFEST_FILE)
-    return manifest_from_dict(json.loads(path.read_text()))
+    return manifest_from_dict(read_json(path))
 
 
 def manifest_from_dict(data: dict[str, Any]) -> Manifest:

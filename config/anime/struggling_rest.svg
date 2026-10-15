@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking line aside, a hint of a smile at its right, the tongue curled up out of that corner</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="tongue" d="M 214.46 85.85 C 218.26 85.45 222.07 85.05 225.88 84.64 C 227.35 84.49 228.73 83.83 229.67 82.7 C 232.48 79.28 231.43 78.44 232.43 73.62 C 234.52 68.43 232.01 62.54 226.82 60.45 C 221.64 58.36 215.74 60.87 213.65 66.06 C 211.75 69.09 209.31 73.85 207.77 78.66 C 206.48 82.69 210.25 86.3 214.46 85.85 Z" fill="#F09AA8"/>
+  <path class="shine" d="M 212.33 77.23 C 212.54 79.21 214.93 80.57 217.68 80.28 C 220.43 79.99 222.48 78.15 222.27 76.17 C 222.06 74.2 219.67 72.83 216.92 73.12 C 214.17 73.41 212.12 75.25 212.33 77.23 Z" fill="#F8C8D0" data-follow="tongue"/>
+  <path class="line" d="M 158 86.97 C 182 87.27 206 86.37 230 82.97" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 229.67 82.7 C 232.48 79.28 231.43 78.44 232.43 73.62 C 234.52 68.43 232.01 62.54 226.82 60.45 C 221.64 58.36 215.74 60.87 213.65 66.06 C 211.75 69.09 209.31 73.85 207.77 78.66" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <path class="line" d="M 218.27 81.67 C 220.39 77.48 222.33 72.66 223.71 68.17" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="crease" data-follow="tongue"/>
+</svg>

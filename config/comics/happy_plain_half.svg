@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the D laugh, the band with one gap, the red tongue, the ticks, the chin mark (happy's variant: the same drawing)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 75 37.32 C 126.7 43.2 193.3 43.2 245 37.32 C 247.65 37.02 250.01 39.11 249.82 41.77 C 247.22 77.45 216.75 105.85 160 105.85 C 103.25 105.85 72.78 77.46 70.18 41.77 C 69.99 39.11 72.35 37.02 75 37.32 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 75 37.32 C 126.7 43.2 193.3 43.2 245 37.32 C 247.65 37.02 250.01 39.11 249.82 41.77 C 199.52 69.37 120.48 69.37 70.18 41.77 C 69.99 39.11 72.35 37.02 75 37.32 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 42.73 C 160.2 48.64 160.4 54.55 160.6 60.47" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 96.69 75.14 C 135.99 64.92 184.01 64.92 223.31 75.14 C 228.53 76.5 230.3 83.17 226.07 86.53 C 211.01 98.48 188.92 105.85 160 105.85 C 131.08 105.85 108.99 98.48 93.93 86.53 C 89.7 83.17 91.47 76.5 96.69 75.14 Z" fill="#DE5B55"/>
+  <path class="line" d="M 75 37.32 C 126.7 43.2 193.3 43.2 245 37.32 C 247.65 37.02 250.01 39.11 249.82 41.77 C 247.22 77.45 216.75 105.85 160 105.85 C 103.25 105.85 72.78 77.46 70.18 41.77 C 69.99 39.11 72.35 37.02 75 37.32 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 67.06 36.42 C 63.53 36.02 60.36 34.08 58.41 31.12" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 252.94 36.42 C 256.47 36.02 259.64 34.08 261.59 31.12" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 149 114.35 C 151.2 120.05 168.8 120.05 171 114.35" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="chin"/>
+</svg>

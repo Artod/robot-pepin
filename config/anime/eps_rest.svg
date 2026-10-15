@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small 'e' the idle gesture shrinks into</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 165.1 70.88 C 163.71 68.46 160.78 67.39 158.16 68.35 C 155.54 69.3 153.98 72 154.46 74.75 C 154.95 77.5 157.33 79.5 160.13 79.5 C 163.16 79.5 165.63 81.96 165.63 85 C 165.63 88.04 163.16 90.5 160.13 90.5 C 157.33 90.5 154.95 92.5 154.46 95.25 C 153.98 98 155.54 100.7 158.16 101.65 C 160.78 102.61 163.71 101.54 165.1 99.12" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

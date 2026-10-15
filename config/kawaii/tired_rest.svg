@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dark slack mouth, the tongue lolling out of its lower right</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 140.18 69.12 C 141.1 62.56 150.71 58.48 161.65 60.02 C 172.59 61.56 180.71 68.12 179.79 74.69 C 179.17 79.06 169.81 81.36 158.87 79.82 C 147.93 78.29 139.56 73.49 140.18 69.12 Z" fill="#504743"/>
+  <path class="tongue" d="M 163.17 77.41 C 166.12 77.3 169.07 77.2 172.02 77.09 C 173.67 77.04 175.14 78.14 175.55 79.75 C 176.54 83.67 177.53 87.6 178.52 91.52 C 179.74 95.77 177.29 100.2 173.04 101.42 C 168.8 102.64 164.36 100.19 163.14 95.94 C 162.04 91.21 160.94 86.48 159.84 81.75 C 159.34 79.58 160.94 77.49 163.17 77.41 Z" fill="#DD7487"/>
+  <path class="line" d="M 160.56 80.03 C 160 79.97 159.44 79.9 158.87 79.82 C 147.93 78.29 139.56 73.49 140.18 69.12 C 141.1 62.56 150.71 58.48 161.65 60.02 C 172.59 61.56 180.71 68.12 179.79 74.69 C 179.48 76.87 176.98 78.54 173.2 79.47" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 175.55 79.75 C 176.54 83.67 177.53 87.6 178.52 91.52 C 179.74 95.77 177.29 100.2 173.04 101.42 C 168.8 102.64 164.36 100.19 163.14 95.94 C 162.04 91.21 160.94 86.48 159.84 81.75" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+</svg>

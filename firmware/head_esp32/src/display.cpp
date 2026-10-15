@@ -94,19 +94,32 @@ bool display_begin(uint8_t brightness) {
 
 void display_brightness(uint8_t brightness) { g_lcd.setBrightness(brightness); }
 
-void display_face(const face::Layout& layout) {
-  // A transfer starts only once the one before it is done (LovyanGFX waits for the bus), so:
-  // strip 0 is free here (the last frame's strip 1 started after it had gone out), and strip 1
-  // is free once strip 0's push has started. Each strip is drawn while the other is sent.
-  face::draw(layout, face::Strip{g_strip[0], 0, kTopRows, true});
+namespace {
+
+// A transfer starts only once the one before it is done (LovyanGFX waits for the bus), so:
+// strip 0 is free here (the last frame's strip 1 started after it had gone out), and strip 1
+// is free once strip 0's push has started. Each strip is drawn while the other is sent.
+template <typename Draw>
+void push_strips(Draw draw) {
+  draw(face::Strip{g_strip[0], 0, kTopRows, true});
   if (!g_dma_busy) {
     g_lcd.startWrite();
     g_dma_busy = true;
   }
   g_lcd.pushImageDMA(0, 0, face::kScreenWidth, kTopRows, (const lgfx::swap565_t*)g_strip[0]);
-  face::draw(layout, face::Strip{g_strip[1], kTopRows, kBottomRows, true});
+  draw(face::Strip{g_strip[1], kTopRows, kBottomRows, true});
   g_lcd.pushImageDMA(0, kTopRows, face::kScreenWidth, kBottomRows,
                      (const lgfx::swap565_t*)g_strip[1]);
+}
+
+}  // namespace
+
+void display_face(const face::Layout& layout) {
+  push_strips([&](face::Strip strip) { face::draw(layout, strip); });
+}
+
+void display_anime(const face::AnimeFrame& frame) {
+  push_strips([&](face::Strip strip) { face::draw_anime(frame, strip); });
 }
 
 void display_info(const InfoScreen& info) {

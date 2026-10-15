@@ -41,6 +41,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from pepin.overlay import read_json
+
 Kind = Literal["bool", "choice", "number", "list"]
 
 ON_WORDS = ("true", "on", "1", "yes")
@@ -483,13 +485,15 @@ def knobs_of(blocks: Mapping[str, Any], node: str) -> FlagSet:
     return FlagSet(*(knob(name, spec) for name, spec in block.items()))
 
 
-def read_knobs(path: Path | None = None) -> dict[str, Any]:
+def read_knobs(path: Path | None = None, overlay: bool = True) -> dict[str, Any]:
     """The whole knobs file as a mapping (``config/knobs.json`` wherever this library runs,
-    :func:`pepin.deployment.config_file`), keys starting with ``_`` left out."""
+    :func:`pepin.deployment.config_file`), keys starting with ``_`` left out; merged over the
+    private overlay (:func:`pepin.overlay.read_json`) unless ``overlay`` is False (the file
+    alone: what a tracked document is generated from)."""
     from pepin.deployment import config_file  # lazy: the table half stays import-light
 
     source = path if path is not None else config_file(KNOBS_FILE)
-    data = json.loads(Path(source).read_text())
+    data = read_json(source) if overlay else json.loads(Path(source).read_text())
     return {k: v for k, v in data.items() if not k.startswith("_")}
 
 

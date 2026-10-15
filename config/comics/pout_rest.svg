@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed frown, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 128 89 C 147.2 78.33 172.8 78.33 192 89" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 121.01 92.89 C 117.91 94.61 115.73 97.61 115.05 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 198.99 92.89 C 202.09 94.61 204.27 97.61 204.95 101.1" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

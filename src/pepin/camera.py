@@ -39,6 +39,8 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
+
 # ROS's optical frame: z forward, x right, y down. From an x-forward link that is a roll of
 # -90 degrees followed by a yaw of -90 degrees (REP 103).
 OPTICAL_RPY = (-math.pi / 2, 0.0, -math.pi / 2)
@@ -284,7 +286,7 @@ class CameraConfig:
         stack has to know where that file lives to say whether the head can measure.
         """
         file = Path(path)
-        data = json.loads(file.read_text())
+        data = read_json(file)
         chosen = active_camera(data, name, environ)
         cfg = cls.from_json(data[chosen], chosen)
         cfg = replace(cfg, stream=cfg.stream.format(board=board))
@@ -344,7 +346,7 @@ def camera_rate(
         from pepin.deployment import config_file
 
         path = config_file("camera.json")
-    data = json.loads(Path(path).read_text())
+    data = read_json(path)
     chosen = active_camera(data, name, environ)
     block = data[chosen].get("rate")
     if not isinstance(block, Mapping):

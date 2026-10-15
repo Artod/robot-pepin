@@ -3,7 +3,8 @@ priority table per part, the idle layer's states, attention first, the arm's pla
 the close that lets a farewell finish, and the book's new fields; then ON THE WORD: the ladder
 by the computed lead, the last-moment send, never a late word stroke, never in a pause, units,
 long compositions only with the speech to cover them, barge-in, the token stream's lead, the
-bookings, and the feelings' arm lengths."""
+bookings, and the feelings' arm lengths; hello and bye, the brain's own marks: waved on the
+word at a person seen, the floor at nobody."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -19,7 +20,7 @@ from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import PARTS, Book, Clip, Idle, Performance, Range, Scene, Track
 from pepin.expression.animator import ARM_REST_S, Caps, EngineConfig, GestureEngine
 from pepin.expression.book import book_from, load_book, with_rest
-from pepin.expression.conversation import ACKNOWLEDGED, GREETING_DUE, Heard, moment_rank
+from pepin.expression.conversation import ACKNOWLEDGED, YES_FIRST, Heard, moment_rank
 from pepin.expression.executors import Executor
 from pepin.expression.fakes import (
     FakeArmLink,
@@ -44,7 +45,7 @@ from pepin.expression.schedule import (
     Timing,
     timing_from,
 )
-from pepin.expression.speaker import Attention
+from pepin.expression.speaker import Attention, unseen
 from pepin.expression.trajectory import JOINTS, ArmStatus, Trajectory
 from pepin.tools.gesture import GESTURES as TWELVE
 
@@ -119,7 +120,8 @@ def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
         plain = [v for v in composition.variants if "arg" not in v.needs]
         styled = [v for v in composition.variants if "arg" in v.needs]  # the style's (the laugh)
         assert [v.floor for v in plain].count(True) == 1, composition.name
-        assert all(v.needs == {} for v in plain)
+        waves = composition.name in ("greeting", "farewell")  # at a person seen (2026-10-14)
+        assert all(v.needs == ({} if v.floor or not waves else {"person": "seen"}) for v in plain)
         assert not styled or composition.name == "laugh"
         assert all(v.needs["arg"] in composition.style_args for v in styled)
         assert [v.floor for v in styled].count(True) == len({v.needs["arg"] for v in styled})
@@ -130,7 +132,8 @@ def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
         "variants": [{"needs": {"arm": "any"}, "steps": [{"atom": "arm_beat"}]},
                      {"floor": True, "steps": [{"atom": "head_nod"}]}],
     }  # fmt: skip
-    data["idle"].append({"part": "head", "atoms": ["breath"], "every_s": 1, "unless": "speaking"})
+    data["idle"].append({"part": "head", "compositions": ["breath"], "every_s": 1,
+                         "unless": "speaking"})  # fmt: skip
     book = book_from(data)
     point = book.compositions["point"]
     assert point.bind == "word" and point.args == ("you", "*") and point.family == "point"
@@ -138,6 +141,10 @@ def test_the_book_tags_the_twelve_intents_and_reads_the_new_fields() -> None:
     assert book.idle[-1].unless == ("speaking",)
     data["compositions"]["point"]["bind"] = "sentence"
     with pytest.raises(ValueError, match=r"point\.bind"):
+        book_from(data)
+    data["compositions"]["point"]["bind"] = "word"
+    data["compositions"]["point"]["variants"][0]["needs"] = {"person": "heard"}
+    with pytest.raises(ValueError, match=r"point\.variants\[0\]\.needs\.person: seen"):
         book_from(data)
 
 
@@ -167,11 +174,11 @@ def test_the_priority_table_one_request_holds_a_part_at_a_time() -> None:
     assert book.refusal("head", Priority.PULSE, 0, now) is None  # the idle layer gives way
     assert book.refusal("head", Priority.IDLE, 0, now) is None  # a newer idle clip replaces it
     assert book.reserve("head", hold(Priority.MOMENT, moment_rank(ACKNOWLEDGED)), now) is None
-    assert book.refusal("head", Priority.MOMENT, moment_rank(GREETING_DUE), now) is None
-    assert book.reserve("head", hold(Priority.MOMENT, moment_rank(GREETING_DUE)), now) is None
+    assert book.refusal("head", Priority.MOMENT, moment_rank(YES_FIRST), now) is None
+    assert book.reserve("head", hold(Priority.MOMENT, moment_rank(YES_FIRST)), now) is None
     assert book.refusal("head", Priority.MOMENT, moment_rank(ACKNOWLEDGED), now) is not None
     last = book.last("head")
-    assert last is not None and last.rank == moment_rank(GREETING_DUE)
+    assert last is not None and last.rank == moment_rank(YES_FIRST)
 
 
 def test_requests_go_at_their_word_their_stream_second_and_their_time() -> None:
@@ -383,14 +390,21 @@ class Ladder:
     """An engine over the arm's real planner on a fake board, fake head and face, a fake player
     and a fake clock; the scheduler is lent the engine's parts and renderer (the seam)."""
 
-    def __init__(self, book: Book | None = None, body: Executor | None = None) -> None:
+    def __init__(
+        self,
+        book: Book | None = None,
+        body: Executor | None = None,
+        arm_latency_s: float = 0.06,
+        timing: Timing | None = None,
+    ) -> None:
         self.now = 1000.0
         self.playout = FakePlayout(now=1.0)
         self.link = FakeArmLink(state=ArmStatus(0.0, MOTION.rest(), False, "off"))
-        self.arm = ArmPart(self.link, MOTION, latency_s=0.06, clock=lambda: self.now)
+        self.arm = ArmPart(self.link, MOTION, latency_s=arm_latency_s, clock=lambda: self.now)
         self.head, self.face = FakeExecutor("head", 0.1), FakeExecutor("face", 0.05)
         self.records: list[tuple[str, dict[str, Any]]] = []
-        config = EngineConfig(arm_speed_scale=1.0, audio_lag_s=0.15, seed=7)
+        config = EngineConfig(arm_speed_scale=1.0, audio_lag_s=0.15, seed=7,
+                              timing=timing or Timing())  # fmt: skip
         parts = {"arm": self.arm, "head": self.head, "face": self.face,
                  "body": body if body is not None else Absent("body", "no wheels")}  # fmt: skip
         played = book if book is not None else GESTURES
@@ -661,7 +675,7 @@ def test_a_long_composition_is_refused_with_short_speech_ahead() -> None:
 def test_a_motion_late_in_its_sentence_needs_the_speech_after_its_stroke_only() -> None:
     """«Принтер стоит {point_hold} вон там.» alone: 1.4 s of arm (0.6 to the pose, 0.8 held), its
     stroke 0.66 s before the sentence's forecast end: the 0.8 s after the stroke fit 0.7 of
-    that speech and the 0.5 s past it, though the whole motion is longer than 0.7 of the
+    that speech and overrun_s past it, though the whole motion is longer than 0.7 of the
     sentence from its start would allow."""
     rig = Ladder()
     text = "Принтер стоит вон там."
@@ -773,13 +787,16 @@ def test_a_lower_request_is_refused_a_part_promised_to_a_mark_and_a_tool_takes_i
 
 def test_every_feeling_holds_the_arm_at_most_2_5_s_before_the_board_s_return() -> None:
     """The utterance-bound compositions' arm clips (the board's return to rest comes after), at
-    the corners of their draws; evil_click keeps its live-tuned 3-4 s (Artem's tuning)."""
+    the corners of their draws; evil_click keeps its live-tuned 3-4 s (Artem's tuning), and an
+    atom's auto-wrapper is no feeling (a single move as long as its atom: gripper_set 2-3 s)."""
     renderer = BookRenderer(BOOK)
     arm = ArmPart(FakeArmLink(), MOTION)
     scene = Scene(frozenset(PARTS))
     for name, composition in BOOK.compositions.items():
         if composition.bind != "utterance" or name == "evil_click" or not composition.callable:
             continue  # the engine's own sway rides a held unit
+        if composition.wraps is not None:
+            continue
         longest: Clip | None = None
         for k in range(len(composition.variants)):
             for seed in range(60):
@@ -1050,3 +1067,154 @@ def test_a_mark_takes_the_arm_from_the_held_arm_s_sway_at_once() -> None:
     rig.tick(2.0)
     (arm,) = rig.rows("send", part="arm")
     assert -0.3 <= arm["error_s"] <= 0.15 and arm["base"] == "unit"
+
+
+# -- hello and bye: the brain's own marks (2026-10-14) ---------------------------------------------
+
+# The brain's own word of greeting or parting, mid-sentence (the arm's lead from rest), and the
+# joint its wave swings on the raised pose's hold
+HELLO_BYE = (
+    ("greeting", "Ну что ж, привет тебе, дорогой друг, рад тебя снова видеть!", "привет",
+     "shoulder_pan"),
+    ("farewell", "Ну что ж, пока тебе, дорогой друг, до завтра, увидимся утром!", "пока",
+     "wrist_flex"),
+)  # fmt: skip
+
+
+def spoken(view: Attention, intent: str, text: str, word: str) -> Ladder:
+    """The brain's ``{intent}`` before ``word`` in a reply's first sentence, played out with the
+    attention engine's snapshot ``view``."""
+    rig = Ladder(book=BOOK)
+    rig.engine.attention = FakeAttention(view)
+    rig.say(1, 0, text, intent, text.index(word))
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(4.0)
+    return rig
+
+
+@pytest.mark.parametrize(("intent", "text", "word", "dof"), HELLO_BYE, ids=("hello", "bye"))
+def test_the_brain_s_hello_or_bye_waves_on_its_own_word_at_a_person_seen(
+    intent: str, text: str, word: str, dof: str
+) -> None:
+    """Artem 2026-10-14: hello and bye are the brain's to decide. Its {greeting} before its own
+    «привет» ({farewell} before «пока»), the person seen all along: a variant that waves, the arm
+    raised from rest with its stroke on the word, and two strokes of the wave (+-10 deg at
+    least) on the raised pose's hold; no ``unseen`` row; without eyes the same (no rule)."""
+    seen = Attention("track", 0.0, eyes=True, seen_s=2000.0)  # past the rig's clock: all along
+    for view in (seen, Attention("voice")):
+        rig = spoken(view, intent, text, word)
+        (drawn,) = rig.rows("performance", intent=intent)
+        assert not BOOK.compositions[intent].variants[drawn["variant"]].floor
+        assert "arm" in drawn["parts"] and not rig.rows("unseen")
+        (ladder,) = rig.rows("ladder", intent=intent)
+        assert ladder["step"] == "authored" and ladder["base"] == "rest"
+        (arm,) = rig.rows("send", part="arm")
+        assert -0.3 <= arm["error_s"] <= 0.15, arm  # the stroke on its word
+        (cue,) = rig.rows("cue", part="arm", ok=True)
+        (trajectory,) = rig.sent()
+        held = [k.deg[JOINTS.index(dof)] for k in trajectory.knots if k.t_s >= cue["stroke_s"]]
+        assert max(held) - min(held) >= 20.0, (dof, held)  # the wave, after the arrival
+
+
+@pytest.mark.parametrize(("intent", "text", "word", "dof"), HELLO_BYE, ids=("hello", "bye"))
+def test_the_brain_s_hello_or_bye_at_nobody_seen_is_its_floor_with_a_row_saying_why(
+    intent: str, text: str, word: str, dof: str
+) -> None:
+    """The same mark with nobody seen within 3 s (a voice from behind, a face a minute old):
+    the floor (a smile and a nod; no arm, no wheels, never a wave at nobody, nor as a rung of
+    the ladder), and an ``unseen`` row with the reason."""
+    for view, ago in (
+        (Attention("voice", 0.0, eyes=True, seen_s=1000.0 - 60.0), "last seen 60.0 s ago"),
+        (Attention("turning", 0.0, eyes=True), "never seen"),
+    ):
+        rig = spoken(view, intent, text, word)
+        (drawn,) = rig.rows("performance", intent=intent)
+        assert BOOK.compositions[intent].variants[drawn["variant"]].floor
+        (row,) = rig.rows("unseen")
+        assert row == {"intent": intent, "source": "marker", "variant": drawn["variant"],
+                       "turn": 1, "part": 0, "why": f"nobody seen within 3 s ({ago})"}  # fmt: skip
+        (ladder,) = rig.rows("ladder", intent=intent)
+        assert set(ladder["parts"]) <= {"face", "head"} and not rig.sent()
+        assert rig.rows("cue", part="face", ok=True)
+
+
+def waved(rig: Ladder, dof: str = "shoulder_pan") -> float:
+    """How far ``dof`` swings after the arm's stroke in its one trajectory (the wave's span)."""
+    (cue,) = rig.rows("cue", part="arm", ok=True)
+    (trajectory,) = rig.sent()
+    held = [k.deg[JOINTS.index(dof)] for k in trajectory.knots if k.t_s >= cue["stroke_s"]]
+    return max(held) - min(held)
+
+
+def test_a_greeting_on_the_reply_s_first_word_waves_within_its_utterance() -> None:
+    """«{greeting} Привет, Артём!», the person seen: the mark on the reply's first word (0.46 s
+    of lead, the raise 0.96 s) still waves, its stroke within the utterance (the hello is the
+    sentence's gesture, not the word's beat), never refused for time: no drop, no late clip."""
+    text = "Привет, Артём!"
+    rig = spoken(Attention("track", 0.0, eyes=True, seen_s=2000.0), "greeting", text, "Привет")
+    (ladder,) = rig.rows("ladder", intent="greeting")
+    assert ladder["step"] != "floor" and "arm" in ladder["parts"], ladder
+    assert not rig.rows("dropped") and not rig.rows("late") and not rig.rows("unseen")
+    (arm,) = rig.rows("send", part="arm")
+    speech_end = 0.1 + 0.15 + 0.09 * len(text)  # after TEXT: its START, the speaker's lag
+    assert arm["error_s"] >= -0.3 and arm["stroke"] < speech_end, arm  # inside the sentence
+    assert waved(rig) >= 20.0
+
+
+def test_a_lone_hello_waves_its_hold_running_past_the_one_word_within_overrun_s() -> None:
+    """Artem 2026-10-14, no special case for the wave: «{greeting} Привет!» as the reply's lone
+    first sentence, the person seen. The 1.3 s of the raised hand's hold after its stroke run
+    past the one word's speech, within ``timing.overrun_s`` (1.5 s, every composition alike;
+    the file's value), so the arm waves; with the old 0.5 s it is the floor."""
+    assert timing_from(json.loads((CONFIG / "expression.json").read_text())).overrun_s == 1.5
+    rig = spoken(Attention("track", 0.0, eyes=True, seen_s=2000.0), "greeting", "Привет!",
+                 "Привет")  # fmt: skip
+    (ladder,) = rig.rows("ladder", intent="greeting")
+    assert ladder["step"] != "floor" and "arm" in ladder["parts"], ladder
+    assert not rig.rows("late") and not rig.rows("dropped")
+    assert waved(rig) >= 20.0
+    old = Ladder(book=BOOK, timing=replace(Timing(), overrun_s=0.5))
+    old.engine.attention = FakeAttention(Attention("track", 0.0, eyes=True, seen_s=2000.0))
+    old.say(1, 0, "Привет!", "greeting", 0)
+    (row,) = old.rows("ladder", intent="greeting")
+    assert row["step"] == "floor" and "of speech ahead" in row["why"], row
+
+
+def test_a_long_mark_the_arm_cannot_land_on_its_word_lands_later_in_its_utterance() -> None:
+    """The same first word with a slow hop to the arm (0.3 s: the compressed rise misses the
+    word by more than late_s) in a longer sentence: the ladder's IN THE UTTERANCE rung sends the
+    arm as soon as it can from the text's arrival, and the wave lands on the hold while the
+    sentence goes on (0.5-1 s after the word, inside its speech), not the floor; the send rule
+    keeps it (no late row)."""
+    text = "Привет, Артём, рад тебя снова видеть!"
+    rig = Ladder(book=BOOK, arm_latency_s=0.3)
+    rig.engine.attention = FakeAttention(Attention("track", 0.0, eyes=True, seen_s=2000.0))
+    rig.say(1, 0, text, "greeting", 0)
+    (ladder,) = rig.rows("ladder", intent="greeting")
+    assert ladder["step"] == "in the utterance" and "arm" in ladder["parts"], ladder
+    assert "compressed: the arm" in ladder["why"]
+    rig.tick(0.1)
+    rig.start(1, 0, 0.09 * len(text))
+    rig.tick(4.0)
+    assert not rig.rows("late") and not rig.rows("dropped")
+    (arm,) = rig.rows("send", part="arm")
+    speech_end = 0.1 + 0.15 + 0.09 * len(text)
+    assert 0.5 < arm["error_s"] < 1.0 and arm["stroke"] < speech_end, arm
+    assert waved(rig) >= 20.0
+    other = Ladder(book=BOOK, arm_latency_s=0.3)  # a feeling: bound to its utterance, not long
+    other.say(1, 0, "Не знаю, честно говоря, может быть и так.", "shrug", 0)
+    (row,) = other.rows("ladder", intent="shrug")
+    assert row["step"] != "in the utterance" and "in the utterance" not in row["why"]
+
+
+def test_the_person_counts_as_unseen_only_with_eyes_in_a_conversation() -> None:
+    """A sighting within 3 s is seen; an older one, or none, is unseen with its age; no rule
+    without eyes or a conversation (the bench's gesture plays)."""
+    now = 100.0
+    assert unseen(Attention("track", 0.0, eyes=True, seen_s=97.5), now) is None
+    assert unseen(Attention("track", 0.0, eyes=True, seen_s=96.5), now) == (
+        "nobody seen within 3 s (last seen 3.5 s ago)"
+    )
+    assert unseen(Attention("idle", 0.0, eyes=True), now) is None
+    assert unseen(Attention("voice"), now) is None

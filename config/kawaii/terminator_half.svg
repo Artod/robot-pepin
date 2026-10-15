@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the rounded rectangle of teeth, the bite line and three gaps</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 133.06 59 C 151.02 59 168.98 59 186.94 59 C 190.84 59 194 62.16 194 66.06 C 194 70.89 194 75.71 194 80.54 C 194 84.44 190.84 87.6 186.94 87.6 C 168.98 87.6 151.02 87.6 133.06 87.6 C 129.16 87.6 126 84.44 126 80.54 C 126 75.71 126 70.89 126 66.06 C 126 62.16 129.16 59 133.06 59 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 133.06 59 C 151.02 59 168.98 59 186.94 59 C 190.84 59 194 62.16 194 66.06 C 194 70.89 194 75.71 194 80.54 C 194 84.44 190.84 87.6 186.94 87.6 C 168.98 87.6 151.02 87.6 133.06 87.6 C 129.16 87.6 126 84.44 126 80.54 C 126 75.71 126 70.89 126 66.06 C 126 62.16 129.16 59 133.06 59 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 129.5 72.8 C 148 74.8 172 74.8 190.5 72.8" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 144.7 76.42 C 144.87 78.65 145.03 80.88 145.2 83.1" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 160 76.8 C 160.17 78.9 160.33 81 160.5 83.1" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 175.3 76.42 C 175.47 78.65 175.63 80.88 175.8 83.1" fill="none" stroke="#504743" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+</svg>

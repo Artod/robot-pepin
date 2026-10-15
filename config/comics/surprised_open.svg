@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the tall shout, the band, the tongue, the chin mark</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 132.19 31.83 C 149.9 33.66 170.1 33.66 187.81 31.83 C 194.23 31.17 200.01 36.05 199.82 42.51 C 198.03 105.1 182.54 154.41 160 154.41 C 137.46 154.41 121.97 105.1 120.18 42.51 C 119.99 36.05 125.77 31.17 132.19 31.83 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 132.19 31.83 C 149.9 33.66 170.1 33.66 187.81 31.83 C 194.23 31.17 200.01 36.05 199.82 42.51 C 177.52 72.77 142.48 72.77 120.18 42.51 C 119.99 36.05 125.77 31.17 132.19 31.83 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 34.21 C 160.2 43.87 160.4 53.54 160.6 63.21" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 129.5 102.95 C 148.06 80.04 171.94 80.04 190.5 102.95 C 191.73 104.46 192.14 106.47 191.66 108.37 C 184.66 136.41 173.62 154.41 160 154.41 C 146.38 154.41 135.34 136.41 128.34 108.37 C 127.86 106.47 128.27 104.46 129.5 102.95 Z" fill="#DE5B55"/>
+  <path class="line" d="M 132.19 31.83 C 149.9 33.66 170.1 33.66 187.81 31.83 C 194.23 31.17 200.01 36.05 199.82 42.51 C 198.03 105.1 182.54 154.41 160 154.41 C 137.46 154.41 121.97 105.1 120.18 42.51 C 119.99 36.05 125.77 31.17 132.19 31.83 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the lips parted into the small black oval</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 142 95.18 C 142 83.58 150.06 74.18 160 74.18 C 169.94 74.18 178 83.58 178 95.18 C 178 106.78 169.94 116.18 160 116.18 C 150.06 116.18 142 106.78 142 95.18 Z" fill="#1D1D1B"/>
+  <path class="line" d="M 142 95.18 C 142 83.58 150.06 74.18 160 74.18 C 169.94 74.18 178 83.58 178 95.18 C 178 106.78 169.94 116.18 160 116.18 C 150.06 116.18 142 106.78 142 95.18 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

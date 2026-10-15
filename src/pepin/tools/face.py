@@ -29,6 +29,23 @@ Emotion = Literal[
     "focused",
     "listening",
     "sinister",
+    "kiss",
+    "kiss_heart",
+    "pout",
+    "thinking_flat",
+    "moustache",
+    "o_mouth",
+    "vampire",
+    "terminator",
+    "blush",
+    "tease",
+    "tired",
+    "cat",
+    "cat_blush",
+    "smile_wide",
+    "happy_plain",
+    "angry",
+    "shocked",
 ]
 EMOTIONS: tuple[str, ...] = Emotion.__args__  # type: ignore[attr-defined]
 MAX_SECONDS = 60.0
@@ -45,7 +62,13 @@ def express(robot: Robot, emotion: Emotion, seconds: float = 5.0) -> Result:
     Args:
         emotion: neutral, smile, happy (an open smile), grin, clenched (a grin with clenched
             teeth), sad, worried, surprised (an O), thinking, struggling (a zigzag), flat (no
-            comment), sleepy, focused, listening.
+            comment), sleepy, focused, listening; for fun and jokes: sinister (sharp teeth),
+            kiss, kiss_heart (blows a heart), pout (sulking), tease (cheeky, the tongue
+            straight out), tired (tongue hanging limp), cat (the anime cat's w mouth),
+            cat_blush (the same, blushing), moustache, o_mouth (an oo), vampire,
+            terminator, blush (embarrassed), smile_wide and happy_plain (the smile's and
+            happy's variants), angry (gritted teeth), shocked (a small open mouth, the
+            cheeks striped).
         seconds: how long to show it, 1 to 60.
     """
     if not 0.0 < seconds <= MAX_SECONDS:

@@ -20,6 +20,14 @@ data/
 logs/
 *.log
 
+# Sounds and music never enter the public tree; a private overlay keeps its own
+# (docs/PRIVATE_OVERLAY.md)
+sounds/
+*.mp3
+*.ogg
+*.flac
+*.m4a
+
 # One-off analyses and probes (readable locally, never published)
 scratch/
 ros/pepin_src/

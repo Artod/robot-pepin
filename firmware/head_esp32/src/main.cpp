@@ -7,6 +7,7 @@
 #include <freertos/semphr.h>
 
 #include "display.h"
+#include "face_anime.h"
 #include "face_model.h"
 #include "face_render.h"
 #include "face_table.h"
@@ -23,9 +24,9 @@ constexpr uint8_t kBootBrightness = 200;
 enum Mode : uint8_t { kModeFace = 0, kModeInfo = 1, kModeAsleep = 2 };
 
 struct FaceCommand {
-  uint8_t type;  // 'E', 'M', or 'B' (brightness, from a 'C')
+  uint8_t type;  // 'E', 'M', or 'B' (brightness and the face's style, from a 'C')
   uint8_t a;     // expression id / mouth level / brightness
-  uint8_t b;     // intensity
+  uint8_t b;     // intensity / the style (0xFF: unchanged)
   uint16_t ms;   // transition
 };
 
@@ -40,6 +41,7 @@ volatile uint32_t g_sent_samples = 0;
 head::Parser g_parser;
 
 face::FaceModel g_model;
+face::AnimeModel g_anime;  // the shape engine, following g_model in the anime style
 face::Layout g_layout;
 
 // One frame onto the wire. `droppable`: when the TX buffer cannot take it whole, it is counted
@@ -110,9 +112,9 @@ void dispatch(uint8_t type, const uint8_t* p, size_t n) {
       }
       return;
     case head::kConfig:
-      if (n != head::kConfigBytes) return;
+      if (n != head::kConfigBytes && n != head::kConfigBytesStyled) return;
       head::imu_configure({p[0], head::get_u16(p + 1), p[3], p[4], p[5]});
-      cmd = {'B', p[6], 0, 0};
+      cmd = {'B', p[6], n >= head::kConfigBytesStyled ? p[7] : (uint8_t)0xFF, 0};
       break;
     default:
       return;
@@ -169,6 +171,7 @@ void loop() {
       g_model.setMouth(cmd.a / 255.0f, now);
     } else if (cmd.type == 'B') {
       head::display_brightness(cmd.a);
+      if (cmd.b < face::kStyleCount) g_model.setStyle(cmd.b, now);
     }
   }
 
@@ -199,8 +202,13 @@ void loop() {
     if (mode == kModeInfo) mode = kModeFace;
     info_until = 0;
     g_model.update(now);
-    face::layout(g_model.shape(), &g_layout);
-    head::display_face(g_layout);
+    if (face::shape_table_of(g_model.style()) != nullptr) {
+      g_anime.follow(g_model, now);
+      head::display_anime(g_anime.frame());
+    } else {
+      face::layout(g_model.shape(), &g_layout);
+      head::display_face(g_layout);
+    }
     ++frames;
   }
 

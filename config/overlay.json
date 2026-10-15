@@ -1,0 +1,18 @@
+{
+  "_note": "The private overlay (pepin.overlay, docs/PRIVATE_OVERLAY.md): every config and asset path is looked for in each root in turn, highest priority first, relative to this checkout ('.' is the public tree itself and must be listed); a root that does not exist is skipped, so the public tree alone is a whole robot. PEPIN_OVERLAY (the same list, ':'-separated) replaces roots for one run. A JSON file merges over the roots (objects key by key, lists of named objects by name, null a value that never deletes), any other file is replaced whole by the highest root that has it; rules name the exceptions by path or glob: mode 'override' (a JSON file supplied whole) or 'merge' (a text file concatenated, the public text first), entries (the dotted keys of objects whose members are named entries, replaced whole by name instead of merged into).",
+  "roots": ["companion", "."],
+  "rules": {
+    "config/animation.json": {
+      "entries": ["poses", "atoms", "compositions"],
+      "note": "a private pose, atom or composition of a public name replaces it whole"
+    },
+    "config/face.json": {
+      "entries": ["events", "params"],
+      "note": "expressions are a list of named objects and merge by name on their own; a private event or parameter of a public name replaces it whole"
+    },
+    "config/voice_cascade_persona.md": {
+      "mode": "override",
+      "note": "the public persona is the generic default; a private copy replaces it whole"
+    }
+  }
+}

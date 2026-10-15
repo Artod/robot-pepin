@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line under the moustache</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 115.63 85 C 145.21 85 174.79 85 204.37 85 C 208.57 85 212.04 88.44 211.59 92.61 C 208.33 122.23 186.38 145.32 160 145.32 C 133.62 145.32 111.67 122.23 108.41 92.61 C 107.96 88.44 111.43 85 115.63 85 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 115.63 85 C 145.21 85 174.79 85 204.37 85 C 208.57 85 212.04 88.44 211.59 92.61 C 182.7 101.13 137.3 101.13 108.41 92.61 C 107.96 88.44 111.43 85 115.63 85 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 211.59 92.61 C 182.7 101.13 137.3 101.13 108.41 92.61" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 126.54 116.14 C 147.53 108.4 172.47 108.4 193.46 116.14 C 198.25 117.91 199.95 123.89 196.6 127.75 C 187.18 138.6 174.23 145.32 160 145.32 C 145.77 145.32 132.82 138.6 123.4 127.75 C 120.05 123.89 121.75 117.91 126.54 116.14 Z" fill="#F09AA8"/>
+  <path class="line" d="M 117.71 119.99 C 143.08 107.12 176.92 107.12 202.29 119.99" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 115.63 85 C 145.21 85 174.79 85 204.37 85 C 208.57 85 212.04 88.44 211.59 92.61 C 208.33 122.23 186.38 145.32 160 145.32 C 133.62 145.32 111.67 122.23 108.41 92.61 C 107.96 88.44 111.43 85 115.63 85 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="moustache" d="M 139.04 58 C 153.01 58 166.99 58 180.96 58 C 183.74 58 186 60.26 186 63.04 C 186 67.01 186 70.99 186 74.96 C 186 77.74 183.74 80 180.96 80 C 166.99 80 153.01 80 139.04 80 C 136.26 80 134 77.74 134 74.96 C 134 70.99 134 67.01 134 63.04 C 134 60.26 136.26 58 139.04 58 Z" fill="#3C2A30"/>
+</svg>

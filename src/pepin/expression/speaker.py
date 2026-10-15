@@ -215,6 +215,10 @@ AttentionPhase = Literal["idle", "paused", "seek", "check", "turning", "track", 
 # A gesture overlay plays only on a person seen within this (DESIGN.md §8.4; the engine's knob
 # layers.head_seen_s): frames come at 1 Hz while the robot speaks, so a second and a margin
 HEAD_SEEN_S = 1.2
+# A variant that needs the person seen (the greeting's and the farewell's waves) is drawn only
+# on a sighting this fresh, a face or a body: a track's may be minutes old, and a wave at a
+# voice from behind reads as a wave at nobody (Artem 2026-10-13)
+PERSON_SEEN_S = 3.0
 
 
 @dataclass(frozen=True)
@@ -273,6 +277,18 @@ def head_refusal(view: Attention, now: float, seen_s: float = HEAD_SEEN_S) -> st
         unseen = "never" if view.seen_s is None else f"{now - view.seen_s:.1f} s"
         return f"attention: the person unseen for {unseen}"
     return None
+
+
+def unseen(view: Attention, now: float, seen_s: float = PERSON_SEEN_S) -> str | None:
+    """Why the person engaged counts as unseen at ``now`` (no face or body of theirs within
+    ``seen_s``), None when they were seen. No rule without eyes, a conversation, or during a
+    drive (nobody can tell: the bench's gesture plays)."""
+    if not view.eyes or view.phase in ("idle", "paused"):
+        return None
+    if view.seen_s is not None and now - view.seen_s <= seen_s:
+        return None
+    ago = "never seen" if view.seen_s is None else f"last seen {now - view.seen_s:.1f} s ago"
+    return f"nobody seen within {seen_s:g} s ({ago})"
 
 
 def arm_refusal(view: Attention, past_arc_rule: bool = True) -> str | None:

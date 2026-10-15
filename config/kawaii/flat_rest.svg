@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the dash</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 143 70 C 154.33 70 165.67 70 177 70" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

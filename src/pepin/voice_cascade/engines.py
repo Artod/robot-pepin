@@ -9,6 +9,7 @@ and a switch back to a voice just used load nothing twice.
 from __future__ import annotations
 
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -21,6 +22,9 @@ from pepin.voice_cascade.stages import Brain, Voice
 NOT_FOR_THE_BRAIN = frozenset({"say", "find", "look_around", "map_tree"})
 ECHO = "echo"  # the brain that repeats what it heard (no API call)
 API_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
+# The persona file's line the book's vocabulary of gestures replaces, one mark a line
+# (pepin.expression.book.mark_lines): the book is the one source of the marks' names
+MARKS_SLOT = "<!-- the marks: generated from config/animation.json -->"
 FIRST_SENTENCE = (
     "Your first sentence has at most {n} {words} and ends with a full stop, a question mark or"
     " an exclamation mark, so the voice can start on it at once; say the rest after it. This"
@@ -28,9 +32,13 @@ FIRST_SENTENCE = (
 )
 
 
-def persona_text(persona: str, first_sentence_words: int) -> str:
-    """The persona as the brain gets it: the file's text, then the first-sentence line when
-    ``brain.first_sentence_words`` is set (fixed per config, so the cached prefix is too)."""
+def persona_text(persona: str, first_sentence_words: int, marks: Sequence[str] = ()) -> str:
+    """The persona as the brain gets it: the file's text, its :data:`MARKS_SLOT` line replaced
+    by ``marks`` (the book's vocabulary of gestures, one per line), then the first-sentence line
+    when ``brain.first_sentence_words`` is set (fixed per config and book, so the cached prefix
+    is too)."""
+    if MARKS_SLOT in persona:
+        persona = persona.replace(MARKS_SLOT, "\n".join(marks))
     if first_sentence_words <= 0:
         return persona
     words = "word" if first_sentence_words == 1 else "words"
@@ -86,10 +94,13 @@ def build_brain(
     if not os.environ.get(key):
         raise RuntimeError(f"{key} missing: set -a; . ./.env; set +a (the main checkout's .env)")
     from pepin.deployment import config_file
+    from pepin.expression.book import load_book, mark_lines
+    from pepin.overlay import read_text
     from pepin.tools.schemas import gemini_function_declarations, openai_tools
 
     b = config.brain
-    persona = persona_text(config_file(b.persona_file).read_text(), b.first_sentence_words)
+    persona = persona_text(read_text(config_file(b.persona_file)), b.first_sentence_words,
+                           mark_lines(load_book()))  # fmt: skip
     brain: Brain
     if b.provider == "openai":
         from pepin.voice_cascade.chat_brain import ChatBrain

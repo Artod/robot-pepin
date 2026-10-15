@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small o</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 150 76 C 150 67.16 154.48 60 160 60 C 165.52 60 170 67.16 170 76 C 170 84.84 165.52 92 160 92 C 154.48 92 150 84.84 150 76 Z" fill="#DD7487"/>
+  <path class="line" d="M 150 76 C 150 67.16 154.48 60 160 60 C 165.52 60 170 67.16 170 76 C 170 84.84 165.52 92 160 92 C 154.48 92 150 84.84 150 76 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

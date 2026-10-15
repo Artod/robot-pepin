@@ -10,12 +10,23 @@ from pathlib import Path
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import Scene
 from pepin.expression.animator import EngineConfig, GestureEngine
-from pepin.expression.book import face_names, load_book, vocabulary, with_rest
+from pepin.expression.book import face_names, load_book, mark_lines, vocabulary, with_rest
 from pepin.expression.fakes import FakePlayout
-from pepin.expression.markers import Cue, Marker, Named, Part, argument, cues, parse, read
+from pepin.expression.markers import (
+    Cue,
+    Mark,
+    Marker,
+    Named,
+    Part,
+    argument,
+    cues,
+    parse,
+    read,
+    read_mark,
+)
 from pepin.expression.render import BookRenderer, Resolver
 from pepin.voice_cascade.config import CascadeConfig
-from pepin.voice_cascade.engines import persona_text
+from pepin.voice_cascade.engines import MARKS_SLOT, persona_text
 
 CONFIG = Path(__file__).resolve().parents[2] / "config"
 BOOK = with_rest(
@@ -82,7 +93,6 @@ def test_what_names_nothing_is_dropped_and_never_turns_the_voice() -> None:
         "arc:sideways",  # an argument the intent does not take
         "size:medium",
         "count:4",
-        "laugh:loud",  # an intent that takes none
         "point",  # an intent that needs one, without it
         "arc",
         "face:nope",
@@ -98,6 +108,8 @@ def test_what_names_nothing_is_dropped_and_never_turns_the_voice() -> None:
     assert named("laugh") == ("gesture", "laugh", None) and named("face:smile") == (
         "face", "smile", None,
     )  # fmt: skip
+    # an argument the intent does not take is left out, the mark plays (2026-10-14)
+    assert read_mark("laugh:loud", WORDS) == Mark("gesture", "laugh", ignored=("loud",))
 
 
 def test_the_same_mark_and_argument_twice_in_one_reply_plays_once() -> None:
@@ -123,22 +135,38 @@ def test_the_same_mark_and_argument_twice_in_one_reply_plays_once() -> None:
 
 def _persona() -> str:
     config = CascadeConfig.load()
-    return persona_text((CONFIG / config.brain.persona_file).read_text(), 0)
+    return persona_text((CONFIG / config.brain.persona_file).read_text(), 0, mark_lines(BOOK))
 
 
 def test_the_persona_s_marks_are_the_book_s_and_its_examples_leave_the_arm_time() -> None:
-    """Every mark the persona shows reads as the book's (none dropped), each primitive and
-    feeling the brain may write is shown, ``{emphasis}``, ``{greeting}`` and ``{farewell}`` are
-    not (the accent; the engine's own hello and bye); every example's mark stands at least 11
-    characters into its sentence or in a later sentence (critic_architecture #6: the arm's
-    lead from rest at the text)."""
+    """Every mark the persona shows reads as the book's (none dropped): those in its prose and
+    the generated vocabulary's lines (the book's, one a line, each with at most six words); each
+    primitive and feeling the brain may write is listed with ``greeting`` and ``farewell`` (its
+    own hello and bye since 2026-10-14), ``emphasis`` is not (the accent's); every example's mark
+    stands at least 11 characters into its sentence or in a later sentence
+    (critic_architecture #6: the arm's lead from rest at the text)."""
     persona = _persona()
+    assert MARKS_SLOT not in persona
+    lines = mark_lines(BOOK)
+    assert "\n".join(lines) in persona
     shown = MARK.findall(persona)
     for inner in shown:
         assert named(inner) is not None, inner
-    names = {named(inner)[1] for inner in shown if named(inner)[0] == "gesture"}  # type: ignore[index]
-    assert set(PRIMITIVES) <= names
-    assert {"emphasis", "greeting", "farewell"}.isdisjoint(MARK.findall(persona))
+    listed = set()
+    for line in lines:
+        spelled, _, words = line.partition(" — ")
+        assert 1 <= len(words.split()) <= 6, line
+        name, _, choose = spelled.partition("[")[0].partition(":")
+        arg = choose.split("|")[0].replace("NAME", "printer") or None  # one that chooses
+        assert named(name if arg is None else f"{name}:{arg}") == ("gesture", name, arg), line
+        listed.add(name)
+    assert set(PRIMITIVES) <= listed and set(PRIMITIVES) <= {named(i)[1] for i in shown} | listed  # type: ignore[index]
+    feelings = {"surprise", "doubt", "shrug", "sympathy", "agreement", "disagreement",
+                "thinking", "evil_click", "laugh", "snap", "greeting", "farewell"}  # fmt: skip
+    assert feelings <= listed
+    assert "emphasis" not in listed | set(shown)
+    assert "{greeting}" in persona and "{farewell}" in persona  # the brain's to decide
+    assert "happen by themselves" not in persona
     examples = re.findall(r"«([^»]*)»", persona)
     marked = [e for e in examples if any(named(m) and named(m)[0] == "gesture"  # type: ignore[index]
                                          for m in MARK.findall(e))]  # fmt: skip

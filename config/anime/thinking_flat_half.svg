@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the thinking line, nearly level</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 171.91 86.09 C 185.71 86.09 199.51 85.76 213.31 85.12 C 223.07 84.66 231.51 95.29 223.42 100.77 C 216.09 105.73 205.6 108.85 194 108.85 C 181.63 108.85 170.52 105.59 163.17 100.49 C 156.07 95.56 163.27 86.09 171.91 86.09 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 171.91 86.09 C 185.71 86.09 199.51 85.76 213.31 85.12 C 223.07 84.66 231.51 95.29 223.42 100.77 C 206.55 99.56 180.04 99.56 163.17 100.49 C 156.07 95.56 163.27 86.09 171.91 86.09 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 223.42 100.77 C 206.55 99.56 180.04 99.56 163.17 100.49" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 171.91 86.09 C 185.71 86.09 199.51 85.76 213.31 85.12 C 223.07 84.66 231.51 95.29 223.42 100.77 C 216.09 105.73 205.6 108.85 194 108.85 C 181.63 108.85 170.52 105.59 163.17 100.49 C 156.07 95.56 163.27 86.09 171.91 86.09 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

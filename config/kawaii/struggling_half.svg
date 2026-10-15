@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the short line aside, tilted, a hint of a smile, the tongue out to the right and up</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 162.56 72.39 C 168.12 73.22 174.24 72.97 179.89 70.94 C 183.08 69.8 186.87 71.88 186.1 75.17 C 184 84.19 178.46 90.67 172 90.67 C 165.26 90.67 159.52 84.81 157.65 76.82 C 157 74.07 159.77 71.98 162.56 72.39 Z" fill="#DD7487"/>
+  <path class="tongue" d="M 187.11 68.41 C 188.19 67.75 189.28 67.1 190.37 66.44 C 190.78 66.19 191.14 65.86 191.42 65.46 C 193.19 62.95 194.96 60.44 196.73 57.94 C 198.19 54.65 196.7 50.81 193.42 49.36 C 190.14 47.91 186.3 49.39 184.84 52.67 C 183.86 56.64 182.88 60.61 181.9 64.57 C 181.15 67.6 184.44 70.02 187.11 68.41 Z" fill="#DD7487"/>
+  <path class="line" d="M 162.56 72.39 C 168.12 73.22 174.24 72.97 179.89 70.94 C 183.08 69.8 186.87 71.88 186.1 75.17 C 184 84.19 178.46 90.67 172 90.67 C 165.26 90.67 159.52 84.81 157.65 76.82 C 157 74.07 159.77 71.98 162.56 72.39 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 190.37 66.44 C 190.78 66.19 191.14 65.86 191.42 65.46 C 193.19 62.95 194.96 60.44 196.73 57.94 C 198.19 54.65 196.7 50.81 193.42 49.36 C 190.14 47.91 186.3 49.39 184.84 52.67 C 183.86 56.64 182.88 60.61 181.9 64.57" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+</svg>

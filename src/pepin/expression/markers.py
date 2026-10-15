@@ -11,6 +11,11 @@ A marker is one pair of braces with no brace inside::
     {!}                   another spelling of an intent: the book's ``aliases`` map it (and
                           ``{beat}``, ``{point:i}``, ``{arc:rise}``) to the canonical name and
                           argument (``accent``, ``point:me``, ``arc:up``)
+    {snap:3,fast}         a list after the colon (2026-10-14): at most one argument that chooses
+                          (as above), words and numbers that set the intent's parameters (the
+                          book's ``settings``: ``fast``, a number; an atom's auto-wrapper: one
+                          number is its repeats, several its parameters in their order) and
+                          ``key=value`` for a parameter by name ({head_nod:amp_deg=6})
     {gesture:laugh}       the same, the channel spelled out
     {face:smile}          one expression of config/face.json, on its own
     {style:whispering}    the voice's manner from here on, in free words as the voice takes them
@@ -19,8 +24,10 @@ A marker is one pair of braces with no brace inside::
                           persona's style words (:data:`STYLE_WORDS`: ``{happy, excited}``)
 
 Everything else is dropped, never a voice style: a bare name of no intent (``{nod}``), an
-``{x:y}`` whose ``x`` names no intent, an argument the intent does not take, an intent that needs
-an argument written without one. A marker is never spoken: the voice gets the text without it.
+``{x:y}`` whose ``x`` names no intent, an intent that needs an argument written without one (or
+with none it takes). An argument the intent does not take is left out and kept in
+:attr:`Marker.ignored` for the log; the rest of the mark plays. A marker is never spoken: the
+voice gets the text without it.
 Its place is the character offset in its part's spoken text where it stood, so it belongs to the
 word that FOLLOWS it: that word's start is the marker's sync point, where the intent's stroke
 lands. A style marker changes the voice only at a clause boundary (the sentence's start, or after
@@ -38,9 +45,10 @@ C owns the grammar here (``{name:arg}``, aliases, ``{!}``); :class:`Marker`, :cl
 
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Literal, Protocol
 
 Channel = Literal["gesture", "face", "style"]
@@ -70,30 +78,48 @@ _PUNCTUATION = frozenset(".,!?;:…»)]")  # the end of a sentence or a clause
 
 
 @dataclass(frozen=True)
+class Takes:
+    """What a mark of an intent may carry beside the argument that chooses (``Vocabulary.args``):
+    words that set its parameters (``fast``), how many numbers it reads in order (an
+    auto-wrapper: its atom's parameters, one number alone being its repeats; else 1 when the
+    book gives it a ``number``) and the parameters ``key=value`` may set."""
+
+    words: frozenset[str] = frozenset()
+    numbers: int = 0
+    keys: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
 class Vocabulary:
     """The names a marker may carry: the intents (config/animation.json's compositions), the
-    face's expressions (config/face.json), the arguments each intent takes (``args``: an intent
-    absent from it takes none; ``"*"`` any short name) and the intents' other spellings
-    (``aliases``: ``"beat"`` -> ``"accent"``, ``"point:i"`` -> ``"point:me"``). A bare name is
-    an intent when it is one, else a style when it is made of :data:`STYLE_WORDS`."""
+    face's expressions (config/face.json), the arguments each intent takes that choose
+    (``args``: an intent absent from it takes none; ``"*"`` any short name), those that set its
+    parameters (``takes``) and the intents' other spellings (``aliases``: ``"beat"`` ->
+    ``"accent"``, ``"point:i"`` -> ``"point:me"``). A bare name is an intent when it is one,
+    else a style when it is made of :data:`STYLE_WORDS`."""
 
     intents: frozenset[str]
     faces: frozenset[str]
     args: Mapping[str, tuple[str, ...]] = field(default_factory=dict, hash=False)
     aliases: Mapping[str, str] = field(default_factory=dict, hash=False)
+    takes: Mapping[str, Takes] = field(default_factory=dict, hash=False)
 
 
 @dataclass(frozen=True)
 class Marker:
     """One marker: its channel, its name (a style's words; "" with ``style``: the plain voice),
-    the character offset in its part's spoken text it stands before, the text as written, and
-    its argument (``{point:you}``: ``"you"``; None: none)."""
+    the character offset in its part's spoken text it stands before, the text as written, its
+    argument that chooses (``{point:you}``: ``"you"``; None: none), the arguments that set
+    parameters as read (``{snap:3,fast}``: ``("3", "fast")``; ``key=value`` as written) and
+    those it carried that the intent does not take (left out, for the log)."""
 
     channel: Channel
     name: str
     at: int
     raw: str = ""
     arg: str | None = None
+    args: tuple[str, ...] = ()
+    ignored: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -149,33 +175,115 @@ EMPTY = Vocabulary(frozenset(), frozenset())  # no intents, no faces: every bare
 Named = tuple[Channel, str, str | None]  # a marker's channel, canonical name and argument
 
 
+@dataclass(frozen=True)
+class Mark:
+    """A marker's inside as read: :data:`Named`'s three, then the arguments that set
+    parameters and the ones left out (:class:`Marker`)."""
+
+    channel: Channel
+    name: str
+    arg: str | None = None
+    args: tuple[str, ...] = ()
+    ignored: tuple[str, ...] = ()
+
+    @property
+    def named(self) -> Named:
+        """The channel, the name and the argument that chooses."""
+        return self.channel, self.name, self.arg
+
+
 def read(inner: str, vocabulary: Vocabulary) -> Named | None:
     """What a marker's inside names: ``(channel, name, arg)``, a gesture's canonical name and
     argument through the aliases, a style's words with their spaces collapsed (``""``: the plain
-    voice); None for what names nothing (the module's notes): never a style for an ``x:y``."""
+    voice); None for what names nothing (the module's notes): never a style for an ``x:y``.
+    The arguments that set parameters: :func:`read_mark`."""
+    found = read_mark(inner, vocabulary)
+    return None if found is None else found.named
+
+
+def read_mark(inner: str, vocabulary: Vocabulary) -> Mark | None:
+    """:func:`read` with the arguments that set parameters and those left out."""
     text = inner.strip()
     if not text:
-        return "style", "", None
+        return Mark("style", "")
     spelled = SPELLED.match(text)
     if spelled is not None:
         channel, name = spelled.group(1).lower(), spelled.group(2)
         if channel == "gesture":
-            return gesture(name, vocabulary)
+            return mark(name, vocabulary)
         if channel == "face":
-            return ("face", name.lower(), None) if name.lower() in vocabulary.faces else None
-        return "style", _SPACES.sub(" ", name).strip(), None
-    named = gesture(text, vocabulary)
-    if named is not None or ":" in text:
-        return named
+            return Mark("face", name.lower()) if name.lower() in vocabulary.faces else None
+        return Mark("style", _SPACES.sub(" ", name).strip())
+    found = mark(text, vocabulary)
+    if found is not None or ":" in text:
+        return found
     if set(_STYLE_SPLIT.split(text.lower())) - {""} <= STYLE_WORDS:
-        return "style", _SPACES.sub(" ", text), None
+        return Mark("style", _SPACES.sub(" ", text))
     return None
+
+
+def mark(text: str, vocabulary: Vocabulary) -> Mark | None:
+    """``name``, ``name:arg`` or ``name:a,b,key=value`` as an intent and its arguments: one
+    argument whole as :func:`gesture` reads it; else each of the list: an argument that
+    chooses (through the aliases, the intent's own, any short name for ``*``; the first such),
+    a word or a number that sets parameters (:class:`Takes`; an argument the intent lists
+    chooses before a number does: ``{count:2}``), ``key=value`` with a number for a parameter
+    it takes; anything else left out. None when no intent is named or one that needs an
+    argument that chooses got none."""
+    whole = gesture(text, vocabulary)
+    if whole is not None:
+        return Mark(*whole)
+    name, colon, rest = text.partition(":")
+    if not colon:
+        return None
+    name = name.strip().lower()
+    given: str | None = None
+    if name in vocabulary.aliases:
+        name, _, alias_arg = vocabulary.aliases[name].partition(":")
+        given = alias_arg or None
+    if name not in vocabulary.intents:
+        return None
+    choose = vocabulary.args.get(name, ())
+    takes = vocabulary.takes.get(name, Takes())
+    chosen, args, ignored = given, [], []
+    numbers = 0
+    for raw in rest.split(","):
+        item = argument(raw)
+        if item is None:
+            if raw.strip():
+                ignored.append(raw.strip())
+            continue
+        key, equals, value = (x.strip() for x in item.partition("="))
+        if equals:
+            if key in takes.keys and number_of(value) is not None:
+                args.append(f"{key}={value}")
+            else:
+                ignored.append(item)
+            continue
+        alias = vocabulary.aliases.get(f"{name}:{item}", "")
+        target, _, alias_arg = alias.partition(":")
+        if chosen is None and target == name and alias_arg:
+            chosen = alias_arg
+        elif chosen is None and item in choose and item != ANY:
+            chosen = item
+        elif item in takes.words:
+            args.append(item)
+        elif number_of(item) is not None and numbers < takes.numbers:
+            args.append(item)
+            numbers += 1
+        elif chosen is None and ANY in choose and ARG.match(item) is not None:
+            chosen = item
+        else:
+            ignored.append(item)
+    if chosen is None and choose:
+        return None
+    return Mark("gesture", name, chosen, tuple(args), tuple(ignored))
 
 
 def gesture(text: str, vocabulary: Vocabulary) -> Named | None:
     """``name`` or ``name:arg`` as an intent and its argument: the whole spelling through the
     aliases first, then the name alone (its argument kept); None unless the intent takes that
-    argument, or, written bare, needs none."""
+    argument, or, written bare, needs none (a list of arguments: :func:`mark`)."""
     name, colon, rest = text.partition(":")
     name = name.strip().lower()
     arg = argument(rest) if colon else None
@@ -199,6 +307,16 @@ def gesture(text: str, vocabulary: Vocabulary) -> Named | None:
     if arg in takes or (ANY in takes and ARG.match(arg) is not None):
         return "gesture", name, arg
     return None
+
+
+def number_of(text: str) -> float | None:
+    """A mark's argument as a number (``3``, ``0.4``, ``-5``), None when it is none or not
+    finite."""
+    try:
+        value = float(text)
+    except ValueError:
+        return None
+    return value if math.isfinite(value) else None
 
 
 def argument(raw: str) -> str | None:
@@ -230,11 +348,12 @@ def parse(sentence: str, vocabulary: Vocabulary = EMPTY) -> ParsedSentence:
     for match in MARKER.finditer(sentence):
         text = _joined(text, sentence[pos : match.start()])
         pos = match.end()
-        named = read(match.group(1), vocabulary)
-        if named is None:
+        found = read_mark(match.group(1), vocabulary)
+        if found is None:
             dropped.append(match.group(0))
         else:
-            placed.append(Marker(named[0], named[1], len(text), match.group(0), named[2]))
+            placed.append(Marker(found.channel, found.name, len(text), match.group(0),
+                                 found.arg, found.args, found.ignored))  # fmt: skip
     text = _joined(text, sentence[pos:])
     cuts: dict[int, str] = {}  # where a part starts -> the style it is said in
     for marker in placed:
@@ -255,7 +374,7 @@ def parse(sentence: str, vocabulary: Vocabulary = EMPTY) -> ParsedSentence:
         lead = len(body) - len(body.lstrip())
         spoken = body.strip()
         inside = tuple(
-            Marker(m.channel, m.name, min(max(0, m.at - begin - lead), len(spoken)), m.raw, m.arg)
+            replace(m, at=min(max(0, m.at - begin - lead), len(spoken)))
             for m in placed
             if m.channel != "style" and begin <= m.at < end
         )

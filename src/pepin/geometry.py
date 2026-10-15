@@ -8,11 +8,12 @@ derived state.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 
 @dataclass(frozen=True)
@@ -97,5 +98,4 @@ class BaseConfig:
     @classmethod
     def from_json(cls, path: str | Path) -> BaseConfig:
         """Load the base configuration from ``config/base.json`` or a copy of it."""
-        with open(path) as f:
-            return cls.from_dict(json.load(f))
+        return cls.from_dict(read_json(path))

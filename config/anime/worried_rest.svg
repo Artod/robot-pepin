@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the upset wave</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="line" d="M 104 84.28 C 108.67 84.17 122.67 83.25 132 83.61 C 141.33 83.98 150.67 86.29 160 86.46 C 169.33 86.63 178.67 84.64 188 84.61 C 197.33 84.58 211.33 86 216 86.28" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

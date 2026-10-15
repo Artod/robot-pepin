@@ -37,6 +37,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from pepin import goal_link
 from pepin.gaze_link import GAZE_PORT, ask
 from pepin.neck import NeckConfig, angle_limits
+from pepin.overlay import read_json
 from pepin.tools.registry import Image, ToolError
 
 if TYPE_CHECKING:  # numpy's modules: loaded by the clients that use them
@@ -600,7 +601,7 @@ def _upside_down_stereo() -> bool | None:
     from pepin.camera import active_camera
     from pepin.deployment import config_file
 
-    data = json.loads(config_file("camera.json").read_text())
+    data = read_json(config_file("camera.json"))
     rig = data[active_camera(data)].get("rig")
     return bool(rig.get("upside_down", False)) if isinstance(rig, dict) else None
 

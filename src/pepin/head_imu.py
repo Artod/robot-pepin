@@ -47,6 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pepin.overlay import read_json
+
 HEAD_PORT = 3340
 SUBSCRIBE_LINE = '{"cmd":"subscribe","imu":true}\n'
 IMU_FRAME = "head_imu"
@@ -260,7 +262,7 @@ class HeadImuConfig:
         from pepin.deployment import config_file
 
         source = Path(path) if path is not None else config_file("head_imu.json")
-        data = json.loads(source.read_text())
+        data = read_json(source)
         link, publish, noise, mast = data["link"], data["publish"], data["noise"], data["mast"]
         cfg = cls(
             host=str(link["host"]),

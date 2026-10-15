@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the cat's w, its ends curling up (the cheeks are the overlay's)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 122.07 86.46 C 135.2 91.89 147.43 91.19 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 172.57 91.19 184.8 91.89 197.93 86.46 C 203.16 84.3 209.8 88.16 207.02 93.08 C 199.44 106.47 179.14 116 160 116 C 140.86 116 120.56 106.47 112.98 93.08 C 110.2 88.16 116.84 84.3 122.07 86.46 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 140.17 99.37 C 153.07 97.65 166.93 97.65 179.83 99.37 C 186.72 100.29 188.3 109.75 181.77 112.11 C 174.87 114.6 167.35 116 160 116 C 152.65 116 145.13 114.6 138.23 112.11 C 131.7 109.75 133.28 100.29 140.17 99.37 Z" fill="#DE5B55"/>
+  <path class="line" d="M 122.07 86.46 C 135.2 91.89 147.43 91.19 155.73 85.35 C 158.29 83.55 161.71 83.55 164.27 85.35 C 172.57 91.19 184.8 91.89 197.93 86.46 C 203.16 84.3 209.8 88.16 207.02 93.08 C 199.44 106.47 179.14 116 160 116 C 140.86 116 120.56 106.47 112.98 93.08 C 110.2 88.16 116.84 84.3 122.07 86.46 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 103.41 75.31 C 100.48 73.3 98.6 70.1 98.26 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 216.59 75.31 C 219.52 73.3 221.4 70.1 221.74 66.57" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

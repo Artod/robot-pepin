@@ -7,6 +7,13 @@ the places book as a second system block, then the conversation, cached as it gr
 request's top-level breakpoint). A conversation's history keeps the model's own content blocks,
 so a later round reads exactly what it wrote; a turn the person cut short keeps only what they
 heard (:meth:`ClaudeBrain.interrupt`).
+
+With ``brain.web_search`` the tools end with Anthropic's server-side web search: the API runs it
+inside the call, so the reply streams on after it, its cited text split into several text blocks
+(one sentence may span them: only a block that is not text ends the words before it); the
+searches are counted and priced from the call's usage, and the search blocks stay in the
+history. A call the API pauses in its own loop (``pause_turn``) is sent again as it stands and
+the API resumes it.
 """
 
 from __future__ import annotations
@@ -47,6 +54,8 @@ END_TOOL = {
     "input_schema": {"type": "object", "properties": {}},
 }
 INTERRUPTED = " …"  # an ellipsis: a bracketed marker got copied into replies by chat models
+WEB_SEARCH = "web_search"
+PAUSE_TURN = "pause_turn"  # the API's own tool loop stopped short: sent again, it goes on
 NOT_AWAITED = "interrupted by the person before the result came back"
 PLACES_KNOWN = (
     "The places go_to takes are: {names} (exactly these names). You know them already: when"
@@ -64,28 +73,52 @@ def tool_definitions(registry: Registry, allowed: set[str]) -> list[dict[str, An
     return [t for t in anthropic_tools(registry) if t["name"] in allowed] + [END_TOOL]
 
 
+def web_search_tools(config: BrainConfig) -> list[dict[str, Any]]:
+    """Anthropic's server-side web search as ``config`` sets it, or nothing when it is off."""
+    if not config.web_search:
+        return []
+    tool: dict[str, Any] = {
+        "type": config.web_search_tool,
+        "name": WEB_SEARCH,
+        "max_uses": config.web_search_max_uses,
+    }
+    if config.web_search_allowed_domains:
+        tool["allowed_domains"] = list(config.web_search_allowed_domains)
+    return [tool]
+
+
 def usage_of(usage: Any, price: ModelPrice, stop: str | None, ms: int) -> Usage:
-    """An API usage report as :class:`Usage`, priced."""
+    """An API usage report as :class:`Usage`, priced (its web searches too)."""
     fresh = int(getattr(usage, "input_tokens", 0) or 0)
     read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
     write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
     out = int(getattr(usage, "output_tokens", 0) or 0)
+    server = getattr(usage, "server_tool_use", None)
+    searches = int(getattr(server, "web_search_requests", 0) or 0)
     usd = (
         fresh * price.input
         + read * price.cache_read
         + write * price.cache_write
         + out * price.output
-    ) / 1e6
-    return Usage(fresh, read, write, out, usd, stop, ms)
+    ) / 1e6 + searches * price.web_search_per_1000 / 1000
+    return Usage(fresh, read, write, out, usd, stop, ms, searches)
 
 
-def cut_usage(started: Any, chars: int, last_prompt: int, price: ModelPrice, ms: int) -> Usage:
+def cut_usage(
+    started: Any, chars: int, last_prompt: int, price: ModelPrice, ms: int, searches: int = 0
+) -> Usage:
     """A call cut mid-stream, priced as an estimate: its prompt as ``message_start`` reported it
     (or, cut before that, the last call's prompt read from the cache), its output as the larger
-    of what the stream reported and the text it streamed."""
+    of what the stream reported and the text it streamed, and ``searches`` (the searches it
+    began)."""
+    server = SimpleNamespace(web_search_requests=searches)
     if started is None:
         return usage_of(
-            SimpleNamespace(cache_read_input_tokens=last_prompt, output_tokens=text_tokens(chars)),
+            SimpleNamespace(
+                cache_read_input_tokens=last_prompt,
+                output_tokens=text_tokens(chars),
+                server_tool_use=server,
+            ),
             price,
             CUT,
             ms,
@@ -97,11 +130,23 @@ def cut_usage(started: Any, chars: int, last_prompt: int, price: ModelPrice, ms:
             cache_read_input_tokens=getattr(started, "cache_read_input_tokens", 0),
             cache_creation_input_tokens=getattr(started, "cache_creation_input_tokens", 0),
             output_tokens=out,
+            server_tool_use=server,
         ),
         price,
         CUT,
         ms,
     )
+
+
+def answered(content: list[Any]) -> list[Any]:
+    """``content`` without the calls nothing answers: a tool call the turn ends without running
+    and a search whose result never came (a call cut by ``max_tokens``)."""
+    results = {getattr(block, "tool_use_id", None) for block in content}
+    return [
+        block
+        for block in content
+        if block.type != "tool_use" and (block.type != "server_tool_use" or block.id in results)
+    ]
 
 
 def prompt_tokens(usage: Usage) -> int:
@@ -123,15 +168,16 @@ class ClaudeBrain:
         client: Any | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        """``tools``: Messages API tool definitions (:func:`tool_definitions`); ``client``: an
-        ``AsyncAnthropic`` (built from the environment when None)."""
+        """``tools``: Messages API tool definitions (:func:`tool_definitions`; the web search is
+        added after them when ``config.web_search``); ``client``: an ``AsyncAnthropic`` (built
+        from the environment when None)."""
         if client is None:
             import anthropic  # lazy: the unit tier runs the brain over a fake client
 
             client = anthropic.AsyncAnthropic(timeout=config.timeout_s, max_retries=1)
         self.config = config
         self.persona = persona
-        self.tools = tools
+        self.tools = [*tools, *web_search_tools(config)]
         self.price = price
         self.client: Any = client
         self.clock = clock
@@ -207,19 +253,21 @@ class ClaudeBrain:
         self._turn = [{"role": "user", "content": text}]
         self._said, self._acted = [], False
         first = True
+        spoken = 0  # the rounds of tools done: the round the sentences belong to
+        resumed = False  # the last call paused in the API's own loop: this one goes on with it
         for round_index in range(self.config.max_tool_rounds + 1):
             final = round_index == self.config.max_tool_rounds
             kwargs = self.request(self.history + self._turn, final=final)
             splitter = SentenceSplitter()
             t0 = self.clock()
 
-            def say(sentence: str, index: int = round_index) -> None:
+            def say(sentence: str, index: int = spoken) -> None:
                 said = Sentence(sentence, index)
                 self._said.append(said)
                 emit(said)
 
             started: Any = None  # the call's usage so far, as the stream reports it
-            chars = 0
+            chars = searches = 0
             try:
                 async with self.client.messages.stream(**kwargs) as stream:
                     async for event in stream:
@@ -234,15 +282,20 @@ class ClaudeBrain:
                             for sentence in splitter.feed(event.text):
                                 say(sentence)
                             for early in splitter.ahead():
-                                emit(Ahead(early, round_index))
-                        elif kind == "content_block_stop":
-                            rest = splitter.flush()  # a text block ends before a tool call
+                                emit(Ahead(early, spoken))
+                        elif kind == "content_block_start" and event.content_block.type != "text":
+                            # the words before a tool call, a search or more thinking end here
+                            # (a cited text block goes on with the sentence of the one before)
+                            rest = splitter.flush()
                             if rest:
                                 say(rest)
+                            block = event.content_block
+                            if block.type == "server_tool_use" and block.name == WEB_SEARCH:
+                                searches += 1
                     message: Any = await stream.get_final_message()
             except asyncio.CancelledError:
                 ms = round((self.clock() - t0) * 1000)
-                emit(cut_usage(started, chars, self.last_prompt, self.price, ms))
+                emit(cut_usage(started, chars, self.last_prompt, self.price, ms, searches))
                 raise
             rest = splitter.flush()
             if rest:
@@ -251,15 +304,18 @@ class ClaudeBrain:
             usage = usage_of(message.usage, self.price, message.stop_reason, ms)
             self.last_prompt = prompt_tokens(usage)
             emit(usage)
+            if message.stop_reason == PAUSE_TURN and not final:
+                self._keep(list(message.content), resumed)
+                resumed = True
+                continue
             uses = [block for block in message.content if block.type == "tool_use"]
             if message.stop_reason != "tool_use" or not uses:
                 # a call cut by max_tokens leaves no tool call to answer; an empty reply (speech
                 # not meant for the robot) leaves no message: the API refuses an empty one
-                kept = [block for block in message.content if block.type != "tool_use"]
-                if kept:
-                    self._turn.append({"role": "assistant", "content": kept})
+                self._keep(list(message.content), resumed, last=True)
                 return
-            self._turn.append({"role": "assistant", "content": message.content})
+            self._keep(list(message.content), resumed)
+            resumed = False
             self._acted = True
             for use in uses:
                 emit(ToolUse(use.id, use.name, dict(use.input or {})))
@@ -267,8 +323,20 @@ class ClaudeBrain:
                 *(self._run(tools, use.id, use.name, dict(use.input or {}), emit) for use in uses)
             )
             self._turn.append({"role": "user", "content": [block for block, _ in done]})
+            spoken += 1
             if not any(follow for _, follow in done):
                 return  # every result said there is nothing to add: no call to hear it
+
+    def _keep(self, content: list[Any], resumed: bool, *, last: bool = False) -> None:
+        """A call's content as the turn's assistant message (a resumed call's joins the paused
+        one's: the API reads two in a row as one anyway); ``last``: the turn ends on it, so the
+        calls nothing answers go (:func:`answered`) and an empty reply leaves no message."""
+        if resumed and self._turn[-1]["role"] == "assistant":
+            content = [*self._turn.pop()["content"], *content]
+        if last:
+            content = answered(content)
+        if content:
+            self._turn.append({"role": "assistant", "content": content})
 
     async def _run(
         self, tools: ToolExecutor, use_id: str, name: str, args: dict[str, Any], emit: Emit

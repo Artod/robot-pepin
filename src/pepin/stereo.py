@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 import numpy.typing as npt
 
+from pepin.overlay import read_json
+
 Array = npt.NDArray[Any]
 
 CALIBRATION_FILE = "stereo_calibration.json"
@@ -162,7 +164,7 @@ class StereoCalibration:
     @classmethod
     def load(cls, path: str | Path) -> StereoCalibration:
         """Read ``config/stereo_calibration.json`` (``FileNotFoundError`` when there is none)."""
-        return cls.from_json(json.loads(Path(path).read_text()))
+        return cls.from_json(read_json(path))
 
     def write(self, path: str | Path) -> None:
         """Write the file, whole, so a reader never meets half of it."""

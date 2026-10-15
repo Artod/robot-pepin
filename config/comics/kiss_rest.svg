@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the red kiss lips, the seam between them</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="tongue" d="M 130 86.79 C 130.17 59.73 147.65 56.52 156.76 72.32 C 158.2 74.82 161.8 74.82 163.24 72.32 C 172.35 56.52 189.83 59.73 190 86.79 C 190 87.05 189.98 87.31 189.92 87.56 C 187.24 99.35 170.69 107.18 160 107.18 C 149.31 107.18 132.75 99.35 130.08 87.56 C 130.02 87.31 130 87.05 130 86.79 Z" fill="#DE5B55"/>
+  <path class="line" d="M 138 88.18 C 152 91.18 168 91.18 182 88.18" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="seam"/>
+</svg>

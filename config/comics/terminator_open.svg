@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the angry gritted grid, tilted, the bite line and four gaps</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 84.31 102.64 C 117.74 55.41 191.49 46.35 235.36 84.1 C 236.64 85.2 236.96 87.07 236.11 88.54 C 203.75 144.63 129.62 153.73 84.66 107.13 C 83.48 105.91 83.33 104.03 84.31 102.64 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 84.31 102.64 C 117.74 55.41 191.49 46.35 235.36 84.1 C 236.64 85.2 236.96 87.07 236.11 88.54 C 203.75 144.63 129.62 153.73 84.66 107.13 C 83.48 105.91 83.33 104.03 84.31 102.64 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 83.67 104.65 C 112.88 88.62 206.48 88.62 236.58 86.78" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 119.5 73.84 C 119.63 92.39 119.76 110.94 119.9 129.5" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 145.33 64.29 C 145.46 88.03 145.6 111.77 145.73 135.51" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 171.16 61.67 C 171.3 85.85 171.43 110.03 171.56 134.21" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 197 65.43 C 197.13 85.65 197.26 105.87 197.4 126.09" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+</svg>

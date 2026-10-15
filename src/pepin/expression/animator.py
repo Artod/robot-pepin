@@ -24,8 +24,9 @@ pulse, the idle layer); the person starting to speak fades the gesture layer of 
 part to rest and drops what waits; a cut reply drops its clips. An arm UNIT the board holds
 (``then: hold``: a mark's next stroke due, the listeners' posture) goes to rest when the person
 starts to speak, when its reply is cut or done, and when the body's turn asks for the arm,
-unless a clip still moves the arm (its own end decides). The idle layer plays an atom of
-the book's ``idle`` entries every ``every_s`` on a part no gesture holds, unless a state the
+unless a clip still moves the arm (its own end decides). The idle layer plays a composition of
+the book's ``idle`` entries (an atom's auto-wrapper, or one written for it) every ``every_s`` on
+a part no gesture holds, unless a state the
 entry excludes holds (by default either speaker: idle only while nobody speaks), from the
 entry's ``after_speech_s`` (else ``idle_after_speech_s``) after those states ended and
 ``idle_resume_s`` after a gesture. A looping idle clip (the breath) holds its part until a
@@ -51,8 +52,10 @@ the command line, which a person asked for: per part (a sentence or a clause of 
 reply, per minute, arm gestures per minute, an intent's own per minute (``laugh``: 1, waived
 while the person's own laugh is fresh), and each composition's ``cooldown_s`` per mark and
 argument. The accent (``{!}``) is outside those counts, one a part; a series (``count``) counts
-once a reply, its later items passing every count. Arm gestures are counted on the final
-version (the ladder's: a mark that fell to its head-and-face floor used no arm).
+once a reply, its later items passing every count; a mark of an atom's auto-wrapper (a single
+basic move) counts under ``per_part`` alone unless ``caps.atoms_counted``. Arm gestures are
+counted on the final version (the ladder's: a mark that fell to its head-and-face floor used no
+arm). Nested compositions count as their parent: one gesture, its cooldown alone.
 
 A requester ends its own move with :meth:`release` (what that very request holds fades, what
 it still waits for is dropped), and sees what waits with :meth:`pending` (each clip's part,
@@ -62,8 +65,17 @@ One thread does all of it, waking only for what waits: every ``poll_s`` while a 
 its word, at a performance's next clip, at the next idle motion or renewal, every
 ``ATTENTION_POLL_S`` while a gesture holds the head, and at least every ``MAX_WAIT_S``; the
 cascade's calls only post to it and never wait. Every performance is logged with its seed and
-variant (a replay is ``scripts/gesture.py play NAME --seed N --variant V``), every clip sent
-with the stream second it was planned for and the one it went at.
+variant (a replay is ``scripts/gesture.py play NAME --seed N --variant V``), the arguments that
+set its parameters and the nested compositions' variants, every clip sent with the stream
+second it was planned for and the one it went at; a mark's arguments its intent does not take
+are logged ``ignored`` when its part goes to the voice.
+
+Every rendering's scene carries what the engine knows (:meth:`GestureEngine._known_scene`): the
+expression its own face clip shows now, attention's phase and why the person engaged counts as
+unseen (no face or body of theirs within :data:`pepin.expression.speaker.PERSON_SEEN_S`, 3 s,
+with eyes to tell), which a variant may need: a variant that needs the person seen (the waves
+of the brain's ``{greeting}`` and ``{farewell}``) is left out while they are unseen, the floor
+plays and an ``unseen`` row says why.
 
 Owners (gesticulation DESIGN.md §11): the contract's file. A plugs in through
 :meth:`GestureEngine.request`, :meth:`GestureEngine.release`, :meth:`GestureEngine.pending`,
@@ -88,6 +100,7 @@ from typing import Any, Literal
 
 from pepin.expression.animation import (
     PARTS,
+    PERSON,
     Book,
     Clip,
     Composition,
@@ -98,7 +111,7 @@ from pepin.expression.animation import (
     Performance,
     Scene,
 )
-from pepin.expression.book import vocabulary
+from pepin.expression.book import loops, vocabulary
 from pepin.expression.breath import ArmBreath
 from pepin.expression.conversation import (
     GESTURES,
@@ -109,7 +122,7 @@ from pepin.expression.conversation import (
     moment_rank,
 )
 from pepin.expression.executors import Executor, Outcome, Renewing
-from pepin.expression.markers import Cue, Part, Playout, cues, gesture
+from pepin.expression.markers import Cue, Part, Playout, cues, mark
 from pepin.expression.mix import stretched
 from pepin.expression.parts import GENTLE_SHARE, ArmPart, HeadPart
 from pepin.expression.render import BookRenderer, Resolver, WeightedChooser
@@ -132,8 +145,10 @@ from pepin.expression.speaker import (
     AttentionView,
     arm_refusal,
     head_refusal,
+    unseen,
 )
 from pepin.expression.trajectory import JOINTS
+from pepin.sounds import NO_PLAYER, SOUND
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +179,12 @@ class Caps:
     accent_per_part: int = 1
     accents: tuple[str, ...] = ("accent",)
     series: tuple[str, ...] = ("count",)
+    atoms_counted: bool = False  # an auto-wrapper's mark counts as a composition's (2026-10-14)
 
 
-Tally = Literal["counted", "accent", "series"]  # how a capped request counts (Caps)
+# How a capped request counts (Caps): as itself, an accent, a series' later item, or a single
+# basic move (an atom's auto-wrapper: per_part alone)
+Tally = Literal["counted", "accent", "series", "atom"]
 
 
 @dataclass(frozen=True)
@@ -237,6 +255,7 @@ def engine_config(data: Mapping[str, Any]) -> EngineConfig:
             accent_per_part=int(caps.get("accent_per_part", c.accent_per_part)),
             accents=tuple(str(x) for x in caps.get("accents", c.accents)),
             series=tuple(str(x) for x in caps.get("series", c.series)),
+            atoms_counted=bool(caps.get("atoms_counted", c.atoms_counted)),
         ),
         timing=timing_from(data),
     )
@@ -272,8 +291,12 @@ class GestureEngine:
         self.resolver = Resolver(attention=attention, record=self._meaning)
         self._attention = attention
         self.taps: list[AudioTap] = []  # the voice's chunks, on the voice's thread (prosody)
-        # each rendering's scene refined, in order: the arm's place first (the scheduler's)
-        self.scene_hooks: list[SceneHook] = [self._arm_scene]
+        # each rendering's scene refined, in order: the arm's place first (the scheduler's), then
+        # what the engine knows of the face and attention
+        self.scene_hooks: list[SceneHook] = [self._arm_scene, self._known_scene]
+        # a bare mark's argument from the engine's sources, by intent (the dance's style from
+        # the sound playing: pepin.expression.listeners.MusicPulse); None: the book's first
+        self.arg_hooks: dict[str, Callable[[], str | None]] = {}
         self.scheduler = Scheduler(
             playout, self._latency, lambda kind, fields: self.record(kind, fields)
         )
@@ -567,18 +590,28 @@ class GestureEngine:
         for cue in cues(turn, index, part):
             marker = cue.marker
             at = AtWord(turn, index, marker.at)
+            if marker.ignored:
+                self.record("ignored", {"intent": marker.name, "args": list(marker.ignored),
+                                        "turn": turn, "part": index})  # fmt: skip
             if marker.channel == "face":
                 hold = self.config.face_hold_s
                 face = Clip("face", 0.0, 0.0, hold, events=(Event(0.0, marker.name, hold),))
                 request = Request(f"face:{marker.name}", at, Priority.MARK, "marker", clips=(face,))
                 self._request(request, cue)
                 continue
+            if marker.name == SOUND:  # reserved for the brain's sound tool (pepin.sounds)
+                self.record("sound", {"name": marker.arg, "turn": turn, "part": index,
+                                      "why": NO_PLAYER})  # fmt: skip
+                continue
             request = Request(marker.name, at, Priority.MARK, "marker")
             composition = self.book.compositions.get(marker.name)
             if composition is not None:
                 request = replace(request, bind=composition.bind, family=composition.family)
                 arg = styled_arg(composition, marker.arg, part.style)
-                if arg != marker.arg:  # the part's style chose the bare mark's argument
+                hook = self.arg_hooks.get(marker.name)
+                if arg is None and hook is not None:
+                    arg = hook()  # the engine's source chose the bare mark's argument
+                if arg != marker.arg:  # the style or a source chose the bare mark's argument
                     cue = replace(cue, marker=replace(marker, arg=arg))
             self._request(request, cue)
 
@@ -709,9 +742,9 @@ class GestureEngine:
                     f"no gesture {intent!r}; the gestures are {', '.join(self.book.compositions)}"
                     " (an argument after a colon: point:printer)",
                 )
-            name, arg = asked
+            name, arg, args = asked
             request = Request(name, None, Priority.ASK, source)
-            performance = self._render(name, source, None, request, arg=arg)
+            performance = self._render(name, source, None, request, arg=arg, args=args)
             if performance is None:
                 return Outcome(False, "no part can play it now")
             outcomes = self._place(request, performance, None, rendered=True)
@@ -723,13 +756,14 @@ class GestureEngine:
         )
         return Outcome(True, f"seed {performance.seed}, variant {performance.variant}", seconds)
 
-    def _asked(self, intent: str) -> tuple[str, str | None] | None:
-        """A person's ask as a composition and its argument: a composition's name as it is
-        (its first argument when it takes one), else read as a marker's inside is."""
+    def _asked(self, intent: str) -> tuple[str, str | None, tuple[str, ...]] | None:
+        """A person's ask as a composition, its argument that chooses and those that set its
+        parameters: a composition's name as it is (its first argument when it takes one), else
+        read as a marker's inside is (``snap:3,fast``)."""
         if intent in self.book.compositions:
-            return intent, None
-        named = gesture(intent, vocabulary(self.book, frozenset()))
-        return None if named is None else (named[1], named[2])
+            return intent, None, ()
+        found = mark(intent, vocabulary(self.book, frozenset()))
+        return None if found is None else (found.name, found.arg, found.args)
 
     def _request(
         self, request: Request, cue: Cue | None = None, *, moment: str | None = None
@@ -763,15 +797,17 @@ class GestureEngine:
             performance = Performance(request.intent, 0, 0, request.clips, cue)
         else:
             rendered = self._render(request.intent, request.source, cue, request,
-                                    counted=capped and tally == "counted")  # fmt: skip
+                                    counted=capped and tally == "counted",
+                                    arg=request.arg, args=request.args)  # fmt: skip
             if rendered is None:
                 return []
             performance = rendered
         if capped and turn is not None and index is not None:
             if tally == "accent":
                 self._accents[(turn, index)] = self._accents.get((turn, index), 0) + 1
-            elif tally == "counted":
+            elif tally in ("counted", "atom"):
                 self._per_part[(turn, index)] = self._per_part.get((turn, index), 0) + 1
+            if tally == "counted":
                 self._per_reply[turn] = self._per_reply.get(turn, 0) + 1
                 if request.intent in self.config.caps.series:
                     self._series.setdefault(turn, set()).add(request.intent)
@@ -779,12 +815,16 @@ class GestureEngine:
 
     def _tally(self, intent: str, turn: int | None) -> Tally:
         """How a marker's or a moment's ``intent`` counts under the caps: an accent outside
-        them, a series' later item in its reply as none, anything else as itself."""
+        them, a series' later item in its reply as none, an atom's auto-wrapper under
+        ``per_part`` alone (unless ``caps.atoms_counted``), anything else as itself."""
         caps = self.config.caps
         if intent in caps.accents:
             return "accent"
         if turn is not None and intent in self._series.get(turn, ()):
             return "series"
+        composition = self.book.compositions.get(intent)
+        if composition is not None and composition.wraps is not None and not caps.atoms_counted:
+            return "atom"
         return "counted"
 
     def _place(
@@ -816,11 +856,13 @@ class GestureEngine:
         *,
         counted: bool = True,
         arg: str | None = None,
+        args: tuple[str, ...] = (),
     ) -> Performance | None:
-        """``intent`` rendered for the parts ready now that the request may use (``arg``: an ask's
-        argument), the arm's and the body's clips stretched to their speed scales (the arm left out
-        past ``arm_per_minute``, unless the performance is not ``counted``: an accent, a series'
-        later item); logged with its seed. None when it cannot be played."""
+        """``intent`` rendered for the parts ready now that the request may use (``arg``, ``args``:
+        an ask's arguments), the arm's and the body's clips stretched to their speed scales (the
+        arm left out past ``arm_per_minute``, unless the performance is not ``counted``: an
+        accent, a series' later item, a single basic move); logged with its seed. None when it
+        cannot be played."""
         if self._driving or intent not in self.book.compositions:
             return None
         ready = frozenset(p for p, part in self.parts.items() if part.ready() is None)
@@ -831,7 +873,14 @@ class GestureEngine:
         for hook in self.scene_hooks:
             scene = hook(scene, request)
         seed = self.config.seed if self.config.seed is not None else self.seeds.randrange(2**31)
-        performance = self.renderer.render(intent, scene, seed, cue, arg=arg)
+        performance = self.renderer.render(intent, scene, seed, cue, arg=arg, args=args)
+        composition = self.book.compositions[intent]
+        if scene.unseen is not None and any(PERSON in v.needs for v in composition.variants):
+            self.record("unseen", {  # the variants that need the person seen were left out
+                "intent": intent, "source": source, "variant": performance.variant,
+                "turn": cue.turn if cue else None, "part": cue.index if cue else None,
+                "why": scene.unseen,
+            })  # fmt: skip
         scales = {"arm": self.config.arm_speed_scale, "body": self.config.body_speed_scale}
         clips = tuple(
             stretched(c, 1.0 / scales[c.part]) if c.part in scales else c for c in performance.clips
@@ -849,12 +898,15 @@ class GestureEngine:
         self._started.append((now, intent, arm, counted))  # the arm's: see _place
         self._used[_mark(intent, cue, arg)] = now
         self._last = performance
+        given = cue.marker.args if cue is not None and cue.marker.name == intent else args
         self.record("performance", {
             "intent": intent, "arg": cue.marker.arg if cue else arg,
             "source": source, "seed": performance.seed,
             "variant": performance.variant, "parts": [c.part for c in clips],
             "turn": cue.turn if cue else None, "part": cue.index if cue else None,
             "share": round(cue.share, 3) if cue else None, "arm_at": scene.arm_at,
+            **({"args": list(given)} if given else {}),
+            **({"nested": [list(n) for n in performance.nested]} if performance.nested else {}),
         })  # fmt: skip
         return performance
 
@@ -874,7 +926,7 @@ class GestureEngine:
             where = (cue.turn, cue.index)
             if tally == "accent" and self._accents.get(where, 0) >= caps.accent_per_part:
                 return "accent_per_part"
-            if tally == "counted" and self._per_part.get(where, 0) >= caps.per_part:
+            if tally in ("counted", "atom") and self._per_part.get(where, 0) >= caps.per_part:
                 return "per_part"
             if tally == "counted" and self._per_reply.get(cue.turn, 0) >= caps.per_reply:
                 return "per_reply"
@@ -1008,6 +1060,31 @@ class GestureEngine:
         holds or a waiting arm clip will hold, rest, or unknown without the arm's planner)."""
         return replace(scene, arm_at=self.scheduler.arm_at())
 
+    def _known_scene(self, scene: Scene, request: Request) -> Scene:
+        """The scene hook that says what the face shows, where attention is and whether the
+        person is seen (``face``: the expression of the engine's own face clip still holding,
+        None: none; ``attention``: its phase, None without a view; ``unseen``: why the person
+        engaged counts as unseen, :func:`pepin.expression.speaker.unseen`)."""
+        view, now = self._view(), self.clock()
+        attention = view.phase if self.attention is not None else None
+        return replace(scene, face=self._face_now(now), attention=attention,
+                       unseen=unseen(view, now))  # fmt: skip
+
+    def _face_now(self, now: float) -> str | None:
+        """The expression the face clip holding the face shows at ``now`` (its latest event
+        begun and not lapsed), None when none of the engine's does."""
+        held = self._playing.get("face")
+        if held is None or now >= held.ends:
+            return None
+        showing = None
+        for event in sorted(held.clip.events, key=lambda e: e.t_s):
+            at = held.started + event.t_s
+            if at > now:
+                break
+            lapsed = event.hold_s is not None and now >= at + event.hold_s
+            showing = None if lapsed else event.name
+        return showing
+
     def _meaning(self, kind: str, fields: dict[str, Any]) -> None:
         """A row of the gesture space's (a catchment, a repeat): the engine's record and the
         conversation's events.jsonl."""
@@ -1045,7 +1122,7 @@ class GestureEngine:
                     self.scheduler.reservations.release(idle.part)
                 continue
             if playing is not None and not math.isfinite(playing.ends):
-                if any(self.book.atoms[name].loop for name in idle.atoms):
+                if any(loops(self.book, name) for name in idle.compositions):
                     self._idle_next.pop(key, None)
                     continue  # a loop holds the part until it is let go (renewed meanwhile)
                 playing = None  # a finite entry over a loop: the loop yields, comes back after
@@ -1068,9 +1145,13 @@ class GestureEngine:
             if part is None or part.ready() is not None:
                 continue
             seed = self.seeds.randrange(2**31)
-            name = random.Random(seed).choice(idle.atoms)
-            clip = self.renderer.render_atom(name, seed)
-            performance = Performance(f"idle:{name}", seed, 0, (clip,))
+            name = random.Random(seed).choice(idle.compositions)
+            rendered = self.renderer.render(name, Scene(frozenset({idle.part})), seed,
+                                            layer="idle")  # fmt: skip
+            clip = next((c for c in rendered.clips if c.part == idle.part), None)
+            if clip is None:
+                continue
+            performance = Performance(f"idle:{name}", seed, rendered.variant, (clip,))
             request = Request(performance.intent, None, Priority.IDLE, "idle")
             if self._send(Waiting(performance, clip, request), now, None).ok:
                 self._idle_of[idle.part] = idle

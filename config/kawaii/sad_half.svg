@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the inverted u</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 148.29 71.77 C 155.58 62.74 164.42 62.74 171.71 71.77 C 173.33 73.79 174.23 76.64 172.51 78.58 C 170.2 81.19 165.45 83 160 83 C 154.55 83 149.8 81.19 147.49 78.58 C 145.77 76.64 146.67 73.79 148.29 71.77 Z" fill="#DD7487"/>
+  <path class="line" d="M 148.29 71.77 C 155.58 62.74 164.42 62.74 171.71 71.77 C 173.33 73.79 174.23 76.64 172.51 78.58 C 170.2 81.19 165.45 83 160 83 C 154.55 83 149.8 81.19 147.49 78.58 C 145.77 76.64 146.67 73.79 148.29 71.77 Z" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

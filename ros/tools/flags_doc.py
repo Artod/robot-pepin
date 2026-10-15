@@ -113,7 +113,7 @@ def tables() -> dict[str, FlagSet]:
 
 def knob_tables() -> dict[str, FlagSet]:
     """Every node's config knobs by node name (config/knobs.json), in the file's order."""
-    blocks = read_knobs(KNOBS)
+    blocks = read_knobs(KNOBS, overlay=False)  # the public file alone: the README is tracked
     return {node: knobs_of(blocks, node) for node in blocks}
 
 

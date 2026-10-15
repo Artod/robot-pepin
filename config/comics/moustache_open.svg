@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the flat line under the moustache</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 110.33 85 C 143.44 85 176.56 85 209.67 85 C 212.05 85 214.01 86.95 213.89 89.33 C 212.24 121.78 192.07 147.64 160 147.64 C 127.93 147.64 107.76 121.78 106.11 89.33 C 105.99 86.95 107.95 85 110.33 85 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 110.33 85 C 143.44 85 176.56 85 209.67 85 C 212.05 85 214.01 86.95 213.89 89.33 C 183.71 108.61 136.29 108.61 106.11 89.33 C 105.99 86.95 107.95 85 110.33 85 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 86 C 160.2 91.26 160.4 96.53 160.6 101.79" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 123.03 119.34 C 146.04 110.3 173.96 110.3 196.97 119.34 C 200.92 120.89 202.35 125.81 199.67 129.1 C 190.35 140.54 176.81 147.64 160 147.64 C 143.19 147.64 129.65 140.54 120.33 129.1 C 117.65 125.81 119.08 120.89 123.03 119.34 Z" fill="#DE5B55"/>
+  <path class="line" d="M 110.33 85 C 143.44 85 176.56 85 209.67 85 C 212.05 85 214.01 86.95 213.89 89.33 C 212.24 121.78 192.07 147.64 160 147.64 C 127.93 147.64 107.76 121.78 106.11 89.33 C 105.99 86.95 107.95 85 110.33 85 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 98 85 C 94.45 85 91.09 86.57 88.81 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 222 85 C 225.55 85 228.91 86.57 231.19 89.29" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="moustache" d="M 138.04 58 C 152.68 58 167.32 58 181.96 58 C 184.74 58 187 60.26 187 63.04 C 187 67.01 187 70.99 187 74.96 C 187 77.74 184.74 80 181.96 80 C 167.32 80 152.68 80 138.04 80 C 135.26 80 133 77.74 133 74.96 C 133 70.99 133 67.01 133 63.04 C 133 60.26 135.26 58 138.04 58 Z" fill="#1D1D1B"/>
+</svg>

@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the shallow smile with the tongue hanging from its middle, wagging</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="tongue" d="M 155.53 74 C 158.51 74 161.49 74 164.47 74 C 166.42 74 168 75.58 168 77.53 C 168 82.02 168 86.51 168 91 C 168 95.42 164.42 99 160 99 C 155.58 99 152 95.42 152 91 C 152 86.51 152 82.02 152 77.53 C 152 75.58 153.58 74 155.53 74 Z" fill="#DD7487"/>
+  <path class="line" d="M 133 65 C 149.2 78.33 170.8 78.33 187 65" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 164.47 74 C 166.42 74 168 75.58 168 77.53 C 168 82.02 168 86.51 168 91 C 168 95.42 164.42 99 160 99 C 155.58 99 152 95.42 152 91 C 152 86.51 152 82.02 152 77.53" fill="none" stroke="#504743" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+</svg>

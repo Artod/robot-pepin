@@ -38,7 +38,6 @@ from __future__ import annotations
 import argparse
 import array
 import contextlib
-import json
 import logging
 import math
 import os
@@ -187,6 +186,8 @@ class AudioConfig:
 def load_audio_config(path: str | Path | None = None) -> AudioConfig:
     """config/audio.json (or ``path``); the defaults, logged, when the file is not there (the
     board gets it by hand: board/README.md)."""
+    from pepin.overlay import read_json
+
     if path is None:
         from pepin.deployment import config_file
 
@@ -195,7 +196,7 @@ def load_audio_config(path: str | Path | None = None) -> AudioConfig:
         except FileNotFoundError as exc:
             logger.warning("%s; raw_mics on, capture channels auto", exc)
             return AudioConfig()
-    data = json.loads(Path(path).read_text())
+    data = read_json(path)
     channels = data.get("capture_channels", "auto")
     if channels != "auto":
         channels = int(channels)

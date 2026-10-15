@@ -47,7 +47,6 @@ Laptop only (numpy); the board never imports this module.
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import threading
@@ -121,11 +120,13 @@ class Peak:
 
 
 def _audio_config(path: str | Path | None) -> dict[str, Any]:
+    from pepin.overlay import read_json
+
     if path is None:
         from pepin.deployment import config_file
 
         path = config_file(AUDIO_CONFIG)
-    data: dict[str, Any] = json.loads(Path(path).read_text())
+    data: dict[str, Any] = read_json(path)
     return data
 
 

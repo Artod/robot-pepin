@@ -1,8 +1,9 @@
 """The alive layer: the prosody listener on the voice's own audio (nuclei, their prominence, the
 melody, the alignment the word clock uses) and the listeners that post the engine's own requests
 (the melody, accent nods, the question tilt, the long reply's aversion, the thinking glance, the
-listener's and the acknowledgement's nods, greeting and farewell due, the laugh's rock, the face
-found, the breath, the quiet rule), each through a real engine on fakes and a fake clock."""
+listener's and the acknowledgement's nods, none of the engine's own for the person's hello or
+bye, the laugh's rock, the face found, the breath, the quiet rule), each through a real engine
+on fakes and a fake clock."""
 
 # ruff: noqa: RUF001 -- Russian speech is the data here, not a lookalike of Latin
 
@@ -24,20 +25,18 @@ import pytest
 from pepin.arm_motion import load_arm_motion
 from pepin.expression.animation import PARTS, Book, Clip, Scene, Track
 from pepin.expression.animator import EngineConfig, GestureEngine
-from pepin.expression.book import load_book, span, with_rest
+from pepin.expression.book import load_book, loops, span, with_rest
 from pepin.expression.conversation import (
-    FAREWELL_DUE,
-    GREETING_DUE,
+    ACKNOWLEDGED,
     LISTENER_PAUSE,
+    THINK_WAIT,
     Heard,
     VoiceChunk,
-    moment_rank,
 )
 from pepin.expression.fakes import FakeAttention, FakeClock, FakeExecutor, FakePlayout
 from pepin.expression.head import GESTURE, IDLE_LOOK
 from pepin.expression.listeners import (
     ACK_NOD,
-    DUE,
     LAUGHING,
     LISTEN_NOD,
     PEAK,
@@ -672,64 +671,27 @@ def test_the_glance_keeps_the_head_gap_after_an_acknowledgement() -> None:
     assert glance_stroke - ack_stroke >= 1.5 - 0.011  # delayed to keep head_gap_s, not dropped
 
 
-def test_hello_from_the_person_s_words_in_the_wait_absorbs_the_brain_s_later_greeting() -> None:
-    """«Пепин, привет!»: the hello plays 0.2 s after the close, before the reply's first word;
-    the brain's own {greeting} in the reply is absorbed by the composition's cooldown."""
-    rig = Rig(seed=2)
-    rig.view.be(phase="track", seen_s=rig.clock.now + 100, eyes=False)
-    rig.alive.opened(Heard(rig.clock.now - 1.5, rig.clock.now, "Пепин, привет!"))
-    rig.heard("Пепин, привет!", seconds=1.5)
-    rig.tick(0.15)
-    assert not [f for k, f in rig.records if k == "performance"]
-    rig.tick(0.1)
-    performance = next(f for k, f in rig.records if k == "performance")
-    assert performance["intent"] == "greeting" and performance["source"] == "moment"
-    rig.say(1, 0, "Привет, Артём!", Marker("gesture", "greeting", 0))
-    rig.tick(0.05)
-    assert next(f for k, f in rig.records if k == "capped")["why"] == "cooldown 30 s"
-    assert rig.moments(GREETING_DUE)[0]["played"]
-
-
-def test_a_goodbye_waves_bye_in_the_wait_and_a_greeting_waits_for_the_body_s_turn() -> None:
-    rig = Rig(seed=1)
+@pytest.mark.parametrize("words", ["Пепин, привет!", "Ладно, пока, Пепин."], ids=("hi", "bye"))
+def test_the_person_s_hello_or_bye_alone_moves_nothing(words: str) -> None:
+    """Artem 2026-10-14: no scripted start. The person's «привет» or «пока», seen, asks the
+    engine for nothing in the brain's wait: no greeting or farewell of its own, no
+    acknowledgement, no thinking glance (their knobs at 1 here); the wave is the brain's own
+    mark on its word. A statement as long brings both."""
+    rig = Rig(seed=1, think_p=1.0, ack_nod_p=1.0)
     rig.open()
-    rig.heard("Ладно, пока, Пепин.", seconds=1.5)
-    rig.tick(0.3)
-    assert [f["intent"] for k, f in rig.records if k == "performance"] == ["farewell"]
-    rig = Rig(seed=1)
-    rig.open()
-    rig.view.be(phase="turning", eyes=True)
-    rig.heard("Привет!", seconds=1.0)
-    rig.tick(1.0)
-    assert not [f for k, f in rig.records if k == "performance"]
-    rig.view.be(phase="track", eyes=True)  # the turn is over, nobody seen yet: it waits
-    rig.tick(0.6)
-    assert not [f for k, f in rig.records if k == "performance"]
-    rig.view.be(phase="track", eyes=True, seen_s=rig.clock.now)
-    rig.tick(0.2)
-    assert [f["intent"] for k, f in rig.records if k == "performance"] == ["greeting"]
-    assert rig.moments(GREETING_DUE)[0]["deferred_s"] >= 1.4
-
-
-def test_a_greeting_waits_to_see_the_person_and_is_dropped_when_nobody_shows() -> None:
-    """2026-10-13: the hello at the wake waved at a voice from behind, before any face; with
-    eyes the wave waits for a fresh sighting (a face or a body), and a hello nobody shows up
-    for is no wave at all. Without eyes (no finder) it plays as before."""
-    rig = Rig(seed=1)
-    rig.open()
-    rig.view.be(phase="voice", eyes=True, seen_s=rig.clock.now - 60.0)  # seen a minute ago
-    rig.heard("Привет!", seconds=1.0)
-    rig.tick(3.0)
-    assert not [f for k, f in rig.records if k == "performance"], "a stale sighting is none"
-    rig.tick(3.5)
-    assert not [f for k, f in rig.records if k == "performance"]
-    assert "nobody seen" in rig.moments(GREETING_DUE)[0]["why"]
-    rig = Rig(seed=1)
-    rig.open()
-    rig.view.be(phase="voice", eyes=False)
-    rig.heard("Привет!", seconds=1.0)
-    rig.tick(0.3)
-    assert [f["intent"] for k, f in rig.records if k == "performance"] == ["greeting"]
+    rig.view.be(phase="track", eyes=True, seen_s=rig.clock.now + 100.0)  # seen all along
+    rig.heard(words, seconds=2.0)
+    rig.tick(4.0)
+    asked = {f["intent"] for k, f in rig.records if k in ("performance", "cue")}
+    assert asked.isdisjoint({"greeting", "farewell", ACK_NOD, "think_glance"}), asked
+    assert not rig.moments(ACKNOWLEDGED)
+    assert [m["why"] for m in rig.moments(THINK_WAIT)] == ["a hello or a bye"]
+    said = Rig(seed=1, think_p=1.0, ack_nod_p=1.0)
+    said.open()
+    said.view.be(phase="track", eyes=True, seen_s=said.clock.now + 100.0)
+    said.heard("Я сегодня весь день чинил колесо.", seconds=2.0)
+    said.tick(4.0)
+    assert said.moments(ACKNOWLEDGED)[0]["played"] and said.moments(THINK_WAIT)[0]["played"]
 
 
 def test_the_laugh_is_one_body_its_face_head_gripper_and_cart_together() -> None:
@@ -979,7 +941,7 @@ def test_the_listeners_thread_takes_the_calls_and_stops() -> None:
     assert rig.alive._thread is not None and not rig.alive._thread.is_alive()
 
 
-def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_compositions() -> None:
+def test_the_knobs_load_from_config() -> None:
     data = json.loads((CONFIG / "expression.json").read_text())
     knobs_ = alive_knobs(data)
     assert knobs_.pulse.beat_lead_min_s == 0.30 and knobs_.pulse.melody_max_deg == 0.9
@@ -993,16 +955,13 @@ def test_the_knobs_load_from_config_and_the_moments_due_name_the_book_s_composit
     assert knobs_.moments.nod_rock_p == 0.3 and knobs_.pulse.arm_up_min_sentences == 2
     for gone in ("beat_amp_deg", "wrist_beat_deg", "accent_rock_p"):  # the book's sizes now
         assert gone not in data["pulse"]
-    (breath,) = [i for i in BOOK.idle if "breath" in i.atoms]  # the breath is the book's
+    (breath,) = [i for i in BOOK.idle if "breath" in i.compositions]  # the breath is the book's
     assert breath.unless == ("speaking",) and breath.after_speech_s == 0.0
     assert (
-        BOOK.atoms["breath"].loop and BOOK.atoms["breath"].params["amp_deg"].hi == 2.0
-    )  # 2026-10-13: 1 deg read as jerky ticks
+        loops(BOOK, "breath") and BOOK.atoms["breath"].params["amp_deg"].hi == 2.0
+    )  # 2026-10-13: 1 deg read as jerky ticks; the loop is the breath composition's step's
     assert knobs_.pulse.voice_stats == VoiceStats() and knobs_.quiet.hours == (23, 8)
     assert alive_knobs({}) == AliveKnobs()
-    assert DUE == {GREETING_DUE: "greeting", FAREWELL_DUE: "farewell"}
-    assert set(DUE.values()) <= set(BOOK.compositions)
-    assert moment_rank(GREETING_DUE) < moment_rank(LISTENER_PAUSE)
 
 
 # -- offline: a recorded reply ---------------------------------------------------------------------

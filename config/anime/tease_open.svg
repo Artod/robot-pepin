@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the smile with the tongue hanging down out of its right corner (the tongue id's drawing; tease took it on 2026-10-15 night)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 113.75 83.88 C 142.73 92.04 177.27 92.04 206.25 83.88 C 211.92 82.28 217.94 86.53 216.68 92.29 C 211.01 118.34 187.69 138 160 138 C 132.31 138 108.99 118.34 103.32 92.29 C 102.06 86.53 108.08 82.28 113.75 83.88 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 113.75 83.88 C 142.73 92.04 177.27 92.04 206.25 83.88 C 211.92 82.28 217.94 86.53 216.68 92.29 C 184.94 107.9 135.06 107.9 103.32 92.29 C 102.06 86.53 108.08 82.28 113.75 83.88 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 216.68 92.29 C 184.94 107.9 135.06 107.9 103.32 92.29" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 183.2 128.74 C 184.01 128.33 184.82 127.92 185.64 127.52 C 189.46 125.61 194.57 125.26 196.43 129.11 C 197.37 131.04 197.95 133.18 198.77 134.89 C 201.64 138.24 201.24 143.28 197.89 146.15 C 194.54 149.02 189.5 148.62 186.63 145.27 C 184.87 144.06 182.16 141.71 179.92 139.04 C 177.07 135.62 179.22 130.72 183.2 128.74 Z" fill="#F09AA8"/>
+  <path class="shine" d="M 183.12 139.51 C 182.23 137.74 183.52 135.29 185.99 134.06 C 188.46 132.83 191.18 133.27 192.07 135.05 C 192.96 136.83 191.68 139.27 189.2 140.5 C 186.73 141.74 184.01 141.29 183.12 139.51 Z" fill="#F8C8D0" data-follow="tongue"/>
+  <path class="line" d="M 179.74 134.52 C 173.57 136.77 166.92 138 160 138 C 132.31 138 108.99 118.34 103.32 92.29 C 102.06 86.53 108.08 82.28 113.75 83.88 C 142.73 92.04 177.27 92.04 206.25 83.88 C 211.92 82.28 217.94 86.53 216.68 92.29 C 213.37 107.48 204.06 120.51 191.37 128.72" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 196.43 129.11 C 197.37 131.04 197.95 133.18 198.77 134.89 C 201.64 138.24 201.24 143.28 197.89 146.15 C 194.54 149.02 189.5 148.62 186.63 145.27 C 184.87 144.06 182.16 141.71 179.92 139.04" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <path class="line" d="M 187.2 133.64 C 189.69 135.94 192.12 138.78 194 141.6" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="crease" data-follow="tongue"/>
+</svg>

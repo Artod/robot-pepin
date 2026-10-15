@@ -10,7 +10,8 @@
 //   'P' pong: ping id u32, micros at receipt u32    'Q' ping: id u32
 //                                                   'C' config: id u8, IMU rate u16 (Hz),
 //                                                       DLPF u8, accel FS u8, gyro FS u8,
-//                                                       brightness u8
+//                                                       brightness u8[, face style u8: 0 pepin,
+//                                                       1 rose, 2 manga, 3 anime, 4 kawaii, 5 comics]
 // Everything little-endian. src/pepin/head_link.py is the host's side of the same bytes. Pure
 // C++ (no Arduino): the native tests share it.
 #pragma once
@@ -23,7 +24,7 @@ namespace head {
 constexpr uint8_t kSync = 0xA5;
 constexpr size_t kMaxPayload = 1024;
 constexpr size_t kOverhead = 5;  // sync, type, length (2), CRC
-constexpr uint8_t kFirmwareVersion = 1;
+constexpr uint8_t kFirmwareVersion = 4;  // 4: the shape engine draws any shapes style (kawaii 4, comics 5 in 'C')
 
 enum Type : uint8_t {
   kImu = 'I',
@@ -38,7 +39,8 @@ enum Type : uint8_t {
 
 constexpr size_t kImuSampleBytes = 17;
 constexpr size_t kStatusBytes = 36;
-constexpr size_t kConfigBytes = 7;
+constexpr size_t kConfigBytes = 7;        // without the face's style (an older host)
+constexpr size_t kConfigBytesStyled = 8;  // with it
 
 uint8_t crc8(const uint8_t* data, size_t n, uint8_t crc = 0);
 

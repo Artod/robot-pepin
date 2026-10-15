@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small pursed line aside, nearly level, a tick</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 158 87 C 182 83 206 88 230 83" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 237.83 81.37 C 241.3 80.64 244.92 81.49 247.71 83.69" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

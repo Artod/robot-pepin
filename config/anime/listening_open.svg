@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>a small soft oval with the band</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 132 88.3 C 132 74.33 144.54 63 160 63 C 175.46 63 188 74.33 188 88.3 C 188 102.27 175.46 113.6 160 113.6 C 144.54 113.6 132 102.27 132 88.3 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 138.58 72 C 143.72 66.5 151.41 63 160 63 C 168.59 63 176.28 66.5 181.42 72 C 168.57 78.67 151.43 78.67 138.58 72 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 181.42 72 C 168.57 78.67 151.43 78.67 138.58 72" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 132 88.3 C 132 74.33 144.54 63 160 63 C 175.46 63 188 74.33 188 88.3 C 188 102.27 175.46 113.6 160 113.6 C 144.54 113.6 132 102.27 132 88.3 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

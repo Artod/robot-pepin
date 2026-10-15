@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the gritted grid, the bite line and six gaps</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="teeth" d="M 74.39 88.81 C 118.3 45.99 201.7 45.99 245.61 88.81 C 246.99 90.14 247.04 92.33 245.73 93.74 C 201.81 141.01 118.19 141.01 74.27 93.74 C 72.96 92.33 73.01 90.14 74.39 88.81 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 74.39 88.81 C 118.3 45.99 201.7 45.99 245.61 88.81 C 246.99 90.14 247.04 92.33 245.73 93.74 C 201.81 141.01 118.19 141.01 74.27 93.74 C 72.96 92.33 73.01 90.14 74.39 88.81 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 73.32 91.36 C 107.2 87.99 212.8 87.99 246.68 91.36" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+  <path class="line" d="M 103.33 70.24 C 103.46 84.94 103.59 99.64 103.73 114.34" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 126 62.21 C 126.13 82.54 126.26 102.87 126.4 123.2" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 148.67 58.19 C 148.8 81.34 148.93 104.49 149.07 127.64" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 171.33 58.19 C 171.47 81.34 171.6 104.49 171.73 127.64" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 194 62.21 C 194.14 82.54 194.27 102.87 194.4 123.2" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="line" d="M 216.67 70.24 C 216.81 84.94 216.94 99.64 217.07 114.34" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+</svg>

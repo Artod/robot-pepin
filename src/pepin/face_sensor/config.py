@@ -3,11 +3,12 @@ thresholds, the device and every path the face sensor reads or writes."""
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from pepin.overlay import read_json
 
 CONFIG_FILE = "face_sensor.json"
 DEVICES = ("coreml", "mps", "ane", "cpu")
@@ -141,7 +142,7 @@ class FaceSensorConfig:
             from pepin.deployment import config_file
 
             path = config_file(CONFIG_FILE)
-        return cls.from_dict(json.loads(Path(path).read_text()))
+        return cls.from_dict(read_json(path))
 
     def check(self) -> None:
         """Raise ``ValueError`` on a value no run could use."""

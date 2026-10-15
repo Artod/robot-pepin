@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the worried wave, its ends curling up</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 98 85 C 103.17 84.71 118.67 82.94 129 83.24 C 139.33 83.54 149.67 86.79 160 86.79 C 170.33 86.79 180.67 83.54 191 83.24 C 201.33 82.94 216.83 84.71 222 85" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 90.01 85.46 C 86.47 85.66 83.02 84.28 80.59 81.7" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 229.99 85.46 C 233.53 85.66 236.98 84.28 239.41 81.7" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

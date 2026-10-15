@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the bracket pout: a short level line, a bracket at each end, the cheeks flushed (the overlay's)</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 133.77 86.1 C 150.49 87.3 169.51 87.3 186.23 86.1 C 192.4 85.65 198.08 90.75 196.11 96.62 C 191.11 111.53 176.78 122.36 160 122.36 C 143.22 122.36 128.89 111.53 123.89 96.62 C 121.92 90.75 127.6 85.65 133.77 86.1 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 133.77 86.1 C 150.49 87.3 169.51 87.3 186.23 86.1 C 192.4 85.65 198.08 90.75 196.11 96.62 C 175.89 102.46 144.11 102.46 123.89 96.62 C 121.92 90.75 127.6 85.65 133.77 86.1 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 196.11 96.62 C 175.89 102.46 144.11 102.46 123.89 96.62" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="tongue" d="M 143.91 102.82 C 154.37 100.83 165.63 100.83 176.09 102.82 C 183.2 104.18 185.58 113.47 179.34 117.12 C 173.67 120.45 167.05 122.36 160 122.36 C 152.95 122.36 146.33 120.45 140.66 117.12 C 134.42 113.47 136.8 104.18 143.91 102.82 Z" fill="#F09AA8"/>
+  <path class="line" d="M 129.43 107.13 C 147.77 99.39 172.23 99.39 190.57 107.13" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="dome"/>
+  <path class="line" d="M 133.77 86.1 C 150.49 87.3 169.51 87.3 186.23 86.1 C 192.4 85.65 198.08 90.75 196.11 96.62 C 191.11 111.53 176.78 122.36 160 122.36 C 143.22 122.36 128.89 111.53 123.89 96.62 C 121.92 90.75 127.6 85.65 133.77 86.1 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

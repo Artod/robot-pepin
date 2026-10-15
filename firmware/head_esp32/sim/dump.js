@@ -3,9 +3,12 @@
 "use strict";
 
 const Face = require("./face.js");
+const Anime = require("./anime.js");
 
 const words = require("fs").readFileSync(0, "utf8").split(/\s+/).filter((w) => w.length);
 const model = new Face.FaceModel();
+const anime = new Anime.AnimeModel();
+let style = Face.T.style;
 const out = [];
 let i = 0;
 const next = () => Number(words[i++]);
@@ -14,8 +17,29 @@ while (i < words.length) {
   if (op === "R") {
     const p = new Float32Array(Face.T.params.length);
     for (let k = 0; k < p.length; k++) p[k] = next();
-    const px = Face.render({ p, wavePhase: Math.fround(next()) });
+    const wavePhase = Math.fround(next());
+    const heart = Math.fround(next());
+    const z = Math.fround(next());
+    const color = Face.T.elements.map(() => next());
+    const px = Face.render({ p, wavePhase, heart, z, color, style });
     out.push(Buffer.from(px.buffer, px.byteOffset, px.byteLength));
+  } else if (op === "D") {
+    const t = next();
+    model.update(t);
+    let px;
+    if (Anime.tableOf(model.style) !== null) {
+      anime.follow(model, t);
+      px = Anime.render(anime);
+    } else {
+      px = Face.render(model.shape());
+    }
+    out.push(Buffer.from(px.buffer, px.byteOffset, px.byteLength));
+  } else if (op === "Y") {
+    style = next();
+    model.setStyle(style, 0);
+  } else if (op === "C") {
+    const s = next(), t = next();
+    model.setStyle(s, t);
   } else if (op === "E") {
     const id = next(), intensity = next(), ms = next(), t = next();
     model.setExpression(id, intensity, ms, t);
@@ -25,7 +49,8 @@ while (i < words.length) {
   } else if (op === "S") {
     model.update(next());
     const s = model.shape();
-    out.push(Buffer.from([...s.p].map((v) => v.toFixed(5)).join(" ") + " " + s.wavePhase.toFixed(5) + "\n"));
+    const text = [...s.p, s.wavePhase, s.heart, s.z].map((v) => v.toFixed(5)).join(" ");
+    out.push(Buffer.from(`${text} ${s.color.join(" ")} ${s.style} ${model.shown} ${model.expression}\n`));
   }
 }
 process.stdout.write(Buffer.concat(out));

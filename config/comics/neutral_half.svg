@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small content smile, a tick at each end</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 110.42 83.14 C 140.97 90.29 179.03 90.29 209.58 83.14 C 212.89 82.36 216.33 84.74 215.79 88.1 C 212.5 108.56 185.33 124.34 160 124.34 C 134.67 124.34 107.5 108.56 104.21 88.1 C 103.67 84.74 107.11 82.36 110.42 83.14 Z" fill="#1D1D1B"/>
+  <path class="tongue" d="M 130.34 104.08 C 149.29 100.33 170.71 100.33 189.66 104.08 C 195.78 105.29 197.39 113.46 191.86 116.36 C 182.29 121.38 170.97 124.34 160 124.34 C 149.03 124.34 137.71 121.38 128.14 116.36 C 122.61 113.46 124.22 105.29 130.34 104.08 Z" fill="#DE5B55"/>
+  <path class="line" d="M 110.42 83.14 C 140.97 90.29 179.03 90.29 209.58 83.14 C 212.89 82.36 216.33 84.74 215.79 88.1 C 212.5 108.56 185.33 124.34 160 124.34 C 134.67 124.34 107.5 108.56 104.21 88.1 C 103.67 84.74 107.11 82.36 110.42 83.14 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 96.29 79.36 C 92.87 78.41 90.05 76 88.58 72.77" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 223.71 79.36 C 227.13 78.41 229.95 76 231.42 72.77" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

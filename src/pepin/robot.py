@@ -8,7 +8,6 @@ in git history (its callers went on 2026-09-27).
 
 from __future__ import annotations
 
-import json
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
@@ -17,6 +16,7 @@ from pathlib import Path
 from pepin.footprint import Footprint
 from pepin.geometry import BaseConfig
 from pepin.lidar import LidarMount
+from pepin.overlay import read_json
 from pepin.tof import TofMount, load_mounts
 
 logger = logging.getLogger(__name__)
@@ -54,8 +54,8 @@ class RobotConfig:
         unless switched off); a misspelt feed name is an error, not a silently
         ignored sensor.
         """
-        robot = json.loads((config_dir / "robot.json").read_text())
-        base_raw = json.loads((config_dir / "base.json").read_text())
+        robot = read_json(config_dir / "robot.json")
+        base_raw = read_json(config_dir / "base.json")
         entries = robot.get("feeds", {})
         unknown = sorted(set(entries) - set(KNOWN_FEEDS))
         if unknown:

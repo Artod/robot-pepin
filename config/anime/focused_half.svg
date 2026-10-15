@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the closed lens of teeth with the bite line</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="teeth" d="M 105.74 79.77 C 136.61 68.62 183.39 68.62 214.26 79.77 C 219.75 81.76 220.42 89.3 215.29 92.1 C 184.1 109.15 135.9 109.15 104.71 92.1 C 99.58 89.3 100.25 81.76 105.74 79.77 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 105.74 79.77 C 136.61 68.62 183.39 68.62 214.26 79.77 C 219.75 81.76 220.42 89.3 215.29 92.1 C 184.1 109.15 135.9 109.15 104.71 92.1 C 99.58 89.3 100.25 81.76 105.74 79.77 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 101.22 86.25 C 140.2 94.44 179.8 94.44 218.78 86.25" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+</svg>

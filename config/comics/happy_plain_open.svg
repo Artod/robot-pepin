@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the D laugh, the band with one gap, the red tongue, the ticks, the chin mark (happy's variant: the same drawing)</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="fill" d="M 74.69 37.29 C 126.54 43.21 193.46 43.21 245.31 37.29 C 247.8 37 250 38.95 249.94 41.45 C 248.45 102.65 217.92 151.93 160 151.93 C 102.08 151.93 71.55 102.65 70.06 41.45 C 70 38.95 72.2 37 74.69 37.29 Z" fill="#1D1D1B"/>
+  <path class="teeth" d="M 74.69 37.29 C 126.54 43.21 193.46 43.21 245.31 37.29 C 247.8 37 250 38.95 249.94 41.45 C 199.57 81.82 120.43 81.82 70.06 41.45 C 70 38.95 72.2 37 74.69 37.29 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 160 42.73 C 160.2 51.73 160.4 60.73 160.6 69.73" fill="none" stroke="#1D1D1B" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="gap"/>
+  <path class="tongue" d="M 91.12 103.08 C 133.23 82.61 186.77 82.61 228.88 103.08 C 232.13 104.66 233.35 108.68 231.47 111.76 C 216.52 136.32 192.6 151.93 160 151.93 C 127.4 151.93 103.48 136.32 88.53 111.76 C 86.65 108.68 87.87 104.66 91.12 103.08 Z" fill="#DE5B55"/>
+  <path class="line" d="M 74.69 37.29 C 126.54 43.21 193.46 43.21 245.31 37.29 C 247.8 37 250 38.95 249.94 41.45 C 248.45 102.65 217.92 151.93 160 151.93 C 102.08 151.93 71.55 102.65 70.06 41.45 C 70 38.95 72.2 37 74.69 37.29 Z" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 66.74 36.38 C 63.21 35.98 60.05 34.04 58.09 31.08" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 253.26 36.38 C 256.79 35.98 259.95 34.04 261.91 31.08" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the gentle frown, the hooks down</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 114.9 83.55 C 142.97 76.35 177.03 76.35 205.1 83.55 C 210.67 84.98 215.61 90.04 212.93 95.14 C 206.92 106.57 183.81 114.87 160 114.87 C 136.19 114.87 113.08 106.57 107.07 95.14 C 104.39 90.04 109.33 84.98 114.9 83.55 Z" fill="#EC7488"/>
+  <path class="teeth" d="M 114.9 83.55 C 142.97 76.35 177.03 76.35 205.1 83.55 C 210.67 84.98 215.61 90.04 212.93 95.14 C 183.29 91.16 136.71 91.16 107.07 95.14 C 104.39 90.04 109.33 84.98 114.9 83.55 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 212.93 95.14 C 183.29 91.16 136.71 91.16 107.07 95.14" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="band"/>
+  <path class="line" d="M 114.9 83.55 C 142.97 76.35 177.03 76.35 205.1 83.55 C 210.67 84.98 215.61 90.04 212.93 95.14 C 206.92 106.57 183.81 114.87 160 114.87 C 136.19 114.87 113.08 106.57 107.07 95.14 C 104.39 90.04 109.33 84.98 114.9 83.55 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

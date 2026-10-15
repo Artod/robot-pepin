@@ -126,8 +126,12 @@ def stretched(clip: Clip, factor: float) -> Clip:
 
 def rebased(clip: Clip, base: Mapping[str, float], rest: Mapping[str, float]) -> Clip:
     """``clip`` started where ``base`` holds the arm instead of at ``rest``: every absolute
-    track's first key that stands on the rest pose (the book's ``arm_pose`` starts there) moves
-    to the base's value, so a unit's next stroke goes from the held pose straight to its own."""
+    track whose first key stands on the rest pose (the book's ``@from``, rest when the renderer
+    knows no earlier step: ``arm_pose`` starts there) has that key, and every later one that
+    stands there too (an atom that comes back to where it began: the gripper's snap), moved to
+    the base's value, so a unit's next stroke goes from the held pose straight to its own and
+    returns to it. No pose of the book stands on rest's value of a joint (a test holds it), so
+    only ``@from``'s keys stand there."""
     tracks = []
     for track in clip.tracks:
         dof = track.dof
@@ -138,7 +142,8 @@ def rebased(clip: Clip, base: Mapping[str, float], rest: Mapping[str, float]) ->
         if abs(track.values[0] - start) > 1e-6:
             tracks.append(track)
             continue
-        tracks.append(Track(dof, track.mode, track.times, (base[dof], *track.values[1:])))
+        values = tuple(base[dof] if abs(v - start) <= 1e-6 else v for v in track.values)
+        tracks.append(Track(dof, track.mode, track.times, values))
     return replace(clip, tracks=tuple(tracks))
 
 

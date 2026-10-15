@@ -51,6 +51,7 @@ from pepin.footprint import Footprint
 from pepin.geometry import BaseConfig
 from pepin.mounts import lidar_mount, load_lidar
 from pepin.odometry import Pose2D
+from pepin.overlay import read_json
 from pepin.places import PLACES_TOPIC
 from pepin.sim import Box, Grid, LidarModel, SimWorld, UnicycleBase, places_from_payload
 from pepin.watch import PLACEMENT_TOPIC, Placement
@@ -140,7 +141,7 @@ class SimWorldNode(Node):
             BaseConfig.from_json(config_file("base.json")),
             Pose2D(args.x, args.y, math.radians(args.yaw_deg)),
         )
-        hull = Footprint.from_config(json.loads(config_file("base.json").read_text())["footprint"])
+        hull = Footprint.from_config(read_json(config_file("base.json"))["footprint"])
         self._lidar_mount = load_lidar()
         self.world = SimWorld(grid, base, LidarModel(self._lidar_mount, hull=hull), hull)
         self._lock = threading.Lock()

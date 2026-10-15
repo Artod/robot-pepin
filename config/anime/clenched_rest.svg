@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the pill of teeth, the bite line dipping at the canines</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="teeth" d="M 105 65 C 141.67 65 178.33 65 215 65 C 226.05 65 235 73.95 235 85 C 235 96.05 226.05 105 215 105 C 178.33 105 141.67 105 105 105 C 93.95 105 85 96.05 85 85 C 85 73.95 93.95 65 105 65 Z" fill="#FFFFFF"/>
+  <path class="line" d="M 105 65 C 141.67 65 178.33 65 215 65 C 226.05 65 235 73.95 235 85 C 235 96.05 226.05 105 215 105 C 178.33 105 141.67 105 105 105 C 93.95 105 85 96.05 85 85 C 85 73.95 93.95 65 105 65 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 85 83 C 86.67 83 91.67 82.87 95 83 C 98.33 83.13 101.67 83.14 105 83.79 C 108.33 84.44 111.67 86.99 115 86.92 C 118.33 86.85 121.67 84.01 125 83.36 C 128.33 82.7 131.67 83.06 135 83 C 138.33 82.94 141.67 83 145 83 C 148.33 83 151.67 83 155 83 C 158.33 83 161.67 83 165 83 C 168.33 83 171.67 83 175 83 C 178.33 83 181.67 82.94 185 83 C 188.33 83.06 191.67 82.7 195 83.36 C 198.33 84.01 201.67 86.85 205 86.92 C 208.33 86.99 211.67 84.44 215 83.79 C 218.33 83.14 221.67 83.13 225 83 C 228.33 82.87 233.33 83 235 83" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="bite"/>
+</svg>

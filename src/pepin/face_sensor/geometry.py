@@ -9,13 +9,14 @@ points now.
 
 from __future__ import annotations
 
-import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 from numpy.typing import NDArray
+
+from pepin.overlay import read_json
 
 Image = NDArray[np.uint8]
 
@@ -65,7 +66,7 @@ class Lens:
     def stereo_eye(cls, path: str | Path, eye: str = "left") -> Lens:
         """One raw eye of ``config/stereo_calibration.json`` (``k_left``/``d_left`` or the right
         pair): the lens of the unrectified picture the sensor looks at."""
-        data = json.loads(Path(path).read_text())
+        data = read_json(path)
         side = "right" if eye == "right" else "left"
         k = data[f"k_{side}"]
         return cls(

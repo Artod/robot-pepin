@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the tight zigzag</title>
+  <rect width="320" height="170" fill="#FFFFFF"/>
+  <path class="line" d="M 108 78 C 112.95 82.67 117.9 87.33 122.86 92 C 127.81 87.33 132.76 82.67 137.71 78 C 142.67 82.67 147.62 87.33 152.57 92 C 157.52 87.33 162.48 82.67 167.43 78 C 172.38 82.67 177.33 87.33 182.29 92 C 187.24 87.33 192.19 82.67 197.14 78 C 202.1 82.67 207.05 87.33 212 92" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="zigzag"/>
+  <path class="line" d="M 102.18 72.51 C 99.6 70.08 98.22 66.63 98.43 63.09" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+  <path class="line" d="M 217.82 97.49 C 220.4 99.92 223.93 101.08 227.45 100.67" fill="none" stroke="#1D1D1B" stroke-width="5" stroke-linecap="round" stroke-linejoin="round" data-part="tick"/>
+</svg>

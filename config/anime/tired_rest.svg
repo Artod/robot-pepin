@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the manga set's tired: the slack tilted lens, the tongue hanging full-width from its lower lip, a drop of drool</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 114.34 76.58 C 142.8 73.32 177.79 74.35 205.94 79.31 C 213.83 80.7 213.73 92.1 205.79 93.16 C 177.53 96.93 142.42 95.52 113.95 90.36 C 106.06 88.93 106.38 77.5 114.34 76.58 Z" fill="#EC7488"/>
+  <path class="tongue" d="M 154.83 94.12 C 162.88 94.22 170.92 94.32 178.96 94.42 C 181.86 94.46 184.45 96.46 184.69 99.35 C 185.31 106.75 183.13 112.79 182.22 119.82 C 182.11 128.46 175.02 135.37 166.38 135.27 C 157.75 135.16 150.83 128.07 150.94 119.43 C 150.2 112.38 148.18 106.29 148.98 98.9 C 149.29 96.02 151.94 94.08 154.83 94.12 Z" fill="#F09AA8"/>
+  <path class="shine" d="M 155.86 107.13 C 155.89 104.43 158.96 102.28 162.72 102.32 C 166.47 102.37 169.49 104.6 169.45 107.3 C 169.42 110.01 166.35 112.16 162.59 112.11 C 158.84 112.07 155.82 109.84 155.86 107.13 Z" fill="#F8C8D0" data-follow="tongue"/>
+  <path class="line" d="M 114.34 76.58 C 142.8 73.32 177.79 74.35 205.94 79.31 C 213.83 80.7 213.73 92.1 205.79 93.16 C 177.53 96.93 142.42 95.52 113.95 90.36 C 106.06 88.93 106.38 77.5 114.34 76.58 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+  <path class="line" d="M 184.69 99.35 C 185.31 106.75 183.13 112.79 182.22 119.82 C 182.11 128.46 175.02 135.37 166.38 135.27 C 157.75 135.16 150.83 128.07 150.94 119.43 C 150.2 112.38 148.18 106.29 148.98 98.9" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" data-part="tongue" data-follow="tongue"/>
+  <path class="line" d="M 166.82 100.07 C 167.13 107.27 167.03 115.27 166.54 122.47" fill="none" stroke="#C04860" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" data-part="crease" data-follow="tongue"/>
+  <circle class="drool" cx="205.17" cy="93.58" r="3" fill="#F8C8D0"/>
+</svg>

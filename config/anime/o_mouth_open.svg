@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="320" height="170" viewBox="0 0 320 170">
+  <title>the small filled oval</title>
+  <rect width="320" height="170" fill="#FFF5F0"/>
+  <path class="fill" d="M 134 98.3 C 134 80.46 145.64 66 160 66 C 174.36 66 186 80.46 186 98.3 C 186 116.14 174.36 130.6 160 130.6 C 145.64 130.6 134 116.14 134 98.3 Z" fill="#EC7488"/>
+  <path class="line" d="M 134 98.3 C 134 80.46 145.64 66 160 66 C 174.36 66 186 80.46 186 98.3 C 186 116.14 174.36 130.6 160 130.6 C 145.64 130.6 134 116.14 134 98.3 Z" fill="none" stroke="#C04860" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>
