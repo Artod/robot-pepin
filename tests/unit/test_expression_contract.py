@@ -9,6 +9,7 @@ from pepin.expression.conversation import GESTURES, SPEAKER_GAZE
 from pepin.expression.executors import NO_BODY, NoBody, NoWheels, WheelMove, WheelReport
 from pepin.expression.fakes import FakeExecutor, FakeFlag, FakeGazeDoor, FakePlayout
 from pepin.expression.markers import CLAUSE_END, MARKER, NAME, SPELLED
+from pepin.expression.speaker import Point
 from pepin.expression.trajectory import JOINTS
 from pepin.gaze import Aim
 
@@ -54,8 +55,11 @@ def test_the_fakes_answer_as_scripted() -> None:
     flag = FakeFlag(GESTURES)
     assert flag.switch(True) is None and flag.on
     door = FakeGazeDoor()
-    aim = Aim(0.3, 0.1)
-    assert door.aim(aim, speed="saccade", ttl_s=6.0).head == aim
+    there = Point(1.0, 0.5, 1.1)
+    assert door.aim(there, speed="saccade", ttl_s=6.0).head is None, "no resolver: no head"
+    door.resolve = lambda point: Aim(0.3, 0.1)
+    assert door.aim(there, speed="saccade", ttl_s=6.0).head == Aim(0.3, 0.1)
+    assert door.calls[-1] == ("aim", (there, "saccade", 6.0, None))
 
 
 def test_the_joints_are_the_self_filters_joints() -> None:

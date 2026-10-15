@@ -2,21 +2,27 @@
 the arbiter's door as the speaker gaze uses it (with a move's own ease), and the seams for
 choosing whom to look at.
 
-Angles follow the neck (:class:`pepin.gaze.Aim`): pan positive to the left of the cart's nose,
-tilt positive below level. The microphone array sits on the cart, not on the head, so its
+PEOPLE ARE POINTS IN THE MAP (since 2026-10-15): every sighting and every voice is placed as a
+:class:`Point` in the ``map`` frame by the poses of its own stamp (TF's, through the goal server's
+``pose_at``: :mod:`pepin.expression.poses`), and the head is asked to look at a point
+(:meth:`GazeDoor.aim`), which the arbiter turns into pan and tilt from TF's pose of now and keeps
+as the cart turns under it. Angles follow the neck (:class:`pepin.gaze.Aim`): pan positive to the
+left of the cart's nose, tilt positive below level. The microphone array sits on the cart, not on
+the head, so its
 direction of arrival is a bearing in the cart's frame once :class:`DoaMap` (measured on the robot)
 has turned it: with the array's readings of a voice left of, behind and right of the cart, the
 bearing is interpolated between the four quarter turns (an array off the cart's centre reads
 them unevenly); with the front alone, ``bearing = sign * (doa_deg - front_deg)``, wrapped to
 -180..180.
-A face's bearing comes from the head camera's left eye through its lens
-(:meth:`pepin.face_sensor.geometry.Lens.bearing_deg`), relative to where the head pointed when
-the frame was taken, so a face only counts in a frame taken while the head stood still. A
-person's box (:class:`BodySighting`) comes through the same lens with an estimate of where the
-head is in it, so a person whose face is not seen (turned away, lying, far) still gives an aim.
+A face's angles come from the head camera's left eye through its lens
+(:meth:`pepin.face_sensor.geometry.Lens.bearing_deg`), relative to the eye's optical axis when
+the frame was exposed: the ray they name is carried into the map by the camera's pose at the
+frame's stamp. A person's box (:class:`BodySighting`) comes through the same lens with an
+estimate of where the head is in it, so a person whose face is not seen (turned away, lying,
+far) still gives a point.
 
-Whom to look at is :mod:`pepin.expression.policy`'s over the people tracked
-(:mod:`pepin.expression.tracks`), and how to turn there is :class:`GazePlan`'s split between the
+Whom to look at is :mod:`pepin.expression.policy`'s over the people in the register
+(:mod:`pepin.expression.people_map`), and how to turn there is :class:`GazePlan`'s split between the
 head and the wheels: the head alone within the forward arc, the body turned toward a person past
 it when the wheels may move, and the head as far as it reaches when they may not.
 
@@ -40,6 +46,28 @@ if TYPE_CHECKING:
     from numpy.typing import NDArray
 
     from pepin.face_sensor.models import Detection
+
+
+@dataclass(frozen=True)
+class Point:
+    """A point in the ``map`` frame, metres (``z`` above the floor): where a person's head is,
+    or where the head is asked to look."""
+
+    x: float
+    y: float
+    z: float
+
+    def plus(self, dx: float, dy: float, dz: float) -> Point:
+        """This point moved by ``(dx, dy, dz)`` metres."""
+        return Point(self.x + dx, self.y + dy, self.z + dz)
+
+    def distance(self, other: Point) -> float:
+        """Metres to ``other``."""
+        return math.dist((self.x, self.y, self.z), (other.x, other.y, other.z))
+
+    def rounded(self, digits: int = 2) -> list[float]:
+        """``[x, y, z]`` rounded, for an event."""
+        return [round(self.x, digits), round(self.y, digits), round(self.z, digits)]
 
 
 @dataclass(frozen=True)
@@ -74,7 +102,8 @@ class FaceSighting:
     the robot) when the finder reads it, and the detection itself (box and five points: what
     person recognition aligns the face on) when the finder keeps it; a finder that keeps no
     pixels (the perception service's) gives the crop's sharpness and brightness instead, the
-    measures person recognition's gate reads."""
+    measures person recognition's gate reads; ``depth_m`` the stereo depth at the face when the
+    finder measures one (None: unmeasured, the face's size gives the range)."""
 
     pan_deg: float
     tilt_deg: float
@@ -85,6 +114,7 @@ class FaceSighting:
     detection: Detection | None = field(default=None, compare=False, repr=False)
     sharpness: float | None = field(default=None, compare=False, repr=False)
     brightness: float | None = field(default=None, compare=False, repr=False)
+    depth_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -92,8 +122,9 @@ class BodySighting:
     """One person's box in a frame (a body detector's, :class:`pepin.expression.finder.
     BodyDetector`), in degrees from the optical axis (pan + left, tilt + down): the box's centre
     pan and half width, the head estimated from it (near the box's top: standing, sitting,
-    slouching and lying all give one), its height, the detector's score, and whether the frame's
-    top edge cuts it (the head is then above the picture: the estimate is the edge)."""
+    slouching and lying all give one), its height, the detector's score, whether the frame's
+    top edge cuts it (the head is then above the picture: the estimate is the edge), and the
+    stereo depth at the head estimate when the finder measures one (None: unmeasured)."""
 
     pan_deg: float
     half_width_deg: float
@@ -102,6 +133,7 @@ class BodySighting:
     height_deg: float
     score: float
     cut: bool = False
+    depth_m: float | None = None
 
 
 @dataclass(frozen=True)
@@ -181,9 +213,13 @@ class GazeDoor(Protocol):
     """The arbiter's door (``POST /look``, ``/renew``, ``/release``, ``GET /state``) for one
     source; every call may wait on the network, so only a worker thread makes them."""
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
-        """Hold the head at ``aim`` (replacing this source's last aim), moving at ``speed`` or,
-        given, on ``ease``; answered when the head has settled there, or refused."""
+    def aim(
+        self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None
+    ) -> GazeAnswer:
+        """Hold the head on ``point`` in the map (replacing this source's last aim): the
+        arbiter resolves it to pan and tilt from the pose of now and keeps it there as the cart
+        moves; moving at ``speed`` or, given, on ``ease``; answered when the head has settled
+        there, or refused."""
         ...
 
     def renew(self) -> int:
@@ -222,9 +258,10 @@ class Attention:
     """A read-only snapshot of the attention engine (the speaker gaze), laptop monotonic clock:
     its phase and since when, whether it has eyes (a face finder: frames to protect), when the
     person engaged was last seen by a face or a body (None: never), their bearing and tilt
-    (degrees, the cart's frame, + left, + down) and rough distance (None: unknown), whether they
-    stand past the forward arc (a body turn is wanted) and when their first clear face of the
-    conversation was found."""
+    (degrees, the head's pan and tilt that look at them from the cart's newest pose, + left,
+    + down) and rough distance (None: unknown), whether they stand past the forward arc (a body
+    turn is wanted), when their first clear face of the conversation was found, and their point
+    in the map."""
 
     phase: AttentionPhase = "idle"
     since_s: float = 0.0
@@ -235,6 +272,7 @@ class Attention:
     distance_m: float | None = None
     past_arc: bool = False
     first_face_s: float | None = None
+    point: Point | None = None
 
 
 NO_ATTENTION = Attention()  # the speaker gaze off, or no conversation: nothing to keep clear

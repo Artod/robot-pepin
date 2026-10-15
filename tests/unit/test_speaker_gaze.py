@@ -37,7 +37,7 @@ from pepin.expression.doa import (
     wrap_deg,
 )
 from pepin.expression.door import view_of
-from pepin.expression.executors import Headings, NoWheels, WheelMove, WheelReport
+from pepin.expression.executors import NoWheels, WheelMove, WheelReport
 from pepin.expression.fakes import (
     FakeDoa,
     FakeFace,
@@ -45,11 +45,14 @@ from pepin.expression.fakes import (
     FakeGazeDoor,
     FakePerson,
     FakeScene,
+    FakeTf,
     FakeWheels,
 )
 from pepin.expression.head import GESTURE, IDLE_LOOK, SPEAKER
+from pepin.expression.people_map import Person, Register, Sighting, VoiceRay, sightings
 from pepin.expression.plan import BodyLimits, BoundedTurn, Step, head_after, split, sweep
-from pepin.expression.policy import decide, doubt, face_aim
+from pepin.expression.policy import decide, doubt
+from pepin.expression.poses import HeadModel, Pose, PosesAt
 from pepin.expression.speaker import (
     BodySighting,
     DoaMap,
@@ -58,21 +61,27 @@ from pepin.expression.speaker import (
     FaceSighting,
     GazeAnswer,
     HeadView,
+    Point,
 )
 from pepin.expression.tracker import (
-    BY_FRAMES,
-    BY_ODOMETRY,
+    MOVED,
+    SIGHTED,
+    VOICED,
     SpeakerGaze,
     SpeakerGazeWorker,
     SpeakerSettings,
     flag_default,
 )
-from pepin.expression.tracks import Sighting, Track, Tracks, sightings
 from pepin.gaze import HOME, Aim, Reach, Speed
-from pepin.neck import NeckConfig
+from pepin.neck import NeckConfig, NeckPivot
 
 REPO = Path(__file__).resolve().parents[2]
-REACH = Reach.of(NeckConfig.from_json(REPO / "config/neck.json"))
+NECK = NeckConfig.from_json(REPO / "config/neck.json")
+REACH = Reach.of(NECK)
+# The head with its lens on the neck's two axes (no lever arms): a person's angles from the
+# camera are the same at any range, so these tests' degrees are exact (the real arms' own
+# round trip: test_speaker_gaze_pursuit)
+FLAT = HeadModel(replace(NECK, pivot=NeckPivot()))
 BOARD = 5000.0  # the board's clock runs this far ahead of the laptop's in these tests
 MAP = DoaMap(front_deg=180.0, sign=1)  # the array reads 180 straight ahead, growing leftward
 # The shipped knobs, the simple map; the body turned by the wheels' executor (body_turn
@@ -266,36 +275,27 @@ def test_the_off_centre_array_s_four_readings_are_its_quarter_turns_and_between_
     assert bearing_deg(246.0, m) == pytest.approx(-63.3, abs=0.1), "the quiet one: -76 before"
 
 
-def test_each_reading_is_turned_by_the_cart_s_turn_since_its_stamp() -> None:
+def test_each_reading_is_taken_into_the_map_by_the_cart_s_heading_at_its_stamp() -> None:
     """A voice that stays put while the cart turns 20 deg left reads 40 -> 20 in the cart's
-    frame; less how far the cart has turned since each reading (radians, by its board stamp),
-    every one says 20: the bearing it has now. Across 180 the mean is circular."""
+    frame; each reading taken into the map by the cart's heading (TF's) at its own stamp says
+    40 in the map, and by the heading at the newest reading, 20 in the cart's frame then: the
+    bearing it has now. A reading TF has no heading for is left out; across 180 the mean is
+    circular."""
     readings = [DoaReading(BOARD + k / 10, array(40.0 - 2.0 * k), True) for k in range(11)]
-    turned = lambda stamp: rad(20.0 - 20.0 * (stamp - BOARD))  # noqa: E731
+    heading = lambda stamp: rad(20.0 * (stamp - BOARD))  # noqa: E731
     plain = voice_of(chip(readings), MAP)
     assert plain.bearing_rad is not None and deg(plain.bearing_rad) == pytest.approx(30.0, abs=0.6)
-    now = voice_of(chip(readings), MAP, turned=turned)
+    assert plain.map_rad is None, "no heading: no direction in the map"
+    now = voice_of(chip(readings), MAP, heading=heading)
+    assert now.map_rad is not None and deg(now.map_rad) == pytest.approx(40.0, abs=0.6)
     assert now.bearing_rad is not None and deg(now.bearing_rad) == pytest.approx(20.0, abs=0.6)
-    assert now.doa_deg == plain.doa_deg, "the array's own angle logged as read"
+    assert now.ref_s == pytest.approx(BOARD + 1.0) and now.doa_deg == plain.doa_deg
+    gaps = voice_of(chip(readings), MAP, heading=lambda st: None if st > BOARD + 0.55 else 0.0)
+    assert gaps.map_rad is not None and deg(gaps.map_rad) == pytest.approx(35.0, abs=0.6)
+    assert gaps.ref_s == pytest.approx(BOARD + 0.5), "the newest reading with a heading"
     behind = [DoaReading(BOARD, array(175.0), True), DoaReading(BOARD + 0.1, array(-175.0), True)]
-    back = voice_of(chip(behind), MAP, turned=lambda stamp: 0.0)
+    back = voice_of(chip(behind), MAP, heading=lambda stamp: 0.0)
     assert back.bearing_rad is not None and abs(deg(back.bearing_rad)) == pytest.approx(180.0)
-
-
-def test_the_odometry_s_headings_are_kept_unwrapped_and_read_at_any_stamp() -> None:
-    log = Headings(kept_s=1.0)
-    assert log.latest() is None and log.at(5.0) is None
-    log.add(10.0, rad(170.0))
-    log.add(10.1, rad(-170.0))  # past +180: unwrapped to 190
-    log.add(10.05, rad(0.0))  # older than the newest: ignored
-    assert log.latest() == (10.1, pytest.approx(rad(190.0)))
-    assert log.at(10.05) == pytest.approx(rad(180.0)), "interpolated"
-    assert log.at(9.0) == pytest.approx(rad(170.0)) and log.at(11.0) == pytest.approx(rad(190.0))
-    for k in range(1, 60):
-        log.add(10.1 + k / 10, rad(190.0 + k))
-    oldest = log.at(0.0)  # 1 to 2 kept_s before the newest (16.0 s, 249 deg)
-    assert oldest is not None and rad(229.0) <= oldest <= rad(239.0), deg(oldest or 0.0)
-    assert log.at(16.0) == pytest.approx(rad(249.0))
 
 
 # ---- the head and the wheels ----------
@@ -423,83 +423,185 @@ def body(pan: float, head_pan: float, head_tilt: float, score: float = 0.7) -> B
     return BodySighting(pan, 12.0, head_pan, head_tilt, 40.0, score)
 
 
-def tracks() -> Tracks:
-    return Tracks(default_tilt_rad=TILT, min_new_px=40.0)
+ORIGIN = Pose.planar(0.0, 0.0, 0.0)  # the cart at the map's origin, facing +x
+LENS = FLAT.lens(Aim(0.0, 0.0))  # the FLAT head's lens: on the axes, at any aim
+
+
+def register(**knobs: Any) -> Register:
+    return Register(min_new_px=40.0, **knobs)
+
+
+def axis_dir(pan: float, tilt: float) -> tuple[float, float, float]:
+    """The head's axis at ``pan`` and ``tilt`` degrees, in the map (the cart at the origin)."""
+    p, t = rad(pan), rad(tilt)
+    return math.cos(t) * math.cos(p), math.cos(t) * math.sin(p), -math.sin(t)
+
+
+def at_aim(pan: float, tilt: float, range_m: float = 2.0) -> Point:
+    """The point the head looks at, ``pan`` and ``tilt`` degrees, ``range_m`` from the lens."""
+    return ORIGIN.to_map(FLAT.axis_point(Aim(rad(pan), rad(tilt)), range_m))
+
+
+def azimuth_deg(point: Point) -> float:
+    return deg(math.atan2(point.y, point.x))
+
+
+def elevation_deg(point: Point) -> float:
+    """How far below level ``point`` is from the lens (degrees)."""
+    return deg(math.atan2(LENS[2] - point.z, math.hypot(point.x, point.y)))
+
+
+def voice_at(pan: float, stamp: float = 0.0) -> VoiceRay:
+    """A voice from ``pan`` degrees with the cart at the origin, placed as the gaze places it
+    (at a known person's range and height, else 2 m at the seek's tilt)."""
+
+    def place(person: Person | None) -> Point:
+        if person is None:
+            return at_aim(pan, deg(TILT))
+        local = ORIGIN.to_frame(person.point)
+        toward = FLAT.aim_at(local)
+        return at_aim(pan, deg(toward.tilt_rad), math.dist(FLAT.lens(toward), local))
+
+    return VoiceRay(rad(pan), (0.0, 0.0), stamp, place)
+
+
+def seen_at(
+    pan: float, tilt: float, source: Any = "face", stamp: float = 0.0, width: float = 60.0
+) -> Sighting:
+    """One person seen from the lens at ``pan`` and ``tilt`` degrees: a face of ``width`` px (at
+    the range its size says), or a body box (at the default 2 m)."""
+    d = axis_dir(pan, tilt)
+    if source == "face":
+        range_m, how, seen = 80.0 / width, "face", face(0.0, width)
+    else:
+        range_m, how, seen = 2.0, "default", None
+    point = Point(LENS[0] + d[0] * range_m, LENS[1] + d[1] * range_m, LENS[2] + d[2] * range_m)
+    return Sighting(point, source, stamp, LENS, d, range_m, how, seen)  # type: ignore[arg-type]
 
 
 def test_a_frame_s_people_are_faces_and_the_bodies_no_face_speaks_for() -> None:
-    head = Aim(rad(30), rad(5))
+    """The camera's pose at the frame's exposure places each face along the ray its angles
+    name, at the range its size says (a body box at the default range, its head estimate the
+    point); a 20 px face is under the floor, a 0.3 box is nobody."""
+    camera = ORIGIN.then(FLAT.camera(Aim(rad(30), rad(5))))
+    at = PosesAt(BOARD, camera, ORIGIN)
     boxes = (body(-12.0, -10.0, 0.0), body(40.0, 38.0, 12.0), body(0.0, 0.0, 0.0, 0.3))
     seen = frame(face(-10.0, tilt=2.0), face(25.0, width=20.0), bodies=boxes)
-    people = sightings(seen, head, min_face_px=28.0, min_body_score=0.5)
-    assert [(p.source, round(deg(p.pan)), round(deg(p.head.tilt_rad))) for p in people] == [
+    people = sightings(seen, at, FLAT, min_face_px=28.0, min_body_score=0.5, default_range_m=2.0)
+    found = [(p.source, round(azimuth_deg(p.point)), round(elevation_deg(p.point))) for p in people]
+    assert found == [
         ("face", 20, 7),  # its body box (-12) is its face's
-        ("body", 70, 17),  # lying low on the right: the box's head estimate
+        ("body", 69, 16),  # lying low on the right: the box's head estimate
     ], "a 20 px face is under the floor, a 0.3 box is nobody"
-    assert people[0].distance_m == pytest.approx(80.0 / 60.0)
-    assert face_aim(Aim(0.1, 0.2), face(10.0, tilt=-5.0)).tilt_rad == pytest.approx(0.2 - rad(5))
+    assert people[0].range_m == pytest.approx(80.0 / 60.0) and people[0].range_from == "face"
+    assert math.dist(LENS, (people[0].point.x, people[0].point.y, people[0].point.z)) == (
+        pytest.approx(80.0 / 60.0)
+    )
+    assert people[1].range_from == "default" and people[0].stamp == BOARD
+    measured = frame(replace(face(-10.0, tilt=2.0), depth_m=2.5))
+    (deep,) = sightings(measured, at, FLAT, min_face_px=28.0, min_body_score=0.5,
+                        default_range_m=2.0)  # fmt: skip
+    assert deep.range_m == 2.5 and deep.range_from == "depth", "the stereo depth first"
+    assert sightings(seen, PosesAt(BOARD, None, ORIGIN), FLAT, min_face_px=28.0,
+                     min_body_score=0.5, default_range_m=2.0) == []  # fmt: skip
 
 
-def test_freshness_decides_between_a_track_s_place_and_a_voice() -> None:
-    """A person seen within a second keeps their place against the noisy array; one seen
-    longer ago takes the fresh bearing and keeps the tilt their face had."""
-    known = tracks()
-    (artem,) = [known.heard(rad(40), 0.0)[0]]
-    known.seen([Sighting(rad(40), Aim(rad(40), rad(8)), "face", face(0.0))], 1.0)
-    assert artem.seen_s == 1.0 and artem.head == Aim(rad(40), rad(8))
-    same, new = known.heard(rad(48), 1.5)
-    assert same is artem and not new and artem.pan == pytest.approx(rad(40)), "seen 0.5 s ago"
-    assert artem.voice_pan == pytest.approx(rad(48))
-    known.heard(rad(55), 30.0)  # half a minute later, 15 deg off his place
-    assert artem.pan == pytest.approx(rad(55)) and artem.head == Aim(rad(55), rad(8))
-    stranger, new = known.heard(rad(-60), 31.0)
-    assert new and stranger.head == Aim(rad(-60), TILT) and stranger.seen_s is None
-    assert known.forget(400.0, keep={stranger.id}) == [artem] and known.tracks == [stranger]
+def test_freshness_decides_between_a_person_s_point_and_a_voice() -> None:
+    """A person seen within a second keeps their point against the noisy array; one seen
+    longer ago takes the fresh voice, at their range and the height their face had."""
+    known = register()
+    (artem,) = [known.heard(voice_at(40.0, 0.0))[0]]
+    known.seen([seen_at(40.0, 8.0, stamp=1.0)], 1.0)
+    assert artem.seen_s == 1.0 and artem.source == "face" and artem.origin == "utterance"
+    assert azimuth_deg(artem.point) == pytest.approx(40.0)
+    assert elevation_deg(artem.point) == pytest.approx(8.0)
+    face_point = artem.point
+    same, new = known.heard(voice_at(48.0, 1.5))
+    assert same is artem and not new and artem.point == face_point, "seen 0.5 s ago"
+    assert artem.voice is not None and azimuth_deg(artem.voice) == pytest.approx(48.0)
+    known.heard(voice_at(55.0, 30.0))  # half a minute later, 15 deg off his point
+    assert azimuth_deg(artem.point) == pytest.approx(55.0) and artem.source == "voice"
+    assert elevation_deg(artem.point) == pytest.approx(8.0), "his face's height, remembered"
+    assert math.dist(LENS, (artem.point.x, artem.point.y, artem.point.z)) == pytest.approx(
+        80.0 / 60.0
+    ), "at his range"
+    stranger, new = known.heard(voice_at(-60.0, 31.0))
+    assert new and stranger.seen_s is None and stranger.who is None
+    assert azimuth_deg(stranger.point) == pytest.approx(-60.0)
+    assert elevation_deg(stranger.point) == pytest.approx(deg(TILT)), "the seek's tilt, 2 m"
+    assert known.forget(400.0, keep={stranger.id}) == [artem] and known.people == [stranger]
 
 
-def test_detections_join_the_nearest_track_and_a_sought_track_takes_the_nearest_person() -> None:
-    known = tracks()
-    a = known.heard(rad(-15), 0.0)[0]
-    seen = known.seen([Sighting(rad(-43.5), Aim(rad(-43.5), rad(2.8)), "face", face(0.0))], 0.5)
-    assert seen == {} and len(known.tracks) == 2, "28.5 deg off: someone else, unless sought"
-    claimed = known.seen([Sighting(rad(-43.5), Aim(rad(-43.5), rad(2.8)), "face", face(0.0))],
-                         0.6, seeking=a, seek_rad=rad(40))  # fmt: skip
-    assert claimed.keys() == {a.id} and known.tracks == [a], "the earlier sighting merged in"
-    assert a.pan == pytest.approx(rad(-43.5)) and a.source == "face"
-    small = Sighting(rad(60), Aim(rad(60), 0.0), "face", face(0.0, width=30.0))
-    assert known.seen([small], 1.0) == {} and len(known.tracks) == 1, "a small face is nobody"
-    known.seen([Sighting(rad(-40), Aim(rad(-41), rad(9)), "body")], 1.2)
-    assert a.head == Aim(rad(-43.5), rad(2.8)), "a body after a fresh face keeps the face's aim"
-    known.seen([Sighting(rad(-40), Aim(rad(-41), rad(9)), "body")], 3.0)
-    assert a.head == Aim(rad(-41), rad(9)) and a.source == "body"
+def test_detections_join_the_nearest_person_and_a_sought_one_takes_the_nearest() -> None:
+    known = register()
+    a = known.heard(voice_at(-15.0, 0.0))[0]
+    seen = known.seen([seen_at(-43.5, 2.8, stamp=0.5)], 0.5)
+    assert seen == {} and len(known.people) == 2, "28.5 deg off: someone else, unless sought"
+    claimed = known.seen([seen_at(-43.5, 2.8, stamp=0.6)], 0.6, seeking=a, seek_rad=rad(40))
+    assert claimed.keys() == {a.id} and known.people == [a], "the earlier sighting merged in"
+    assert azimuth_deg(a.point) == pytest.approx(-43.5) and a.source == "face"
+    small = seen_at(60.0, 0.0, stamp=1.0, width=30.0)
+    assert known.seen([small], 1.0) == {} and len(known.people) == 1, "a small face is nobody"
+    known.seen([seen_at(-41.0, 9.0, "body", stamp=1.2)], 1.2)
+    assert azimuth_deg(a.point) == pytest.approx(-43.5), "a body after a fresh face: the face's"
+    assert a.seen_s == 1.2, "still there"
+    known.seen([seen_at(-41.0, 9.0, "body", stamp=3.0)], 3.0)
+    assert azimuth_deg(a.point) == pytest.approx(-41.0) and a.source == "body"
+    assert elevation_deg(a.point) == pytest.approx(9.0) and a.range_from == "kept"
+    assert a.range_m == pytest.approx(80.0 / 60.0), "the box at the range his face gave"
 
 
-def test_the_tilt_changes_its_source_only_past_the_hysteresis() -> None:
+def test_the_height_changes_its_source_only_past_the_hysteresis() -> None:
     """The head nodded between Artem's face and his body box whenever the face came and went in
-    the frames: the tilt now changes source (face to box or back) only past tilt_hold_deg; the
-    pan follows the newest sighting either way, and one source moves its own tilt freely."""
-    known = Tracks(default_tilt_rad=TILT, min_new_px=40.0, tilt_hold_deg=12.0)
-    a = known.heard(rad(30), 0.0)[0]
-    assert a.tilt_source == "voice"
-    known.seen([Sighting(rad(30), Aim(rad(30), rad(-15)), "face", face(0.0))], 0.1)
-    assert a.head.tilt_rad == pytest.approx(rad(-15)) and a.tilt_source == "face", "a voice's"
-    box = Sighting(rad(32), Aim(rad(33), rad(-5)), "body")  # the box's estimate, 10 deg lower
-    known.seen([box], 2.0)
-    assert a.head == Aim(rad(33), rad(-15)) and a.tilt_source == "face", "10 deg: the face's"
-    known.seen([Sighting(rad(31), Aim(rad(31), rad(-17)), "face", face(0.0))], 2.1)
-    assert a.head.tilt_rad == pytest.approx(rad(-17)), "the face itself moves freely"
-    known.seen([Sighting(rad(31), Aim(rad(31), rad(8)), "body")], 4.0)  # he sat down: 25 deg
-    assert a.head.tilt_rad == pytest.approx(rad(8)) and a.tilt_source == "body"
-    known.seen([Sighting(rad(31), Aim(rad(31), rad(1)), "face", face(0.0))], 4.1)
-    assert a.head.tilt_rad == pytest.approx(rad(8)) and a.tilt_source == "body", "7 deg: kept"
-    assert a.source == "face" and a.pan == pytest.approx(rad(31))
+    the frames: the height changes source (face to box or back) only past tilt_hold_deg of
+    elevation; the bearing follows the newest sighting either way, and one source moves its own
+    height freely."""
+    known = register(tilt_hold_deg=12.0)
+    a = known.heard(voice_at(30.0, 0.0))[0]
+    assert a.height_from == "voice"
+    known.seen([seen_at(30.0, -15.0, stamp=0.1)], 0.1)
+    assert elevation_deg(a.point) == pytest.approx(-15.0) and a.height_from == "face"
+    known.seen([seen_at(33.0, -5.0, "body", stamp=2.0)], 2.0)  # the box's estimate, 10 lower
+    assert azimuth_deg(a.point) == pytest.approx(33.0) and a.height_from == "face"
+    assert elevation_deg(a.point) == pytest.approx(-15.0), "10 deg: the face's"
+    known.seen([seen_at(31.0, -17.0, stamp=2.1)], 2.1)
+    assert elevation_deg(a.point) == pytest.approx(-17.0), "the face itself moves freely"
+    known.seen([seen_at(31.0, 8.0, "body", stamp=4.0)], 4.0)  # he sat down: 25 deg
+    assert elevation_deg(a.point) == pytest.approx(8.0) and a.height_from == "body"
+    known.seen([seen_at(31.0, 1.0, stamp=4.1)], 4.1)
+    assert elevation_deg(a.point) == pytest.approx(8.0) and a.height_from == "body", "7: kept"
+    assert a.source == "face" and azimuth_deg(a.point) == pytest.approx(31.0)
     assert RULES.tilt_hysteresis_deg == 12.0
 
 
+def test_the_register_keeps_its_records_explicit_and_their_confidence_halves_with_age() -> None:
+    """The live layer of a future social map: a name moves to whoever recognition says it is,
+    the camera's sightings fit a velocity in the map, a record's confidence is its source's
+    trust halving every half-life, and the array's peaks never move a person's point."""
+    known = register(half_life_s=10.0)
+    a = known.heard(voice_at(0.0, 0.0))[0]
+    b = known.heard(voice_at(90.0, 0.0))[0]
+    known.named(a, "Саша")
+    known.named(b, "Саша")
+    assert (a.who, b.who) == (None, "Саша"), "one person a name"
+    for k in range(4):  # walking left at 0.5 m/s, 2 m ahead
+        known.seen([seen_at(math.degrees(math.atan2(0.05 * k, 1.333)), 0.0, stamp=1.0 + 0.1 * k)],
+                   1.0 + 0.1 * k)  # fmt: skip
+    assert a.velocity[1] == pytest.approx(0.5, abs=0.05) and abs(a.velocity[0]) < 0.05
+    assert a.confidence(a.stamp, 10.0) == pytest.approx(1.0)
+    assert a.confidence(a.stamp + 10.0, 10.0) == pytest.approx(0.5)
+    assert b.confidence(b.stamp + 20.0, 10.0) == pytest.approx(0.5 / 4), "a voice's: half"
+    before = a.point
+    known.peak(voice_at(5.0, 2.0), 0.7)
+    assert a.point == before and a.peaks == 1 and a.strength == 0.7, "a peak: never the point"
+    alone = known.peak(voice_at(-120.0, 2.0), 0.4)
+    assert alone.origin == "peaks" and known.voices() == [a, alone]
+
+
 def test_the_speaker_decides_stay_switch_check_or_seek_and_a_stimulus_is_judged_first() -> None:
-    seen = Track(1, rad(60), Aim(rad(60), 0.0), "face", 0.0, seen_s=1.0)
-    voiced = Track(2, rad(-60), Aim(rad(-60), TILT), "voice", 2.0, heard_s=2.0)
-    other = Track(3, rad(-20), Aim(rad(-20), 0.0), "face", 0.0, seen_s=0.5)
+    seen = Person(1, at_aim(60.0, 0.0), 1.0, "face", "camera", 0.0, seen_s=1.0)
+    voiced = Person(2, at_aim(-60.0, 3.0), 2.0, "voice", "utterance", 2.0, heard_s=2.0)
+    other = Person(3, at_aim(-20.0, 0.0), 0.5, "face", "camera", 0.0, seen_s=0.5)
     assert decide(seen, seen, named=False).act == "stay"
     assert decide(seen, voiced, named=True).act == "seek", "the name: no return"
     assert decide(seen, other, named=False).act == "switch", "a person seen there: at once"
@@ -545,20 +647,51 @@ def view(head: Aim | None = HOME_AIM, holder: str = "", **kw: Any) -> HeadView:
 
 @dataclass
 class Door(FakeGazeDoor):
-    """The arbiter as the speaker gaze sees it: an aim that is done moves the head there and
-    makes the speaker the holder."""
+    """The arbiter as the speaker gaze sees it (pepin.gaze's point look that follows): an aim
+    asks for a point in the map, resolved to pan and tilt from the cart's pose now (TF's) and
+    clamped toward the head's own pan; one that is done puts the head there and makes the
+    speaker the holder, and the state keeps the head on the held point as the cart turns, its
+    reading stamped on the board's clock (TF's newest)."""
 
     answers: deque[GazeAnswer] = field(default_factory=deque)
+    tf: FakeTf | None = None
+    held: Point | None = None
+    resolved: list[Aim] = field(default_factory=list)
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
-        self.calls.append(("aim", (aim, speed, ttl_s, ease)))
-        answer = self.answers.popleft() if self.answers else GazeAnswer("done", head=aim)
+    def look_at(self, point: Point) -> Aim:
+        """The pan and tilt that look at ``point`` now (the arbiter's geometry and clamp)."""
+        assert self.tf is not None
+        aim = FLAT.aim_at(self.tf.base(self.tf.now()).to_frame(point))
+        here = self.view.head.pan_rad if self.view is not None and self.view.head else None
+        return REACH.clamp(aim, from_pan=here)
+
+    def aim(
+        self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None
+    ) -> GazeAnswer:
+        self.calls.append(("aim", (point, speed, ttl_s, ease)))
+        head = self.look_at(point)
+        self.resolved.append(head)
+        answer = self.answers.popleft() if self.answers else GazeAnswer("done", head=head)
         if answer.status == "done" and self.view is not None:
-            self.view = replace(self.view, head=aim, holder=SPEAKER, band=5)
+            self.held = point
+            self.view = replace(self.view, head=head, holder=SPEAKER, band=5)
         return answer
 
+    def state(self) -> HeadView | None:
+        view = self.view
+        if view is None:
+            return None
+        if self.held is not None and view.holder == SPEAKER:  # the head kept on its point
+            view = self.view = replace(view, head=self.look_at(self.held))
+        return replace(view, head_stamp=self.tf.now() if self.tf is not None else None)
+
     def aims(self) -> list[tuple[Aim, Speed]]:
-        return [(c[1][0], c[1][1]) for c in self.calls if c[0] == "aim"]
+        """Every aim asked: the pan and tilt it resolved to then, and its speed."""
+        speeds = [c[1][1] for c in self.calls if c[0] == "aim"]
+        return list(zip(self.resolved, speeds, strict=True))
+
+    def points(self) -> list[Point]:
+        return [c[1][0] for c in self.calls if c[0] == "aim"]
 
     def eases(self) -> list[Ease | None]:
         return [c[1][3] for c in self.calls if c[0] == "aim"]
@@ -589,13 +722,24 @@ class Rig:
     face: FakeFace
     said: list[str]
     events: list[tuple[str, float, dict[str, Any]]]
+    tf: FakeTf
     series: FakeSeries = field(default_factory=FakeSeries)  # the ears' Silero: a voice throughout
+    turns: list[tuple[float, float]] = field(default_factory=list)  # TF's (board stamp, heading)
 
     def person(self, pan: float, **kw: Any) -> FakePerson:
-        """Someone at ``pan`` degrees in the room."""
+        """Someone at ``pan`` degrees in the room (the map's, from the cart's first place)."""
         p = FakePerson(pan, **kw)
         self.scene.people.append(p)
         return p
+
+    def turn_to(self, deg_: float, at: float | None = None) -> None:
+        """The cart's heading in the map is ``deg_`` from the board's stamp ``at`` (now: the
+        machine's last moment) on: TF's history, it turned."""
+        self.turns.append((self.tf.now() if at is None else at, deg_))
+
+    def cart_deg(self, stamp: float) -> float:
+        """The cart's heading at a board stamp, as TF's history has it."""
+        return next((d for t, d in reversed(self.turns) if t <= stamp + 1e-9), 0.0)
 
     def say(
         self,
@@ -610,9 +754,9 @@ class Rig:
         flagged: int | None = None,
         read_s: float = 0.1,
     ) -> float:
-        """An utterance from ``bearing`` read ``read_s`` after it ended (GigaAM), the room's
-        word-less readings in between; ``flagged``: only its last that many readings carry the
-        speech flag. When it was read."""
+        """An utterance from ``bearing`` (the cart's frame) read ``read_s`` after it ended
+        (GigaAM), the room's word-less readings in between; ``flagged``: only its last that
+        many readings carry the speech flag. When it was read."""
         read = end + read_s
         voice = speech(array(bearing), start, end)
         if flagged is not None:
@@ -659,8 +803,14 @@ class Rig:
         return now
 
     def aimed(self) -> list[tuple[float, float]]:
-        """Every aim asked, as (pan, tilt) degrees rounded."""
+        """Every aim asked, as (pan, tilt) degrees rounded, as the arbiter resolved it then."""
         return [(round(deg(a.pan_rad), 1), round(deg(a.tilt_rad), 1)) for a, _ in self.door.aims()]
+
+    def head(self) -> tuple[float, float]:
+        """Where the head points now (the arbiter keeps it on the point held)."""
+        view = self.door.state()
+        assert view is not None and view.head is not None
+        return round(deg(view.head.pan_rad), 1), round(deg(view.head.tilt_rad), 1)
 
     def kinds(self, prefix: str = "gaze_") -> list[str]:
         return [k for k, _, _ in self.events if k.startswith(prefix)]
@@ -678,17 +828,26 @@ def rig(
     **knobs: Any,
 ) -> Rig:
     """The engine on the fakes; ``knobs`` are the SpeakerSettings a scenario pins over the
-    shipped ones (``arc_deg=160.0``, ``seek_pan_deg=20.0``, ``body=BodyLimits(...)``)."""
+    shipped ones (``arc_deg=160.0``, ``seek_pan_deg=20.0``, ``body=BodyLimits(...)``). TF has
+    the cart at the map's origin, heading as :meth:`Rig.turn_to` turned it, the board's clock
+    BOARD ahead of the machine's own; the lens on the neck's axes (FLAT), so a person's angles
+    are exact."""
     door = Door(view=view(head=head))
     doa = FakeDoa()
-    scene = FakeScene(door)
+    holder: list[Rig] = []
+    tf = FakeTf(
+        FLAT,
+        now=lambda: BOARD + holder[0].machine.now_s,
+        cart_at=lambda t: (0.0, 0.0, holder[0].cart_deg(t)),
+        head_at=lambda t: door.view.head if door.view is not None else None,
+    )
+    door.tf = tf
+    scene = FakeScene(door, tf)
     face_channel = FakeFace()
     said: list[str] = []
     events: list[tuple[str, float, dict[str, Any]]] = []
     series = FakeSeries()
     wheels = wheels if wheels is not None else NoWheels()
-    if isinstance(wheels, FakeWheels) and wheels.board is None:  # its headings on the board's clock
-        wheels.board = lambda: doa.readings[-1].stamp_s if doa.readings else BOARD
     machine = SpeakerGaze(
         replace(settings if settings is not None else RULES, **knobs),
         door=door,
@@ -697,12 +856,16 @@ def rig(
         wheels=wheels,
         face=face_channel,
         reach=REACH,
+        head=FLAT,
+        poses=tf,
         report=said.append,
         events=lambda kind, now, **f: events.append((kind, now, f)),
         series=series,
     )
     machine.spawn = lambda call: call()  # an aim sent without waiting: its answer in the inbox
-    return Rig(machine, door, doa, scene, wheels, face_channel, said, events, series)
+    built = Rig(machine, door, doa, scene, wheels, face_channel, said, events, tf, series)
+    holder.append(built)
+    return built
 
 
 def tracked(pan: float = 60.0, **kw: Any) -> Rig:
@@ -755,7 +918,8 @@ def test_the_wake_turns_to_the_bearing_even_near_where_the_head_points() -> None
     assert r.aimed() == [(-15.0, 3.0)]
     r.machine.tick(read)
     assert r.machine.phase == "track" and r.aimed()[-1] == (-43.5, 2.8)
-    assert r.reaims()[-1]["why"] == "onto the face" and r.reaims()[-1]["speed"] == "turn"
+    last = r.reaims()[-1]
+    assert (last["why"], last["source"], last["speed"]) == (SIGHTED, "face", "turn")
 
 
 def test_a_stale_remembered_place_15_deg_off_the_bearing_gives_the_tilt_not_the_pan() -> None:
@@ -792,7 +956,7 @@ def test_a_face_35_deg_off_the_bearing_is_found_by_the_pan_sweep_within_2_s_with
         assert all(tilt == 3.0 for _, tilt in aims), "no tilt sweep"
         assert r.machine.phase == "track" and aims[-1] == (face_at, 3.0)
         reaims = r.reaims()
-        found = next(i for i, f in enumerate(reaims) if f["why"] == "onto the face")
+        found = next(i for i, f in enumerate(reaims) if f["why"] == SIGHTED)
         moves = [f["move_s"] for f in reaims[:found]]  # the centring comes after the find
         frames = stops + 1
         assert sum(moves) + frames * FRAME_S <= 2.0, (moves, frames)
@@ -823,9 +987,9 @@ def test_the_head_follows_a_person_walking_while_he_speaks_and_arrives_where_he_
         return where(t) if t <= 4.0 else None
 
     now = r.run(4.1, read, voice=voice, move=move)
-    pan = deg(r.machine.aim.pan_rad) if r.machine.aim is not None else 0.0
+    pan = r.aimed()[-1][0]
     assert abs(pan - 70.0) <= 12.0, (pan, r.aimed())
-    assert r.machine.counts["follows"] >= 3 and "the voice moved" in [f["why"] for f in r.reaims()]
+    assert r.machine.counts["follows"] >= 3 and VOICED in [f["why"] for f in r.reaims()]
     read = r.say(70.0, 1.35, 4.0, "я тут, у стола")
     artem.face_px = 60.0  # he turns round
     r.run(read + 1.0, max(read, now))
@@ -841,7 +1005,8 @@ def test_a_person_lying_on_the_sofa_is_aimed_at_by_the_body_box_without_a_face()
     read = r.wake(-40.0)
     r.machine.tick(read)
     assert r.aimed() == [(-40.0, 3.0), (-36.0, 12.0)]
-    assert r.machine.phase == "track" and r.reaims()[-1]["why"] == "onto the person"
+    assert r.machine.phase == "track" and r.reaims()[-1]["why"] == SIGHTED
+    assert r.reaims()[-1]["source"] == "body"
     face_event = next(f for k, _, f in r.events if k == "gaze_face")
     assert face_event["source"] == "body" and r.face.calls == []
     r.run(read + 3.0, read)
@@ -860,14 +1025,14 @@ def test_a_second_speaker_takes_the_gaze_and_the_first_takes_it_back_at_once() -
     assert "a voice elsewhere" in r.said[-1]
     r.machine.tick(read)
     assert r.machine.phase == "track" and r.aimed()[-1] == (-40.0, 6.0)
-    wife = r.machine.track
+    wife = r.machine.person
     read = r.say(65.0, 5.0, 6.0, "Она шутит")
     assert r.aimed()[-1] == (65.0, 2.0) and not r.machine.verifying
     assert "a person seen there" in r.said[-1]
     r.machine.tick(read)
     assert r.machine.phase == "track" and r.aimed()[-1] == (60.0, 2.0)
     r.say(-38.0, 8.0, 9.0, "Ничего я не шучу")
-    assert r.machine.track is wife and r.aimed()[-1] == (-38.0, 6.0), "her bearing, her tilt"
+    assert r.machine.person is wife and r.aimed()[-1] == (-38.0, 6.0), "her bearing, her tilt"
 
 
 def test_a_voice_where_nobody_is_is_checked_with_one_frame_and_the_head_comes_straight_back() -> (
@@ -893,7 +1058,7 @@ def test_a_check_never_takes_the_person_it_returns_to_for_the_voice() -> None:
     read = r.say(20.0, 3.0, 4.0, "кто это сказал")
     r.machine.tick(read)
     assert r.aimed()[-2:] == [(20.0, 3.0), (60.0, 3.0)] and r.machine.phase == "track"
-    assert len(r.machine.tracks.tracks) == 2, "Artem, and a voice nobody was seen at"
+    assert len(r.machine.people.people) == 2, "Artem, and a voice nobody was seen at"
 
 
 def test_quiet_mumbling_noise_and_thin_utterances_move_nothing() -> None:
@@ -1003,69 +1168,64 @@ def test_a_face_lost_for_good_fades_to_where_the_voice_was_heard_since() -> None
     assert r.reaims()[-1]["speed"] == "adjust"
 
 
-def test_past_the_arc_the_wheels_start_with_the_head_and_with_no_face_the_head_glides() -> None:
+def test_past_the_arc_the_wheels_start_with_the_head_and_tf_keeps_the_head_on_his_point() -> None:
     """A call from 100 deg left (past the forward arc's 80), the caller's face turned away: the
     wheels are started before the head's aim is asked (their checks take longer than its turn),
-    neither waits for the other, and the aim goes out without waiting for the arbiter (status
-    sent, the answer through the inbox). Every record is taken while the body turns and none
-    shows him, so the odometry's heading is the prior: as it comes round at 30 deg/s the head
-    GLIDES, every tick the aim is the person's pan 0.2 s ahead at that rate, on a ceiling of
-    twice the rate, never a stop-and-go step, each row saying so (by the odometry, no frame);
-    the turn's end re-centres the residue as an adjustment."""
+    neither waits for the other, and the aim (his voice's point in the map) goes out without
+    waiting for the arbiter (status sent, the answer through the inbox). Every record is taken
+    while the body turns and none shows him; as TF turns the cart at 30 deg/s the arbiter keeps
+    the head on his point (the pan comes round 100, 97, 94, 91) and the gaze sends no aim at
+    all (no odometry, no glide: 2026-10-15). The turn's end reads the cart's pose again: he is
+    at 70, within the arc, and the seek goes on there."""
     r = rig(wheels=FakeWheels(), arc_deg=160.0, body=BodyLimits(max_turn_deg=30.0))
-    artem = r.person(100.0, face_px=0.0)
+    r.person(100.0, face_px=0.0)
     read = r.wake(100.0)
     (start,) = r.wheels.calls
     assert start == ("start", (WheelMove(turn_deg=pytest.approx(30.0)),))
     assert r.aimed()[0] == (100.0, 3.0) and r.machine.turning is not None
     assert r.reaims()[0]["status"] == "sent" and r.machine.ours, "not waited for"
+    assert r.reaims()[0]["source"] == "voice" and len(r.reaims()[0]["point"]) == 3
     due = r.machine.tick(read)
     assert due == pytest.approx(read + 0.1) and r.scene.looks == 1, "a record, nobody in it"
     assert r.machine.inbox == deque() and r.machine.counts["aims"] == 1, "its answer taken"
-    for k in range(1, 4):  # the cart at 30 deg/s, its heading on the board's clock
-        t = read + 0.1 * k
-        turned = 30.0 * 0.1 * k
-        r.wheels.turn_to(turned, BOARD + t)
-        artem.pan_deg = 100.0 - turned  # the room turns the other way in the cart's frame
-        r.machine.tick(t)
-    assert [p for p, _ in r.aimed()] == [100.0, 91.0, 88.0, 85.0], "0.2 s ahead at 30 deg/s"
-    glides = r.reaims()[1:]
-    assert {f["speed"] for f in glides} == {"glide"} and {f["status"] for f in glides} == {"sent"}
-    assert {f["why"] for f in glides} == {BY_ODOMETRY}
-    assert all(f["rate_deg_s"] == pytest.approx(30.0, abs=0.5) for f in glides), glides
-    eases = r.door.eases()[1:]
-    assert all(e is not None and e.speed_deg_s == pytest.approx(60.0) for e in eases), "x2"
-    assert all(e is not None and e.acc_deg_s2 == RULES.adjust_acc_deg_s2 for e in eases)
-    assert r.machine.counts["glides"] == 3 and r.machine.ours
+    heads = []
+    for k in range(1, 4):  # TF: the cart at 30 deg/s
+        r.turn_to(3.0 * k)
+        r.machine.tick(read + 0.1 * k)
+        heads.append(r.head()[0])
+    assert heads == [97.0, 94.0, 91.0], "the arbiter keeps the head on his point"
+    assert len(r.door.aims()) == 1 and r.machine.counts["aims"] == 1, "no aim of the gaze's"
     assert r.scene.looks == 4 and r.machine.counts["frames_turning"] == 4, "every record"
+    r.turn_to(30.0)
     r.wheels.finish()
-    artem.pan_deg = 70.0
     r.machine.tick(read + 0.8)
-    (end,) = [f for f in r.reaims() if f["why"] == "the body turned"]
-    assert (end["pan_deg"], end["speed"], end["status"]) == (70.0, "adjust", "done")
-    assert r.machine.voice == pytest.approx(rad(70)), "the person moved with the cart"
+    assert r.machine.bearing == pytest.approx(rad(70)), "the turn's end: the cart's pose read"
     assert r.machine.turning is None and r.scene.looks == 5, "the frames go on"
     assert r.aimed()[-1] == (100.0, 3.0), "nobody seen there: the seek's first stop, outward"
     assert len(r.wheels.calls) == 1, "back within the arc: no second turn"
 
 
-def test_a_glide_s_answers_come_through_the_inbox_and_only_the_newest_one_counts() -> None:
-    """An aim sent without waiting is answered later: done and preempted (by our own newer aim)
-    change nothing; queued on the newest says another look holds the head (the wheels let go,
-    as a waited-for queued does); denied on the newest loses the head; an older aim's late
-    denied is ignored; past AIMS_IN_FLIGHT unanswered aims none goes out; a door that throws
-    off the thread is a denied; the shipped spawn runs the call on a thread of its own."""
+def test_aims_sent_without_waiting_are_answered_through_the_inbox_the_newest_counting() -> None:
+    """An aim sent without waiting (while the body turns, and every pursuit's) is answered
+    later: done and preempted (by our own newer aim) change nothing; queued on the newest says
+    another look holds the head (the wheels let go, as a waited-for queued does); denied on the
+    newest loses the head; an older aim's late denied is ignored; past AIMS_IN_FLIGHT
+    unanswered aims none goes out; a door that throws off the thread is a denied; the shipped
+    spawn runs the call on a thread of its own."""
     from pepin.expression.tracker import AIMS_IN_FLIGHT, _on_a_thread
 
-    r = rig(wheels=FakeWheels())
+    r = rig(wheels=FakeWheels())  # the arc's +-30: Artem at 150 turns the body
+    artem = r.person(150.0)
     read = r.wake(150.0)
+    r.machine.tick(read)
+    assert r.machine.phase == "track" and r.machine.turning is not None
     r.door.answers.append(GazeAnswer("preempted", "by a newer request of voice.speaker"))
-    r.wheels.turn_to(3.0, BOARD + read + 0.1)
+    artem.pan_deg = 160.0  # he steps aside: a pursuit's aim
     r.machine.tick(read + 0.1)
     r.machine.tick(read + 0.2)
     assert r.machine.ours and r.machine.turning is not None and len(r.wheels.calls) == 1
     r.door.answers.append(GazeAnswer("queued", "held behind look"))
-    r.wheels.turn_to(6.0, BOARD + read + 0.2)
+    artem.pan_deg = 145.0
     r.machine.tick(read + 0.3)  # the aim goes out, its queued answer lands in the inbox
     r.machine.tick(read + 0.4)
     assert r.wheels.calls[-1][0] == "halt" and r.machine.turning is None
@@ -1078,22 +1238,25 @@ def test_a_glide_s_answers_come_through_the_inbox_and_only_the_newest_one_counts
     late.machine.wheels_event(("aimed", newest, GazeAnswer("denied", "no head")), read + 0.1)
     assert late.machine.aim is None and late.machine.phase == "voice", "the newest: lost"
     assert late.wheels.calls[-1] == ("halt", ("the head is not this source's",))
-    stuck = rig(wheels=FakeWheels())
-    stuck.machine.spawn = lambda call: None  # the door never answers
-    stuck.wake(150.0)
+    stuck = rig()
+    stuck.machine.spawn = lambda call: None  # the door never answers what goes without waiting
+    walker = stuck.person(10.0)
+    read = stuck.wake(10.0)
+    stuck.machine.tick(read)
+    assert stuck.machine.phase == "track"
     for k in range(1, AIMS_IN_FLIGHT + 3):
-        stuck.wheels.turn_to(3.0 * k, BOARD + 1.3 + 0.1 * k)
-        stuck.machine.tick(1.3 + 0.1 * k)
+        walker.pan_deg = 18.0 if k % 2 else 10.0  # past the dead band every record
+        stuck.machine.tick(read + 0.1 * k)
     sent = [f["status"] for f in stuck.reaims()]
     assert sent.count("sent") == AIMS_IN_FLIGHT and sent[-1] == "unsent"
     assert stuck.machine.counts["aims_unsent"] >= 1
 
     class Broken(Door):
-        def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> Any:
+        def aim(self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> Any:
             raise OSError("the door fell off")
 
     broken = rig(wheels=FakeWheels())
-    broken.machine.door = Broken(view=view())
+    broken.machine.door = Broken(view=view(), tf=broken.tf)
     read = broken.wake(150.0)
     broken.machine.tick(read)
     assert broken.machine.phase == "voice" and broken.machine.aim is None, "denied, off-thread"
@@ -1118,7 +1281,7 @@ def test_a_face_past_straight_back_keeps_the_head_at_its_end_and_never_whips_acr
     pans = [p for p, _ in r.aimed()]
     assert pans and all(0.0 < p <= deg(REACH.pan[1]) + 0.1 for p in pans), pans
     assert r.scene.looks >= 1, "the person was looked for"
-    assert r.machine.phase == "track" and r.machine.track is not None
+    assert r.machine.phase == "track" and r.machine.person is not None
     assert all(abs(a - b) < 30.0 for a, b in itertools.pairwise(pans)), pans
 
 
@@ -1153,46 +1316,61 @@ def test_a_tool_s_face_turns_the_body_the_whole_way_past_the_arc_rule_and_a_turn
 def test_an_utterance_spoken_across_a_turn_gives_the_bearing_the_person_has_now() -> None:
     """The array turns with the cart: Artem at 100 deg keeps talking while the body turns 30
     toward him, so the array reads him sweeping 100 -> 70 (the utterance's last second averages
-    ~78). Each reading is turned by the odometry's heading since its own stamp (one board
-    clock): the bearing is 70, his place now, and the voice stays his (no hunting)."""
+    ~78). Each reading is taken into the map by TF's heading at its own stamp (one board clock):
+    he is at 100 in the room, at 70 from the cart as it stands at his last word, and the voice
+    stays his (no hunting)."""
     r = rig(wheels=FakeWheels())
     read = r.wake(100.0)
     assert r.machine.turning is not None
     start, end = read + 0.1, read + 2.0
+
+    def yaw(stamp: float) -> float:
+        return 30.0 * min(max((stamp - BOARD - start) / (end - start), 0.0), 1.0)
+
+    r.tf.cart_at = lambda t: (0.0, 0.0, yaw(t))  # TF's heading history
     for k in range(round((end - start) * 10) + 1):
         t = start + k / 10
-        yaw = 30.0 * (t - start) / (end - start)
-        r.wheels.turn_to(yaw, BOARD + t)
-        r.doa.readings.append(DoaReading(BOARD + t, array(100.0 - yaw), True))
+        r.doa.readings.append(DoaReading(BOARD + t, array(100.0 - yaw(BOARD + t)), True))
     r.doa.readings.append(DoaReading(BOARD + end + 0.1, 30, False))
     r.machine.heard(Heard(start, end, "я здесь", False, -12.0), end + 0.1)
     (voice,) = [f for k, _, f in r.events if k == "gaze_voice"]
     assert voice["bearing_deg"] == pytest.approx(70.0, abs=1.0), voice
+    assert voice["azimuth_deg"] == pytest.approx(100.0, abs=1.0), "in the room"
     assert voice["verdict"] == "the person engaged" and voice["track"] == 1
-    assert r.machine.voice == pytest.approx(rad(70.0), abs=rad(0.5)), "the person turned too"
-    rows = [f["readings"] for k, _, f in r.events if k == "gaze_doa"][-1]
-    assert rows[0][3] == pytest.approx(30.0, abs=2.0) and rows[-1][3] == pytest.approx(0.0)
+    assert r.machine.bearing == pytest.approx(rad(70.0), abs=rad(0.5)), "from the cart now"
+    doa = [f for k, _, f in r.events if k == "gaze_doa"][-1]
+    rows, voiced = doa["readings"], doa["voiced"]
+    first = voiced.index(1)  # the wheels' first jerk is no voice: no pose asked for it
+    stamp = BOARD + end + rows[first][0]  # its seconds before the utterance's end
+    assert rows[first][3] == pytest.approx(30.0 - yaw(stamp), abs=0.5), "TF's turn since"
+    assert rows[first][3] > 15.0 and rows[-1][3] == pytest.approx(0.0)
     window = utterance_readings(r.doa, Heard(start, end, "я здесь"), end + 0.1, 1.0)
     unturned = voice_of(chip(window), MAP)
     assert unturned.bearing_rad is not None and deg(unturned.bearing_rad) > 75.0, "uncorrected"
 
 
 def test_a_person_far_behind_turns_the_body_again_until_they_are_inside_the_arc() -> None:
-    """Behind at 150 deg: a request's worth (30) at a time, the next asked when the last ends,
-    until the person is within the forward arc (+-80: 150 -> 120 -> 90 -> 60)."""
-    r = rig(wheels=FakeWheels(), arc_deg=160.0, body=BodyLimits(max_turn_deg=30.0))
+    """Behind at 150 deg: a request's worth (30) at a time, the next asked when the last ends
+    (the cart's pose read again), until the person is within the forward arc (+-80: 150 -> 120
+    -> 90 -> 60), the head on his point all the while (the arbiter's; no eyes here: no seek's
+    stop moves it)."""
+    r = rig(wheels=FakeWheels(), finder=False, arc_deg=160.0, body=BodyLimits(max_turn_deg=30.0))
     read = r.wake(150.0)
+    heads = [r.head()[0]]
     for k in range(3):
         assert r.wheels.calls[-1] == ("start", (WheelMove(turn_deg=pytest.approx(30.0)),))
+        r.turn_to(30.0 * (k + 1))
         r.wheels.finish()
         r.machine.tick(read + 0.1 * (k + 1))
+        heads.append(r.head()[0])
     assert len(r.wheels.calls) == 3 and r.machine.turning is None
-    assert r.machine.voice == pytest.approx(rad(60))
-    assert [p for p, _ in r.aimed()[:4]] == [150.0, 120.0, 90.0, 60.0], "the head came round"
+    assert r.machine.bearing == pytest.approx(rad(60))
+    assert heads == [150.0, 120.0, 90.0, 60.0], "the head came round"
+    assert len(r.door.aims()) == 1, "the one point, kept by the arbiter"
 
 
 def test_a_person_tracked_who_walks_past_the_arc_turns_the_body_toward_them() -> None:
-    """One rule, wherever the person's place comes from: Artem tracked at 70 deg walks round to
+    """One rule, wherever the person's point comes from: Artem tracked at 70 deg walks round to
     95; the frame that places him past the arc (+-80) starts the turn (a request's worth, 30),
     the head already on him."""
     r = rig(wheels=FakeWheels(), arc_deg=160.0, body=BodyLimits(max_turn_deg=30.0))
@@ -1207,7 +1385,7 @@ def test_a_person_tracked_who_walks_past_the_arc_turns_the_body_toward_them() ->
     r.run(now + 2.0, now, move=walk)
     (start,) = r.wheels.calls
     assert start[0] == "start" and start[1][0].turn_deg == pytest.approx(30.0)
-    assert r.machine.track is not None and deg(r.machine.track.pan) > 80.0
+    assert r.machine.bearing is not None and deg(r.machine.bearing) > 80.0
 
 
 def test_wheels_that_turn_less_leave_the_head_alone_and_wait_for_the_next_utterance() -> None:
@@ -1227,9 +1405,11 @@ def test_wheels_that_turn_less_leave_the_head_alone_and_wait_for_the_next_uttera
     # finds nobody ends the seek at once, and its line is the last said)
     cut = rig(wheels=FakeWheels(), seek_pan_deg=20.0, body=BodyLimits(max_turn_deg=30.0))
     cut.wake(100.0)
+    cut.turn_to(12.0)  # TF: the cart turned 12 of the 30
     cut.wheels.finish(WheelReport(False, 12.0, why="superseded by a newer motion", cut=True))
     cut.machine.tick(1.4)
-    assert cut.aimed()[1] == (88.0, 3.0) and cut.machine.body_waits, "then the seek goes on"
+    assert cut.head() == (108.0, 3.0) and cut.machine.body_waits, "then the seek goes on"
+    assert cut.aimed()[1] == (108.0, 3.0), "its first stop, outward of his 88 from the cart"
     assert "turned +12 of +30 deg (superseded by a newer motion)" in cut.said[-1]
     cut.machine.tick(1.5)
     assert len(cut.wheels.calls) == 1, "it waits for the next utterance"
@@ -1239,6 +1419,7 @@ def test_wheels_that_turn_less_leave_the_head_alone_and_wait_for_the_next_uttera
     stuck = rig(wheels=FakeWheels())
     stuck.wake(100.0)
     blocked = WheelReport(False, 6.0, 0.06, 3, "gave up: the arc is blocked")
+    stuck.turn_to(6.0)
     stuck.wheels.finish(blocked)
     stuck.machine.tick(1.4)
     stuck.say(94.0, 3.0, 4.0, "эй")
@@ -1264,7 +1445,7 @@ def test_a_drive_pauses_the_gaze_forgets_the_places_and_the_next_utterance_orien
     r = tracked(60.0)
     r.machine.drive(True, 3.0)
     assert r.machine.phase == "paused" and r.machine.tick(3.0) is None
-    assert r.machine.tracks.tracks == [], "the cart moves: every bearing goes stale"
+    assert r.machine.people.people == [], "the cart moves: every bearing goes stale"
     r.say(60.0, 4.0, 5.0, "куда")
     assert len(r.door.aims()) == 1, "the drive runs"
     r.machine.drive(False, 9.0)
@@ -1283,9 +1464,9 @@ def test_the_conversation_s_end_lets_the_head_go_and_nothing_runs_after() -> Non
     assert r.machine.tick(7.0) is None and r.scene.looks == looks
     r.machine.closed("idle", 8.0)
     assert r.door.count("release") == 1, "nothing held: nothing to release"
-    assert len(r.machine.tracks.tracks) == 1
+    assert len(r.machine.people.people) == 1
     r.machine.stop(9.0, "the switch is off")
-    assert r.machine.tracks.tracks == []
+    assert r.machine.people.people == []
 
 
 def test_a_door_that_does_not_answer_is_asked_again_after_the_renewal_period() -> None:
@@ -1330,7 +1511,7 @@ def test_tracking_re_aims_past_the_dead_band_and_a_frame_without_its_stamp_gives
     rows = r.reaims()[1:]
     assert rows and {f["lead_deg"] for f in rows} == {0.0}, rows
     assert {f["speed"] for f in rows} == {"adjust"} and {f["status"] for f in rows} == {"sent"}
-    assert rows[-1]["why"] == "the person moved" and r.machine.counts["pursuits"] == 0
+    assert rows[-1]["why"] == MOVED and r.machine.counts["pursuits"] == 0
     assert r.machine.counts["frames_unposed"] >= 13 and r.machine.counts["frames_posed"] == 0
 
 
@@ -1599,13 +1780,14 @@ def test_the_shipped_knobs_load_off_and_measured_on_the_four_readings() -> None:
         8.0,
         35.0,
     )
-    assert (settings.glide_ahead_s, settings.glide_gain) == (0.2, 2.0)
+    assert settings.glide_gain == 2.0
+    assert (settings.default_range_m, settings.people_half_life_s) == (2.0, 60.0)
     assert settings.body_turn == "spin", "2026-10-14, Artem: Nav2's Spin turns the body"
     assert flag_default(REPO / "config/expression.json") is False
     bad_knobs = ({"track_hz": 0}, {"max_tracks": 0}, {"lead_max_deg": -1},
                  {"track_speaking_hz": 0}, {"face_lost_frames": 0}, {"turn_speed_deg_s": 0},
-                 {"doa_follow_s": 0}, {"glide_gain": 0.5}, {"glide_ahead_s": -0.1},
-                 {"body_turn": "nav2"})  # fmt: skip
+                 {"doa_follow_s": 0}, {"glide_gain": 0.5}, {"default_range_m": 0},
+                 {"people_half_life_s": -1}, {"body_turn": "nav2"})  # fmt: skip
     for bad in bad_knobs:
         with pytest.raises(ValueError, match="speaker"):
             SpeakerSettings.from_config({"speaker": bad})
@@ -1807,73 +1989,80 @@ def test_the_engine_lets_the_turn_go_first_on_a_wake_from_behind_with_a_greeting
 
 
 # ---- a turn in place the gaze did not start (the turn tool's Nav2 Spin) ----------
-def test_a_turn_in_place_gets_the_drive_s_pause_back_and_the_frames_keep_the_person() -> None:
+def test_a_turn_in_place_gets_the_drive_s_pause_back_and_tf_keeps_the_head_on_the_person() -> None:
     """Artem's "повернись ко мне": the cascade tells the turn tool's call as a drive (the
     pause, the people put aside); the tool asks the gaze to keep the person: they come back
-    with the phase and the aim, the snapshot says turning at their bearing, and as Nav2 turns
-    the cart every record is taken and the head is aimed at them BY THE FRAMES (sent without
-    waiting, none by the odometry), the gaze's own wheels never asked; the drive's end keeps
-    them (no reorientation) and the frames go on."""
+    with the phase and the point, the snapshot says turning at their bearing, and as Nav2 turns
+    the cart (TF) every record is taken while the arbiter keeps the head on his point: no aim
+    of the gaze's (he stands), the gaze's own wheels never asked; the drive's end keeps him (no
+    reorientation) and the frames go on."""
     r = rig(wheels=FakeWheels(), arc_deg=360.0)  # the arc never turns the body by itself
-    artem = r.person(60.0)
+    r.person(60.0)
     read = r.wake(60.0)
     r.machine.tick(read)
     assert r.machine.phase == "track"
-    r.wheels.turn_to(0.0, BOARD + read)  # the wheels' link is open: the odometry's heading
     r.machine.drive(True, read + 0.1)
-    assert r.machine.phase == "paused" and r.machine.track is None, "a drive as ever"
+    assert r.machine.phase == "paused" and r.machine.person is None, "a drive as ever"
     assert r.machine.keep_person(read + 0.15, "turn: me") is None
-    assert r.machine.phase == "track" and r.machine.voice == pytest.approx(rad(60.0))
+    assert r.machine.phase == "track" and r.machine.bearing == pytest.approx(rad(60.0))
     view = r.machine.attention(read + 0.15)
     assert view.phase == "turning" and view.bearing_deg == pytest.approx(60.0)
-    assert r.kinds()[-1] == "gaze_spin" and r.machine.spin is not None and r.machine.spin.glides
-    looks, t = r.scene.looks, read + 0.15
-    for k in range(1, 6):  # Nav2's Spin at 30 deg/s, its heading on the board's clock
+    assert view.point is not None and r.kinds()[-1] == "gaze_spin" and r.machine.spin is not None
+    looks, aims, t = r.scene.looks, len(r.door.aims()), read + 0.15
+    for k in range(1, 6):  # Nav2's Spin at 30 deg/s, TF's heading
         t = read + 0.15 + 0.1 * k
-        turned = 3.0 * k
-        r.wheels.turn_to(turned, BOARD + t)
-        artem.pan_deg = 60.0 - turned  # the room turns the other way in the cart's frame
+        r.turn_to(3.0 * k)
         due = r.machine.tick(t)
-        assert due == pytest.approx(t + 0.1), "a record and the heading every 0.1 s"
-    frames = [f for f in r.reaims() if f["why"] == BY_FRAMES]
-    assert [f["pan_deg"] for f in frames] == [57.0, 54.0, 51.0, 48.0, 45.0], "on him"
-    assert {f["status"] for f in frames} == {"sent"} and {f["speed"] for f in frames} == {"glide"}
-    assert not [f for f in r.reaims() if f["why"] == BY_ODOMETRY]
+        assert due == pytest.approx(t + 0.1), "a record every 0.1 s"
+    assert r.head() == (45.0, 3.0), "on him: the arbiter keeps the head on his point"
+    assert len(r.door.aims()) == aims, "he stands: no aim of the gaze's"
     assert r.scene.looks == looks + 5, "every record while the body turns"
     assert r.wheels.calls == [], "the gaze's own wheels are never asked"
-    assert r.machine.voice == pytest.approx(rad(45.0), abs=rad(0.5)), "the person turned too"
+    assert r.machine.bearing == pytest.approx(rad(45.0), abs=rad(0.5)), "from the turned cart"
     r.machine.drive(False, t + 0.1)
     assert r.machine.spin is None and r.machine.phase == "track" and not r.machine.reorient
     r.machine.tick(t + 0.2)
     assert r.scene.looks == looks + 6, "the frames go on"
 
 
-def test_a_turn_in_place_without_the_odometry_is_re_aimed_by_the_frames_and_refusals_say_why() -> (
-    None
-):
-    """No heading to glide on (the wheels' link opens at their own first motion): the person is
-    kept and the frames go on, so they re-aim the head. No conversation, or a drive that began
-    with nobody engaged, is refused with why; a drive the tool never claims pauses and
-    forgets as ever, and its end orients at the next utterance."""
-    r = rig(arc_deg=360.0)  # NoWheels: no heading ever
+def test_a_turn_in_place_keeps_the_person_and_refusals_say_why() -> None:
+    """The person is kept and the frames go on whatever wheels the gaze has. No conversation,
+    or a drive that began with nobody engaged, is refused with why; a drive the tool never
+    claims pauses and forgets as ever, and its end orients at the next utterance."""
+    r = rig(arc_deg=360.0)  # NoWheels
     assert r.machine.keep_person(0.0, "turn: left") == "no conversation"
     r.person(60.0)
     read = r.wake(60.0)
     r.machine.tick(read)
     r.machine.drive(True, read + 0.1)
     assert r.machine.keep_person(read + 0.15, "turn: left") is None
-    assert r.machine.spin is not None and not r.machine.spin.glides
-    assert r.said[-1].endswith("by the frames (no odometry heading yet)")
+    assert r.machine.spin is not None
+    assert r.said[-1].endswith("(turn: left): the head keeps the person's point")
     looks = r.scene.looks
     r.machine.tick(read + 0.2)
     assert r.scene.looks == looks + 1, "the frames go on"
     r.machine.drive(False, read + 3.0)
     r.machine.drive(True, read + 3.1)
     r.machine.drive(False, read + 4.0)
-    assert r.machine.reorient and r.machine.tracks.tracks == [], "unclaimed: a drive as ever"
+    assert r.machine.reorient and r.machine.people.people == [], "unclaimed: a drive as ever"
     r.machine.drive(True, read + 4.1)  # paused, nobody engaged since that drive
     why = r.machine.keep_person(read + 4.2, "turn: me")
     assert why == "nobody was engaged when the drive began"
+
+
+def test_a_sure_name_from_recognition_names_the_person_engaged_in_the_register() -> None:
+    """Person recognition's sure verdict on the utterance just heard names the person the gaze
+    holds (one person a name: it moves off anyone else), logged; nobody engaged, nobody named."""
+    r = tracked(60.0)
+    other = r.machine.people.heard(voice_at(-60.0, BOARD + 1.4))[0]
+    r.machine.people.named(other, "Саша")
+    r.machine.named("Саша", 1.5)
+    person = r.machine.person
+    assert person is not None and person.who == "Саша" and other.who is None
+    assert [f for k, _, f in r.events if k == "gaze_named"] == [{"who": "Саша", "track": person.id}]
+    idle = rig()
+    idle.machine.named("Саша", 0.0)
+    assert idle.machine.people.people == []
 
 
 def test_the_worker_hands_the_turn_tool_the_person_kept_through_its_drive() -> None:
@@ -1891,7 +2080,9 @@ def test_the_worker_hands_the_turn_tool_the_person_kept_through_its_drive() -> N
     worker.drive(True)  # the cascade, before the tool runs
     view = worker.keep_person("turn: me")  # the tool, after it: one queue, in order
     assert isinstance(view, Attention), view
-    assert view.phase == "turning" and view.bearing_deg == pytest.approx(deg(r.machine.voice or 0))
+    assert view.phase == "turning" and view.bearing_deg == pytest.approx(
+        deg(r.machine.bearing or 0)
+    )
     worker.drive(False)
     worker.switch(False)
     worker.close()

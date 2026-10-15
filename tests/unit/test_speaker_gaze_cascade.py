@@ -14,12 +14,12 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import pytest
-from test_speaker_gaze import Door, face, frame, view
+from test_speaker_gaze import FLAT, Door, face, frame, view
 from test_voice_cascade_loop import Rig, until, utterance
 
 from pepin.expression.conversation import SPEAKER_GAZE
 from pepin.expression.executors import NoWheels
-from pepin.expression.fakes import FakeDoa, FakeFace, FakeFaceFinder, RecordingObserver
+from pepin.expression.fakes import FakeDoa, FakeFace, FakeFaceFinder, FakeTf, RecordingObserver
 from pepin.expression.markers import Part
 from pepin.expression.speaker import FaceFrame
 from pepin.expression.tracker import SpeakerGaze, SpeakerGazeWorker, SpeakerSettings
@@ -35,10 +35,19 @@ pytestmark = pytest.mark.slow  # the player paces at real time
 REPO = Path(__file__).resolve().parents[2]
 
 
+def door_on_tf() -> tuple[Door, FakeTf]:
+    """The arbiter's door and TF (the cart at the map's origin, the head where the door says),
+    the board's clock this Mac's monotonic one."""
+    door = Door(view=view())
+    tf = FakeTf(FLAT, now=time.monotonic, head_at=lambda t: door.view.head if door.view else None)
+    door.tf = tf
+    return door, tf
+
+
 def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets_it_go(
     tmp_path: Path,
 ) -> None:
-    door = Door(view=view())
+    door, tf = door_on_tf()
     face_channel = FakeFace()
     machine = SpeakerGaze(
         SpeakerSettings(doa_map=None),  # unmeasured: the head looks up where it points
@@ -48,6 +57,8 @@ def test_the_switch_turns_the_gaze_on_the_wake_turns_the_head_and_the_close_lets
         wheels=NoWheels(),
         face=face_channel,
         reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
+        head=FLAT,
+        poses=tf,
         report=lambda line: None,
     )
 
@@ -138,14 +149,17 @@ def three_replies(tmp: Path, hold: bool) -> tuple[Stamps, StampedFinder, Speaker
     0.1-0.15 s on the GPU), the gaze tracking at 10 Hz; the moments, the frames, the machine
     and each turn's tts step."""
     finder = StampedFinder()
+    door, tf = door_on_tf()
     machine = SpeakerGaze(
         SpeakerSettings(doa_map=None),
-        door=Door(view=view()),
+        door=door,
         doa=FakeDoa(),
         finder=finder,
         wheels=NoWheels(),
         face=FakeFace(),
         reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
+        head=FLAT,
+        poses=tf,
         report=lambda line: None,
     )
     settings = replace(SpeakerSettings(), hold_for_voice=hold)

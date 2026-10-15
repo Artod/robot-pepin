@@ -7,7 +7,7 @@ from __future__ import annotations
 import math
 import threading
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any
 
@@ -19,7 +19,6 @@ from pepin.expression.animation import Clip, Layer, PartName
 from pepin.expression.clearance import View
 from pepin.expression.conversation import Heard, VoiceChunk
 from pepin.expression.executors import (
-    Headings,
     Outcome,
     WheelMove,
     WheelReport,
@@ -28,7 +27,9 @@ from pepin.expression.executors import (
 )
 from pepin.expression.head import ClipLook
 from pepin.expression.markers import Part
+from pepin.expression.people_map import FACE_PX_M
 from pepin.expression.places import match
+from pepin.expression.poses import HeadModel, Pose, PosesAt
 from pepin.expression.schedule import Nucleus
 from pepin.expression.speaker import (
     NO_ATTENTION,
@@ -39,6 +40,7 @@ from pepin.expression.speaker import (
     FaceSighting,
     GazeAnswer,
     HeadView,
+    Point,
 )
 from pepin.expression.trajectory import ArmAnswer, ArmStatus, Trajectory
 from pepin.gaze import Aim, Speed
@@ -220,20 +222,24 @@ class FakeArmLink:
 
 @dataclass
 class FakeGazeDoor:
-    """The arbiter's door for one source: aims are answered ``done`` at the aim asked (or with
-    the next of ``refusals``); ``view`` scripts the state; ``live`` what a renewal finds."""
+    """The arbiter's door for one source: aims (points in the map) are answered ``done`` at the
+    pan and tilt ``resolve`` gives the point (None: no head in the answer), or with the next of
+    ``refusals``; ``view`` scripts the state; ``live`` what a renewal finds."""
 
     view: HeadView | None = None
     live: int = 1
     refusals: deque[GazeAnswer] = field(default_factory=deque)
     calls: list[Call] = field(default_factory=list)
+    resolve: Callable[[Point], Aim] | None = None
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
+    def aim(
+        self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None
+    ) -> GazeAnswer:
         """Recorded; done, unless a refusal is scripted."""
-        self.calls.append(("aim", (aim, speed, ttl_s, ease)))
+        self.calls.append(("aim", (point, speed, ttl_s, ease)))
         if self.refusals:
             return self.refusals.popleft()
-        return GazeAnswer("done", head=aim)
+        return GazeAnswer("done", head=self.resolve(point) if self.resolve is not None else None)
 
     def renew(self) -> int:
         """Recorded; as scripted."""
@@ -292,9 +298,12 @@ class FakeFaceFinder:
 
 @dataclass
 class FakePerson:
-    """Someone in the room for :class:`FakeScene`, in the cart's frame (degrees): their face's
-    bearing and tilt (+ down), its width (0: the face is not seen, turned away), whether their
-    body is seen, where a body detector puts their head (default: the face's place) and who."""
+    """Someone in the room for :class:`FakeScene`, a point in the map: where the head would look
+    to see their face with the cart at the map's origin facing +x (``pan_deg`` + left,
+    ``tilt_deg`` + down) and how far from the lens (``range_m``; None: the face's size says,
+    2 m without a face), the face's width (0: the face is not seen, turned away), whether their
+    body is seen, where a body detector puts their head (default: the face's place) and who.
+    Move them between looks (their angles) to make them walk."""
 
     pan_deg: float
     tilt_deg: float = 3.0
@@ -303,15 +312,76 @@ class FakePerson:
     head_pan_deg: float | None = None
     head_tilt_deg: float | None = None
     who: str | None = None
+    range_m: float | None = None
+
+    def distance(self) -> float:
+        """How far their head is from the lens."""
+        if self.range_m is not None:
+            return self.range_m
+        return FACE_PX_M / self.face_px if self.face_px > 0.0 else 2.0
+
+    def point(self, model: HeadModel) -> Point:
+        """Their face's point in the map."""
+        aim = Aim(math.radians(self.pan_deg), math.radians(self.tilt_deg))
+        x, y, z = model.axis_point(aim, self.distance())
+        return Point(x, y, z)
+
+    def head_point(self, model: HeadModel) -> Point:
+        """Where a body detector puts their head, in the map."""
+        pan = self.pan_deg if self.head_pan_deg is None else self.head_pan_deg
+        tilt = self.tilt_deg if self.head_tilt_deg is None else self.head_tilt_deg
+        x, y, z = model.axis_point(Aim(math.radians(pan), math.radians(tilt)), self.distance())
+        return Point(x, y, z)
+
+
+@dataclass
+class FakeTf:
+    """TF as the speaker gaze asks it (:class:`pepin.expression.poses.PoseSource`): the cart's
+    pose in the map at a board stamp (``cart_at``: x, y and heading in degrees; at the origin
+    facing +x by default) and the head's angles then (``head_at``; None: no camera pose),
+    composed through ``model``'s neck; ``now`` the board's clock (a stamp of None is TF's
+    newest, at it). Every request is kept; ``refuse`` fails each with that reason."""
+
+    model: HeadModel
+    now: Callable[[], float]
+    cart_at: Callable[[float], tuple[float, float, float]] = lambda t: (0.0, 0.0, 0.0)
+    head_at: Callable[[float], Aim | None] = lambda t: None
+    refuse: str | None = None
+    asked: list[tuple[tuple[float | None, ...], bool]] = field(default_factory=list)
+
+    def base(self, stamp: float) -> Pose:
+        """``map <- base_link`` at ``stamp``."""
+        x, y, yaw = self.cart_at(stamp)
+        return Pose.planar(x, y, math.radians(yaw))
+
+    def camera(self, stamp: float, head: Aim | None = None) -> Pose | None:
+        """``map <- camera_link`` at ``stamp`` (the head's angles then, or ``head``)."""
+        aim = head if head is not None else self.head_at(stamp)
+        return None if aim is None else self.base(stamp).then(self.model.camera(aim))
+
+    def poses(self, stamps: Sequence[float | None], *, camera: bool) -> list[PosesAt] | str:
+        """The cart, and the camera when asked, at each stamp."""
+        self.asked.append((tuple(stamps), camera))
+        if self.refuse is not None:
+            return self.refuse
+        found: list[PosesAt] = []
+        for stamp in stamps:
+            at = self.now() if stamp is None else stamp
+            cam = self.camera(at) if camera else None
+            why = "camera_link: Extrapolation: no head" if camera and cam is None else ""
+            found.append(PosesAt(at, cam, self.base(at), why))
+        return found
 
 
 @dataclass
 class FakeScene:
     """The head camera over :class:`FakePerson` s: a look sees each face and body within
-    ``half_pan_deg`` and ``half_tilt_deg`` of where ``door``'s state says the head points (move
-    the people between looks to make them walk)."""
+    ``half_pan_deg`` and ``half_tilt_deg`` of the eye's axis, as the camera stands now: the
+    head where ``door``'s state says it points, the cart where ``tf`` puts it (move the people
+    between looks to make them walk; turn the cart in ``tf``)."""
 
     door: Any
+    tf: FakeTf
     people: list[FakePerson] = field(default_factory=list)
     half_pan_deg: float = 30.0
     half_tilt_deg: float = 25.0
@@ -319,24 +389,25 @@ class FakeScene:
     asked: list[float | None] = field(default_factory=list)  # each look's not_before
 
     def look(self, not_before: float | None = None) -> FaceFrame | None:
-        """The faces and bodies in view now."""
+        """The faces and bodies in view now (an unstamped frame: TF's newest places it)."""
         self.looks += 1
         self.asked.append(not_before)
         view = self.door.state()
         if view is None or view.head is None:
             return None
-        head_pan, head_tilt = math.degrees(view.head.pan_rad), math.degrees(view.head.tilt_rad)
+        camera = self.tf.camera(self.tf.now(), view.head)
+        if camera is None:
+            return None
+        model = self.tf.model
         faces, bodies = [], []
         for p in self.people:
-            pan = (p.pan_deg - head_pan + 180.0) % 360.0 - 180.0
-            tilt = p.tilt_deg - head_tilt
+            pan, tilt = model.angles(camera, p.point(model))
             if abs(pan) > self.half_pan_deg or abs(tilt) > self.half_tilt_deg:
                 continue
             if p.face_px > 0.0:
                 faces.append(FaceSighting(pan, tilt, p.face_px, 0.8, p.who))
             if p.body:
-                hpan = (p.pan_deg if p.head_pan_deg is None else p.head_pan_deg) - head_pan
-                htilt = (p.tilt_deg if p.head_tilt_deg is None else p.head_tilt_deg) - head_tilt
+                hpan, htilt = model.angles(camera, p.head_point(model))
                 bodies.append(BodySighting(pan, 12.0, hpan, htilt, 40.0, 0.7))
         return FaceFrame(0.0, tuple(faces), bodies=tuple(bodies))
 
@@ -359,56 +430,31 @@ class FakeDoa:
 @dataclass
 class FakeWheels:
     """Wheel motions recorded and left running: a test moves them on (:meth:`move_on`) and ends
-    them (:meth:`finish`) when it wants, so a caller is seen to return before any of it. The
-    cart's heading follows (:meth:`headings`), stamped on ``board`` (the board's clock the test
-    keeps; a hair after the newest heading when it says nothing newer), or where a test puts it
-    (:meth:`turn_to`)."""
+    them (:meth:`finish`) when it wants, so a caller is seen to return before any of it (where
+    the cart is, is TF's: :class:`FakeTf`)."""
 
     calls: list[Call] = field(default_factory=list)
     running: list[tuple[WheelMove, WheelsDone, WheelsMoved | None]] = field(default_factory=list)
-    yaw_deg: float = 0.0  # the cart's heading now (+ left)
-    board: Callable[[], float] | None = None
-    log: Headings = field(default_factory=Headings)
-    began_deg: float = 0.0  # the heading the newest motion began at
 
     def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
-        """Recorded (the heading it begins at told); it runs until :meth:`finish`."""
+        """Recorded; it runs until :meth:`finish`."""
         self.calls.append(("start", (request,)))
         self.running.append((request, done, moved))
-        self.began_deg = self.yaw_deg
-        self.turn_to(self.yaw_deg)
 
     def halt(self, why: str) -> None:
         """Recorded (the running motion ends when the test finishes it)."""
         self.calls.append(("halt", (why,)))
 
-    def headings(self) -> Headings:
-        """The headings told so far."""
-        return self.log
-
-    def turn_to(self, yaw_deg: float, stamp_s: float | None = None) -> None:
-        """The cart's heading is ``yaw_deg`` at ``stamp_s`` (board clock; default: now)."""
-        self.yaw_deg = yaw_deg
-        latest = self.log.latest()
-        stamp = stamp_s
-        if stamp is None:
-            now = self.board() if self.board is not None else 0.0
-            stamp = now if latest is None else max(now, latest[0] + 1e-3)
-        self.log.add(stamp, math.radians(yaw_deg))
-
     def move_on(self, deg: float) -> None:
         """The newest motion has turned ``deg`` so far."""
         _, _, moved = self.running[-1]
-        self.turn_to(self.began_deg + deg)
         if moved is not None:
             moved(deg)
 
     def finish(self, report: WheelReport | None = None) -> None:
         """The newest motion ends (in full unless ``report`` says otherwise)."""
         request, done, _ = self.running.pop()
-        report = report if report is not None else WheelReport(True, request.turn_deg, attempts=1)
-        self.turn_to(self.began_deg + report.turned_deg)
-        done(report)
+        done(report if report is not None else WheelReport(True, request.turn_deg, attempts=1))
 
 
 @dataclass
@@ -679,14 +725,19 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         faces: list[FaceChannel] = [FakeFace(), HeadClient("board", source="voice")]
         arm: ArmLink = FakeArmLink()
         door: GazeDoor = FakeGazeDoor()
-        finder: list[FaceFinder] = [FakeFaceFinder(), FakeScene(FakeGazeDoor())]
+        from pepin.expression.poses import PoseSource
+        from pepin.neck import NeckConfig
+
+        tf = FakeTf(HeadModel(NeckConfig.from_json("config/neck.json")), lambda: 0.0)
+        poses: PoseSource = tf
+        finder: list[FaceFinder] = [FakeFaceFinder(), FakeScene(FakeGazeDoor(), tf)]
         doa: list[DoaSource] = [FakeDoa(), AudioClient("board")]
         wheels: list[Wheels] = [FakeWheels(), NoWheels(), executor]
         heads: list[HeadDoor] = [FakeHeadDoor(), OverlayDoor()]
         bases: list[BaseLink] = [FakeBase(FakeClock()), BaseClient("board")]
         views: list[Surroundings] = [FakeView(FakeBase(FakeClock())), GoalServerView()]
         del playout, observers, flag, parts, faces, arm, door, finder, doa, wheels, heads
-        del bases, views
+        del bases, views, poses
 
     def _contract(engine: GestureEngine, gaze: SpeakerGazeWorker) -> None:
         """The gesticulation contract's seams: the fakes, the engine and the gaze fit them."""

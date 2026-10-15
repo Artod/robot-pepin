@@ -32,7 +32,15 @@ from pepin.expression.clearance import (
 )
 from pepin.expression.conversation import Heard
 from pepin.expression.executors import WheelMove, WheelReport, WheelsDone
-from pepin.expression.fakes import FakeBase, FakeClock, FakeDoa, FakeFace, FakeFaceFinder, FakeView
+from pepin.expression.fakes import (
+    FakeBase,
+    FakeClock,
+    FakeDoa,
+    FakeFace,
+    FakeFaceFinder,
+    FakeTf,
+    FakeView,
+)
 from pepin.expression.mix import stretched
 from pepin.expression.plan import BodyLimits
 from pepin.expression.render import BookRenderer
@@ -668,29 +676,16 @@ def test_the_person_speaking_stops_a_gesture_s_motion_and_never_the_turn_toward_
     gesture.wheels.close()
 
 
-def test_the_executor_keeps_every_state_line_s_heading_on_the_board_s_clock() -> None:
-    """The speaker gaze's frame follows the odometry's heading whoever turns the cart: every
-    state line the base link hears is kept by its board stamp."""
-    r = rig()
-    assert r.wheels.headings().latest() is None, "no link before a motion"
-    report = turn(r, 20.0)
-    assert report.done
-    stamp, heading = r.wheels.headings().latest() or (0.0, 0.0)
-    assert heading == pytest.approx(r.base.pose.theta) and stamp == r.base.lines[-1][0]
-    first = r.base.lines[0][0]
-    assert r.wheels.headings().at(first) == pytest.approx(0.0), "before the turn"
-    r.wheels.close()
-
-
 def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
     """The coordinator's rule: the head turns at once, the speech path gets no wait. The gaze
     machine on a fake clock, the real executor behind it stuck on a silent goal server: the wake
     returns in milliseconds of wall time with the head already aimed and the turn handed over."""
-    from test_speaker_gaze import MAP, Door, speech, view
+    from test_speaker_gaze import FLAT, MAP, Door, speech, view
 
     said: list[str] = []
     wheels, _ = real_wheels(said)
-    door = Door(view=view())
+    tf = FakeTf(FLAT, now=lambda: 0.0)  # TF: the cart at the map's origin
+    door = Door(view=view(), tf=tf)
     doa = FakeDoa()
     # the gaze asks within the executor's own limits (FULL): a request of 30 deg, handed over,
     # not refused at once as a 100 deg one would be
@@ -698,7 +693,7 @@ def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
     machine = SpeakerGaze(settings, door=door, doa=doa,
                           finder=FakeFaceFinder(), wheels=wheels, face=FakeFace(),
                           reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
-                          report=lambda line: None)  # fmt: skip
+                          head=FLAT, poses=tf, report=lambda line: None)  # fmt: skip
     doa.readings += speech(280, 0.0, 1.2)
     began = time.perf_counter()
     machine.opened(Heard(0.0, 1.2, "Пепин"), 1.6)
@@ -713,12 +708,13 @@ def test_the_gaze_hands_the_turn_to_the_wheels_and_returns_at_once() -> None:
 def test_the_gaze_worker_s_moments_never_wait_on_the_wheels() -> None:
     said: list[str] = []
     wheels, _ = real_wheels(said)
-    from test_speaker_gaze import MAP, Door, view
+    from test_speaker_gaze import FLAT, MAP, Door, view
 
-    machine = SpeakerGaze(SpeakerSettings(doa_map=MAP), door=Door(view=view()), doa=FakeDoa(),
-                          finder=None, wheels=wheels, face=None,
+    tf = FakeTf(FLAT, now=lambda: 0.0)
+    machine = SpeakerGaze(SpeakerSettings(doa_map=MAP), door=Door(view=view(), tf=tf),
+                          doa=FakeDoa(), finder=None, wheels=wheels, face=None,
                           reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
-                          report=lambda line: None)  # fmt: skip
+                          head=FLAT, poses=tf, report=lambda line: None)  # fmt: skip
     worker = SpeakerGazeWorker(
         lambda s: machine, on=True, load=lambda: SpeakerSettings(doa_map=MAP)
     )

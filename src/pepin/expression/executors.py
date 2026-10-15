@@ -30,9 +30,6 @@ The :class:`Animator` is the one place a gesture is asked for: the cascade's cue
 
 from __future__ import annotations
 
-import bisect
-import math
-import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -157,57 +154,6 @@ class WheelReport:
 
 WheelsDone = Callable[[WheelReport], None]  # a motion's end, told on any thread: never block it
 WheelsMoved = Callable[[float], None]  # a turn's heading so far (degrees), every step_deg
-HEADINGS_KEPT_S = 30.0  # the odometry's headings kept: an utterance's readings and then some
-
-
-class Headings:
-    """The cart's heading as the base server's wheel odometry tells it in every state line, on
-    the board's clock (the clock the microphone array stamps its directions with): the last
-    ``kept_s`` seconds of (stamp, heading), the heading unwrapped (radians, + left). Read at any
-    stamp, interpolated between two lines, the nearest end outside them (before the first line
-    the cart had not moved: the link opens before a motion's first twist). Thread-safe: the base
-    link's reader adds, the speaker gaze reads."""
-
-    def __init__(self, kept_s: float = HEADINGS_KEPT_S) -> None:
-        """Keeps ``kept_s`` seconds."""
-        self.kept_s = kept_s
-        self._lock = threading.Lock()
-        self._stamps: list[float] = []
-        self._headings: list[float] = []
-
-    def add(self, stamp_s: float, theta: float) -> None:
-        """One state line's heading (wrapped or not) at its board stamp; a stamp not newer than
-        the newest is ignored."""
-        with self._lock:
-            if self._stamps:
-                if stamp_s <= self._stamps[-1]:
-                    return
-                last = self._headings[-1]
-                theta = last + math.remainder(theta - last, math.tau)
-            self._stamps.append(stamp_s)
-            self._headings.append(theta)
-            old = bisect.bisect_left(self._stamps, stamp_s - self.kept_s)
-            if old > len(self._stamps) // 2:  # trimmed in halves: amortised, one kept before
-                del self._stamps[: old - 1], self._headings[: old - 1]
-
-    def latest(self) -> tuple[float, float] | None:
-        """The newest (stamp, heading); None before any line."""
-        with self._lock:
-            return (self._stamps[-1], self._headings[-1]) if self._stamps else None
-
-    def at(self, stamp_s: float) -> float | None:
-        """The heading at board time ``stamp_s``; None before any line."""
-        with self._lock:
-            stamps, headings = self._stamps, self._headings
-            if not stamps:
-                return None
-            if stamp_s <= stamps[0]:
-                return headings[0]
-            if stamp_s >= stamps[-1]:
-                return headings[-1]
-            k = bisect.bisect_right(stamps, stamp_s)
-            s0, s1, h0, h1 = stamps[k - 1], stamps[k], headings[k - 1], headings[k]
-            return h0 + (h1 - h0) * (stamp_s - s0) / (s1 - s0)
 
 
 class Wheels(Protocol):
@@ -225,18 +171,9 @@ class Wheels(Protocol):
         non-blocking line to the base)."""
         ...
 
-    def headings(self) -> Headings:
-        """The cart's heading over the last seconds (empty until the base has said anything):
-        whoever turned the cart, the speaker gaze's frame follows it."""
-        ...
-
 
 class NoWheels:
     """No wheels to move for expression (no robot): every motion refused."""
-
-    def __init__(self) -> None:
-        """No heading ever."""
-        self._headings = Headings()
 
     def start(self, request: WheelMove, done: WheelsDone, moved: WheelsMoved | None = None) -> None:
         """Refused, answered at once."""
@@ -244,10 +181,6 @@ class NoWheels:
 
     def halt(self, why: str) -> None:
         """Nothing moves."""
-
-    def headings(self) -> Headings:
-        """Always empty: the cart never turns here."""
-        return self._headings
 
 
 class NoBody:

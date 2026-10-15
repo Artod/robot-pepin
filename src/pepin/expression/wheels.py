@@ -2,9 +2,7 @@
 
 The speaker gaze turns the body toward a person past its forward arc (at most ``max_turn_deg``
 per request), and the gesture engine's body atoms rock the cart (at most ``max_rock_m``) or sway
-it. Every state line's heading is kept (:class:`pepin.expression.executors.Headings`, on the
-board's clock): the speaker gaze's frame follows it, whoever turned the cart.
-:class:`WheelsExecutor` is both doors (the gaze's :class:`pepin.expression.executors.Wheels`,
+it. :class:`WheelsExecutor` is both doors (the gaze's :class:`pepin.expression.executors.Wheels`,
 the gestures' ``body`` :class:`pepin.expression.executors.Executor`) and the one owner of the
 wheels in the voice cascade. NOTHING HERE EVER WAITS ON THE CALLER'S THREAD: every request is
 queued for the wheels' thread and answered through a callback, and :meth:`WheelsExecutor.halt`
@@ -86,7 +84,6 @@ from pepin.expression.clearance import (
     turn_blocker,
 )
 from pepin.expression.executors import (
-    Headings,
     Outcome,
     WheelMove,
     WheelReport,
@@ -396,7 +393,6 @@ class WheelsExecutor:
         self._first_at: float | None = None  # when this job's first twist went
         self._foreign_stop_at: float | None = None
         self._settling = threading.Event()  # never set: a settle waits its ticks out
-        self._headings = Headings()  # every state line's heading, whoever turns the cart
         self.counts: dict[str, int] = {}
 
     # ---- the gaze's door (Wheels) --------------------------------------------------------------
@@ -427,20 +423,6 @@ class WheelsExecutor:
         """Stop a gesture's motion at once and drop a gesture's waiting one (the person
         speaks); a turn toward the speaker goes on. Never blocks."""
         self._halt_source("gesture", why)
-
-    def headings(self) -> Headings:
-        """The cart's heading from every state line since the link opened (at the first
-        motion, or :meth:`listen`), whoever turned it."""
-        return self._headings
-
-    def listen(self) -> None:
-        """Open the base link now, without a motion (the speaker gaze before a turn in place
-        Nav2 drives): every state line's heading kept from here on. Never blocks (the link
-        connects on its reader thread); a motion queued or running opens it itself."""
-        with self._lock:
-            idle = self._current is None and self._pending is None
-            if self.base is None and idle and not self._closed:
-                self.base = self._link_factory(self.heard)
 
     def preview(self, request: WheelMove) -> str | None:
         """Why ``request`` would be refused now, checked without moving (the knobs, the base's
@@ -504,8 +486,7 @@ class WheelsExecutor:
     # ---- the base's word -----------------------------------------------------------------------
     def heard(self, state: BaseState, at: float) -> None:
         """One state line (the base link's reader thread, ``at`` its arrival): the motion ends
-        at once when it carries a twist this executor did not send; its heading is kept."""
-        self._headings.add(state.stamp_s, state.pose.theta)
+        at once when it carries a twist this executor did not send."""
         with self._lock:
             job = self._current
             if job is None or self._first_at is None or job.cancel.is_set():
