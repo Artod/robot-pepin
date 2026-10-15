@@ -61,6 +61,10 @@
 #                            the xfeat image's (PEPIN_ADAPTERS_MOUNT=0: the image's) and passes
 #                            PEPIN_GLOBAL_DESCRIPTOR / PEPIN_REGISTRATION_BACKEND through when set;
 #                            stop stops the models again
+#   ros/laptop.sh vslam      starts the perception service when it is installed (ros/models.sh
+#                            perception: the one camera channel camera_stream feeds and the voice
+#                            reads); PEPIN_PERCEPTION_URL overrides where camera_stream sends;
+#                            stop stops it
 # Nothing here talks to the board. Prerequisites: the image built here (ros/laptop-build.sh) and
 # the board's sensors up with no Nav2 of its own (two Nav2 in one graph share every node name).
 # A Docker container on macOS lives behind the VM's NAT; this machine's zenoh router holds the one
@@ -273,6 +277,8 @@ case "${1:-}" in
         # The localisation models leave with the session, as the depth host does: ~1 GB of this
         # laptop's memory that nothing else uses (ros/models.sh start localization brings them).
         if "$HERE/models.sh" installed localization; then "$HERE/models.sh" stop localization; fi
+        # The camera channel leaves with the camera half that feeds it.
+        if "$HERE/models.sh" installed perception; then "$HERE/models.sh" stop perception; fi
         echo "laptop side stopped"; exit 0 ;;
     logs)
         exec docker logs -f "pepin-${2:-macnav}" ;;
@@ -439,6 +445,19 @@ case "${1:-}" in
         else
             echo "localization service not installed (ros/models.sh install localization): the adapters compute locally"
         fi
+        # THE ONE CAMERA CHANNEL (ros/models.sh perception, :8792): camera_stream POSTs every
+        # rectified left eye to it (its perception_feed flag; host.docker.internal:8792 unless
+        # PEPIN_PERCEPTION_URL says otherwise), and the voice's gaze, people and see read it.
+        # Down or not installed: the feed counts refusals and backs off, the voice's vision cell
+        # says DOWN, and vision.source snapshot is that day's way round.
+        PERCEPTION_ENV=()
+        [ -n "${PEPIN_PERCEPTION_URL:-}" ] && PERCEPTION_ENV=(-e "PEPIN_PERCEPTION_URL=$PEPIN_PERCEPTION_URL")
+        if "$HERE/models.sh" installed perception; then
+            "$HERE/models.sh" start perception \
+                || echo "perception service not answering (ros/models.sh logs perception): the voice has no camera until it does"
+        else
+            echo "perception service not installed (ros/models.sh install perception): the voice has no camera (vision.source snapshot for today)"
+        fi
         # Two flags read at start from the environment, passed through when this shell sets them:
         # sensor_pack's global_descriptor (auto|on|off; the launch reads it too) and rtabmap_frame's
         # registration_backend (service|local|auto; live afterwards through ros/flags.sh).
@@ -462,7 +481,7 @@ case "${1:-}" in
         # every start, of the file RTAB-Map is given (vslam.launch.py census_env): a census taken
         # here once would outlive a restart of the container after the file changed.
         docker run -d --name pepin-vslam --network "$NET" -p 8765:8765 --restart unless-stopped --stop-signal SIGINT "${MOUNTS[@]}" \
-            ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
+            ${ADAPTER_MOUNTS[@]+"${ADAPTER_MOUNTS[@]}"} "${MODELS_ENV[@]}" ${PERCEPTION_ENV[@]+"${PERCEPTION_ENV[@]}"} ${FLAG_ENV[@]+"${FLAG_ENV[@]}"} \
             -e ROS_DOMAIN_ID=7 "${RMW_ENV[@]}" ${DEPTH_ENV[@]+"${DEPTH_ENV[@]}"} ${CAMERA_ENV[@]+"${CAMERA_ENV[@]}"} \
             "$VSLAM_IMAGE" ros2 launch pepin_bringup vslam.launch.py "board:=$BOARD" "static_camera_tf:=$STATIC_CAMERA_TF" \
             "camera_only:=$CAMERA_ONLY" "vo:=$VO" "vo_input:=$VO_INPUT" >/dev/null

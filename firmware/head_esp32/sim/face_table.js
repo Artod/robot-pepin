@@ -422,6 +422,28 @@ const FACE_TABLE = {
     0.0
    ],
    "note": "a small open, attentive mouth (someone speaks to the robot)"
+  },
+  {
+   "name": "sinister",
+   "values": [
+    0.72,
+    0.36,
+    0.5,
+    0.3,
+    1.3,
+    0.5,
+    0.45,
+    6.0,
+    1.0,
+    0.0,
+    0.3,
+    0.0,
+    0.0,
+    0.4,
+    0.0,
+    0.0
+   ],
+   "note": "a wide lopsided grin with a sawtooth bite: the upper row of teeth over a dark mouth, the lip line a sharp zigzag (the evil laugh, the mischievous click; Artem 2026-10-13: a sinister smile with sharp teeth); appended, never reordered (the wire id is the index)"
   }
  ],
  "events": {

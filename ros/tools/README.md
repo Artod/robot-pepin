@@ -21,6 +21,9 @@ Find the job in this file before writing a script for it. When a tool already ow
 | What the board runs and what it costs | `ros/board.sh` | `ros/board.sh census` |
 | Feature flags and config knobs | `ros/flags.sh` | `ros/flags.sh list [NODE]` |
 | Planner and controller trials without the robot | `ros/sim.sh` | `ros/sim.sh up`, `ros/sim.sh scenario FILE` |
+| The arm and the gestures: read, rest, halt, play an intent, teach a pose | `scripts/gesture.py` | `uv run python scripts/gesture.py read \| rest \| halt \| play NAME [--speed 0.2] [--seed N] [--dry-run] \| teach POSE` |
+| The wheels' expressive motions (the gaze's turn, the rock), checks first | `scripts/gesture.py` | `uv run python scripts/gesture.py turn DEG \| rock [CM] [--times N] [--speed 0.2] [--dry-run]` |
+| Where the array's front is (the speaker gaze's voice bearing) | `ros/tools/doa_calibrate.py` | `uv run python ros/tools/doa_calibrate.py --write` |
 
 ## ros/tools
 
@@ -31,6 +34,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `bt_watch.py` | The behaviour tree's decisive transitions, one line each | `python3 -u /tools/bt_watch.py` (pepin-macnav) |
 | `build_rmw_zenoh_fix.sh` | Builds the patched `librmw_zenoh_cpp.so` in a throwaway container | `ros/tools/build_rmw_zenoh_fix.sh` |
 | `clip_to_bag.py` | A drive's camera clip as a stereo camera bag stamped by capture time | `ros/clip_to_bag.sh RUN` |
+| `doa_calibrate.py` | The microphone array's four quarter readings (front, left, behind, right) the speaker gaze interpolates its voice bearing between: three phrases at each place; listens only; `--source mac` measures the Mac's own direction from the raw microphones (the 6-channel firmware) into `speaker.doa.mac_readings` | `uv run python ros/tools/doa_calibrate.py [--source mac] [--write \| --readings F L B R]` |
 | `flags_doc.py` | Renders the nodes' flags and knobs into ros/README.md; checks it is current | `ros/tools/flags_doc.py [--check \| nodes \| where NODE]` |
 | `foxglove_probe.py` | Read-only probe of the foxglove_bridge websocket | `python3 ros/tools/foxglove_probe.py [--port 8765]` |
 | `gaze_preset.py` | The gaze arbiter's follow, glance and reverse knobs set as a named preset | `uv run python ros/tools/gaze_preset.py baseline \| follow \| show` |
@@ -86,7 +90,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `laptop.sh` | Runs the navigation and camera stacks on the laptop | `ros/laptop.sh nav [down \| logs] \| vslam \| vio \| kick NODE \| logs \| stop` |
 | `lib.sh` | Shared helpers: one multiplexed ssh connection to the board | sourced by `ros/*.sh` |
 | `map.sh` | Saves the map being built as a file | `ros/map.sh save NAME` |
-| `models.sh` | The depth and localisation model services as launchd jobs | `ros/models.sh install \| start \| stop \| restart \| status \| logs [depth \| localization]` |
+| `models.sh` | The depth, localisation and perception services as launchd jobs | `ros/models.sh install \| start \| stop \| restart \| status \| logs [depth \| localization \| perception]` |
 | `neck.sh` | The neck servos through the base server: read, move, hold | `ros/neck.sh read \| home \| goto PAN TILT \| hold PAN TILT \| motion \| registers` |
 | `preflight.sh` | Ready for a goal: pose, lidar, planner, snapshots, ToF, Foxglove, one plan | `ros/preflight.sh [--no-plan]` |
 | `push.sh` | Copies changed files to the robot and restarts only the nodes that import them | `ros/push.sh [--dry-run] FILE...` |
@@ -135,6 +139,7 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `pepin.head_server` | Board server that owns the head ESP32's serial port (TCP 3340) | `python -m pepin.head_server` |
 | `pepin.i2c_recover` | Frees a locked I2C bus on the board without a power cycle | `python -m pepin.i2c_recover check \| recover` (board) |
 | `pepin.localization_service` | The localisation models on the laptop GPU as one HTTP service | `ros/models.sh start localization` |
+| `pepin.perception_service` | The one camera channel: camera_stream's left eye in a ring, faces and people, embeddings, as one HTTP service | `ros/models.sh start perception` |
 | `pepin.push` | Which running nodes a changed file needs restarted, or why a push refuses | `uv run python -m pepin.push plan FILE...` |
 | `pepin.red_button` | The base's own stop, confirmed by the wheels | `python3 -m pepin.red_button [--host BOARD]` |
 | `pepin.speed` | The cart's speed ceiling: check a value, read the file, read or set the base | `python -m pepin.speed check X \| file \| base --host H --port P` |
@@ -156,12 +161,17 @@ Find the job in this file before writing a script for it. When a tool already ow
 | `calibrate_neck.py` | Neck and head servo calibration | `uv run python scripts/calibrate_neck.py --port PORT` |
 | `dashboard.py` | Live rerun dashboard: scan, camera, ToF, board vitals, log | `uv run python scripts/dashboard.py [--map data/maps/M.npz]` |
 | `extrinsics.py` | Library: the camera's yaw against the lidar from the two range fans | imported by `tests/unit/test_extrinsics.py` |
+| `gesture.py` | The SO-101 through the base server: its angles, rest, halt, a gesture of `config/animation.json` played at a speed and seed (Ctrl-C halts), a pose taught by hand; the wheels' turn in place and rock as the voice makes them (every check first, Ctrl-C halts) | `uv run python scripts/gesture.py list \| read \| rest \| halt \| play NAME [--speed S] [--seed N] [--variant V] [--dry-run] \| nudge JOINT DEG \| teach POSE \| turn DEG \| rock [CM] [--times N]` |
 | `face_sensor.py` | Who is in front of the head camera, where, looking and talking, expression: a JSON line a second in `data/face/latest.json`; enrolment and a bench | `uv run --group face python scripts/face_sensor.py run \| bench FILE... \| enrol NAME FILE... \| list \| forget NAME` |
 | `health_check.py` | Launch-readiness check of every subsystem: GO or NO GO | `uv run python scripts/health_check.py [--quick]` |
 | `jog.py` | Gentle single-motor jog for bring-up | `uv run python scripts/jog.py wheel \| neck --port PORT --id N` |
 | `setup_motor_id.py` | Assigns a bus ID to one Feetech servo | `uv run python scripts/setup_motor_id.py --port PORT --id N` |
 | `timesync.py` | The board's clock offset from the laptop over NTP, one line | `ros/time.sh offset` |
+| `turn_eval.py` | End-of-turn methods (silence, Smart Turn, two-gates) replayed on recorded turns, with mid-sentence pauses inserted: cuts before the last word, merges, the close after it; the text judges on the early reads | `uv run --group stt-gigaam python scripts/turn_eval.py data/voice/DAY... [--live-cuts DIR] [--pauses 0.25 0.5 0.8] [--methods M...] [--set K=V] [-v]` |
 | `voice.py` | Voice loop: the array, Gemini on the audio, the robot's tools, speech | `uv run python scripts/voice.py` |
 | `voice_live.py` | Voice over the Gemini Live API with a local wake gate | `uv run python scripts/voice_live.py [--dry-run]` |
 | `voice_cascade.py` | Voice cascade: local Whisper, Claude with the tools, local Qwen3-TTS; per-stage latency, `--bench` p50/p90 | `uv run python scripts/voice_cascade.py [--brain sonnet] [--bench DIR]` |
 | `cascade_stats.py` | Voice-cascade sessions side by side: to-sound p50/p90, Whisper / first token / first sentence / TTS medians, tool turns, barge-ins, cents per reply | `uv run python scripts/cascade_stats.py data/voice/DAY [SESSION_DIR] [-v]` |
+| `b2_ship.sh` | the recordings to Backblaze B2: `ship` moves finished audio, video, drive recordings, the ring and day-old logs to the bucket (same paths under `pepin/`); nothing is deleted on the laptop; `status`, `restore PATH`, `mount` (~/B2, NFS), `install` (launchd: ship every 30 min, mount at login) |
+| `bus_tap_sink.py` | the laptop's copy of the servo bus tap (pepin.bus_tap on the board, every byte between the base server and ser2net): `serve` (UDP 3341 -> data/bus_tap/<day>.log, a ring of three days, never shipped), `install` (launchd com.pepin.bustap), `status`, `prune` | `uv run python ros/tools/bus_tap_sink.py status` |
+| `bus_tap_decode.py` | a bus tap log as packets: who was told what, the replies, failed checksums and noise; `--from/--to HH:MM:SS`, `--ids 9,10`, `--writes`, `--summary` | `uv run python ros/tools/bus_tap_decode.py data/bus_tap/20261013.log --ids 9,10 --writes` |

@@ -22,6 +22,7 @@ dev = [
 ]
 macos = [
     "pygame>=2.6.1",
+    "pyobjc-framework-vision>=12.2.2",
     "rumps>=0.4.0",
 ]
 # The depth network on the laptop's GPU (pepin.depth_service, ros/depth_host.sh): torch comes
@@ -141,8 +142,10 @@ files = [
     "scripts/extrinsics.py",
     "scripts/voice_live.py",
     "scripts/voice_cascade.py",
+    "scripts/gesture.py",
     "scripts/barge_in_eval.py",
     "scripts/face_sensor.py",
+    "scripts/people.py",
     "apps/macos",
 ]
 strict = true

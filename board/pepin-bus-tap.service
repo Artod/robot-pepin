@@ -1,0 +1,17 @@
+[Unit]
+Description=Pepin servo bus tap: every byte between the base server and ser2net, logged (TCP 3334 -> 3333)
+After=ser2net.service network.target
+Requires=ser2net.service
+# Never give up: the bus may be powered minutes after the board.
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=/opt/pepin
+Environment=PYTHONPATH=/opt/pepin
+ExecStart=/opt/pepin/bin/python -m pepin.bus_tap --listen 3334 --upstream 127.0.0.1:3333 --log-dir /var/log/pepin/bus-tap --sink 10.0.0.167:3341
+Restart=always
+RestartSec=1
+TimeoutStopSec=3
+
+[Install]
+WantedBy=multi-user.target

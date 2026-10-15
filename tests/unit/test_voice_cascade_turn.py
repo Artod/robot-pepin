@@ -119,7 +119,7 @@ def test_the_config_takes_the_model_and_refuses_what_cannot_work() -> None:
         8.0,
         0.85,
     )
-    assert CascadeConfig.load(CONFIG).turn_model is None
+    assert CascadeConfig.load(CONFIG).turn_model == "two-gates"  # the file since 2026-10-13
     for bad in (
         ["ears.turn_model=smart-turn-v9"],
         ["ears.turn_model=smart-turn-v3.2", "turn.min_silence_s=0.6"],

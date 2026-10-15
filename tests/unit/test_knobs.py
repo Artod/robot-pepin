@@ -33,6 +33,8 @@ from pepin.graphmode import PNP_REPROJ_PX, PNP_REPROJ_RANGE_PX
 from pepin.lean import LEAN_QUALITY_FLOOR, SCAN_LEAN_GATE_DEG
 from pepin.marks_audit import MATCH_CELLS, RADIUS_M
 from pepin.path_gaze import PathGazeLaw, ReverseLaw
+from pepin.perception.feed import DEFAULT_HZ as FEED_HZ
+from pepin.perception.feed import DEFAULT_QUALITY as FEED_QUALITY
 from pepin.snapshot import PAIR_PERIODS
 from pepin.stall_look import AHEAD_M as STALL_AHEAD_M
 from pepin.stall_look import CLUSTER_M as STALL_CLUSTER_M
@@ -75,6 +77,9 @@ NAMED = {
     ("rtabmap_frame", "pnp_reproj_px"): PNP_REPROJ_PX,
     ("rtabmap_frame", "descriptor_null_share"): MAX_NULL_SHARE,
     ("sensor_pack", "pair_periods"): PAIR_PERIODS,
+    # the one camera channel's sender: pepin.perception.feed.FrameFeed's defaults
+    ("camera_stream", "perception_hz"): FEED_HZ,
+    ("camera_stream", "perception_quality"): FEED_QUALITY,
     # The gaze gate: one number in every node that carries it (pepin.gaze_gate).
     **{
         (node, name): value

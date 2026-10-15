@@ -5,7 +5,9 @@ The board's array -> a loudness-cut utterance -> Whisper on the Mac (and Praat's
 robot's tools -> Qwen3-TTS on the Mac speaks each sentence as it arrives -> the board's speaker.
 Every turn prints its timeline (person stopped -> cut -> text -> token -> sentence -> tts ->
 play -> end, in ms) with the cache tokens and the price. Every switch: config/voice_cascade.json,
-or --set section.key=value for one run. Logs: data/voice/<day>/cascade_<HHMMSS>/.
+or --set section.key=value for one run. Logs: data/voice/<day>/cascade_<HHMMSS>/; outside a
+conversation each utterance is a row of data/voice/<day>/cascade_heard.jsonl and, unless it is a
+noise line, its audio in data/voice/<day>/heard/<HHMMSS_mmm>.wav (ears.heard_audio).
 
 The key comes from the environment (the repo's gitignored .env, loaded by the shell):
 
@@ -15,6 +17,7 @@ The key comes from the environment (the repo's gitignored .env, loaded by the sh
     uv run python scripts/voice_cascade.py --brain flashlite     # Gemini (GEMINI_API_KEY)
     uv run python scripts/voice_cascade.py --brain groq-qwen     # Groq (GROQ_API_KEY)
     uv run python scripts/voice_cascade.py --set ears.turn_model=smart-turn-v3.2   # Smart Turn
+    uv run python scripts/voice_cascade.py --set ears.turn_model=two-gates  # words + pause
     uv run python scripts/voice_cascade.py --set transcriber.engine=whispercpp  # Neural Engine
     uv run python scripts/voice_cascade.py --voice gemini-lite   # Gemini TTS (GEMINI_API_KEY)
 
@@ -24,6 +27,15 @@ about a second, a voice once its model has loaded, a transcriber between utteran
 
     uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
     uv run python scripts/voice_cascade.py switch --transcriber whispercpp
+    uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
+    uv run python scripts/voice_cascade.py switch --flag people=on     # config/people.json
+    uv run python scripts/voice_cascade.py switch --knob vision.source=snapshot  # models.json
+
+The pictures (the speaker gaze's faces, person recognition, ``see``) come from the perception
+service on this Mac (``ros/models.sh start perception``, fed by camera_stream); the voice process
+holds none. ``vision.source=snapshot`` goes back to ustreamer's snapshots decoded here, for a
+day the service is broken. Each turn's line ends with the vision cell (frames in and detected a
+second, the detector's ms, the faces and people in the newest record).
 
 The other speech-to-text engines (pepin.voice_cascade.stt: gigaam, parakeet, canary, voxtral)
 need their runtime once, ``uv sync --group stt-<engine>`` (several --group flags add several),
@@ -58,22 +70,39 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pepin.audio_doa import MicDoa, SrpPhat
 from pepin.audio_link import board_host
 from pepin.deployment import config_file
+from pepin.expression.finder import SwitchedFinder, robot_finder
+from pepin.expression.places import GoalPlaces
+from pepin.expression.tracker import SpeakerGazeWorker, SpeakerSettings, robot_gaze
+from pepin.expression.wheels import WheelsExecutor, WheelsGuard, robot_wheels
+from pepin.people.worker import robot_people
+from pepin.perception.client import HealthWatch, PerceptionClient
+from pepin.perception.config import PerceptionConfig
+from pepin.perception.source import KNOB as VISION_KNOB
+from pepin.perception.source import SOURCES as VISION_SOURCES
+from pepin.perception.source import VisionSource
 from pepin.tools import TOOLS, Robot
+from pepin.tools.clients import ChannelSightings
 from pepin.tools.fakes import FakeCamera, FakeGoalServer, WallClock, fake_robot
+from pepin.voice_cascade.barge_in import speech_series
 from pepin.voice_cascade.bench import ReplayMic, utterances
 from pepin.voice_cascade.config import (
     CONFIG_FILE,
     TRANSCRIBER_ENGINES,
+    TWO_GATES,
     CascadeConfig,
     voice_preset,
 )
 from pepin.voice_cascade.control import (
     DONE_STATES,
+    FLAG,
+    KNOB,
     ControlFile,
     Switchboard,
     answers_to,
+    flag_value,
     write_request,
 )
 from pepin.voice_cascade.engines import (
@@ -84,7 +113,8 @@ from pepin.voice_cascade.engines import (
     brain_key,
     build_brain,
 )
-from pepin.voice_cascade.loop import CascadeLoop, Mic
+from pepin.voice_cascade.fillers import clip_lines
+from pepin.voice_cascade.loop import UNANSWERED, CascadeLoop, Mic
 from pepin.voice_cascade.player import Player
 from pepin.voice_cascade.speech import SpeechWorker
 from pepin.voice_cascade.stages import Tagger, Transcriber
@@ -99,6 +129,7 @@ from pepin.voice_cascade.transcriber import (
     wanted_from,
 )
 from pepin.voice_cascade.turn import SmartTurn, TurnWorker
+from pepin.voice_cascade.turn_text import TextJudge, build_judge
 from pepin.voice_live.budget import Ledger
 from pepin.voice_live.config import LiveConfig, Prices
 from pepin.voice_live.events import Events, StatePrinter
@@ -137,12 +168,165 @@ def ledger_for(config: CascadeConfig, path: Path) -> Ledger:
     return Ledger(path, caps)
 
 
+def parse_flags(items: list[str], known: set[str]) -> dict[str, bool]:
+    """``["gestures=on", "speaker_gaze=off"]`` as ``{name: on}``; ``ValueError`` naming an item
+    that is not ``NAME=on|off`` or a name config/expression.json's flags do not carry."""
+    flags: dict[str, bool] = {}
+    for item in items:
+        name, _, value = item.partition("=")
+        wanted = flag_value(value)
+        if not name or wanted is None:
+            raise ValueError(f"--flag {item!r}: NAME=on or NAME=off")
+        if name not in known:
+            raise ValueError(f"--flag {name!r}: one of {', '.join(sorted(known))}")
+        flags[name] = wanted
+    return flags
+
+
+KNOBS: dict[str, tuple[str, ...]] = {VISION_KNOB: VISION_SOURCES}  # live knobs, their values
+
+
+def parse_knobs(items: list[str], known: dict[str, tuple[str, ...]]) -> dict[str, str]:
+    """``["vision.source=snapshot"]`` as ``{name: value}``; ``ValueError`` naming an item that
+    is not ``NAME=VALUE``, a knob the loop does not carry or a value it does not take."""
+    knobs: dict[str, str] = {}
+    for item in items:
+        name, _, value = item.partition("=")
+        if not name or not value:
+            raise ValueError(f"--knob {item!r}: NAME=VALUE")
+        if name not in known:
+            raise ValueError(f"--knob {name!r}: one of {', '.join(sorted(known))}")
+        if value not in known[name]:
+            raise ValueError(f"--knob {name}: {value!r} is not one of {', '.join(known[name])}")
+        knobs[name] = value
+    return knobs
+
+
+def expression_flags() -> set[str]:
+    """The live flags: config/expression.json's ``flags`` (but the note) and the people flag
+    (config/people.json, ``pepin.people.config.FLAG``)."""
+    from pepin.people.config import FLAG as PEOPLE_FLAG
+
+    data = json.loads(config_file("expression.json").read_text())
+    return {name for name in data.get("flags", {}) if name != "note"} | {PEOPLE_FLAG}
+
+
+class Body:
+    """The gesture engine of this run (config/expression.json's ``gestures`` switch at the start,
+    live through ``switch --flag``), its parts, the marker vocabulary, and what to close."""
+
+    def __init__(self, engine: Any, vocabulary: Any, closers: list[Any]) -> None:
+        """Built by :meth:`build`."""
+        self.engine, self.vocabulary, self.closers = engine, vocabulary, closers
+
+    @classmethod
+    def build(
+        cls,
+        host: str,
+        player: Player,
+        *,
+        fake: bool,
+        face: bool,
+        logs: Path,
+        wheels: WheelsExecutor | None = None,
+    ) -> Body:
+        """The engine over the real arm, head, face and ``wheels`` (``fake``: a fake arm that
+        answers at rest and a head door that only records; ``face`` False: a face that only
+        records; no ``wheels``: the body never moves), every performance, cue and answer logged
+        to ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
+        from pepin.arm_motion import load_arm_motion
+        from pepin.expression.animation import PartName
+        from pepin.expression.animator import GestureEngine, engine_config
+        from pepin.expression.arm_link import ArmClient
+        from pepin.expression.book import face_names, load_book, vocabulary, with_rest
+        from pepin.expression.door import OverlayDoor
+        from pepin.expression.executors import Executor, NoBody
+        from pepin.expression.fakes import FakeArmLink, FakeFace, FakeHeadDoor
+        from pepin.expression.head import ClipLook
+        from pepin.expression.parts import ArmPart, FacePart, HeadDoor, HeadPart, NeckLimits
+        from pepin.expression.trajectory import ArmLink, ArmStatus
+        from pepin.neck import NeckConfig
+        from pepin.voice_cascade.log import append_line, day_dir
+
+        def record(kind: str, fields: dict[str, Any]) -> None:
+            wall = time.time()
+            row = {"t": round(wall, 3), "kind": kind, **fields}
+            append_line(day_dir(logs, wall) / "cascade_gestures.jsonl", row)
+            if kind != "cue" or not fields.get("ok"):
+                print(f"  (gesture {kind}: {json.dumps(fields, ensure_ascii=False)})", flush=True)
+
+        def answered(answer: Any, t: float) -> None:
+            record("arm", {"id": answer.id, "status": answer.status, "reason": answer.reason})
+
+        def head_answered(request: ClipLook, refusal: str | None) -> None:
+            target = request["target"]
+            record("head", {"source": request["source"], "keys": len(target["keys"]),
+                            "loop": target.get("loop", False), "ok": refusal is None,
+                            "why": refusal or ""})  # fmt: skip
+
+        motion = load_arm_motion()
+        knobs = json.loads(config_file("expression.json").read_text())
+
+        def load() -> Any:
+            data = json.loads(config_file("expression.json").read_text())
+            return with_rest(load_book(), motion.rest_deg), engine_config(data)
+
+        closers: list[Any] = []
+        link: ArmLink
+        if fake:
+            link = FakeArmLink(state=ArmStatus(0.0, motion.rest(), False, "off"))
+        else:
+            client = ArmClient(host, on_answer=answered).start()
+            link = client
+            closers.append(client)
+        arm_knobs = knobs.get("parts", {}).get("arm", {})
+        head_knobs = knobs.get("parts", {}).get("head", {})
+        face_knobs = knobs.get("parts", {}).get("face", {})
+        door: HeadDoor = FakeHeadDoor() if fake else OverlayDoor()
+        fades = knobs.get("layers", {}).get("fade_s", {})
+        head = HeadPart(
+            door,
+            latency_s=float(head_knobs.get("latency_s", 0.1)),
+            limits=NeckLimits.of(NeckConfig.from_json(config_file("neck.json")).motion),
+            fade_s=float(fades.get("head", 0.35) if isinstance(fades, dict) else fades),
+            on_answer=head_answered,
+        )
+        channel: Any = FakeFace()
+        if face:
+            from pepin.head_link import HeadClient
+
+            channel = HeadClient(host, source="expression").start()
+            closers.append(channel)
+        arm = ArmPart(
+            link,
+            motion,
+            latency_s=float(arm_knobs.get("latency_s", 0.06)),
+            speed_scale=float(arm_knobs.get("speed_scale", 0.2)),
+            knot_hz=float(arm_knobs.get("knot_hz", 25.0)),
+        )
+        parts: dict[PartName, Executor] = {
+            "arm": arm,
+            "face": FacePart(channel, latency_s=float(face_knobs.get("latency_s", 0.05))),
+            "head": head,
+            "body": wheels if wheels is not None else NoBody(),
+        }
+        on = bool(knobs.get("flags", {}).get("gestures", False))
+        engine = GestureEngine(parts, player, load, on=on, record=record).start()
+        return cls(engine, vocabulary(engine.book, face_names()), closers)
+
+    def close(self) -> None:
+        """The engine's thread stopped, the links let go (the board rests the arm itself)."""
+        self.engine.close()
+        for closer in self.closers:
+            closer.close()
+
+
 def switch(argv: list[str]) -> int:
-    """``switch --brain X --voice Y --transcriber Z``: ask the running loop for a switch and
-    print its answers until each part is applied or has failed."""
+    """``switch --brain X --voice Y --transcriber Z --flag NAME=on``: ask the running loop for
+    a switch and print its answers until each part is applied or has failed."""
     ap = argparse.ArgumentParser(
         prog="voice_cascade.py switch",
-        description="switch the running loop's brain, voice or speech-to-text engine",
+        description="switch the running loop's brain, voice, speech-to-text engine or features",
     )
     ap.add_argument("--brain", help="a brain preset, or echo")
     ap.add_argument("--voice", help="a voice preset (or an engine's name: qwen3, gemini, say)")
@@ -150,12 +334,28 @@ def switch(argv: list[str]) -> int:
         "--transcriber",
         help=f"{', '.join(TRANSCRIBER_ENGINES)}, or engine:model (whispercpp:large-v3)",
     )
+    ap.add_argument(
+        "--flag", action="append", default=[], metavar="NAME=on|off",
+        help="a feature's switch, live: gestures, speaker_gaze (config/expression.json),"
+        " people (config/people.json)",
+    )  # fmt: skip
+    ap.add_argument(
+        "--knob", action="append", default=[], metavar="NAME=VALUE",
+        help="a live knob: vision.source=service|snapshot (the pictures: the perception"
+        " service, or ustreamer's snapshots decoded here)",
+    )  # fmt: skip
     ap.add_argument("--config", type=Path, help="default: config/voice_cascade.json")
     ap.add_argument("--logs", type=Path, default=REPO / "data" / "voice")
     ap.add_argument("--wait-s", type=float, default=SWITCH_WAIT_S)
     args = ap.parse_args(argv)
-    if not (args.brain or args.voice or args.transcriber):
-        ap.error("--brain, --voice, --transcriber, or several")
+    if not (args.brain or args.voice or args.transcriber or args.flag or args.knob):
+        ap.error("--brain, --voice, --transcriber, --flag, --knob, or several")
+    try:
+        flags = parse_flags(args.flag, expression_flags())
+        knobs = parse_knobs(args.knob, KNOBS)
+    except ValueError as error:
+        print(error)
+        return 2
     data = json.loads((args.config or config_file(CONFIG_FILE)).read_text())
     brains = [*data.get("brain", {}).get("presets", {}), ECHO]
     if args.brain and args.brain not in brains:
@@ -170,14 +370,18 @@ def switch(argv: list[str]) -> int:
     if args.transcriber and choice_of(args.transcriber, CascadeConfig.load(args.config)) is None:
         print(f"transcriber {args.transcriber!r}: {', '.join(TRANSCRIBER_ENGINES)} or engine:model")
         return 2
-    request = write_request(args.logs, args.brain, args.voice, args.transcriber)
+    request = write_request(args.logs, args.brain, args.voice, args.transcriber, flags, knobs)
     print(
         f"asked ({request.id}): brain {args.brain}, voice {args.voice},"
-        f" transcriber {args.transcriber}",
+        f" transcriber {args.transcriber}, flags {flags or None}, knobs {knobs or None}",
         flush=True,
     )
     asked = (("brain", args.brain), ("voice", args.voice), ("transcriber", args.transcriber))
-    parts = {what for what, name in asked if name}
+    parts = (
+        {what for what, name in asked if name}
+        | {f"{FLAG} {name}" for name in flags}
+        | {f"{KNOB} {name}" for name in knobs}
+    )
     deadline = time.monotonic() + args.wait_s
     shown = 0
     failed = False
@@ -187,7 +391,11 @@ def switch(argv: list[str]) -> int:
             extra = {k: v for k, v in row.items() if k not in ("id", "t", "what", "name", "state")}
             print(f"  {row['what']} {row['name']}: {row['state']} {json.dumps(extra)}", flush=True)
         shown = len(rows)
-        done = {row["what"] for row in rows if row["state"] in DONE_STATES}
+        done = {
+            f"{row['what']} {row['name']}" if row["what"] in (FLAG, KNOB) else row["what"]
+            for row in rows
+            if row["state"] in DONE_STATES
+        }
         failed = any(row["state"] == "failed" for row in rows)
         if parts <= done:
             return 1 if failed else 0
@@ -279,6 +487,15 @@ def main() -> int:
 
     bench = args.bench is not None
     fake_drive_s = args.fake_robot if args.fake_robot is not None else 5.0 if bench else None
+    # The one camera channel: the perception service's client and the live vision.source,
+    # shared by the gaze's finder, person recognition and see.
+    try:
+        channel = PerceptionConfig.load()
+    except (OSError, ValueError) as error:
+        print(f"config/models.json perception: {error}; its defaults")
+        channel = PerceptionConfig()
+    vision = VisionSource(channel.source)
+    perception = PerceptionClient(channel.url)
     if fake_drive_s is not None:
         clock = WallClock()
         step_s = max(0.0, fake_drive_s - FAKE_ACCEPT_S) / 3  # accepted, 2 reports, done
@@ -286,7 +503,7 @@ def main() -> int:
         robot = fake_robot(clock=clock, goals=goals, camera=FakeCamera(jpeg=fake_view_jpeg()))
         print(f"FAKE ROBOT: nothing moves; a drive takes {fake_drive_s:.1f} s", flush=True)
     else:
-        robot = Robot.connect()
+        robot = Robot.connect(vision=vision, perception=perception)
 
     def run_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return TOOLS.call(name, arguments, robot)
@@ -326,13 +543,7 @@ def main() -> int:
     except RuntimeError as error:  # a cloud voice without its key
         print(error)
         return 2
-    clips = (
-        *(config.backchannel_lines if config.backchannel else ()),
-        config.tool_filler,
-        *config.openers,
-    )
-    clips = tuple(line for line in clips if line)
-    speech = SpeechWorker(voice, player, clips=clips)
+    speech = SpeechWorker(voice, player, clips=config.openers, asides=clip_lines(config))
     choice = configured(config)
     print(f"loading the voice ({config.voice.name}) and the transcriber ({choice.label})...")
     speech.start()  # the voice loads on its own thread meanwhile
@@ -350,9 +561,21 @@ def main() -> int:
         report=lambda line: print(line, flush=True),
     )
     turn: TurnWorker | None = None
-    if config.turn_model is not None:
-        print(f"loading the end-of-turn model ({config.turn_model})...", flush=True)
-        turn = TurnWorker(SmartTurn(config.turn_model))
+    judge: TextJudge | None = None
+    sound = config.turn_model
+    if config.turn_model == TWO_GATES:
+        sound = None if config.turn_acoustic == "pause" else config.turn_acoustic
+        words = config.turn_text_model or "rules"
+        print(f"end of turn: two gates, the words by {words}, the sound by"
+              f" {config.turn_acoustic}", flush=True)  # fmt: skip
+        judge = build_judge(
+            config.turn_text_model,
+            complete_p=config.turn_complete_p,
+            incomplete_p=config.turn_incomplete_p,
+        )
+    if sound is not None:
+        print(f"loading the end-of-turn model ({sound})...", flush=True)
+        turn = TurnWorker(SmartTurn(sound))
     tagger: Tagger | None = None
     if config.prosody_tags:
         tagger = ProsodyTagger(config.prosody, emotion=emotion_model(config.prosody.emotion_model))
@@ -380,7 +603,91 @@ def main() -> int:
         turns = turns or len(args.say)
     else:
         mic = link or BoardLink(args.host)
+    gaze: SpeakerGazeWorker | None = None
+    finder: SwitchedFinder | None = None
+    watch: HealthWatch | None = None
+    on_robot = isinstance(mic, BoardLink) and fake_drive_s is None
+    if on_robot:  # one face finder for the speaker gaze and person recognition
+        # The perception service's records, or (vision.source snapshot) the snapshot finder,
+        # built and loaded only when that switch is turned.
+        finder = robot_finder(args.host, vision, perception, wait_s=channel.look_wait_s)
+        watch = HealthWatch(perception).start()  # the vision cell, read from memory
+    people = robot_people(  # voices only without the robot's camera
+        finder, service=perception if on_robot else None, source=vision
+    )
+    robot.people = people  # the remember_person / forget_person tools' door
+    # The wheels' one owner for the gaze's turn and the gestures' body (no I/O until a motion;
+    # each moves only behind its own flag); the guard stops a gesture's when the person speaks.
+    wheels: WheelsExecutor | None = None
+    if on_robot:
+        try:
+            wheels = robot_wheels(args.host)
+        except (OSError, ValueError, TypeError) as exc:  # the voice starts whatever the knobs say
+            print(f"no wheels for expression (config/expression.json wheels: {exc})")
+    guards = [WheelsGuard(wheels)] if wheels is not None else []
+    mac_doa: MicDoa | None = None
+    if on_robot:  # the robot, its array, its head
+        assert isinstance(mic, BoardLink)
+        # The Mac's own voice direction from the array's raw microphones (speaker.doa.direction
+        # mac): fed by the link's raw frames, its Silero probabilities the ears' once they exist.
+        try:
+            knobs = SpeakerSettings.load()
+            mac_doa = MicDoa(
+                SrpPhat.load(),
+                voice_p_min=knobs.mac_voice_p_min,
+                peak_ratio=knobs.mac_peak_ratio,
+                reading_s=knobs.mac_reading_s,
+            )
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            print(f"no Mac voice direction (config/audio.json, expression.json: {exc}): the chip's")
+        else:
+            mic.listen_raw(mac_doa.feed)
+            print(
+                f"Mac voice direction ready: the board streams {mic.raw_channels} raw mics (0: the"
+                " 2-channel firmware or raw_mics off, the chip's direction then)",
+                flush=True,
+            )
+        gaze = robot_gaze(args.host, mic, finder=finder, on_face=people.seen_face, wheels=wheels,
+                          mac=mac_doa)  # fmt: skip
+        # the approach tool's speaker: the person this gaze holds, on the channel's own frames
+        robot.sightings = ChannelSightings(perception, vision, gaze, wait_s=channel.look_wait_s)
+        robot.gaze = gaze  # and its body turn to the voice, when nobody is in view
 
+    body = Body.build(
+        args.host,
+        player,
+        fake=fake_drive_s is not None,
+        face=not quiet_run and not args.no_face,
+        logs=args.logs,
+        wheels=wheels,
+    )
+    robot.animator = body.engine  # the gesture tool's door
+    if gaze is not None:  # attention first: the engine reads it, a body turn asks for the arm
+        body.engine.attention = gaze  # the gesture space's person too
+        gaze.arm = body.engine
+    # The gesture space's room: the goal server's places book and the robot's map pose, read on
+    # a thread of their own (a down server: a place's name gets its floor until it answers).
+    room = GoalPlaces(robot.goals).start()
+    body.engine.resolver.room = room
+    # The alive layer (riding gestures): the voice's own nuclei and melody from every reply chunk,
+    # the listeners' requests into the engine, the quiet rule over the engine's renderings, the
+    # arm kept up after a mark while a long reply's posture is due or up.
+    from pepin.expression.listeners import Alive
+    from pepin.expression.prosody import ProsodyListener
+
+    prosody = ProsodyListener()
+    alive = Alive(body.engine, prosody, say=lambda line: print(line, flush=True))
+    body.engine.taps.append(prosody)
+    body.engine.scene_hooks.append(alive.scene)
+    body.engine.scheduler.stay_up = alive.stays_up
+    # On the word: the ladder plans with the arm's planner and units, renders the book's other
+    # versions and floors through the engine's renderer and scene hooks, and takes the voice's
+    # nuclei as the word clock's AUDIO moment; a barge-in's record reads the same clock.
+    body.engine.scheduler.attach(
+        body.engine.parts, lambda: body.engine.renderer, nuclei=prosody,
+        hooks=body.engine.scene_hooks,
+    )  # fmt: skip
+    player.words = body.engine.scheduler.words
     switchboard = Switchboard(
         control,
         configure=lambda brain, voice: configure(brain, voice),
@@ -408,16 +715,37 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
+        observers=[*guards, body.engine, alive, people] + ([gaze] if gaze is not None else []),
+        flags=[body.engine, people] + ([gaze] if gaze is not None else []),
+        taps=[body.engine],
+        vocabulary=body.vocabulary,
+        people=people,
+        judge=judge,
+        knobs=[vision],
+        cells=[watch.cell] if watch is not None else [],
     )
     loop.paid_ledger = ledger
     holder.append(loop)
+    if gaze is not None:
+        gaze.journal = loop.record  # the gaze's decisions in each conversation's events.jsonl
+        gaze.series = speech_series(loop.ears.detector)  # the ears' Silero tags the array's DOA
+        if mac_doa is not None:
+            mac_doa.series = gaze.series  # ...and picks the raw chunks the Mac's direction reads
+    alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
+    body.engine.journal = loop.record  # the gesture space's catchment and repeat rows
+    alive.start()
     b = config.brain
     print(
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
         f" {b.cache}), voice {config.voice.name} ({config.voice.model}), wake {config.wake};"
         f" barge_in {config.barge_in}, backchannel {config.backchannel}, prosody_tags"
-        f" {config.prosody_tags}, turn_model {config.turn_model}. Logs: {args.logs}; switch:"
-        " scripts/voice_cascade.py switch --brain NAME --voice NAME",
+        f" {config.prosody_tags}, turn_model {config.turn_model}, speculative {b.speculative},"
+        f" first sentence {b.first_sentence_words or 'as the persona says'}, gestures"
+        f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'},"
+        f" vision.source {vision.value}"
+        f"{f' ({watch.cell()})' if watch is not None else ''}. Logs:"
+        f" {args.logs}; switch: scripts/voice_cascade.py switch --brain NAME --voice NAME"
+        " --flag gestures=on --knob vision.source=snapshot",
         flush=True,
     )
     try:
@@ -427,17 +755,27 @@ def main() -> int:
         if moving and fake_drive_s is None:
             print("halt:", robot.halt(), flush=True)
     finally:
+        alive.close()
+        room.close()
+        if gaze is not None:
+            gaze.close()  # the head let go before the links close
+        if wheels is not None:
+            wheels.close()
+        people.close()
+        if watch is not None:
+            watch.close()
         speech.close()
         if turn is not None:
             turn.close()
         transcriber.close()  # whisper.cpp's server, when that engine is in use
         if face is not None:
             face.close()
+        body.close()
         for closable in (mic, speaker):
             close = getattr(closable, "close", None)
             if close is not None:
                 close()
-    person = [t for t in loop.turns if t["kind"] == "person" and t["outcome"] != "merged"]
+    person = [t for t in loop.turns if t["kind"] == "person" and t["outcome"] not in UNANSWERED]
     if person:
         print("\n" + "\n".join(report(person)), flush=True)
         ears = loop.ears

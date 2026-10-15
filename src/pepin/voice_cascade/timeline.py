@@ -12,6 +12,7 @@ from typing import Any
 # (key, short name in the line, what it is)
 STAGES = (
     ("closed", "cut", "the ears closed the utterance (the end-of-turn silence)"),
+    # a turn asked at the early read (brain.speculative): stamped when the close confirmed them
     ("transcript", "text", "Whisper's words (and the tag line) ready"),
     ("first_token", "token", "the brain's first text"),
     ("first_sentence", "sent", "the brain's first whole sentence"),
@@ -42,10 +43,25 @@ class Timeline:
         with self._lock:
             self.marks.setdefault(stage, t)
 
+    def take(self, other: Timeline) -> None:
+        """``other``'s zero, and its stamps where this one has none (a turn asked before its
+        utterance closed takes the close's)."""
+        with other._lock:
+            stopped, marks = other.stopped, dict(other.marks)
+        with self._lock:
+            self.stopped = stopped
+            for stage, t in marks.items():
+                self.marks.setdefault(stage, t)
+
     def has(self, stage: str) -> bool:
         """Whether ``stage`` is stamped."""
         with self._lock:
             return stage in self.marks
+
+    def at(self, stage: str) -> float | None:
+        """When ``stage`` was stamped (None: not yet)."""
+        with self._lock:
+            return self.marks.get(stage)
 
     def ms(self) -> dict[str, int | None]:
         """Each stage in milliseconds after the person stopped (None: never reached)."""
@@ -114,8 +130,11 @@ def report(turns: Sequence[Mapping[str, Any]]) -> list[str]:
     lines += histogram(steps, [name for name, _, _ in STEPS])
     eot = [t["eot"] for t in turns if t.get("eot")]
     if eot:
-        by_model = sum(1 for e in eot if e["closed_by"] == "model")
+        by_model = sum(1 for e in eot if e["closed_by"] in ("model", "both"))
+        waited = sum(1 for e in eot if e["closed_by"] == "wait")
         lines += ["", f"end-of-turn model ({by_model} of {len(eot)} closed by it):"]
+        if waited:
+            lines.append(f"{waited} of {len(eot)} waited for unfinished words")
         lines += histogram(eot, ["saved_ms", "model_ms"])
         lines += histogram(eot, ["p"], digits=2)[1:]
     if usage:

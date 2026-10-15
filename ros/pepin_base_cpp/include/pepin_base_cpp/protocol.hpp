@@ -8,8 +8,10 @@
 //
 //   base -> us   {"type":"state","t":..,"x":..,"y":..,"theta":..,"dl":..,"dr":..,
 //                 "v":..,"w":..,"moving":bool,"armed":bool,"deadman":bool,
-//                 "bus_ok":bool,"bus_p95_ms":..,"pan_ticks":..,"tilt_ticks":..}
-//                (the neck's two encoders of the same read, only when both answered it)
+//                 "bus_ok":bool,"bus_p95_ms":..,"pan_ticks":..,"tilt_ticks":..,
+//                 "arm":{"deg":[6 angles],...}}
+//                (the neck's two encoders of the same read, only when both answered it; the
+//                arm's angles in degrees, only on a line whose read heard the arm: arm.hpp)
 //   base -> us   {"type":"pong",...}                     answer to a ping; ignored here
 //   us -> base   {"cmd":"twist","v":<m/s>,"w":<rad/s>}   drive; re-arms the deadman
 //   us -> base   {"cmd":"stop"}                          stop the wheels now
@@ -29,6 +31,8 @@
 #include <string_view>
 #include <utility>
 #include <vector>
+
+#include "pepin_base_cpp/arm.hpp"
 
 namespace pepin
 {
@@ -52,6 +56,8 @@ struct BaseState
   bool neck_read;    ///< the neck's encoders rode in this read (both answered)
   int pan_ticks;     ///< ... and what they read, under the same stamp; 0 when not read
   int tilt_ticks;
+  bool arm_read;     ///< the arm's encoders rode in this read (arm.hpp)
+  std::array<double, kArmJoints> arm_deg;  ///< ... its angles, degrees, kArmJointNames order
 };
 
 namespace detail
@@ -177,6 +183,28 @@ inline std::optional<BaseState> parse_state(const nlohmann::json & message)
     state.neck_read = true;
     state.pan_ticks = static_cast<int>(std::lround(pan));
     state.tilt_ticks = static_cast<int>(std::lround(tilt));
+  }
+  // The arm's angles ride the same way, on the lines whose read heard it; a field that is not
+  // six numbers costs the arm its sample and never the line.
+  const auto arm = message.find("arm");
+  if (arm != message.end() && arm->is_object()) {
+    const auto deg = arm->find("deg");
+    if (deg != arm->end() && deg->is_array()) {
+      std::vector<double> values;
+      for (const auto & value : *deg) {
+        double number = 0.0;
+        if (!detail::as_double(value, number)) {
+          values.clear();
+          break;
+        }
+        values.push_back(number);
+      }
+      const auto degrees = arm_degrees(values);
+      if (degrees.has_value()) {
+        state.arm_read = true;
+        state.arm_deg = *degrees;
+      }
+    }
   }
   return state;
 }

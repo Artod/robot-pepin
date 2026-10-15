@@ -38,7 +38,7 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 | 3333 | ser2net | `ser2net.service` | raw TCP to `/dev/servo-bus` (Feetech bus, 1 Mbit/s); `kickolduser` hands the port to the newest client |
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads the encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, a state line every tick; the neck commands (below) |
-| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, the laptop's speech out through its jack, `status`; the speech's loudness to the head's mouth (lip sync, on by default; `--no-lipsync` off) |
+| 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, with the 6-channel firmware the four raw microphones as `raw` frames beside (`config/audio.json` `raw_mics`), the laptop's speech out through its jack, `status`; the speech's loudness to the head's mouth (lip sync, on by default; `--no-lipsync` off) |
 | 3340 | `pepin.head_server` | `pepin-head.service` | the head ESP32 on `/dev/pepin-head`: the mouth's expressions, speech levels and info screens; the head IMU's samples on the board's clock to subscribers (the base bridge); the brain lease (see "The head" below) |
 | 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera`, its exposure the active rig's `exposure` block of `config/camera.json`, set before ustreamer starts (`pepin.camera_controls`; `ros/exposure.sh` shows and tries the modes live) |
 
@@ -65,15 +65,16 @@ and `systemctl start pepin-base` after.
 | `board/wifi_primary.sh` | run by hand, as root: `dongle\|onboard\|status\|confirm` picks which radio carries the board's DHCP identity, with a timed rollback (see its header) |
 | `board/xvf_host_install.sh` | run once: Seeed's `xvf_host` tools into `/opt/xvf_host` |
 | `src/pepin/` (the package, stdlib only on the board) | `/opt/pepin/pepin/` |
-| `config/base.json`, `config/neck.json`, `config/camera.json` | `/opt/pepin/config/` (`neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `camera.json`: the camera's exposure and frame rate (the active rig's `rate.fps`, the one number the laptop's stamps, OpenVINS and the frame gates follow), read by pepin-camera at its start: a rate change is this file copied and `systemctl restart pepin-camera`; `ros/sync.sh` does not reach `/opt/pepin`) |
+| `config/base.json`, `config/neck.json`, `config/arm.json`, `config/camera.json` | `/opt/pepin/config/` (shipped by `ros/sync.sh`, which names the service to restart; `neck.json`: the ids read with the wheels, the limits and the motion the neck commands obey; absent, those commands answer an error and the wheels do not care; `arm.json`: its `motion` block, the arm's ids, rest pose, limits, caps and torque limit (pepin.arm_driver); absent, the arm is never read or written and the `arm_*` commands answer an error; `camera.json`: the camera's exposure and frame rate (the active rig's `rate.fps`, the one number the laptop's stamps, OpenVINS and the frame gates follow), read by pepin-camera at its start: a rate change is this file copied and `systemctl restart pepin-camera`; `ros/sync.sh` does not reach `/opt/pepin`) |
 | `config/head.json`, `config/face.json` | `/opt/pepin/config/` (`head.json`: the head's port, its IMU's rate and ranges, the clock map; `face.json`: the mouth's expressions and the robot events, read by pepin-head and by pepin-audio's lip sync) |
+| `config/audio.json` | `/opt/pepin/config/` (by hand, `scp config/audio.json root@pepin.local:/opt/pepin/config/`, then `systemctl restart pepin-audio`: `raw_mics`, whether the four raw microphones of the 6-channel firmware go to the laptop as `raw` frames, and `capture_channels`, auto = the card's own count; absent, the server runs with raw mics on and auto and says so) |
 | `ros/` | `/root/pepin-ros/` (`ros/sync.sh`) |
 
 Deploy the host package and its configuration from the laptop:
 
 ```bash
 rsync -a --delete --exclude '__pycache__' src/pepin/ root@pepin.local:/opt/pepin/pepin/
-scp config/base.json config/neck.json config/camera.json root@pepin.local:/opt/pepin/config/
+scp config/base.json config/neck.json config/arm.json config/camera.json root@pepin.local:/opt/pepin/config/
 ssh root@pepin.local 'systemctl restart pepin-base pepin-tof pepin-audio'
 ```
 
@@ -91,6 +92,27 @@ scp board/99-pepin-usb.rules root@pepin.local:/etc/udev/rules.d/ && ssh root@pep
 scp board/xvf_host_install.sh root@pepin.local:/tmp/ && ssh root@pepin.local 'bash /tmp/xvf_host_install.sh'
 scp board/pepin-audio.service root@pepin.local:/etc/systemd/system/ && ssh root@pepin.local 'systemctl daemon-reload && systemctl enable --now pepin-audio'
 ```
+
+The 6-channel firmware (`respeaker_xvf3800_usb_dfu_firmware_v2.1.1_16k6ch.bin` of Seeed's
+reSpeaker_XVF3800_USB_4MIC_ARRAY repository, `xmos_firmwares/usb/`): capture channels 1-2 stay
+the processed stereo, 3-6 are the four microphones before any processing, which the server
+streams as `raw` frames (`config/audio.json` `raw_mics`) for the laptop's own voice direction
+(`pepin.audio_doa`). Flashed from the board with the array on its hub (`dfu-util` is installed
+above; the server must not hold the card meanwhile):
+
+```bash
+ssh root@pepin.local 'systemctl stop pepin-audio && dfu-util -l'            # 2886:001a, alt=1 "reSpeaker DFU Upgrade"
+scp respeaker_xvf3800_usb_dfu_firmware_v2.1.1_16k6ch.bin root@pepin.local:/tmp/
+ssh root@pepin.local 'dfu-util -R -e -a 1 -D /tmp/respeaker_xvf3800_usb_dfu_firmware_v2.1.1_16k6ch.bin'
+ssh root@pepin.local 'sleep 5; xvf_host VERSION; grep -A6 Capture: /proc/asound/card*/stream0'   # 2 1 1; Channels: 6
+ssh root@pepin.local 'amixer -c 1 cset numid=8 on,on,on,on,on,on && amixer -c 1 cset numid=10 60,60,60,60,60,60 && alsactl store 1'
+ssh root@pepin.local 'systemctl start pepin-audio'                           # the hello then says raw_channels 4
+```
+
+The `amixer` lines are Seeed's (the raw channels may be muted after the flash; the card number
+is the array's in `/proc/asound/cards`, the control ids are the wiki's example: check them with
+`amixer -c 1 contents` when they do not apply). The 2-channel image
+(`respeaker_xvf3800_usb_dfu_firmware_v2.1.1.bin`) flashed the same way is the way back.
 
 The udev rule names the card `respeaker` (`plughw:CARD=respeaker,DEV=0`) when the array is
 plugged in after it; without it the card is `Array`, which the server finds too.
@@ -183,6 +205,23 @@ limits instead (it is walking, not aiming), and it never winds the servo up: a g
 ~10 deg ahead of the encoder waits for the head. A move's answer is broadcast to every client of
 the port, because it may come seconds after the request. WiFi lost: a jog stops within 0.5 s and
 lets go, a lease goes home within its 2 s.
+
+The SO-101 arm (ids 1-6, the roster's `servo1`..`servo6`) rides the same read as a second group
+(`pepin.base_server.Riders`) in two parts on consecutive ticks, wrist_roll and gripper, then
+joints 1-4 (wheels, neck and all six in one read are 80 bytes of replies, and the CH343 adapter
+holds the 16 past its 64-byte USB packet back until the next request: 2026-10-12): back to back
+while energised (25 Hz), `motion.idle_read_hz` (5) times a second at rest, its angles in the
+state line of the tick that read joints 1-4 as `"arm": {"deg", "torque", "phase", "id",
+"progress_s", "error"}`. When it first answers, its Operating_Mode (position mode, or every
+motion is refused) and its EEPROM range (Min/Max_Position_Limit, which is lerobot's calibration)
+are read once; the angles are lerobot's degrees counted from that range. `pepin.arm_driver`
+plays a whole trajectory by itself on the tick and needs the laptop for nothing after it.
+
+| Line | What happens |
+| --- | --- |
+| `{"cmd":"arm_trajectory","id","source","name","knots":[[t,d1..d6],..],"then":"rest","hold_s":0,"speed":0.2}` | refused (never clamped) outside `config/arm.json`'s `motion.limits_deg` within the EEPROM range, faster than `max_speed_deg_s`/`max_acc_deg_s2` times `speed` (accelerations times its square), longer than `max_duration_s`, or while the wheels are commanded to move: `{"type":"arm","id","status":"refused","reason"}`. Accepted: the six servos energised where they stand (one block: torque, ramp and speed at the caps, goal = present, Torque_Limit `torque_limit`), the first knot joined by a minimum-jerk move, one Goal_Position write a tick; then `done`, a hold (`then: hold`, at most `hold_max_s`), rest by a minimum-jerk move, torque off `release_after_s` later. A newer trajectory answers the older one `preempted`; a twist during one sends the arm to rest (`halted`) |
+| `{"cmd":"arm_rest"}`, `{"cmd":"arm_halt"}` | to rest now; stop where the goal is and hold it `hold_max_s`, then rest. Answered `{"type":"arm_rest","phase":..}` |
+| `{"cmd":"arm_read"}` | `{"type":"arm_read","deg":[..],"ticks":[..],"age_s":..,"torque":..,"phase":..,"range_deg":[[lo,hi],..]}` from the newest read, no bus traffic of its own |
 
 ## The I2C bus
 

@@ -3,12 +3,16 @@
 The arbiter (``pepin_bringup.gaze``) runs in the navigation container and answers here, on
 :data:`GAZE_PORT` (published on this Mac's loopback only, as the goal server's port is):
 
-    POST /look    a request (pepin.gaze.look_from_json's JSON), answered when it ends
-    POST /renew   {"source": ...}: restart that source's TTL (``see`` keeps a look)
-    GET  /state   the published state, the live requests, the driver in use
+    POST /look     a request (pepin.gaze.look_from_json's JSON), answered when it ends; a looped
+                   overlay (kind clip, loop) at once
+    POST /renew    {"source": ...}: restart that source's TTL (``see`` keeps a look)
+    POST /release  {"source": ..., "fade_s": ...}: that source lets the head go now, its overlay
+                   back on the holder's aim over fade_s
+    GET  /state    the published state, the live requests, the overlay, the driver in use
 
 :class:`JsonDoor` is the server half (a thread per request, so a look that waits never holds up
-a ``/state``), :func:`ask` the client half; both speak one JSON object each way.
+a ``/state``), :func:`ask` the client half and :class:`GazeClient` one source's calls over it;
+both speak one JSON object each way.
 """
 
 from __future__ import annotations
@@ -17,11 +21,13 @@ import json
 import threading
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping, Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 GAZE_PORT = 3339
+GAZE_URL = f"http://127.0.0.1:{GAZE_PORT}"
+IDLE_BAND = 5  # pepin.gaze.IDLE: expression's band, below every other
 Route = Callable[[dict[str, Any]], dict[str, Any]]
 
 
@@ -84,11 +90,14 @@ class JsonDoor:
     @staticmethod
     def _reply(request: BaseHTTPRequestHandler, code: int, answer: dict[str, Any]) -> None:
         data = json.dumps(answer).encode()
-        request.send_response(code)
-        request.send_header("Content-Type", "application/json")
-        request.send_header("Content-Length", str(len(data)))
-        request.end_headers()
-        request.wfile.write(data)
+        try:
+            request.send_response(code)
+            request.send_header("Content-Type", "application/json")
+            request.send_header("Content-Length", str(len(data)))
+            request.end_headers()
+            request.wfile.write(data)
+        except (BrokenPipeError, ConnectionResetError):
+            return  # the asker stopped waiting (its own timeout): the request lives on regardless
 
 
 def ask(
@@ -111,3 +120,51 @@ def ask(
     if not isinstance(answer, dict):
         raise OSError(f"{url}{path} answered {type(answer).__name__}, not an object")
     return answer
+
+
+class GazeClient:
+    """One source's calls on the arbiter's door: a look, a head overlay (``clip``), a renewal,
+    a release and the state; each one HTTP exchange that may wait (call from a worker thread),
+    raising ``OSError`` when the door is not there (``TimeoutError`` past ``timeout_s``)."""
+
+    def __init__(self, source: str, url: str = GAZE_URL, timeout_s: float = 3.0) -> None:
+        """Calls of ``source`` to the door at ``url``, waiting at most ``timeout_s`` each."""
+        self.source = source
+        self.url = url
+        self.timeout_s = timeout_s
+
+    def look(self, request: Mapping[str, Any], timeout_s: float | None = None) -> dict[str, Any]:
+        """``POST /look`` of ``request`` as this source's, answered when it ends or refused."""
+        body = {**request, "source": self.source}
+        return ask(self.url, "/look", body, self.timeout_s if timeout_s is None else timeout_s)
+
+    def clip(
+        self,
+        keys: Sequence[Mapping[str, float]],
+        *,
+        ttl_s: float,
+        band: int = IDLE_BAND,
+        loop: bool = False,
+        idle: bool = False,
+        timeout_s: float | None = None,
+    ) -> dict[str, Any]:
+        """A head overlay of ``keys`` ({at_s, pan_rad, tilt_rad, speed_deg_s}, offsets from the
+        holder's aim): answered when it ends (a loop: at once), or refused in words."""
+        target: dict[str, Any] = {"keys": [dict(key) for key in keys], "loop": loop, "idle": idle}
+        request = {"kind": "clip", "band": band, "ttl_s": ttl_s, "target": target}
+        return self.look(request, timeout_s)
+
+    def renew(self) -> int:
+        """Restart this source's TTL (its overlay's too); how many of its requests live."""
+        answer = ask(self.url, "/renew", {"source": self.source}, self.timeout_s)
+        return int(answer.get("renewed", 0))
+
+    def release(self, fade_s: float = 0.0) -> int:
+        """Let the head go now: every request of this source, its overlay back on the holder's
+        aim over ``fade_s``; how many went."""
+        body = {"source": self.source, "fade_s": fade_s}
+        return int(ask(self.url, "/release", body, self.timeout_s).get("released", 0))
+
+    def state(self) -> dict[str, Any]:
+        """``GET /state``: the head, the holder, the blind interval, the overlay, the driver."""
+        return ask(self.url, "/state", None, self.timeout_s)

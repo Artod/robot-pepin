@@ -27,7 +27,7 @@ enum Param : uint8_t {
 constexpr float kParamMin[kParamCount] = {0.08f, 0.0f, -1.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.5f, 0.0f, -3.0f, -1.0f, -1.0f, -1.0f, 0.0f, 0.0f, 0.0f};
 constexpr float kParamMax[kParamCount] = {0.95f, 1.0f, 1.0f, 1.0f, 12.0f, 1.0f, 1.0f, 12.0f, 1.0f, 3.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f};
 
-constexpr int kExpressionCount = 14;
+constexpr int kExpressionCount = 15;
 constexpr const char* kExpressionNames[kExpressionCount] = {
   "neutral",
   "smile",
@@ -43,6 +43,7 @@ constexpr const char* kExpressionNames[kExpressionCount] = {
   "sleepy",
   "focused",
   "listening",
+  "sinister",
 };
 constexpr float kExpressions[kExpressionCount][kParamCount] = {
   {0.46f, 0.0f, 0.12f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.15f, 0.0f},  // 0 neutral
@@ -59,6 +60,7 @@ constexpr float kExpressions[kExpressionCount][kParamCount] = {
   {0.16f, 0.07f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.35f, 1.0f, 0.0f},  // 11 sleepy
   {0.3f, 0.0f, 0.0f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.65f, 0.05f, 0.0f},  // 12 focused
   {0.26f, 0.1f, 0.2f, 0.5f, 2.0f, 0.0f, 0.0f, 2.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.45f, 0.2f, 0.0f},  // 13 listening
+  {0.72f, 0.36f, 0.5f, 0.3f, 1.3f, 0.5f, 0.45f, 6.0f, 1.0f, 0.0f, 0.3f, 0.0f, 0.0f, 0.4f, 0.0f, 0.0f},  // 14 sinister
 };
 constexpr int kNeutral = 0;
 constexpr int kSleepy = 11;

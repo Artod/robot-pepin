@@ -33,6 +33,21 @@ rsync -a --delete --exclude '__pycache__' "$HERE/../src/pepin/" "root@$BOARD:/ro
 # /root/pepin-ros/pepin_src as /ws/pepin_src and the launch reads them from there at start
 # (pepin.deployment.config_file) — the same files the laptop reads from its checkout.
 rsync -a --delete "$HERE/../config/" "root@$BOARD:/root/pepin-ros/pepin_src/config/"
+# The board's own services (pepin-base, pepin-camera, pepin-head: board/README.md) read their
+# configs from /opt/pepin/config/, not from the ROS mount. Their code (/opt/pepin/pepin/) stays a
+# deliberate deploy (board/README.md); a changed config is shipped here and named with the
+# service that reads it, since a service reads its config once, at start.
+rsync -ai --include='base.json' --include='neck.json' --include='arm.json' --include='camera.json' \
+    --include='head.json' --include='face.json' --exclude='*' \
+    "$HERE/../config/" "root@$BOARD:/opt/pepin/config/" | awk '/^>f/ {print $2}' | while read -r f; do
+    case "$f" in
+        base.json | neck.json | arm.json) unit=pepin-base ;;
+        camera.json) unit=pepin-camera ;;
+        head.json | face.json) unit=pepin-head ;;
+        *) continue ;;
+    esac
+    echo "config/$f changed on the board: ssh root@$BOARD systemctl restart $unit (reads it at start)"
+done
 if [ "$RESTART" = true ]; then
     pepin_board_restart  # ros/lib.sh: the stack and its router, the router first
     # A census taken now would call the last nodes MISSING and read every CPU number as the

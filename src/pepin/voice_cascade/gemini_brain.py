@@ -39,7 +39,9 @@ from pepin.voice_cascade.brain import (
 )
 from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
+    CUT,
     FOLLOW_UP,
+    Ahead,
     Emit,
     FirstToken,
     Played,
@@ -48,6 +50,7 @@ from pepin.voice_cascade.stages import (
     ToolExecutor,
     ToolUse,
     Usage,
+    text_tokens,
 )
 from pepin.voice_cascade.text import SentenceSplitter
 
@@ -75,6 +78,20 @@ def gemini_usage(metadata: Any, price: ModelPrice, stop: str | None, ms: int) ->
     fresh = max(0, prompt - cached) + tools
     usd = (fresh * price.input + cached * price.cache_read + out * price.output) / 1e6
     return Usage(fresh, cached, 0, out, usd, stop, ms)
+
+
+def gemini_cut(metadata: Any, chars: int, last_prompt: int, price: ModelPrice, ms: int) -> Usage:
+    """A call cut mid-stream, priced as an estimate: its latest ``usage_metadata`` when a chunk
+    carried one (the output at least the text streamed), else the last call's prompt as fresh
+    input and the streamed text as output."""
+    out = text_tokens(chars)
+    if metadata is not None:
+        usage = gemini_usage(metadata, price, CUT, ms)
+        extra = max(0, out - usage.output)
+        return Usage(usage.input, usage.cache_read, 0, usage.output + extra,
+                     usage.usd + extra * price.output / 1e6, CUT, ms)  # fmt: skip
+    usd = (last_prompt * price.input + out * price.output) / 1e6
+    return Usage(last_prompt, 0, 0, out, usd, CUT, ms)
 
 
 class GeminiBrain:
@@ -112,6 +129,7 @@ class GeminiBrain:
         self._turn: list[Any] = []
         self._said: list[Sentence] = []
         self._acted = False
+        self.last_prompt = 0  # the last call's input tokens (a call cut early is billed so)
         self._cache: str | None = None  # the cache's name
         self._cache_key = ""  # the system instruction it holds
         self._cache_until = 0.0  # when its TTL runs out (monotonic)
@@ -304,34 +322,49 @@ class GeminiBrain:
                     final=round_index == self.config.max_tool_rounds, cache=self.cache()
                 ),
             )
-            async with contextlib.aclosing(stream):
-                async for chunk in stream:
-                    metadata = chunk.usage_metadata or metadata
-                    candidate = chunk.candidates[0] if chunk.candidates else None
-                    if candidate is None:
-                        continue
-                    if candidate.finish_reason is not None:
-                        stop = str(
-                            getattr(candidate.finish_reason, "value", candidate.finish_reason)
-                        )
-                    for part in (candidate.content.parts if candidate.content else None) or []:
-                        if part.text or part.function_call is not None or part.thought_signature:
-                            parts.append(part)  # an empty part carries nothing to send back
-                        if part.function_call is not None:
-                            calls.append(part.function_call)
-                            rest = splitter.flush()  # the words before a call end here
-                            if rest:
-                                say(rest)
-                        elif part.text and not part.thought:
-                            if first:
-                                first = False
-                                emit(FirstToken())
-                            for sentence in splitter.feed(part.text):
-                                say(sentence)
+            chars = 0
+            try:
+                async with contextlib.aclosing(stream):
+                    async for chunk in stream:
+                        metadata = chunk.usage_metadata or metadata
+                        candidate = chunk.candidates[0] if chunk.candidates else None
+                        if candidate is None:
+                            continue
+                        if candidate.finish_reason is not None:
+                            stop = str(
+                                getattr(candidate.finish_reason, "value", candidate.finish_reason)
+                            )
+                        for part in (candidate.content.parts if candidate.content else None) or []:
+                            if (
+                                part.text
+                                or part.function_call is not None
+                                or part.thought_signature
+                            ):
+                                parts.append(part)  # an empty part carries nothing to send back
+                            if part.function_call is not None:
+                                calls.append(part.function_call)
+                                rest = splitter.flush()  # the words before a call end here
+                                if rest:
+                                    say(rest)
+                            elif part.text and not part.thought:
+                                if first:
+                                    first = False
+                                    emit(FirstToken())
+                                chars += len(part.text)
+                                for sentence in splitter.feed(part.text):
+                                    say(sentence)
+                                for early in splitter.ahead():
+                                    emit(Ahead(early, round_index))
+            except asyncio.CancelledError:
+                ms = round((self.clock() - t0) * 1000)
+                emit(gemini_cut(metadata, chars, self.last_prompt, self.price, ms))
+                raise
             rest = splitter.flush()
             if rest:
                 say(rest)
-            emit(gemini_usage(metadata, self.price, stop, round((self.clock() - t0) * 1000)))
+            priced = gemini_usage(metadata, self.price, stop, round((self.clock() - t0) * 1000))
+            self.last_prompt = priced.input + priced.cache_read
+            emit(priced)
             if parts:
                 self._turn.append(t.Content(role="model", parts=parts))
             if not calls:

@@ -12,18 +12,22 @@ from typing import Any
 import pytest
 from google.genai import types
 
-from pepin.audio_link import AudioFrame
+from pepin.audio_link import AudioFrame, RawFrame
 from pepin.voice_live.live import ToolResponse, _GeminiSession
 from pepin.voice_live.sources import BoardLink, ScriptedMic, WavSpeaker
 
 FRAME = b"\x01\x00" * 320
+RAW = b"\x01\x00\x02\x00\x03\x00\x04\x00" * 320
 
 
 class FakeClient:
-    """An AudioClient that yields ``frames`` and then goes silent."""
+    """An AudioClient that yields ``frames`` (and ``raws`` raw microphone frames) and then
+    goes silent."""
 
-    def __init__(self, frames: int) -> None:
+    def __init__(self, frames: int, raws: int = 0) -> None:
         self.frames = frames
+        self.raws = raws
+        self.raw_channels = 4 if raws else 0
         self.sent: list[Any] = []
         self.closed = False
         self.play_rate = 16_000
@@ -32,6 +36,13 @@ class FakeClient:
         if self.frames > 0:
             self.frames -= 1
             return AudioFrame(0, 0.0, FRAME)
+        time.sleep(0.001)
+        return None
+
+    def next_raw(self, timeout_s: float = 1.0) -> RawFrame | None:
+        if self.raws > 0:
+            self.raws -= 1
+            return RawFrame(7 - self.raws, 1.5, RAW, 4)
         time.sleep(0.001)
         return None
 
@@ -76,6 +87,26 @@ def test_the_board_link_speaks_hears_and_replaces_a_silent_link() -> None:
     assert done.wait(2.0)  # two frames from the first link, one from its replacement
     assert opened[0].closed and len(opened) >= 2
     link.close()
+
+
+def test_the_board_link_hands_the_raw_microphone_frames_to_their_own_sink() -> None:
+    client = FakeClient(0, raws=3)
+    link = BoardLink("board", lambda host: client)
+    assert link.raw_channels == 4
+    got: list[tuple[int, float, float]] = []
+    done = threading.Event()
+
+    def sink(frame: RawFrame, t: float) -> None:
+        got.append((frame.seq, frame.stamp_s, t))
+        if len(got) == 3:
+            done.set()
+
+    before = time.monotonic()
+    link.listen_raw(sink)
+    assert done.wait(2.0)
+    assert [g[0] for g in got] == [5, 6, 7] and all(g[1] == 1.5 and g[2] >= before for g in got)
+    link.close()
+    assert BoardLink("board", lambda host: FakeClient(0)).raw_channels == 0
 
 
 def test_the_scripted_mic_waits_for_ready_and_says_each_utterance() -> None:

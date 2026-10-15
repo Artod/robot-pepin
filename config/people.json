@@ -1,0 +1,51 @@
+{
+  "_note": "Person recognition (pepin.people): who said each utterance, by face and voice, against the people the robot has met; and the two tools that name a new person (remember_person) and forget one (forget_person). Embeddings and names stay on this Mac (store). Switching the feature on re-reads this file. MEASURED numbers: scratch/people_1011/ (each script's docstring holds its answer, 2026-10-12).",
+  "flags": {
+    "people": false,
+    "note": "The feature's switch at the cascade's start; while it runs: scripts/voice_cascade.py switch --flag people=on. Off: no snapshot, no embedding, the tag line is the prosody one with prosody.speaker as before, and the two tools answer that recognition is off."
+  },
+  "store": "data/people/people.db",
+  "face": {
+    "model": "models/face/buffalo_l/w600k_r50.onnx",
+    "device": "coreml",
+    "accept": 0.45,
+    "margin": 0.08,
+    "stranger": 0.25,
+    "sure": 0.55,
+    "min_px": 34,
+    "strong_px": 52,
+    "max_yaw_deg": 45.0,
+    "min_det": 0.7,
+    "min_sharpness": 10.0,
+    "min_brightness": 35.0,
+    "max_brightness": 235.0,
+    "dominance": 1.4,
+    "fresh_s": 1.5,
+    "keep": 30,
+    "unload_after_s": 300.0,
+    "note": "ArcFace alone (the buffalo_l pack's w600k_r50.onnx, 174 MB, non-commercial weights; copy it from scratch/face_1008/cache/insightface/models/buffalo_l) on 112 px aligned crops: MEASURED 1.7 ms a face on coreml (15 on cpu), +340 MB resident, 0.1 s to load with a warm CoreML cache (2.4 s and a 1.3 GB transient peak the first time). Loaded when the switch goes on, unloaded after unload_after_s without a conversation (0: kept while on), loaded again at the next wake. accept/margin are the face sensor's (0.45/0.08; scratch/face_1008: Artem's degraded copies 0.83-0.97, strangers <= 0.12); stranger 0.25 so a known face in poor light reads unsure rather than a stranger; sure: a face alone names the person without the voice. MEASURED on the robot's own goal clips of 2026-10-01..09 (62 faces >= 40 px): Artem's 37 frontal faces sit 0.70 from his selfie as a cluster but a single frame p50 0.46 to the selfie and 0.60 to a centroid of 5 robot-camera faces of another clip, so enrol from the robot's camera, not from a photo; his profiles (five-point yaw ~90) 0.36; one other person's face -0.01. A face counts only at min_px wide (about 2 m), |five-point yaw| <= max_yaw_deg (a rough reading: Artem's frontal faces read p50 23 deg), detector score >= min_det and a crop neither blurred nor dark; strong_px (about 1.2 m) lets it overrule a disagreeing voice. min_px and strong_px are the RECTIFIED left eye's pixels since 2026-10-12 (the perception service's records; 40 and 60 in the raw eye x 454.5/528 = 34 and 52 for a centred face; off the axis a face reads wider rectified, 58 px against 49 at ~25 deg). With the service the crop's sharpness and brightness are measured by the service on the rectified eye it keeps (JPEG q90 once), and the face is embedded there (POST /embed): the samples in the store were taken on the raw eye, and the same face embedded in both pixel spaces scored cosine 0.70-0.81 (median 0.75) on 15 profile frames 25 deg off the axis (scratch/perception_1012/eye_parity.py); a centred frontal face is unmeasured. dominance: without the speaker gaze's tracked face, the widest face is the speaker's only when it is that many times wider than the next. fresh_s: the gaze's tracked face counts for an utterance when it was seen that recently. keep: samples kept per person (the newest)."
+  },
+  "voice": {
+    "model": "models/voice/voxceleb_resnet34_LM.onnx",
+    "threads": 2,
+    "min_s": 1.0,
+    "max_s": 6.0,
+    "span_db": 35.0,
+    "strong_s": 2.0,
+    "accept": 0.40,
+    "margin": 0.08,
+    "stranger": 0.15,
+    "sure": 0.50,
+    "keep": 20,
+    "note": "WeSpeaker ResNet34-LM (VoxCeleb2, CC-BY-4.0, 26.5 MB, huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM voxceleb_resnet34_LM.onnx) on the CPU: MEASURED 10/19/37 ms for 1/2/4 s with 2 threads. Only the loud span counts (20 ms frames within span_db of the 95th percentile) and only at least min_s of it ('да', 'угу' name nobody); at most max_s is embedded. On Artem's far-field speech (the robot's array, 2026-10-09..11, 489 loud cuts >= 1 s) against a centroid of 5 of his utterances of another day: accept 0.40 takes 71 % of his cuts and 1.1 % of 202 utterances of 55 other voices (10 LibriSpeech speakers, 44 TTS voices, the robot's own); sure 0.50: 46 % and 0.0 %; enrolled from the same conversation, 0.40 takes 70 % and 0.3 %. 13 % of his cuts fall under 0.15 to his own centroid (the offline cut takes any loud sound, so some are probably not speech), so a voice alone saying stranger is weak evidence. Clean read speech (LibriSpeech) is far more consistent (same speaker p50 0.82 against Artem's 0.35): the array's far-field processing, not the model, is the weak link. strong_s: a voice at least that long overrules a small or turned face. No child and no other Russian human voice was in the data: the thresholds are Artem's."
+  },
+  "session": {
+    "track_face": 0.40,
+    "track_voice": 0.35,
+    "track_keep": 10,
+    "bind_looks": 3,
+    "bind_look_every_s": 0.15,
+    "kind": "guest",
+    "note": "One conversation's speakers: an utterance nobody is named for joins the stranger heard earlier in the conversation whose face (track_face) or voice (track_voice) it resembles, else starts a new one; each keeps its last track_keep samples per modality. remember_person binds the latest utterance's stranger (or, when a known person introduced someone, the one new face in view) and takes bind_looks more pictures bind_look_every_s apart for more face samples. A known person learns new samples only from utterances named sure. kind: what a new person is (guest or family) unless the tool says family."
+  }
+}

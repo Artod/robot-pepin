@@ -94,7 +94,9 @@ def test_the_neck_target_the_arbiter_sends_is_one_the_base_server_takes() -> Non
     head = NeckTargetHead(CFG, send, slow_deg_s=lambda: 20.0, renew_s=lambda: 0.5)
     head.write(LEFT, speed="slow", hold=True, now=0.0)
     head.write(LEFT, speed="saccade", hold=True, now=0.1)
-    slow, saccade = sent
+    head.write(LEFT, speed="saccade", hold=True, now=0.2, speed_deg_s=45.0)  # an overlay's key
+    slow, saccade, key = sent
+    assert base_server._ceiling(key, "speed_deg_s") == 45.0
     for message in sent:
         assert message["cmd"] == "neck_target"
         assert set(message) <= {"cmd", "pan_rad", "tilt_rad", "speed_deg_s", "acc_deg_s2"}

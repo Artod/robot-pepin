@@ -13,11 +13,12 @@ import numpy as np
 import pytest
 
 from pepin.audio_link import FRAME_SAMPLES, RATE
+from pepin.expression.forecast import QueuedAudio, filler_wait_s
 from pepin.voice_cascade.barge_in import Frame
 from pepin.voice_cascade.config import CascadeConfig, ProsodyConfig, apply_overrides
 from pepin.voice_cascade.ears import Ears
 from pepin.voice_cascade.fake import ToneVoice
-from pepin.voice_cascade.player import Playback, Player, PlayoutClock
+from pepin.voice_cascade.player import FillerFade, Playback, Player, PlayoutClock
 from pepin.voice_cascade.speech import SpeechJob, SpeechWorker
 from pepin.voice_cascade.stages import Prosody
 from pepin.voice_cascade.tagger import ProsodyTagger, comparatives
@@ -83,7 +84,7 @@ def test_overrides_switch_a_preset_and_a_flag_for_one_run() -> None:
     )
     assert config.brain.model == "claude-sonnet-5-5"
     assert config.brain.thinking == "between_tools"
-    assert config.barge_in and config.backchannel_lines == ("мм",)
+    assert config.barge_in and config.fillers.backchannel == {"ru": ("мм",)}
     opus = CascadeConfig.load(CONFIG, ["brain.preset=opus", "brain.effort=medium"])
     assert (opus.brain.thinking, opus.brain.effort) == ("adaptive", "medium")
 
@@ -97,6 +98,20 @@ def test_an_override_without_a_value_and_values_out_of_range_are_refused() -> No
             CascadeConfig.load(CONFIG, bad)
     with pytest.raises(ValueError, match="no price"):
         CascadeConfig.load(CONFIG, ["brain.model=claude-unknown"])
+
+
+def test_the_reply_knobs_read_off_and_switch_for_one_run_with_any_preset() -> None:
+    b = CascadeConfig.load(CONFIG).brain
+    assert (b.speculative, b.speculative_min_words, b.first_sentence_words) == (False, 2, 0)
+    sonnet = CascadeConfig.load(
+        CONFIG,
+        ["brain.preset=sonnet", "brain.speculative=true", "brain.first_sentence_words=6"],
+    ).brain
+    assert sonnet.model == "claude-sonnet-5-5" and sonnet.speculative
+    assert sonnet.first_sentence_words == 6
+    for bad in ("brain.speculative_min_words=0", "brain.first_sentence_words=-1"):
+        with pytest.raises(ValueError, match="speculative_min_words"):
+            CascadeConfig.load(CONFIG, [bad])
 
 
 def test_the_file_parses_as_json_with_a_note_per_section() -> None:
@@ -144,6 +159,19 @@ def test_a_timeline_counts_from_the_moment_the_person_stopped() -> None:
     assert ms["closed"] == 500 and ms["transcript"] == 760 and ms["speaker_end"] is None
     assert line.steps()["whisper"] == 260 and line.steps()["tts"] is None
     assert line.line().startswith("cut 500 | text 760 | token -")
+
+
+def test_a_turn_asked_before_the_close_takes_the_close_s_zero_and_stamps() -> None:
+    asked = Timeline(9.9)  # the end of the speech as the early read saw it
+    asked.mark("first_token", 10.3)  # before the close
+    close = Timeline(10.0)
+    close.mark("closed", 10.4)
+    close.mark("transcript", 10.41)
+    close.mark("first_token", 11.0)  # never: the turn's own stamp stays
+    asked.take(close)
+    ms = asked.ms()
+    assert (ms["closed"], ms["transcript"], ms["first_token"]) == (400, 410, 300)
+    assert asked.steps()["brain_ttft"] == -110  # the first token was there before the words
 
 
 def test_percentiles_and_the_report() -> None:
@@ -236,6 +264,46 @@ def test_the_player_says_which_sentences_were_heard() -> None:
     assert player.span(1) is None
 
 
+class Law:
+    """The word clock as the barge-in's record reads it: a quarter of part (1, 0) heard."""
+
+    def heard_share(self, turn: int, index: int, played: float) -> float | None:
+        return 0.25 if (turn, index) == (1, 0) else None
+
+
+def test_a_cut_sentence_is_heard_by_the_word_clock_s_law_when_it_is_lent() -> None:
+    clock = Clock()
+    player = Player(Sink(), rate=RATE, lead_s=10.0, clock=clock)
+    player.feed(pcm_s(2.0), "reply", 1, 0)
+    player.pacer.step()
+    clock.now += 1.0
+    played = player.flush()
+    texts = ["Раз два три четыре."]
+    assert player.heard(1, played, texts).partial == "Раз два"  # half its fed audio
+    player.words = Law()
+    assert player.heard(1, played, texts).partial == "Раз"  # the clock's quarter
+
+
+def test_the_player_tells_the_word_clock_what_waits_ahead_of_the_speaker() -> None:
+    """Fed and not played, of it already sent, and a queued filler's fade: the word clock's
+    filler term (a reply's first word waits for what was sent and the ramp, not the rest)."""
+    clock = Clock()
+    player = Player(Sink(), rate=RATE, lead_s=0.5, clock=clock)
+    assert player.queued_audio() == QueuedAudio(0.0, 0.0, 0.0)
+    player.feed(level(0.6, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.pacer.step()
+    queued = player.queued_audio()
+    assert queued.fed_s == pytest.approx(0.6) and queued.fade_s == 0.06
+    assert 0.0 < queued.sent_s <= 0.1 + 1e-9
+    assert filler_wait_s(queued) == pytest.approx(queued.sent_s + 0.06)
+    for _ in range(10):  # 0.2 s of it plays
+        clock.now += 0.02
+        player.pacer.step()
+    assert player.queued_audio().fed_s == pytest.approx(0.4)
+    player.feed(level(0.3, 2000), "reply", 4, 0)  # the reply takes it over: no filler queued
+    assert player.queued_audio().fade_s == 0.0
+
+
 def test_the_player_tells_a_backchannel_from_a_reply() -> None:
     player = Player(Sink(), rate=RATE, clock=Clock())
     assert player.playback() == "silent"
@@ -243,6 +311,82 @@ def test_the_player_tells_a_backchannel_from_a_reply() -> None:
     assert player.playback() == "backchannel" and player.span(0) is None
     player.feed(pcm_s(0.3), "reply", 1, 0)
     assert player.playback() == "reply"
+
+
+def level(seconds: float, value: int) -> bytes:
+    return np.full(round(seconds * RATE), value, dtype="<i2").tobytes()
+
+
+def drain(player: Player, clock: Clock, seconds: float = 2.0) -> np.ndarray:
+    """Let the pacer send everything on the fake clock; the stream the speaker got."""
+    for _ in range(round(seconds / 0.02)):
+        clock.now += 0.02
+        player.pacer.step()
+    sink = player.playout.speaker
+    assert isinstance(sink, Sink)
+    return np.frombuffer(b"".join(sink.played), dtype="<i2")
+
+
+def test_the_reply_fades_out_a_thinking_filler_still_playing_and_starts_right_after() -> None:
+    """A filler fed with a fade goes only that far ahead of the speaker (not the 0.5 s lead);
+    the reply's first chunk ramps its unsent rest from full level to silence over the fade, on
+    the stream's own samples, drops what is left and follows the ramp at once."""
+    clock, sink = Clock(), Sink()
+    player = Player(sink, rate=RATE, lead_s=0.5, clock=clock)
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    player.feed(level(0.6, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.pacer.step()
+    assert player.playout.sent_s <= 0.06 + 0.04 + 1e-9, "held to the fade, not the lead"
+    for _ in range(10):  # 0.2 s of the filler plays
+        clock.now += 0.02
+        player.pacer.step()
+    sent = player.playout.sent_s
+    asked = clock.now
+    player.feed(level(0.3, 2000), "reply", 3, 0)
+    (fade,) = fades
+    ahead = sent - player.playout.played()
+    assert (fade.turn, fade.faded_s) == (3, pytest.approx(0.06))
+    assert fade.ahead_s == pytest.approx(ahead) and 0.0 < ahead <= 0.1 + 1e-9
+    assert fade.cut_s == pytest.approx(0.6 - sent - 0.06)
+    stream = drain(player, clock)
+    head, ramp = round(sent * RATE), round(0.06 * RATE)
+    assert np.all(stream[:head] == 1000), "what was sent plays as it was"
+    shape = stream[head : head + ramp].astype(float)
+    assert shape[0] == 1000 and shape[-1] == 0 and np.all(np.diff(shape) <= 0), "a linear ramp"
+    assert np.allclose(shape, np.linspace(1000, 0, ramp), atol=0.5)
+    reply = stream[head + ramp :]
+    assert len(reply) == round(0.3 * RATE) and np.all(reply == 2000), "then the reply, whole"
+    start, _ = player.span(3) or (0.0, 0.0)
+    assert start == pytest.approx(sent + 0.06), "the reply's marks follow the ramp"
+    waited = (player.playout.when(start) or 0.0) - asked
+    assert waited == pytest.approx(ahead + 0.06), "the reply waits for the sent part and the ramp"
+
+
+def test_a_filler_without_a_fade_or_already_over_leaves_the_reply_queued_as_before() -> None:
+    clock, sink = Clock(), Sink()
+    player = Player(sink, rate=RATE, lead_s=0.5, clock=clock)
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    player.feed(level(0.6, 1000), "backchannel", 1, -1)  # fade 0: today's behaviour
+    player.pacer.step()
+    assert player.playout.sent_s == pytest.approx(0.52), "the pacer's whole lead"
+    player.feed(level(0.3, 2000), "reply", 1, 0)
+    stream = drain(player, clock)
+    assert fades == [] and len(stream) == round(0.9 * RATE), "the whole filler, then the reply"
+    player.feed(level(0.04, 1000), "backchannel", 2, -1, fade_s=0.06)
+    drain(player, clock, 0.02)
+    player.feed(level(0.3, 2000), "reply", 2, 0)
+    (short,) = fades
+    assert short.faded_s == 0.0 and short.cut_s == 0.0 and short.ahead_s > 0.0, "too little left"
+    drain(player, clock)
+    player.feed(level(0.3, 1000), "backchannel", 3, -1, fade_s=0.06)
+    player.flush()  # a barge-in drops the filler and its hold
+    player.feed(level(0.6, 2000), "reply", 4, 0)
+    before = player.playout.sent_s
+    player.pacer.step()
+    assert player.playout.sent_s - before == pytest.approx(0.52), "the reply has its whole lead"
+    assert len(fades) == 1
 
 
 # -- the ears -------------------------------------------------------------------------------
@@ -332,6 +476,19 @@ def test_the_tag_line_waits_for_a_baseline_then_describes_without_naming_a_feeli
     assert tagger.line(tagger.measure(b""), text) == "[Артём: тише обычного]"
 
 
+def test_a_line_written_before_the_close_leaves_the_baseline_alone() -> None:
+    tagger = ProsodyTagger(ProsodyConfig(min_baseline=2))
+    text = "как у тебя дела сегодня"
+    for level in (60.0, 62.0, 61.0):
+        tagger.line(Prosody(2.0, level, 7.0, 6.0), text)
+    quiet = Prosody(2.0, 50.0, 7.0, 6.0)
+    before = {name: list(seen) for name, seen in tagger.baseline().items()}
+    guess = tagger.line(quiet, text, keep=False)
+    assert guess == "[Артём: тише обычного]" and tagger.count == 3
+    assert {name: list(seen) for name, seen in tagger.baseline().items()} == before
+    assert tagger.line(quiet, text) == guess and tagger.count == 4  # the close: same, joined
+
+
 def test_slower_and_flatter_and_a_model_label() -> None:
     tagger = ProsodyTagger(ProsodyConfig(min_baseline=2))
     for _ in range(3):
@@ -390,6 +547,28 @@ def test_sentences_are_spoken_in_order_and_a_cut_turn_is_dropped() -> None:
     assert heard[0] == (1, 0) and (2, 0) not in heard and (2, -1) in heard and (3, 0) in heard
     assert voice.spoken == ["мм", "Раз два.", "последнее"]  # the backchannel came from memory
     assert player.span(1) is not None and player.span(2) is None
+
+
+def test_a_filler_job_with_a_fade_is_faded_by_its_reply_s_first_chunk() -> None:
+    player = Player(Sink(), rate=RATE, lead_s=0.5, clock=Clock())  # the pacer never steps
+    fades: list[FillerFade] = []
+    player.on_fade = fades.append
+    replied = threading.Event()
+
+    def on_done(job: SpeechJob, t: float) -> None:
+        if job.kind == "reply":
+            replied.set()
+
+    worker = SpeechWorker(ToneVoice(rate=RATE, seconds_per_char=0.01), player, on_done=on_done)
+    worker.start()
+    assert worker.ready.wait(2.0)
+    worker.say(SpeechJob(5, -1, "Хм.", "backchannel", pcm=level(0.5, 1000), fade_s=0.06))
+    worker.say(SpeechJob(5, 0, "Да."))
+    assert replied.wait(2.0)
+    worker.close()
+    (fade,) = fades
+    assert (fade.turn, fade.faded_s, fade.ahead_s) == (5, pytest.approx(0.06), 0.0)
+    assert fade.cut_s == pytest.approx(0.44), "nothing was sent: all but the ramp is cut"
 
 
 def test_openers_are_found_among_the_clips_by_their_words() -> None:
@@ -510,3 +689,17 @@ def test_a_gained_voice_scales_the_engine_s_pcm_and_clips() -> None:
     hot = np.frombuffer(with_gain(np.array([30_000], dtype="<i2").tobytes(), 20.0), dtype="<i2")
     assert int(hot[0]) == 32767
     assert with_gain(b"", -3.0) == b"" and with_gain(b"\x01\x00", 0.0) == b"\x01\x00"
+
+
+def test_a_word_right_after_a_close_keeps_its_first_sound_in_the_lead_in() -> None:
+    ears = ears_with(["silent"], lead_s=1.0)
+    frames = quiet(1.2) + tone(0.6) + quiet(0.6) + quiet(0.1) + tone(0.6) + quiet(0.6)
+    segments = []
+    for i, frame in enumerate(frames):
+        for event in ears.feed(frame, i * FRAME_S):
+            if event.kind == "segment" and event.segment is not None:
+                segments.append(event.segment)
+    assert len(segments) == 2
+    # the second word started 0.1 s after the first close: its lead-in is the quiet tail that
+    # ended the first utterance, not an empty buffer
+    assert segments[1].duration_s >= 0.6 + 0.5

@@ -247,13 +247,14 @@ def test_the_reference_pose_commands_the_reference_ticks() -> None:
 
 
 def test_the_head_s_reach_is_its_tick_limits_in_angles() -> None:
-    """The file's limits through the model: about 156 deg either way, 20 up to 92 down (the
-    'pan about +-156, tilt 22 up .. 65.6 down since head.max 2787' of the brain plan)."""
+    """The file's limits through the model: 167 right to 164 left since 2026-10-13 (set by
+    Artem's hand with the display and the stereo head on; 156 before), 20 up to 61.2 down
+    (the forward stop by hand, 2026-10-13)."""
     (pan_lo, pan_hi), (pitch_lo, pitch_hi) = angle_limits(NeckConfig.from_json(NECK))
-    assert math.degrees(pan_lo) == pytest.approx(-156.7, abs=0.5)
-    assert math.degrees(pan_hi) == pytest.approx(155.7, abs=0.5)
+    assert math.degrees(pan_lo) == pytest.approx(-167.0, abs=0.5)
+    assert math.degrees(pan_hi) == pytest.approx(164.0, abs=0.5)
     assert math.degrees(pitch_lo) == pytest.approx(-19.9, abs=0.5)
-    assert math.degrees(pitch_hi) == pytest.approx(65.6, abs=0.5)  # head.max 2787 since 2026-10-04
+    assert math.degrees(pitch_hi) == pytest.approx(61.2, abs=0.5)  # head.max 2737 since 2026-10-13
 
 
 def test_no_angle_is_commanded_while_the_reference_is_unread() -> None:
@@ -262,3 +263,21 @@ def test_no_angle_is_commanded_while_the_reference_is_unread() -> None:
         ticks_for(cfg, NeckAngles(0.0, 0.4))
     with pytest.raises(ValueError, match="unread"):
         angle_limits(cfg)
+
+
+def test_the_braking_ramp_is_v_squared_over_2d_with_a_fifth_in_hand() -> None:
+    """2026-10-13: the register that ramps a servo up brakes it too. 2276 ticks/s (200 deg/s)
+    with 1800 ticks to go needs 1.2 * 2276^2 / 3600 = 1727 ticks/s^2 = 18 units (the glide
+    keys wrote 3 and 1); with 100 ticks to go, the top (254: the servo cannot stop in time at
+    any legal ramp, so the most it has); with fourteen turns to go, 1 unit is
+    enough and a gentler ramp asked is honoured; moving away from the target, or on it, the
+    top; standing, none."""
+    from pepin.neck import ACC_UNITS_TOP, MOVING_TICKS_S, braking_units
+
+    assert braking_units(2276.0, 1800.0) == 18
+    assert braking_units(2276.0, 100.0) == ACC_UNITS_TOP
+    assert braking_units(2276.0, 60000.0) == 1
+    assert braking_units(-2276.0, -60000.0) == 1, "the other way round, the same"
+    assert braking_units(2276.0, -500.0) == ACC_UNITS_TOP, "moving away: turn round"
+    assert braking_units(2276.0, 0.0) == ACC_UNITS_TOP, "on it at speed: stop now"
+    assert braking_units(MOVING_TICKS_S, 10.0) == 0, "standing (or near it): any ramp"

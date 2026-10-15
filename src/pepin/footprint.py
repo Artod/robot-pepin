@@ -88,3 +88,30 @@ def hull_box(hull: Footprint = HULL, band_m: float = CONTACT_BAND_M) -> dict[str
         "min_y": -(hull.half_width_m + band_m),
         "max_y": hull.half_width_m + band_m,
     }
+
+
+def hull_cells(
+    x: float,
+    y: float,
+    yaw_rad: float,
+    origin: tuple[float, float],
+    resolution: float,
+    hull: Footprint = HULL,
+) -> set[tuple[int, int]]:
+    """The cells ``(col, row)`` of an unrotated grid (``origin`` its corner on the map, cells
+    ``resolution`` wide) that the hull covers standing at map pose ``(x, y, yaw_rad)``: the
+    whole rectangle, sampled every half cell with its edges included (a leg inside the outline
+    counts as much as one on it)."""
+    length, width = hull.front_m + hull.rear_m, 2.0 * hull.half_width_m
+    along = max(1, math.ceil(length / (resolution / 2.0)))
+    across = max(1, math.ceil(width / (resolution / 2.0)))
+    c, s = math.cos(yaw_rad), math.sin(yaw_rad)
+    cells: set[tuple[int, int]] = set()
+    for i in range(along + 1):
+        forward = -hull.rear_m + length * i / along
+        for j in range(across + 1):
+            left = -hull.half_width_m + width * j / across
+            mx, my = x + c * forward - s * left, y + s * forward + c * left
+            col = math.floor((mx - origin[0]) / resolution)
+            cells.add((col, math.floor((my - origin[1]) / resolution)))
+    return cells

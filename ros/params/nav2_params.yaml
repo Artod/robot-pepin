@@ -1182,7 +1182,7 @@ planner_server:
       # lattice's mistake). The turning radius is a comfort choice for a cart that can pivot:
       # arcs RPP tracks at 0.3 m/s, no rotate-in-place at the start.
       plugin: "nav2_smac_planner::SmacPlannerHybrid"
-      tolerance: 0.25
+      tolerance: 1.0  # 2026-10-14 Artem: the taxi: a goal buried in a person's or furniture's inscribed cost ends at the nearest reachable node, up to a metre away (0.25 burned 200 k iterations and refused)
       downsample_costmap: false
       downsampling_factor: 1
       allow_unknown: true
@@ -1334,7 +1334,8 @@ behavior_server:
     # 2.0 s of simulated motion means a Spin is judged over 65 deg of yaw — the full 0.407 m swing
     # circle — so every Spin beside the printer exited "Collision Ahead" without turning a wheel
     # (6 of 8 on 2026-09-08). One second judges 32 deg, which is a manoeuvre the cart can finish.
-    simulate_ahead_time: 1.0
+    # 2026-10-14: 0.0 = no check at all (Spin aborted twice by the dock); BackUp, DriveOnHeading too
+    simulate_ahead_time: 0.0
     max_rotational_vel: 0.6
     min_rotational_vel: 0.25
     rotational_acc_lim: 1.0  # ...1.5 overshoots its heading and the next tick corrects it

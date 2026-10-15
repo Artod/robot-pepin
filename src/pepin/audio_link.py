@@ -10,8 +10,10 @@ raw bytes. A status probe with ``nc`` therefore reads plain JSON, and the audio 
 header per 20 ms frame::
 
     board -> laptop  {"type":"hello","rate":16000,"format":"s16le","channels":1,
-                      "frame_samples":320,"play_rate":16000,...}          on connect
+                      "frame_samples":320,"play_rate":16000,"raw_channels":4,...}   on connect
                      {"type":"pcm","seq":N,"t":<board s>,"bytes":640} + 640 bytes    listeners
+                     {"type":"raw","seq":N,"t":<board s>,"ch":4,"bytes":2560} + 2560 bytes
+                                                                            listeners
                      {"type":"doa","t":<board s>,"deg":0..359,"speech":true}         listeners
                      {"type":"status",...}                                  to the asker
                      {"type":"error","error":"..."}                         to the asker
@@ -25,6 +27,12 @@ header per 20 ms frame::
 read), so a frame and a direction compare directly. ``seq`` counts frames since the server
 started; a gap in it is audio that never reached this client. An unreadable header line ends
 the connection: once framing is lost, the bytes after it cannot be trusted.
+
+A ``raw`` frame (since 2026-10-14, the 6-channel firmware with ``raw_mics`` on, config/audio.json)
+is the same 20 ms as the ``pcm`` frame of the same ``seq`` and ``t``, but the array's four
+microphones before any processing, interleaved s16le (``ch`` channels, 4): the laptop computes
+the voice's direction from them itself (:mod:`pepin.audio_doa`). ``raw_channels`` in the hello
+is 0 when the board sends none (the 2-channel firmware, or the switch off).
 """
 
 from __future__ import annotations
@@ -147,6 +155,34 @@ class AudioFrame:
 
 
 @dataclass(frozen=True)
+class RawFrame:
+    """20 ms of the array's microphones before any processing: ``channels`` interleaved s16le
+    signals (the four mics, in the firmware's channel order 3..6), the same ``seq`` and first
+    sample's board stamp as the processed frame beside it."""
+
+    seq: int
+    stamp_s: float
+    pcm: bytes  # interleaved: sample 0 of mic 0, sample 0 of mic 1, ...
+    channels: int = 4
+    rate: int = RATE
+
+    @property
+    def samples(self) -> int:
+        """Samples per channel in this frame."""
+        return len(self.pcm) // (SAMPLE_BYTES * self.channels)
+
+    @property
+    def duration_s(self) -> float:
+        """How long the frame lasts."""
+        return self.samples / self.rate
+
+    def encode(self) -> bytes:
+        """The frame on the wire."""
+        header = {"type": "raw", "seq": self.seq, "t": round(self.stamp_s, 6), "ch": self.channels}
+        return encode(header, self.pcm)
+
+
+@dataclass(frozen=True)
 class DoaReading:
     """Where the array hears the voice: degrees in the array's own frame (Seeed's diagram:
     0 toward the USB-C connector), whether it calls it speech, and when it was read."""
@@ -167,6 +203,14 @@ def parse_frame(header: dict[str, Any], payload: bytes, rate: int = RATE) -> Aud
     if len(payload) % SAMPLE_BYTES:
         raise ValueError(f"pcm payload of {len(payload)} bytes is not whole samples")
     return AudioFrame(int(header["seq"]), float(header["t"]), payload, rate)
+
+
+def parse_raw(header: dict[str, Any], payload: bytes, rate: int = RATE) -> RawFrame:
+    """A ``raw`` message back into a frame; raises ValueError when it is malformed."""
+    channels = int(header["ch"])
+    if channels < 1 or len(payload) % (SAMPLE_BYTES * channels):
+        raise ValueError(f"raw payload of {len(payload)} bytes is not whole {channels}-ch samples")
+    return RawFrame(int(header["seq"]), float(header["t"]), payload, channels, rate)
 
 
 def parse_doa(header: dict[str, Any]) -> DoaReading:
@@ -243,8 +287,11 @@ class AudioClient:
 
     :meth:`start` connects and waits for the board's hello; a reader thread then files frames
     into a bounded queue (the oldest go first when nobody reads, counted in ``overflowed``),
-    keeps the last few seconds of directions, and answers :meth:`status`. Sends are blocking
-    and serialised; the board never stops reading, so they only wait on the network.
+    the raw microphone frames into their own (:meth:`next_raw`; dropped and counted in
+    ``raw_overflowed`` while nobody reads them: a client that wants the processed voice alone
+    pays nothing for them), keeps the last few seconds of directions, and answers
+    :meth:`status`. Sends are blocking and serialised; the board never stops reading, so they
+    only wait on the network.
     """
 
     def __init__(
@@ -263,6 +310,7 @@ class AudioClient:
         self._send_lock = threading.Lock()
         self._cond = threading.Condition()
         self._frames: deque[AudioFrame] = deque(maxlen=max(1, int(buffer_s * RATE / FRAME_SAMPLES)))
+        self._raw: deque[RawFrame] = deque(maxlen=self._frames.maxlen)
         self._doa: deque[DoaReading] = deque()
         self._doa_history_s = doa_history_s
         self._doa_arrived = 0.0
@@ -274,6 +322,8 @@ class AudioClient:
         self.frames_received = 0
         self.lost_frames = 0  # seq gaps: frames the board sent that never arrived here
         self.overflowed = 0  # frames dropped here because nobody consumed them
+        self.raw_received = 0  # raw microphone frames (0 with the 2-channel firmware)
+        self.raw_overflowed = 0  # raw frames dropped here because nobody consumed them
         self.connected = False
 
     def start(self, *, listen: bool = True, timeout_s: float = 3.0) -> Self:
@@ -304,11 +354,23 @@ class AudioClient:
         """The sample rate the board plays at."""
         return int(self.hello.get("play_rate", RATE))
 
+    @property
+    def raw_channels(self) -> int:
+        """Microphones the board streams raw (0: none, the 2-channel firmware or the switch off)."""
+        return int(self.hello.get("raw_channels", 0))
+
     def next_frame(self, timeout_s: float = 1.0) -> AudioFrame | None:
         """The oldest unread frame, waiting up to ``timeout_s``; None on timeout or when closed."""
         with self._cond:
             self._cond.wait_for(lambda: bool(self._frames) or not self.connected, timeout_s)
             return self._frames.popleft() if self._frames else None
+
+    def next_raw(self, timeout_s: float = 1.0) -> RawFrame | None:
+        """The oldest unread raw microphone frame, waiting up to ``timeout_s``; None on timeout
+        or when closed."""
+        with self._cond:
+            self._cond.wait_for(lambda: bool(self._raw) or not self.connected, timeout_s)
+            return self._raw.popleft() if self._raw else None
 
     def frames(self) -> Iterator[AudioFrame]:
         """Every frame as it arrives, until the link closes."""
@@ -398,6 +460,14 @@ class AudioClient:
         try:
             if kind == "pcm":
                 self._take_frame(parse_frame(header, payload, self._rate))
+            elif kind == "raw":
+                raw = parse_raw(header, payload, self._rate)
+                with self._cond:
+                    if len(self._raw) == self._raw.maxlen:
+                        self.raw_overflowed += 1
+                    self._raw.append(raw)
+                    self.raw_received += 1
+                    self._cond.notify_all()
             elif kind == "doa":
                 reading = parse_doa(header)
                 with self._cond:

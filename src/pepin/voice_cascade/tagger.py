@@ -4,12 +4,16 @@ Praat (parselmouth) measures each utterance over its voiced span, the way
 scratch/prosody_1008 did on Artem's speech: intensity, the pitch's median and its 5-95 % range
 in semitones, the share of pauses of 150 ms or more; the speaking rate is syllables (vowel
 letters of Whisper's words) per second of that span. A running baseline of the last ``window``
-utterances turns each number into a z-score, and a z beyond ``z`` becomes a plain Russian word:
+utterances (one per recognised person, :mod:`pepin.people`; one for all while nobody is)
+turns each number into a z-score, and a z beyond ``z`` becomes a plain Russian word:
 ``[Артём: тише и медленнее обычного, интонация ровнее]``. The line describes and never
 interprets (prosody.md section 7): no feeling is named, and nothing is said until the baseline
 holds ``min_baseline`` utterances. A neural reading is added only when ``emotion_model`` is set:
 audeering's arousal joins the z-scored numbers ("энергичнее"), emotion2vec+'s top class is
-quoted as that model's label.
+quoted as that model's label. When the transcriber times its words (GigaAM), a drawn-out vowel
+is one more phrase, the word spelled as people write a stretch: ``растянуто: приииинтер``
+(a vowel ``stretch_ratio`` times this person's usual vowel in its place and ``stretch_min_s``
+long, :mod:`pepin.voice_cascade.timing`; the vowels join the same person's baseline).
 """
 
 from __future__ import annotations
@@ -21,8 +25,9 @@ from collections.abc import Callable
 from typing import Any, Protocol
 
 from pepin.audio_link import RATE
+from pepin.voice_cascade import timing
 from pepin.voice_cascade.config import ProsodyConfig
-from pepin.voice_cascade.stages import Prosody
+from pepin.voice_cascade.stages import Prosody, TimedWord
 from pepin.voice_cascade.text import syllables
 
 PITCH_FLOOR_HZ, PITCH_CEILING_HZ = 70.0, 400.0
@@ -39,6 +44,11 @@ WORDS = {
 }
 RANGE_WORDS = ("живее", "ровнее")
 PAUSED = 0.25  # pause ratio above which the line says so (absolute: the baseline is ~0)
+DEFAULT_KEY = ""  # the one baseline while nobody is recognised (prosody.speaker's)
+VOWEL_KINDS = ("vowel", "final")  # a word's vowels and a phrase's last, apart
+VOWELS_PER_UTTERANCE = 8  # the vowel baseline keeps window x this many of each kind
+MIN_VOWELS = 10  # a kind's median counts once it holds this many vowels
+STRETCHED = "растянуто"
 
 
 class EmotionModel(Protocol):
@@ -119,10 +129,20 @@ class ProsodyTagger:
         self.config = config
         self.emotion = emotion
         self.measurer = measurer
-        self.baseline: dict[str, deque[float]] = {
-            name: deque(maxlen=config.window) for name in (*WORDS, "range")
-        }
+        self.baselines: dict[str, dict[str, deque[float]]] = {}
         self.count = 0
+
+    def baseline(self, key: str = DEFAULT_KEY) -> dict[str, deque[float]]:
+        """One person's running baseline (``key``: whose; one for everyone when nobody is
+        recognised)."""
+        found = self.baselines.get(key)
+        if found is None:
+            window = self.config.window
+            found = {name: deque(maxlen=window) for name in (*WORDS, "range")}
+            for kind in VOWEL_KINDS:
+                found[kind] = deque(maxlen=window * VOWELS_PER_UTTERANCE)
+            self.baselines[key] = found
+        return found
 
     def measure(self, pcm: bytes) -> Prosody:
         """Praat's numbers, and the neural reading when there is a model."""
@@ -153,26 +173,42 @@ class ProsodyTagger:
             out["arousal"] = prosody.arousal
         return out
 
-    def z(self, name: str, value: float) -> float | None:
+    def z(self, name: str, value: float, key: str = DEFAULT_KEY) -> float | None:
         """``value`` in this person's spreads from their mean (None: no baseline yet)."""
-        seen = self.baseline[name]
+        seen = self.baseline(key)[name]
         if len(seen) < self.config.min_baseline:
             return None
         sd = max(statistics.pstdev(seen), MIN_SD[name])
         return (value - statistics.fmean(seen)) / sd
 
-    def line(self, prosody: Prosody, text: str) -> str:
-        """The tag line, then the utterance joins the baseline."""
+    def line(self, prosody: Prosody, text: str, keep: bool = True) -> str:
+        """The tag line, then the utterance joins the baseline (``keep`` False: it does not, a
+        line written before the utterance closed)."""
+        body = self.describe(prosody, text, keep=keep)
+        who = self.config.speaker or "голос"
+        return f"[{who}: {body}]" if body else ""
+
+    def describe(
+        self, prosody: Prosody, text: str, key: str = DEFAULT_KEY, keep: bool = True
+    ) -> str:
+        """How the utterance was said against ``key``'s own baseline, in words ("" while the
+        baseline is too short or nothing was measured); then it joins that baseline (``keep``
+        False: it does not)."""
         if prosody.loudness_db <= -100 or not text.strip():
             return ""
         values = self.features(prosody, text)
-        scores = {name: self.z(name, value) for name, value in values.items()}
-        for name, value in values.items():
-            if math.isfinite(value):
-                self.baseline[name].append(value)
-        self.count += 1
+        scores = {name: self.z(name, value, key) for name, value in values.items()}
+        stretched = self.stretched(prosody.words, key)
+        if keep:
+            baseline = self.baseline(key)
+            for name, value in values.items():
+                if math.isfinite(value):
+                    baseline[name].append(value)
+            for kind, seconds in timing.samples(prosody.words):
+                baseline[kind].append(seconds)
+            self.count += 1
         if all(score is None for score in scores.values()):
-            return ""
+            return f"{STRETCHED}: {stretched}" if stretched else ""
         limit = self.config.z
         said: list[str] = []
         for name, (up, down) in WORDS.items():
@@ -185,11 +221,23 @@ class ProsodyTagger:
             parts.append("интонация " + (RANGE_WORDS[0] if score > 0 else RANGE_WORDS[1]))
         if prosody.pause_ratio >= PAUSED and prosody.active_s >= 1.5:
             parts.append("с паузами")  # noqa: RUF001
+        if stretched:
+            parts.append(f"{STRETCHED}: {stretched}")
         if prosody.label:
             parts.append(f"модель эмоций: {prosody.label}")
-        body = ", ".join(parts) if parts else "голос как обычно"
-        who = self.config.speaker or "голос"
-        return f"[{who}: {body}]"
+        return ", ".join(parts) if parts else "голос как обычно"
+
+    def stretched(self, words: tuple[TimedWord, ...], key: str = DEFAULT_KEY) -> str:
+        """The utterance's words with a drawn-out vowel against ``key``'s usual vowels, spelled
+        as a stretch and joined (``приииинтер, дааа``); "" when none is, when the stretch is
+        off (``stretch_ratio`` null) or before the baseline holds ``MIN_VOWELS`` of a kind."""
+        ratio = self.config.stretch_ratio
+        if ratio is None or not words:
+            return ""
+        baseline = self.baseline(key)
+        usual = timing.medians({kind: baseline[kind] for kind in VOWEL_KINDS}, MIN_VOWELS)
+        found = timing.stretches(words, usual, ratio=ratio, min_s=self.config.stretch_min_s)
+        return ", ".join(s.spelled() for s in found)
 
 
 class AudeeringArousal:

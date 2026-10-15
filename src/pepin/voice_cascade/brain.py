@@ -15,13 +15,16 @@ import asyncio
 import logging
 import time
 from collections.abc import Callable, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from pepin.tools.registry import Registry, Result, render
 from pepin.tools.schemas import anthropic_tool_result, anthropic_tools
 from pepin.voice_cascade.config import BrainConfig, ModelPrice
 from pepin.voice_cascade.stages import (
+    CUT,
     FOLLOW_UP,
+    Ahead,
     Emit,
     FirstToken,
     Played,
@@ -30,6 +33,7 @@ from pepin.voice_cascade.stages import (
     ToolExecutor,
     ToolUse,
     Usage,
+    text_tokens,
 )
 from pepin.voice_cascade.text import SentenceSplitter
 
@@ -75,6 +79,36 @@ def usage_of(usage: Any, price: ModelPrice, stop: str | None, ms: int) -> Usage:
     return Usage(fresh, read, write, out, usd, stop, ms)
 
 
+def cut_usage(started: Any, chars: int, last_prompt: int, price: ModelPrice, ms: int) -> Usage:
+    """A call cut mid-stream, priced as an estimate: its prompt as ``message_start`` reported it
+    (or, cut before that, the last call's prompt read from the cache), its output as the larger
+    of what the stream reported and the text it streamed."""
+    if started is None:
+        return usage_of(
+            SimpleNamespace(cache_read_input_tokens=last_prompt, output_tokens=text_tokens(chars)),
+            price,
+            CUT,
+            ms,
+        )
+    out = max(int(getattr(started, "output_tokens", 0) or 0), text_tokens(chars))
+    return usage_of(
+        SimpleNamespace(
+            input_tokens=getattr(started, "input_tokens", 0),
+            cache_read_input_tokens=getattr(started, "cache_read_input_tokens", 0),
+            cache_creation_input_tokens=getattr(started, "cache_creation_input_tokens", 0),
+            output_tokens=out,
+        ),
+        price,
+        CUT,
+        ms,
+    )
+
+
+def prompt_tokens(usage: Usage) -> int:
+    """Every input token of a call (fresh, read and written)."""
+    return usage.input + usage.cache_read + usage.cache_write
+
+
 class ClaudeBrain:
     """:class:`pepin.voice_cascade.stages.Brain` on the Messages API (``anthropic`` SDK, async,
     streaming). The key comes from ``ANTHROPIC_API_KEY`` in the environment."""
@@ -106,6 +140,7 @@ class ClaudeBrain:
         self._turn: list[Message] = []
         self._said: list[Sentence] = []
         self._acted = False
+        self.last_prompt = 0  # the last call's input tokens (a call cut early is billed so)
 
     # -- the request -----------------------------------------------------------------------
 
@@ -162,7 +197,9 @@ class ClaudeBrain:
         t0 = self.clock()
         message = await self.client.messages.create(**kwargs)
         ms = round((self.clock() - t0) * 1000)
-        return usage_of(message.usage, self.price, getattr(message, "stop_reason", None), ms)
+        usage = usage_of(message.usage, self.price, getattr(message, "stop_reason", None), ms)
+        self.last_prompt = prompt_tokens(usage)
+        return usage
 
     async def turn(self, text: str, tools: ToolExecutor, emit: Emit) -> None:
         """One turn: model calls until one ends without tools (at most ``max_tool_rounds``
@@ -181,25 +218,39 @@ class ClaudeBrain:
                 self._said.append(said)
                 emit(said)
 
-            async with self.client.messages.stream(**kwargs) as stream:
-                async for event in stream:
-                    kind = getattr(event, "type", "")
-                    if kind == "text":
-                        if first:
-                            first = False
-                            emit(FirstToken())
-                        for sentence in splitter.feed(event.text):
-                            say(sentence)
-                    elif kind == "content_block_stop":
-                        rest = splitter.flush()  # a text block ends before a tool call
-                        if rest:
-                            say(rest)
-                message: Any = await stream.get_final_message()
+            started: Any = None  # the call's usage so far, as the stream reports it
+            chars = 0
+            try:
+                async with self.client.messages.stream(**kwargs) as stream:
+                    async for event in stream:
+                        kind = getattr(event, "type", "")
+                        if kind == "message_start":
+                            started = event.message.usage
+                        elif kind == "text":
+                            chars += len(event.text)
+                            if first:
+                                first = False
+                                emit(FirstToken())
+                            for sentence in splitter.feed(event.text):
+                                say(sentence)
+                            for early in splitter.ahead():
+                                emit(Ahead(early, round_index))
+                        elif kind == "content_block_stop":
+                            rest = splitter.flush()  # a text block ends before a tool call
+                            if rest:
+                                say(rest)
+                    message: Any = await stream.get_final_message()
+            except asyncio.CancelledError:
+                ms = round((self.clock() - t0) * 1000)
+                emit(cut_usage(started, chars, self.last_prompt, self.price, ms))
+                raise
             rest = splitter.flush()
             if rest:
                 say(rest)
             ms = round((self.clock() - t0) * 1000)
-            emit(usage_of(message.usage, self.price, message.stop_reason, ms))
+            usage = usage_of(message.usage, self.price, message.stop_reason, ms)
+            self.last_prompt = prompt_tokens(usage)
+            emit(usage)
             uses = [block for block in message.content if block.type == "tool_use"]
             if message.stop_reason != "tool_use" or not uses:
                 # a call cut by max_tokens leaves no tool call to answer; an empty reply (speech

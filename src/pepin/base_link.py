@@ -69,6 +69,7 @@ import json
 import socket
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
@@ -141,11 +142,13 @@ class BaseState:
     stamp_s: float  # board clock (time.monotonic there): the middle of the encoder read it carries
     age_s: float  # laptop clock: seconds since this message arrived
     neck_ticks: tuple[int, int] | None = None  # (pan, tilt) of the same read; None: not answered
+    arm_phase: str | None = None  # the arm's phase (pepin.arm_driver) in this read; None: not read
 
 
 def decode_state(message: dict[str, Any], received_at: float) -> BaseState:
     """A ``state`` message from the board into a :class:`BaseState` (age 0 at ``received_at``)."""
     pan, tilt = message.get("pan_ticks"), message.get("tilt_ticks")
+    arm = message.get("arm")
     return BaseState(
         pose=Pose2D(float(message["x"]), float(message["y"]), float(message["theta"])),
         d_left_m=float(message["dl"]),
@@ -160,7 +163,11 @@ def decode_state(message: dict[str, Any], received_at: float) -> BaseState:
         stamp_s=float(message["t"]),
         age_s=0.0,
         neck_ticks=(int(pan), int(tilt)) if pan is not None and tilt is not None else None,
+        arm_phase=str(arm.get("phase", "off")) if isinstance(arm, dict) else None,
     )
+
+
+StateListener = Callable[[BaseState, float], None]
 
 
 class BaseClient(JsonLinesClient):
@@ -178,6 +185,10 @@ class BaseClient(JsonLinesClient):
         self._pong_ready = threading.Event()
         self._neck: NeckReading | None = None
         self._neck_error: tuple[str, float] | None = None  # text, laptop clock of its arrival
+        self._arm_phase: str | None = None  # the newest phase of a line that read the arm
+        # Hears every state line with the laptop time it arrived, on the reader thread (it must
+        # not block): a watcher that may not miss a line, as the newest state alone can.
+        self.on_state: StateListener | None = None
 
     def state(self, now: float | None = None) -> BaseState | None:
         """Newest state with ``age_s`` measured at ``now``; None before the first message."""
@@ -266,7 +277,13 @@ class BaseClient(JsonLinesClient):
             now = time.monotonic()
             state = decode_state(message, now)
             with self._lock:
+                if state.arm_phase is None:  # the arm rides some reads only: its last word holds
+                    state = replace(state, arm_phase=self._arm_phase)
+                self._arm_phase = state.arm_phase
                 self._state, self._received_at = state, now
+            listener = self.on_state
+            if listener is not None:
+                listener(state, now)
         elif kind == "pong":
             self._pong = message
             self._pong_ready.set()

@@ -13,6 +13,7 @@ import copy
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
+from itertools import pairwise
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,13 @@ VOICE_ENGINES = ("qwen3", "gemini", "say")  # gemini: a cloud voice with a local
 EMOTION_MODELS = ("audeering", "emotion2vec")
 # end-of-turn models: name -> (Hugging Face repo, file); pipecat-ai/smart-turn, BSD-2-Clause
 TURN_MODELS = {"smart-turn-v3.2": ("pipecat-ai/smart-turn-v3", "smart-turn-v3.2-cpu.onnx")}
+# ears.turn_model: a model above, or the words and the sound together (voice_cascade.turn_text)
+TWO_GATES = "two-gates"
+TURN_METHODS = (*TURN_MODELS, TWO_GATES)
+TURN_ACOUSTIC = ("pause", *TURN_MODELS)  # two-gates' sound: the pause alone or a model's p
+# end-of-turn text models: name -> Hugging Face repo (model_quant.onnx, tokenizer.json):
+# videosdk-live's Namo Turn Detector v1, Apache-2.0
+TEXT_MODELS = {"namo-ru": "videosdk-live/Namo-Turn-Detector-v1-Russian"}
 BARGE_IN_DETECTORS = ("level", "vad", "words")  # pepin.voice_cascade.barge_in
 WORDS_GATES = ("vad", "level")
 # speech to text: mlx (Whisper on the GPU), whispercpp (the encoder on the Neural Engine) and
@@ -76,10 +84,11 @@ class SttConfig:
     quantization: str | None = None  # cpu: onnx-asr's int8 files (None: the full model)
     dtype: str | None = None  # gpu: the weights cast to this MLX dtype once loaded (None: kept)
     delay_ms: int | None = None  # voxtral: its transcription delay (None: the model's 480 ms)
+    timings: bool = False  # gigaam: words with their times and vowels (the stretch tag needs it)
 
 
 DEFAULT_STT = {
-    "gigaam": SttConfig("gigaam-v3-e2e-rnnt", "cpu"),
+    "gigaam": SttConfig("gigaam-v3-e2e-rnnt", "cpu", timings=True),
     "parakeet": SttConfig("mlx-community/parakeet-tdt-0.6b-v3", "gpu", dtype="bfloat16"),
     "canary": SttConfig("nemo-canary-1b-v2", "cpu", quantization="int8"),
     "voxtral": SttConfig("mlx-community/Voxtral-Mini-4B-Realtime-2602-4bit", "gpu"),
@@ -111,6 +120,10 @@ class BrainConfig:
     keep_warm_s: float = 270.0  # 0: never refreshed while idle
     max_tool_rounds: int = 4
     timeout_s: float = 20.0
+    # the brain asked at the early read of a pause, before the close (the voice waits for it)
+    speculative: bool = False
+    speculative_min_words: int = 2  # fewer words never ask early ("да" alone)
+    first_sentence_words: int = 0  # the persona's first-sentence limit (0: the persona's own)
 
 
 @dataclass(frozen=True)
@@ -145,13 +158,115 @@ class VoiceConfig:
 
 @dataclass(frozen=True)
 class ProsodyConfig:
-    """The tag line: who is assumed to speak, the baseline, the z-score that is worth a word."""
+    """The tag line: who is assumed to speak, the baseline, the z-score that is worth a word,
+    and how much longer than usual a vowel must be to be called drawn out (None: never)."""
 
     speaker: str = "Артём"
     min_baseline: int = 5
     window: int = 200
     z: float = 2.0
     emotion_model: str | None = None
+    stretch_ratio: float | None = 2.0
+    stretch_min_s: float = 0.25
+
+
+Phrases = Mapping[str, tuple[str, ...]]  # a language's code ("ru", "en") -> its lines
+# the fillers' contexts (pepin.voice_cascade.fillers), and where their language comes from: the
+# script of the person's last words, or conversation.language alone
+FILLER_CONTEXTS = ("tool", "thinking", "again", "backchannel")
+LANGUAGE_FROM = ("utterance", "config")
+DEFAULT_NEUTRAL = ("Хм…", "Ммм…", "Э-э…", "Хм-м…")
+# thinking: short interjections only (a phrase may still be playing when the reply is ready);
+# the whole phrases are the tools' and again's
+DEFAULT_THINKING: Phrases = {
+    "ru": ("Хм.", "Эм.", "М-м."),  # noqa: RUF001
+    "en": ("Hmm.", "Um.", "Uh."),
+}
+DEFAULT_COMMON: Phrases = {
+    "ru": ("Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент.", "Секундочку."),
+    "en": ("One sec.", "Just a moment.", "Hang on.", "Give me a sec.", "Let me see."),
+}
+DEFAULT_AGAIN: Phrases = {
+    "ru": ("Ещё секундочку.", "Уже почти.", "Почти готово.", "Сейчас-сейчас."),
+    "en": ("Almost there.", "Just a sec more.", "Bear with me."),
+}
+DEFAULT_BACKCHANNEL: Phrases = {
+    "ru": ("угу", "ага", "мм"),  # noqa: RUF001
+    "en": ("mm-hmm", "uh-huh", "yeah"),
+}
+DEFAULT_FILLERS_BY_TOOL: Mapping[str, Phrases] = {
+    "see": {
+        "ru": ("Сейчас гляну.", "Так, смотрю.", "Дай гляну."),
+        "en": ("Let me look.", "Looking.", "Let me see that."),
+    },
+    "look": {
+        "ru": ("Сейчас гляну.", "Так, смотрю.", "Дай посмотрю."),
+        "en": ("Let me look.", "Looking.", "Let me check."),
+    },
+    "look_around": {
+        "ru": ("Сейчас осмотрюсь.", "Так, оглядываюсь.", "Дай осмотрюсь."),
+        "en": ("Let me look around.", "Looking around."),
+    },
+    "find": {
+        "ru": ("Сейчас поищу.", "Так, ищу.", "Дай поищу."),
+        "en": ("Let me find it.", "Looking for it.", "Searching."),
+    },
+    "recall": {
+        "ru": ("Дай вспомнить.", "Сейчас вспомню.", "Так, вспоминаю."),
+        "en": ("Let me remember.", "Let me think back."),
+    },
+    "remember_person": {
+        "ru": ("Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."),
+        "en": ("Let me remember you.", "Okay, remembering you."),
+    },
+    "forget_person": {
+        "ru": ("Хорошо, забываю.", "Ладно, стираю."),
+        "en": ("Okay, forgetting.", "Alright, I'll forget."),
+    },
+    "gesture": {"ru": ("Смотри!", "Вот так!", "Гляди!"), "en": ("Watch!", "Like this!", "Look!")},
+}
+
+
+@dataclass(frozen=True)
+class FillerBook:
+    """The fillers' phrase book (:mod:`pepin.voice_cascade.fillers`): per context, each
+    ``{language: lines}`` (:attr:`common` is the file's ``any``: a slow tool's lines when it has
+    none of its own), :attr:`neutral` hums that need no language, and how much a thinking filler
+    is wanted by the question's length (:func:`pepin.voice_cascade.fillers.thinking_chance`)."""
+
+    common: Phrases = field(default_factory=lambda: dict(DEFAULT_COMMON))
+    again: Phrases = field(default_factory=lambda: dict(DEFAULT_AGAIN))
+    thinking: Phrases = field(default_factory=lambda: dict(DEFAULT_THINKING))
+    backchannel: Phrases = field(default_factory=lambda: dict(DEFAULT_BACKCHANNEL))
+    by_tool: Mapping[str, Phrases] = field(
+        default_factory=lambda: {tool: dict(own) for tool, own in DEFAULT_FILLERS_BY_TOOL.items()}
+    )
+    neutral: tuple[str, ...] = DEFAULT_NEUTRAL
+    thinking_min_words: int = 4  # a question of fewer words gets no thinking filler
+    # (words, probability) points, the words rising: interpolated, held beyond the ends
+    thinking_chance: tuple[tuple[float, float], ...] = ((4.0, 0.3), (10.0, 0.7), (20.0, 1.0))
+
+    def for_tool(self, tool: str, language: str) -> tuple[str, ...]:
+        """The lines a filler for ``tool`` is chosen from in ``language``: its own, else the
+        common ones (none in a language the book lacks)."""
+        return self.by_tool.get(tool, {}).get(language) or self.common.get(language, ())
+
+    def languages(self) -> tuple[str, ...]:
+        """Every language the book has a line in, in the file's order."""
+        books = (self.thinking, self.common, *self.by_tool.values(), self.again, self.backchannel)
+        return tuple(dict.fromkeys(language for book in books for language in book))
+
+    def lines(self, language: str | None = None, *, backchannel: bool = True) -> tuple[str, ...]:
+        """Every line once (the clips to make): the neutral hums, then each language's thinking,
+        common, tools', again and backchannel lines (``language``: that one's alone;
+        ``backchannel`` False: without those)."""
+        books = [self.thinking, self.common, *self.by_tool.values(), self.again]
+        if backchannel:
+            books.append(self.backchannel)
+        every = list(self.neutral)
+        for lang in self.languages() if language is None else (language,):
+            every += [line for book in books for line in book.get(lang, ())]
+        return tuple(dict.fromkeys(every))
 
 
 @dataclass(frozen=True)
@@ -167,10 +282,17 @@ class CascadeConfig:
     lead_s: float = 1.0  # audio kept before the opening: the model says speech ~0.4 s into a word
     floor_min_dbfs: float = -85.0
     continuation_s: float = 0.8
+    heard_audio: bool = True  # outside a conversation each utterance's audio beside its row
     turn_model: str | None = None
     turn_min_silence_s: float = 0.2
     turn_window_s: float = 8.0
     turn_threshold: float = 0.85
+    turn_acoustic: str = "pause"  # two-gates: the sound's gate
+    turn_text_model: str | None = None  # two-gates: None the rules, else a TEXT_MODELS name
+    turn_early_close_s: float = 0.25  # two-gates: the words and the sound agree
+    turn_incomplete_s: float = 0.8  # two-gates: the words unfinished
+    turn_complete_p: float = 0.7  # two-gates' text model: p this high makes a lone word whole
+    turn_incomplete_p: float = 0.02  # ... and p this low vetoes (the words wait)
     # transcriber
     transcriber_engine: str = "mlx"
     whisper_repo: str = "mlx-community/whisper-large-v3-turbo"  # the mlx engine's model
@@ -211,15 +333,32 @@ class CascadeConfig:
     backchannel: bool = False
     backchannel_delay_s: float = 0.3
     backchannel_min_speech_s: float = 0.8
-    backchannel_lines: tuple[str, ...] = ("угу", "мм")  # noqa: RUF001
     prosody_tags: bool = True
     prosody: ProsodyConfig = field(default_factory=ProsodyConfig)
     # conversation
     idle_close_s: float = 20.0
-    max_session_s: float = 900.0
+    idle_parting: bool = True  # the brain says one parting line before the idle close
     report_drive_start: bool = True
     error_line: str = "Извини, у меня сбой связи."  # noqa: RUF001
-    tool_filler: str = "Секунду."
+    conversation_language: str = "ru"  # at a conversation's start (the fillers' language)
+    fillers: FillerBook = field(default_factory=FillerBook)
+    filler_language_from: str = "utterance"
+    filler_thinking_s: float = 1.2  # the brain's first token this late after the close: a hum
+    filler_again_s: float = 4.0  # the second filler after this long without a word (0: none)
+    # per context: the chance a filler's moment passes in silence, the least time between two
+    filler_silent_p: Mapping[str, float] = field(
+        default_factory=lambda: {"thinking": 0.25, "backchannel": 0.25}
+    )
+    filler_cooldown_s: Mapping[str, float] = field(default_factory=lambda: {"backchannel": 2.0})
+    # per context: the longest clip said (seconds); a context not named says any length
+    filler_max_s: Mapping[str, float] = field(default_factory=lambda: {"thinking": 0.6})
+    # the reply's first audio fades a thinking filler still playing out over this (0: it waits)
+    filler_fade_ms: float = 60.0
+    # the body's [scene] line before each brain input, only what changed (voice_cascade.scene)
+    scene_status: bool = True
+    scene_heading_sector_deg: float = 15.0
+    scene_hysteresis_deg: float = 5.0
+    scene_cell_m: float = 0.25
     # money
     daily_budget_cad: float = 2.0
     max_sessions_per_hour: int = 60
@@ -243,6 +382,7 @@ class CascadeConfig:
         conv = data.get("conversation", {})
         money = data.get("money", {})
         d = cls()
+        language = str(conv.get("language", d.conversation_language))
         config = cls(
             wake=str(ears.get("wake", d.wake)),
             silence_s=float(ears.get("silence_s", d.silence_s)),
@@ -252,10 +392,17 @@ class CascadeConfig:
             lead_s=float(ears.get("lead_s", d.lead_s)),
             floor_min_dbfs=float(ears.get("floor_min_dbfs", d.floor_min_dbfs)),
             continuation_s=float(ears.get("continuation_s", d.continuation_s)),
+            heard_audio=bool(ears.get("heard_audio", d.heard_audio)),
             turn_model=ears.get("turn_model") or None,
             turn_min_silence_s=float(turn.get("min_silence_s", d.turn_min_silence_s)),
             turn_window_s=float(turn.get("window_s", d.turn_window_s)),
             turn_threshold=float(turn.get("threshold", d.turn_threshold)),
+            turn_acoustic=str(turn.get("acoustic", d.turn_acoustic)),
+            turn_text_model=turn.get("text_model") or None,
+            turn_early_close_s=float(turn.get("early_close_s", d.turn_early_close_s)),
+            turn_incomplete_s=float(turn.get("incomplete_s", d.turn_incomplete_s)),
+            turn_complete_p=float(turn.get("complete_p", d.turn_complete_p)),
+            turn_incomplete_p=float(turn.get("incomplete_p", d.turn_incomplete_p)),
             transcriber_engine=str(tr.get("engine", d.transcriber_engine)),
             whisper_repo=str(mlx.get("model", d.whisper_repo)),
             whispercpp_model=str(cpp.get("model", d.whispercpp_model)),
@@ -292,19 +439,38 @@ class CascadeConfig:
             barge_in_words_every_s=float(barge.get("words_every_s", d.barge_in_words_every_s)),
             backchannel_delay_s=float(back.get("delay_s", d.backchannel_delay_s)),
             backchannel_min_speech_s=float(back.get("min_speech_s", d.backchannel_min_speech_s)),
-            backchannel_lines=tuple(str(x) for x in back.get("lines", d.backchannel_lines)),
             prosody=ProsodyConfig(
                 speaker=str(pros.get("speaker", d.prosody.speaker)),
                 min_baseline=int(pros.get("min_baseline", d.prosody.min_baseline)),
                 window=int(pros.get("window", d.prosody.window)),
                 z=float(pros.get("z", d.prosody.z)),
                 emotion_model=pros.get("emotion_model") or None,
+                stretch_ratio=(
+                    None
+                    if (ratio := pros.get("stretch_ratio", d.prosody.stretch_ratio)) is None
+                    else float(ratio)
+                ),
+                stretch_min_s=float(pros.get("stretch_min_s", d.prosody.stretch_min_s)),
             ),
             idle_close_s=float(conv.get("idle_close_s", d.idle_close_s)),
-            max_session_s=float(conv.get("max_session_s", d.max_session_s)),
+            idle_parting=bool(conv.get("idle_parting", d.idle_parting)),
             report_drive_start=bool(conv.get("report_drive_start", d.report_drive_start)),
             error_line=str(conv.get("error_line", d.error_line)),
-            tool_filler=str(conv.get("tool_filler", d.tool_filler)),
+            conversation_language=language,
+            fillers=filler_book(conv, back, d.fillers, language),
+            filler_language_from=str(conv.get("filler_language_from", d.filler_language_from)),
+            filler_thinking_s=float(conv.get("filler_thinking_s", d.filler_thinking_s)),
+            filler_again_s=float(conv.get("filler_again_s", d.filler_again_s)),
+            filler_silent_p=by_context(conv.get("filler_silent_p"), d.filler_silent_p),
+            filler_cooldown_s=by_context(conv.get("filler_cooldown_s"), d.filler_cooldown_s),
+            filler_max_s=by_context(conv.get("filler_max_s"), d.filler_max_s),
+            filler_fade_ms=float(conv.get("filler_fade_ms", d.filler_fade_ms)),
+            scene_status=bool(conv.get("scene_status", d.scene_status)),
+            scene_heading_sector_deg=float(
+                conv.get("scene_heading_sector_deg", d.scene_heading_sector_deg)
+            ),
+            scene_hysteresis_deg=float(conv.get("scene_hysteresis_deg", d.scene_hysteresis_deg)),
+            scene_cell_m=float(conv.get("scene_cell_m", d.scene_cell_m)),
             daily_budget_cad=float(money.get("daily_budget_cad", d.daily_budget_cad)),
             max_sessions_per_hour=int(money.get("max_sessions_per_hour", d.max_sessions_per_hour)),
             usd_to_cad=float(money.get("usd_to_cad", d.usd_to_cad)),
@@ -343,17 +509,23 @@ class CascadeConfig:
             raise ValueError(f"brain.effort: one of {', '.join(EFFORTS)} or null")
         if b.max_tokens < 16 or b.max_tool_rounds < 0:
             raise ValueError("brain.max_tokens >= 16 and brain.max_tool_rounds >= 0")
+        if b.speculative_min_words < 1 or b.first_sentence_words < 0:
+            raise ValueError("brain.speculative_min_words >= 1 and brain.first_sentence_words >= 0")
         self.check_voice(self.voice)
         if self.prosody.emotion_model not in (None, *EMOTION_MODELS):
             raise ValueError(f"prosody.emotion_model: one of {', '.join(EMOTION_MODELS)} or null")
-        if self.turn_model is not None and self.turn_model not in TURN_MODELS:
-            raise ValueError(f"ears.turn_model: one of {', '.join(TURN_MODELS)} or null")
+        ratio = self.prosody.stretch_ratio
+        if (ratio is not None and ratio <= 1.0) or self.prosody.stretch_min_s < 0:
+            raise ValueError("prosody.stretch_ratio above 1 or null; prosody.stretch_min_s >= 0")
+        if self.turn_model is not None and self.turn_model not in TURN_METHODS:
+            raise ValueError(f"ears.turn_model: one of {', '.join(TURN_METHODS)} or null")
         if not 0 < self.turn_min_silence_s < self.silence_s:
             raise ValueError("turn.min_silence_s: above 0 and under ears.silence_s")
         if not 1.0 <= self.turn_window_s <= 8.0 or not 0.0 < self.turn_threshold <= 1.0:
             raise ValueError(
                 "turn.window_s in 1..8 s (the model's input) and turn.threshold in 0..1"
             )
+        self.check_two_gates()
         if not 0.1 <= self.silence_s <= 3.0 or self.barge_in_hold_s <= 0:
             raise ValueError("ears.silence_s in 0.1..3 s and barge_in.hold_s > 0")
         if self.barge_in_detector not in BARGE_IN_DETECTORS:
@@ -387,10 +559,60 @@ class CascadeConfig:
                     f"transcriber.{name}: quantization int8 or null, dtype"
                     f" {', '.join(map(str, STT_DTYPES[1:]))} or null, delay_ms > 0"
                 )
-        if self.idle_close_s <= 0 or self.daily_budget_cad <= 0:
-            raise ValueError("conversation.idle_close_s > 0 and money.daily_budget_cad > 0")
+        if self.idle_close_s <= 0 or self.daily_budget_cad <= 0 or self.filler_again_s < 0:
+            raise ValueError(
+                "conversation.idle_close_s > 0, conversation.filler_again_s >= 0 and"
+                " money.daily_budget_cad > 0"
+            )
+        self.check_fillers()
+        self.check_scene()
         if b.model not in self.prices:
             raise ValueError(f"no price for {b.model}: add it to money.prices_usd_per_mtok")
+
+    def check_scene(self) -> None:
+        """``ValueError`` when the scene's buckets cannot work."""
+        width, slack = self.scene_heading_sector_deg, self.scene_hysteresis_deg
+        whole = 0 < width <= 90 and abs(360 / width - round(360 / width)) < 1e-9
+        if not whole or not 0 <= slack < width or self.scene_cell_m <= 0:
+            raise ValueError(
+                "conversation.scene_heading_sector_deg: 360 divided by a whole number, up to 90;"
+                " conversation.scene_hysteresis_deg from 0 to under it; scene_cell_m > 0"
+            )
+
+    def check_fillers(self) -> None:
+        """``ValueError`` when the fillers' knobs cannot work."""
+        if self.filler_language_from not in LANGUAGE_FROM or not self.conversation_language:
+            raise ValueError(
+                f"conversation.filler_language_from: one of {', '.join(LANGUAGE_FROM)};"
+                " conversation.language: a language's code (ru)"
+            )
+        if self.filler_thinking_s < 0:
+            raise ValueError("conversation.filler_thinking_s >= 0 (0: no thinking filler)")
+        if not 0 <= self.filler_fade_ms <= 500:
+            raise ValueError(
+                "conversation.filler_fade_ms from 0 (the reply waits for the filler) to 500"
+            )
+        book = self.fillers
+        points = book.thinking_chance
+        rising = all(w0 < w1 for (w0, _), (w1, _) in pairwise(points))
+        if book.thinking_min_words < 0 or not points or not rising:
+            raise ValueError(
+                "conversation.fillers: thinking_min_words >= 0, thinking_chance a list of"
+                " [words, probability] points with the words rising"
+            )
+        if any(not 0.0 <= p <= 1.0 for _, p in points):
+            raise ValueError("conversation.fillers.thinking_chance: probabilities from 0 to 1")
+        for key, table, top in (
+            ("filler_silent_p", self.filler_silent_p, 1.0),
+            ("filler_cooldown_s", self.filler_cooldown_s, None),
+            ("filler_max_s", self.filler_max_s, None),
+        ):
+            for context, value in table.items():
+                if context not in FILLER_CONTEXTS or value < 0 or (top is not None and value > top):
+                    raise ValueError(
+                        f"conversation.{key}: {{context: value}}, the contexts"
+                        f" {', '.join(FILLER_CONTEXTS)}, values from 0{' to 1' if top else ''}"
+                    )
 
     def check_voice(self, v: VoiceConfig) -> None:
         """``ValueError`` when the voice (or its fallback) cannot work."""
@@ -413,6 +635,30 @@ class CascadeConfig:
         config = replace(self, **{k: v for k, v in changes.items() if v is not None})
         config.check()
         return config
+
+    def check_two_gates(self) -> None:
+        """``ValueError`` when the two-gates knobs cannot work (the names and ranges whatever
+        the method; their order against the other blocks with ``ears.turn_model`` two-gates)."""
+        if self.turn_acoustic not in TURN_ACOUSTIC:
+            raise ValueError(f"turn.acoustic: one of {', '.join(TURN_ACOUSTIC)}")
+        if self.turn_text_model is not None and self.turn_text_model not in TEXT_MODELS:
+            raise ValueError(f"turn.text_model: one of {', '.join(TEXT_MODELS)} or null")
+        if not 0.0 <= self.turn_incomplete_p < self.turn_complete_p <= 1.0:
+            raise ValueError("turn.incomplete_p under turn.complete_p, both in 0..1")
+        if self.turn_model != TWO_GATES:
+            return
+        if not 0.1 <= self.turn_early_close_s <= self.silence_s <= self.turn_incomplete_s <= 3.0:
+            raise ValueError(
+                "turn.early_close_s from 0.1 s up to ears.silence_s, turn.incomplete_s from"
+                " ears.silence_s up to 3 s"
+            )
+        if not 0 < self.early_s < self.turn_early_close_s:
+            raise ValueError(
+                "ears.turn_model two-gates reads the early transcript: transcriber.early_s above"
+                " 0 and under turn.early_close_s"
+            )
+        if self.turn_acoustic != "pause" and self.turn_min_silence_s >= self.turn_early_close_s:
+            raise ValueError("turn.min_silence_s under turn.early_close_s: the model asked first")
 
     @property
     def price(self) -> ModelPrice:
@@ -438,7 +684,73 @@ def stt_config(section: Mapping[str, Any], base: SttConfig) -> SttConfig:
         quantization=None if quantization is None else str(quantization),
         dtype=None if dtype is None else str(dtype),
         delay_ms=None if delay is None else int(delay),
+        timings=bool(section.get("timings", base.timings)),
     )
+
+
+def filler_book(
+    conversation: Mapping[str, Any],
+    backchannel: Mapping[str, Any],
+    default: FillerBook,
+    language: str,
+) -> FillerBook:
+    """The ``fillers`` block of the conversation section: ``any``, ``again``, ``thinking``,
+    ``backchannel`` and each of ``by_tool`` as :func:`phrases`, ``neutral`` a list; a context
+    left out has no lines. The old forms still read: the ``tool_filler`` string (when
+    ``fillers`` is absent or null), or a string or a list as ``fillers``, is ``language``'s
+    common lines alone; "" or {}: no fillers. ``backchannel.lines`` (the old place, a list:
+    ``language``'s) wins when given; without it or a ``backchannel`` of the block, the
+    default's."""
+    block = conversation.get("fillers")
+    if block is None:
+        block = conversation.get("tool_filler")
+    if block is None:
+        book = default
+    elif isinstance(block, str | list):
+        book = FillerBook(phrases(block, language), {}, {}, default.backchannel, {}, ())
+    else:
+        given = block.get("backchannel")
+        book = FillerBook(
+            common=phrases(block.get("any"), language),
+            again=phrases(block.get("again"), language),
+            thinking=phrases(block.get("thinking"), language),
+            backchannel=default.backchannel if given is None else phrases(given, language),
+            by_tool={
+                str(tool): phrases(own, language) for tool, own in block.get("by_tool", {}).items()
+            },
+            neutral=tuple(str(x) for x in block.get("neutral", ()) if x),
+            thinking_min_words=int(block.get("thinking_min_words", default.thinking_min_words)),
+            thinking_chance=tuple(
+                (float(words), float(p))
+                for words, p in block.get("thinking_chance", default.thinking_chance)
+            ),
+        )
+    old = backchannel.get("lines")
+    return book if old is None else replace(book, backchannel=phrases(old, language))
+
+
+def phrases(value: Any, language: str) -> dict[str, tuple[str, ...]]:
+    """``{language: lines}`` as the file writes it, or a list (one string) as ``language``'s
+    lines; empty lines dropped, and a language left with none; null: none."""
+    if value is None:
+        return {}
+    if isinstance(value, Mapping):
+        return {
+            str(lang): own
+            for lang, lines in value.items()
+            if (own := phrases(lines, str(lang)).get(str(lang)))
+        }
+    lines = tuple(str(x) for x in ([value] if isinstance(value, str) else value) if x)
+    return {language: lines} if lines else {}
+
+
+def by_context(value: Any, default: Mapping[str, float]) -> dict[str, float]:
+    """A ``{context: number}`` knob of the fillers over its defaults (null: the defaults)."""
+    if value is None:
+        return dict(default)
+    if not isinstance(value, Mapping):
+        raise ValueError(f"a fillers' knob: {{context: number}}, not {value!r}")
+    return {**default, **{str(context): float(x) for context, x in value.items()}}
 
 
 def brain_config(section: Mapping[str, Any]) -> BrainConfig:
@@ -473,6 +785,9 @@ def brain_config(section: Mapping[str, Any]) -> BrainConfig:
         keep_warm_s=float(merged.get("keep_warm_s", d.keep_warm_s)),
         max_tool_rounds=int(merged.get("max_tool_rounds", d.max_tool_rounds)),
         timeout_s=float(merged.get("timeout_s", d.timeout_s)),
+        speculative=bool(merged.get("speculative", d.speculative)),
+        speculative_min_words=int(merged.get("speculative_min_words", d.speculative_min_words)),
+        first_sentence_words=int(merged.get("first_sentence_words", d.first_sentence_words)),
     )
 
 

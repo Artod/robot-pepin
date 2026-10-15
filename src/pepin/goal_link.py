@@ -50,6 +50,9 @@ CTRL_C_CANCEL_S = 5.0
 # a minute (goal_server._find_myself: 60 s for the search, 15 s for the fit).
 GOAL_SILENCE_S = 120.0
 FEEDBACK_EVERY_S = 2.0  # goto_ros.py's own pace for the progress line
+# A plan (the goal server's ``plan``: one ComputePathToPose, never motion) is waited for this long
+# by the server; ros/tools/planner_check.py measured plans in well under a second.
+PLAN_WAIT_S = 10.0
 NAV2_SUCCEEDED, NAV2_CANCELED = 4, 5
 
 EXIT_OK, EXIT_FAILED, EXIT_UNREACHABLE, EXIT_UNSUPPORTED, EXIT_UNCONFIRMED = 0, 1, 3, 4, 5

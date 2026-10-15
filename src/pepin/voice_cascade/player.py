@@ -1,12 +1,25 @@
 """The speaker side: the voice's PCM paced to the speaker (:class:`pepin.voice_live.audio.Pacer`),
 with a clock of what has actually played.
 
-Every reply sentence is marked by where its audio sits in the stream fed to the pacer, and the
-speaker is wrapped (:class:`PlayoutClock`) so the time each block plays is known. A barge-in
-asks :meth:`Player.flush` how far the stream had played: that, against the marks, is which
-sentences the person heard (:meth:`Player.heard`). The same clock times the speaker's start and
-end of each turn, and keeps each block's level (:meth:`PlayoutClock.level_between`): the
-reference a barge-in detector predicts the robot's own echo from.
+Every part of a reply (a sentence, or a piece of one a style marker cut; one voice call each)
+is marked by where its audio sits in the stream fed to the pacer, and the speaker is wrapped
+(:class:`PlayoutClock`) so the time each block plays is known. A barge-in asks
+:meth:`Player.flush` how far the stream had played: that, against the marks, is which parts
+the person heard (:meth:`Player.heard`, by the gesture engine's word clock when it is lent:
+:attr:`Player.words`). The same marks place the body's cues on the reply's audio
+(:meth:`Player.mark`, :meth:`Player.played`), and what is queued ahead of the speaker tells the
+word clock how long a reply's first word waits (:meth:`Player.queued_audio`). The same clock
+times the speaker's start and end of each turn, and keeps each block's level
+(:meth:`PlayoutClock.level_between`): the reference a barge-in detector predicts the robot's
+own echo from.
+
+A FILLER THE REPLY TAKES OVER. Filler and reply share the one stream, so a reply ready while a
+thinking filler still plays used to queue behind it (2026-10-12: 9 of 19 fillers, 145-1095 ms,
+median 456). A backchannel fed with a fade (:meth:`Player.feed`, ``fade_s``) goes to the
+speaker only that far ahead instead of the pacer's lead, since the board plays whatever it was
+sent; the reply's first chunk then turns the part of it not sent yet into a linear ramp to
+silence over ``fade_s``, on the stream's own samples, and follows it at once. The reply waits
+for what was already sent and the ramp, never for the rest of the filler.
 """
 
 from __future__ import annotations
@@ -15,9 +28,11 @@ import threading
 import time
 from collections import deque
 from collections.abc import Callable
-from typing import Literal
+from dataclasses import dataclass
+from typing import Literal, Protocol
 
 from pepin.audio_link import SAMPLE_BYTES, Speaker
+from pepin.expression.forecast import CHAR_S, QueuedAudio
 from pepin.voice_cascade.stages import Played
 from pepin.voice_live.wake import rms_db
 
@@ -25,6 +40,31 @@ Kind = Literal["reply", "backchannel"]
 Playback = Literal["silent", "reply", "backchannel"]
 HISTORY_BLOCKS = 3000  # ~2 min of 40 ms blocks: enough to time any turn's end
 NOTHING_DB = -120.0  # the level of no block
+
+
+@dataclass(frozen=True)
+class FillerFade:
+    """A reply's first chunk met a filler still playing: the filler's turn, how long the ramp
+    to silence is (0: too little of it was left to fade), how much of the filler it dropped,
+    and how much was already sent and plays before the ramp (seconds)."""
+
+    turn: int
+    faded_s: float
+    cut_s: float
+    ahead_s: float
+
+
+FadeSink = Callable[[FillerFade], None]
+
+
+class WordLaw(Protocol):
+    """When a reply's characters are heard (the gesture engine's word clock,
+    :class:`pepin.expression.forecast.WordClock`): read from the barge-in's thread."""
+
+    def heard_share(self, turn: int, index: int, played: float) -> float | None:
+        """The share of the part's characters heard by stream second ``played``; None when it
+        does not hold the part."""
+        ...
 
 
 class PlayoutClock:
@@ -127,19 +167,31 @@ class Player:
         self._lock = threading.Lock()
         self._fed = 0.0  # stream seconds fed (aligned to the played clock at every flush)
         self._kind: Kind = "reply"
-        self._marks: dict[tuple[int, int], list[float]] = {}  # (turn, sentence) -> [start, end]
+        self._marks: dict[tuple[int, int], list[float]] = {}  # (turn, part) -> [start, end]
+        self._fadeable: tuple[int, float] | None = None  # the queued filler's (turn, fade_s)
         self.flushed_at: float | None = None
+        self.on_fade: FadeSink | None = None  # told on the feeding thread, after the reply's chunk
+        self.words: WordLaw | None = None  # the word clock :meth:`heard` reads, when lent
 
     def start(self) -> threading.Event:
         """Run the pacer on its thread; set the returned event to stop it."""
         return self.pacer.start()
 
-    def feed(self, pcm: bytes, kind: Kind, turn: int, index: int) -> None:
-        """Queue a chunk of sentence ``index`` of reply ``turn`` (a backchannel: index -1)."""
+    def feed(self, pcm: bytes, kind: Kind, turn: int, index: int, fade_s: float = 0.0) -> None:
+        """Queue a chunk of part ``index`` of reply ``turn`` (a backchannel: index -1). A
+        backchannel with ``fade_s`` is a filler the reply takes over (the module's notes): sent
+        at most ``fade_s`` ahead, ramped to silence over ``fade_s`` by the reply's first chunk
+        while it still plays, which :attr:`on_fade` hears."""
         if not pcm:
             return
         duration = len(pcm) / SAMPLE_BYTES / self.rate
+        fade: FillerFade | None = None
         with self._lock:
+            if kind == "reply" and self._fadeable is not None:
+                fade = self._fade_filler(*self._fadeable)
+            elif kind == "backchannel":
+                self._fadeable = (turn, fade_s) if fade_s > 0 else None
+                self.pacer.hold(fade_s if fade_s > 0 else None)
             start = self._fed
             self._fed += duration
             self._kind = kind
@@ -147,9 +199,25 @@ class Player:
                 mark = self._marks.setdefault((turn, index), [start, start])
                 mark[1] = self._fed
             self.pacer.feed(pcm)
+        if fade is not None and self.on_fade is not None:
+            self.on_fade(fade)
+
+    def _fade_filler(self, turn: int, fade_s: float) -> FillerFade | None:
+        """The reply's first chunk is here: the queued filler ramps out (under the lock)."""
+        self._fadeable = None
+        ahead = max(0.0, self.playout.sent_s - self.playout.played())
+        faded, cut = self.pacer.fade(fade_s)
+        self.pacer.hold(None)
+        self._fed -= cut
+        if not (faded or ahead):
+            return None  # the filler had ended
+        return FillerFade(turn, faded, cut, ahead)
 
     def end(self) -> None:
         """The turn's audio is complete: play out what is queued."""
+        with self._lock:
+            self._fadeable = None
+            self.pacer.hold(None)
         self.pacer.end()
 
     def flush(self) -> float:
@@ -158,8 +226,20 @@ class Player:
             played = self.playout.played()
             self.pacer.flush()
             self._fed = self.playout.sent_s
+            self._fadeable = None
             self.flushed_at = self.clock()
         return played
+
+    def queued_audio(self) -> QueuedAudio:
+        """What the player holds ahead of the speaker now (any thread): seconds fed and not
+        played, of them already sent to the speaker, and the fade a queued filler is taken over
+        with (0: none, or one the reply waits for whole)."""
+        with self._lock:
+            played = self.playout.played()
+            fed = max(0.0, self._fed - played)
+            sent = max(0.0, self.playout.sent_s - played)
+            fade = self._fadeable[1] if self._fadeable is not None else 0.0
+        return QueuedAudio(fed, min(sent, fed), fade)
 
     def playback(self) -> Playback:
         """What the speaker is doing: nothing, a reply, or a backchannel."""
@@ -168,6 +248,18 @@ class Player:
     def speaking(self) -> bool:
         """Audio is queued or playing (with the room's tail)."""
         return self.pacer.speaking()
+
+    def played(self) -> float:
+        """Stream seconds played by now (the clock a part's :meth:`mark` is on)."""
+        return self.playout.played()
+
+    def mark(self, turn: int, index: int) -> tuple[float, float] | None:
+        """Where part ``index`` of reply ``turn`` sits in the stream so far: its first and last
+        second fed (the last grows while its audio is still being made); None before its
+        first chunk, or once the turn is forgotten. Read from any thread (the body's cues)."""
+        with self._lock:
+            mark = self._marks.get((turn, index))
+            return None if mark is None else (mark[0], mark[1])
 
     def span(self, turn: int) -> tuple[float, float] | None:
         """Where reply ``turn``'s audio sits in the stream: its first and last second."""
@@ -179,7 +271,9 @@ class Player:
 
     def heard(self, turn: int, played: float, texts: list[str]) -> Played:
         """Which of reply ``turn``'s sentences (``texts``, in order) had played by stream second
-        ``played``: the whole ones, then the words of the one cut, in proportion."""
+        ``played``: the whole ones, then the words of the one cut, in proportion to its
+        characters heard (the word clock's law when it holds the part: the leading silence,
+        then the rest; else the share of its fed audio, at least :data:`CHAR_S` a character)."""
         with self._lock:
             marks = {i: tuple(v) for (t, i), v in self._marks.items() if t == turn}
         whole = 0
@@ -197,7 +291,9 @@ class Player:
                 continue
             if start < played:
                 words = text.split()
-                share = (played - start) / max(end - start, 0.07 * len(text))
+                law = self.words.heard_share(turn, index, played) if self.words else None
+                share = (played - start) / max(end - start, CHAR_S * len(text))
+                share = law if law is not None else share
                 partial = " ".join(words[: round(len(words) * min(1.0, share))])
             break
         return Played(whole, partial)

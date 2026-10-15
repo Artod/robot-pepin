@@ -28,7 +28,7 @@ _WAKE_CYRILLIC = re.compile("п[еэиы]п{1,2}[еэиы]н[\u0430-\u044f]{0,3}
 _WAKE_LATIN = re.compile("p[eiy]pp?[eiy]n[a-z]{0,2}")
 _WORD = re.compile("[a-z\u0430-\u044f]+")
 _SPACES = re.compile(r"\s+")
-_NAME_CORES = ("пепин", "пипин", "пепен")
+_NAME_CORES = ("пепин", "пипин", "пепен", "пеплин", "пипил")  # GigaAM adds the last two
 _NAME_ENDINGS = ("пин", "пен")
 # real words, and what Whisper makes of them (Репин -> Крепин)
 _NOT_THE_NAME = frozenset(("папин", "репин", "крепин", "лапин", "сапин", "чапин", "щипин"))
@@ -221,13 +221,17 @@ class Segmenter:
         if quiet_s < self.silence_s and now - self._start < self.max_s:
             return None
         segment = Segment(b"".join(self._voiced), now - quiet_s)
-        self.reset()
+        self.reset(keep_quiet_tail=True)
         return segment if segment.duration_s >= self.min_s else None
 
-    def reset(self) -> None:
-        """Forget the speech in progress (the floor is kept)."""
+    def reset(self, keep_quiet_tail: bool = False) -> None:
+        """Forget the speech in progress (the floor is kept). ``keep_quiet_tail``: the quiet
+        frames that ended it stay as the next utterance's lead-in, so a word said right after a
+        close keeps its first sound ("Пепин" heard as "Эпин" when the lead-in was empty)."""
+        quiet = self._quiet if keep_quiet_tail else 0
+        tail = self._voiced[len(self._voiced) - quiet :] if quiet else []
         self.talking = False
-        self._voiced, self._pre = [], []
+        self._voiced, self._pre = [], tail[-self._pre_frames :]
         self._loud_run = self._quiet = 0
 
 

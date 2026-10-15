@@ -2,15 +2,16 @@
   "neck": {
     "id": 9,
     "center": 2048,
-    "min": 257,
-    "max": 3812
+    "min": 163,
+    "max": 3929,
+    "range_note": "163..3929 since 2026-10-13: the pan's reach set by Artem's hand with the display and the stereo head mounted (the head turned by hand to where the cables stay free, read through the base server: right 3929 = -167 deg, left 163 = +164 deg from reference 2029; no margin, his stop is the limit). The 257..3812 before came from the 2026-08-30 calibration, before the screens and the camera; within it the head swept -157 -> +150 deg at full ramp on 2026-10-13 and whipped the display's cables. Both ends sit ~165 ticks (14 deg) from the servo's 0/4095 wrap: never push them further."
   },
   "head": {
     "id": 10,
     "center": 2048,
     "min": 1814,
-    "max": 2787,
-  "max_note": "2787 since 2026-10-04: with the head IMU glued on the camera's top and the display under it, the head tilted down by hand to its stop reads 2787 (65.6 deg down, read through the base server); Artem: no margin, the stop is the limit. Before: 2760 (2026-09-30, the remounted module's stop 2783 less 2 deg)"
+    "max": 2737,
+  "max_note": "2737 since 2026-10-13 19:25: the head pushed forward by hand to its stop with everything mounted reads 2737 (61.2 deg down); at 2787 the servo drove 4.4 deg past the stop and pressed on it (Artem: it banged the stop). Before: 2787 since 2026-10-04: with the head IMU glued on the camera's top and the display under it, the head tilted down by hand to its stop reads 2787 (65.6 deg down, read through the base server); Artem: no margin, the stop is the limit. Before: 2760 (2026-09-30, the remounted module's stop 2783 less 2 deg)"
   },
   "reference": {
     "pan_ticks": 2029,

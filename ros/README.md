@@ -12,8 +12,8 @@ laptop (Mac)                                  board (Orange Pi Zero 3, 1.5 GB + 
 pepin-macnav: Nav2 (planner, controller,      docker pepin-ros: ldlidar_node -> laser_filters
   costmaps, behaviour tree, behaviours,         box filter (/scan), base_bridge (C++: /odom,
   velocity smoother), goal_server               /imu/data_raw, /zupt, /neck/state, the camera's
-  (127.0.0.1:3337), run_recorder, gaze          tf), EKF (odom -> base_link), rf2o, tof_bridge
-  (the head's one owner, 127.0.0.1:3339)
+  (127.0.0.1:3337), run_recorder, gaze          tf, /arm/joint_states), EKF (odom -> base_link),
+  (the head's one owner, 127.0.0.1:3339)        rf2o, tof_bridge
 pepin-vslam: RTAB-Map (map -> odom), the      host: pepin-base.service (:3336, the wheels),
   camera, depth, visual odometry, the           pepin-tof.service (:3335), ser2net (:3333,
   volume, foxglove_bridge (ws 8765)             the servo bus, the base server's own link)
@@ -114,6 +114,28 @@ false`.
 `where` also says `lidar`: `ok`, or how long no scan has reached Nav2. A lidar plugged in after
 the board's stack started needs that stack restarted (`ros/restart.sh board`).
 
+**Coming to a person: the `approach` tool** (`src/pepin/tools/approach.py`, the voice brain's and
+the MCP server's). "Подъедь ко мне", "подъедь поближе", "встань рядом", "повернись ко мне",
+"подъедь к принтеру и повернись к нему" are `approach(target, relation)`, never `go_to_pose` at
+a person (2026-10-13: a goal 0.7 m toward Artem sat inside his footprint, and Nav2 backed up and
+spun for a minute). The target: `me` is the person the speaker gaze holds, their face (else their
+body) box on the camera channel's newest frame taken since the head stopped, measured by the
+depth host's stereo (Depth-Anything's mono where stereo is blank) in that frame's own rectified
+pixels (`pepin.pixel_to_map`); a place is the goal server's book; a box `x0,y0,x1,y1` is in the
+pixels of the last `see` picture (the channel's rectified eye as drawn, a snapshot's raw eye
+rectified once), refused once the head has turned. Where to stand (`pepin.stand_pose`, the
+numbers in `config/approach.json`, read at each call): `to` 0.8 m, the sides 0.7 m, never nearer
+a person than 0.6 m plus two sigma of their depth, two alternatives 30 deg either way about the
+target; `face`, and a `to` from already within 0.15 m of the stand distance, are a turn where the
+robot stands ("come closer" never backs it away). Each candidate goes to the goal server's `plan`
+(never motion): RTAB-Map's `/map` cell under it (unknown, occupied, outside: refused), Nav2's
+global costmap under the cart's whole hull standing there (a lethal cell, a person's legs among
+them: refused), one ComputePathToPose. The first that plans is the ONE `go`; when none does, the
+tool says why and nothing moves. On arrival the head turns to the target. A goal server started
+before `plan` answers "unknown command" and the tool says so (`ros/laptop.sh kick goal_server`).
+It needs the depth host (`ros/depth_host.sh stereo`) and the perception service;
+`vision.source snapshot` refuses `me` (a `see` box still works).
+
 **The red button**, `ros/stop.sh` (the tray's first item runs it): the base server's own stop at
 once, every goal cancelled through the goal server (confirmed by a navigator within 3 s), and the
 base's stop again, believed only from its state stream: the last state lines of a one-second
@@ -122,7 +144,10 @@ stays up. Otherwise what commands the wheels is killed first (Nav2's composed co
 its launch respawns idle, and a measured motion on the board), because the base's stop is not
 latched; then the base's stop and its confirmation once more, then `pepin-macnav` stopped. It
 exits 0 only when the wheels read still, and never restarts the board, whose odometry the map is
-tied to; `ros/laptop.sh nav` brings Nav2 back.
+tied to; `ros/laptop.sh nav` brings Nav2 back. The voice's expressive wheels ("Gestures" below)
+never fight it: their motion ends on the first state line that shows a stop they did not send,
+or on the cancel's word from the goal server when their own next twist overwrote the stop before
+any line showed it, and no expressive motion starts for `wheels.stop_hold_s` (30 s) after either.
 
 **Game teleop**, `uv run python -m pepin.teleop --game [--host 10.0.0.187]`: a small window where
 keys act only while held. Arrows drive the wheels, W/S tilt and A/D pan the head (the base
@@ -521,6 +546,81 @@ and `/marks_audit/phantoms` (a red cloud), and a report line every 10 s: `marks 
 (lidar 97, camera-only 106, unexplained 11), nearest camera-only 0.42 m`. Its `marks_audit` flag
 switches it off live.
 
+## One camera channel
+
+The head camera has ONE reader, `camera_stream` in `pepin-vslam`: it decodes the board's
+stream, cuts and rectifies the two eyes and publishes them for depth, the VO and RTAB-Map. After
+each frame is published, its left picture (the rectified eye: fx 454.5, 82.8 x 66.9 deg) goes
+to the **perception service** on this Mac (`pepin.perception_service`, `127.0.0.1:8792`, the
+`perception` job of `ros/models.sh`), and everything on the laptop that wants the camera reads
+that service: the speaker gaze (faces and people, by record), person recognition (the speaker's
+face embedded on demand) and the `see` tool (the JPEG itself). The voice process decodes no
+picture and runs no network.
+
+```
+board ustreamer ──MJPEG──> camera_stream (decode, split, rectify, publish /camera/*)
+                              └─ FrameFeed: one-slot mailbox, own thread, JPEG q90, POST ──┐
+perception service :8792  <───────────────────── host.docker.internal:8792 ────────────────┘
+  ring: 10 s of frames as sent (frame number -> JPEG, board exposure stamp, optics)
+  detector thread, 10 Hz on the newest frame: SCRFD (ane) + Apple Vision (from the JPEG bytes)
+  -> GET /latest (long poll)      the gaze's finder, people
+  -> GET /frame/newest.jpg        see: the first frame exposed after the head settled
+  -> GET /frame/<n>.jpg           a frame by number
+  -> POST /embed                  ArcFace of one face of one frame, on demand
+  -> GET /health                  rates, ms per stage, the newest record, the clock envelope
+```
+
+**The stamps.** Every frame carries camera_stream's own stamp (the board's clock, dated to the
+exposure); a record keeps it beside its arrival on this Mac (`arrived`, reports only). The gaze
+asks for a record exposed after the arbiter's `blind_until` and `see` for a frame exposed after
+it (`see` waits for the head to stop first, 0.3 s at most in all, then takes the newest frame,
+marked `still: false`): board time against board time, never this Mac's clock. `/health`'s
+`arrival_minus_stamp` (min/median ms) is the clock check: a negative minimum means the board's
+clock runs ahead of this Mac's.
+
+**The pixel space.** Faces are measured in the rectified eye's pixels, so the face-size
+thresholds are that eye's: the gaze's `seek_min_face_px` 24 and `track_min_face_px` 34, people's
+`min_px` 34 and `strong_px` 52 (the raw eye's 28/40/40/60 x 454.5/528, the same distance for a
+centred face; off the axis the rectified picture is stretched and a face reads wider).
+
+| switch | where | what |
+| --- | --- | --- |
+| `perception_feed` (flag, on) | camera_stream | the sender; off, nothing is sent and the line says `perception off` |
+| `perception_hz` (knob, 20) | camera_stream | frames a second at most to the service |
+| `perception_quality` (knob, 90) | camera_stream | the JPEG quality of the picture sent (77 KB at 800x600) |
+| `perception_url` (parameter) | camera_stream | where it sends; `PEPIN_PERCEPTION_URL` in `ros/laptop.sh vslam`'s environment |
+| `detect_hz`, `ring_s`, `faces`, `persons`, `identity_device`, `look_wait_s`, `see_wait_s` | config/models.json `perception` | the service's pace, memory and devices; the consumers' waits (read at start) |
+| `vision.source` (live, `service`) | the voice | `snapshot`: the path before the service (ustreamer's `/snapshot` decoded and searched in the voice process, ArcFace local), for a day the service is broken; `scripts/voice_cascade.py switch --knob vision.source=snapshot` |
+
+Bring-up, once per checkout, then with every `ros/laptop.sh vslam` (it starts the job when it is
+installed, and `ros/laptop.sh stop` stops it):
+
+```bash
+ros/models.sh install perception          # the launchd job; waits for /health
+ros/models.sh status perception           # frames/s in, detections/s, ms, faces and persons now
+ros/models.sh logs perception             # its report line every minute frames come
+ros/models.sh restart perception          # after a change to pepin.perception*; stop | start
+ros/laptop.sh kick camera_stream          # the sender is camera_stream's: a code change needs a kick
+ros/flags.sh set camera_stream perception_feed false    # the sender off, live (true: on)
+ros/preflight.sh --no-plan                # its vision line: OK 20.0 frames/s in, 10.0 detected/s, ...
+curl -s 127.0.0.1:8792/health | python3 -m json.tool
+uv run python scripts/voice_cascade.py switch --knob vision.source=snapshot   # the way round
+```
+
+camera_stream's report line carries `publish period median/p95` and the feed's own
+`perception 20.0/s sent (... q90, <= 20/s), 0 dropped, 0 refused, 0 failed, encode 0.9/1.1 ms,
+post 0.4/0.6 ms`; a service that is down costs camera_stream one refused connection every 2 s.
+The voice's turn lines end with the vision cell, `vision 20.0 in / 10.0 detected per s, detect
+19 ms, 1 face 1 person` (`vision DOWN (127.0.0.1:8792: ros/models.sh start perception)` while it
+is down: `see` then answers an error naming the service, and the gaze turns to the voice only).
+
+Measured on this Mac (2026-10-12, the stored frames through a real service at 20 Hz beside the
+live voice and the ROS stack): per detected frame decode 1.6 ms, SCRFD 10.2 ms (p95 11.4), Vision
+7.4 ms (p95 8.2), total 19.2 ms (p95 21.2); the service holds 398 MB, 787 MB with ArcFace loaded
+(1.9 ms a face, let go after 5 idle minutes); `/latest` and `/frame/newest.jpg` answer in 0.2 ms
+on the loopback, `/embed` in 3 ms. The face sensor's live run (`scripts/face_sensor.py run`, a
+second stream client of the board) is retired from the defaults: `run` needs `--source` named.
+
 ## Gaze: the head's one owner
 
 `pepin_bringup.gaze` runs beside Nav2 in `pepin-macnav` and is the only thing that moves the
@@ -561,6 +661,369 @@ ros/laptop.sh nav logs | grep "stall look"
 base server that moves the neck only at rest has them refused during a drive. At a drive's start
 every request but the operator's is let go, and a head found more than `drive_home_tol_deg` off
 home (a jog, a hand) is sent home.
+
+**The overlay and the release** (the voice's expression, `pepin.expression`). The speaker gaze
+holds the head on the person as an ordinary `angles` look of the idle band (`voice.speaker`,
+TTL 6 s renewed every 2 s). A head gesture is an OVERLAY on top of it: `POST /look` of kind
+`clip`, keyed offsets `{at_s, pan_rad, tilt_rad, speed_deg_s}` added to whatever holds the head
+(home when nothing does), each key written at its time with its own speed ceiling
+(`neck_target`'s `speed_deg_s`). The holder keeps its status, TTL and aim, and the head goes back
+to it when the overlay ends — a nod or a thinking glance never loses the person. One plays at a
+time: a newer one replaces it, an `idle` one (breathing) gives way to any other; a `loop`
+repeats until released or lapsed (the breath: one looped clip, renewed) and is answered at once,
+a finite one when it ends. Refused whole, never clamped: over a better band, during a drive, on
+a `neck_goto` base server, past the reach, past `clip_max_deg` (30) off the holder, or with a
+tilt turning back faster than `clip_max_hz` (2.5 Hz; the mast rings at 5.3 Hz, and the board
+caps the tilt's ramp at 600 deg/s² on every move). An overlay within `clip_still_deg` (1°)
+writes without starting a move, so the head is not blind for a breath; any larger one blinds it
+while it moves, as any write. `POST /release {"source", "fade_s"}` is a source's word to let go
+of everything it asked: its looks go (the head falls to the next request or home) and its
+overlay returns to the holder over `fade_s`. `GET /state` names the overlay playing;
+`pepin.gaze_link.GazeClient` is one source's client for all of it.
+
+```bash
+curl -s 127.0.0.1:3339/state | python3 -m json.tool          # holder, overlay, blind interval
+curl -s -X POST 127.0.0.1:3339/release -d '{"source": "voice.speaker"}'   # the speaker gaze lets go
+```
+
+**The speaker gaze** (`pepin.expression.tracker`, in the voice cascade, flag `speaker_gaze`, off as
+shipped): on the robot's name the head turns to the voice (the array's direction of arrival),
+takes the camera channel's first record exposed after the head settled ("One camera channel"
+above: faces and people found by the perception service on the rectified left eye, on the CPU
+and the Neural Engine, never the GPU the voice uses; a far face from 24 px of that eye),
+centres it, smiles once at a clear face, and follows the person at ten frames a second while it
+listens and one while it speaks, none while the voice makes a reply's first chunk, leading a
+walking one; whoever speaks with words from elsewhere is looked at at once,
+and a look that finds nobody returns to the face it left within 0.7 s. Quiet utterances, few
+speech readings and sounds without words never move the head alone; the robot's name always
+does. At the close the look is released and the head goes home. Every decision is a `gaze_*`
+event in the conversation's `events.jsonl`. The array's direction needs four readings once per
+mounting (nothing moves, it listens): `uv run python ros/tools/doa_calibrate.py --write`, a voice
+1.5 m in front of the cart, then left, behind, right, three phrases each; the bearing is
+interpolated between them (the array sits off the cart's centre). Then `scripts/voice_cascade.py
+switch --flag speaker_gaze=on` while the cascade runs (`=off` lets the head go at once). Without
+the calibration the head looks up where it points and finds the face by the camera alone.
+
+**The forward arc and the body** (`speaker.arc_deg`, 160°). One rule: the head alone serves any
+bearing within ±80° of the cart's nose; a person engaged past it (a call from the side or
+behind, someone walking round) turns the body toward them in place, at most `wheels.max_turn_deg`
+(30°) per request and again while they are still past it (a call from 150° is three turns of
+30°). The wheels are started before the head's aim is asked, since their checks take longer than
+the head's turn, and neither waits for the other: the head arrives first and the robot answers
+at once ("Gestures" below for how the wheels move and what stops them). A check of an unknown
+voice turns the head alone. Wheels that cannot turn (a refused check, a stall or a blocked arc
+after the one recovery and one more try, the caps) leave the head alone on the person, as far
+as it reaches: a refusal is asked
+again at the person's next utterance, a turn that moved the cart and still fell short is not
+asked again for that person in the conversation. The person speaking does not stop the turn
+toward them; a drive or the close does. Nothing on the voice's path waits for any of it: the
+wake's turn is a request answered by a callback.
+
+**The frame.** The people's bearings are kept in the cart's frame at the newest heading of the
+wheels' odometry (the base server's 50 Hz state lines, stamped on the board's clock, whoever
+turned the cart: the gaze, a gesture). While the body turns, the head re-centres on the person
+as the heading comes round (read ten times a second; a seek's stop keeps its place in the room)
+and no frame is taken. The microphone array turns with the cart, so each of its readings is
+turned by how far the cart has turned since its own stamp (one clock, the board's) before an
+utterance's readings are averaged: a person who speaks across a turn is heard where they are
+now, not at the average of a sweep. `gaze_doa` rows then carry the degrees taken off each
+reading.
+
+**The tilt's source.** A face gives the head's aim, a body box an estimate of it; the tilt
+changes from one source to the other only when the two differ by more than
+`speaker.tilt_hysteresis_deg` (12°), so the head does not nod between a face and a body box as
+the face comes and goes in the frames, while sitting down or standing up still moves it.
+
+## Gestures: the body as one animated character
+
+The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
+`{laugh}`, `{face:smile}`; `{whispering}` and `{}` stay the voice's style) and the gesture engine
+(`pepin.expression`) decides how: it renders the intent from `config/animation.json` (atoms,
+the twelve feelings and the co-speech marks, taught poses; a seed logged with every performance),
+fits it to the time left before its word (below) and plays it through each part's one owner.
+ONE BODY: every variant of the book plays the face, the head and the arm or the wheels together
+(every step's `p` is 1 since 2026-10-13: the dice are between the variants and in the ranges;
+each feeling has a variant with the cart's small rock or sway beside its arm's), and the arm and
+the wheels move together, neither waiting for the other: the base server plays a trajectory
+whatever the wheels do and a twist no longer sends the arm to rest (`pepin.arm_driver`: deploy it
+to the board with `pepin.base_server`), the wheels' checks and the engine no longer refuse one
+for the other (each part keeps its own caps and limits, the wheels their hull clearance; a drive
+still owns the wheels, and the gaze's body turn still takes the arm to rest first). The arm:
+the laptop sends a whole trajectory (`arm_trajectory`) and the base server plays it on its tick,
+then rests and lets go of the torque by itself (`pepin.arm_driver`, `config/arm.json` `motion`:
+caps, limits, rest pose, torque limit). The face: the head server, source `expression`. The head:
+the gaze arbiter's `clip` overlay on whatever holds it (the person, when the speaker gaze is on;
+home otherwise), source `voice.gesture` (`voice.idle` for the idle layer's fidget, which gives
+way to any gesture): each keyframe of the clip is written one move early with the speed ceiling
+that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/s², pan 2232);
+the idle layer's keys (the melody, the breath, the drift) GLIDE: each also carries its own ramp,
+1.25 times the least that lands it on time (at least the servo register's 8.8 deg/s²), passed by
+the arbiter to `neck_target` beside its speed, so the servo eases between keys instead of
+stepping (the gaze node in `pepin-macnav` reads `pepin.gaze`: `ros/laptop.sh kick gaze` after an
+update; an older one ignores the ramp); and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
+so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
+the gesture plays without its head. The wheels: below. The person starting to speak fades
+the gestures (the head eases back over `layers.fade_s.head`, 0.35 s); a drive or the end of the
+conversation sends every part to rest; markers are capped (`config/expression.json` `caps`: one
+a sentence, three a reply, six a minute; `{!}` outside those counts, one a sentence; a reply's
+`{count:n}` series counted once; a composition's `cooldown_s` per mark and argument; an arm
+gesture counts against `arm_per_minute` only when the arm made it into what was placed). A
+gesture takes the head only while the speaker gaze tracks a person it saw within
+`layers.head_seen_s` (1.2 s: its frames come at 1 Hz while the robot speaks). A looping idle
+clip holds its part until a state it excludes or another clip takes it, renewed at the arbiter
+once a period (an overlay's TTL is one period and a second); the drift plays over it and the
+loop comes back after; an idle entry of the book may set its own `after_speech_s` (0: a breath
+right after a reply) over `layers.idle_after_speech_s`.
+
+**The alive layer** (`pepin.expression.prosody`, `pepin.expression.listeners`; it rides
+`gestures`, no flag of its own). The prosody listener hears every chunk of a reply as the player
+takes it (one queue append on the voice's thread) and, on its own thread, finds the syllable
+nuclei of the robot's own voice (voiced band-energy peaks), each one's prominence (band level,
+voiced length and pitch, each a z over the voice's statistics: `pulse.voice_stats`) and the
+pitch contour, 1.2-1.3 ms of one core a second of voice. The listeners turn that and the
+conversation's moments into the engine's own requests, under its one priority table: EVERY
+EVENT IS AN ENSEMBLE, the book's own composition asked for by name (`callable` false: never a
+mark of the brain's, never under its caps; their sizes are tuned in the book) with the parts
+the listeners find free for it (the head where its gaps allow, the arm where a unit holds it up,
+the wheels where the cart stands and the gaze is not turning it, each part where its lead
+covers its way). While the robot speaks: the melody, the head tilting with the voice's pitch
+within `pulse.melody_max_deg` (0.9°, inside the arbiter's `clip_still_deg` 2°: the camera keeps
+its frames), keys at least `pulse.melody_key_gap_s` (0.5 s) apart, gliding, on the idle source;
+an ACCENT on the first nucleus of a sentence with z >= `pulse.beat_z` (2) or its most prominent
+once the sentence's audio is all in (one a sentence), by its strength: under `pulse.strong_z`
+(3.0; the 24 accents played live on 10-12/13 had a median z of 2.9) `pulse_weak`, the nod with,
+while the arm is up, the wrist's beat (`pulse.wrist_beat_p`, 0.5) and on every second one
+(`pulse.wheel_accent_share`, 0.5: steady, the next free one when the cart was busy) the cart's
+0.5 cm sway; from it `pulse_strong`, the nod, the wrist's beat with the arm up and the cart's
+1 cm rock; the reply's strongest known (once a reply) `pulse_peak`, all three bigger. The nod
+keeps 2 s from any head stroke, 12 a minute, never less lead than it needs (0.30 s with the
+head's latency); none in a sentence that carries the brain's own marker, none within 2 s of a
+marker's head stroke; an accent whose nod is refused still moves the rest of its ensemble. The
+decision waits for the lead of the slowest part it wants (the cart's rock: about 1 s at
+`wheels.speed_scale` 0.4). THE LAUGH'S SOUND: a run of `pulse.laugh_run` (3) accents
+`pulse.laugh_gap_s` (0.2-0.4 s) apart is the voice laughing, no text read: each of its accents
+asks for `pulse_laugh`, the cart's rock with the happy face and a bob of the head; the cart
+takes the next accent once its rock has settled (about one every 2 s at speed 0.4: a laugh's
+3-5 Hz is out of the wheels' reach), and the laugh is that sentence's accent. A lift and cock of
+the head at a question's last syllable; one look away in a reply with 6 s of audio. THE ARM UP:
+a reply whose second sentence reaches the voice (`pulse.arm_up_min_sentences`, 2; its text,
+before its sound) raises the arm once to the book's `ready` (about 0.7 s, half the caps) within
+half a second of its speech, only with 1 s of its speech known after it, and holds it there
+while the reply goes on: the hold reaches 0.5 s past the reply's audio known and is sent again
+before it lapses (a lost laptop leaves the arm up at most `config/arm.json`'s `hold_max_s`, 20 s),
+a mark's stroke starts from it and the arm comes back to `ready` after the mark, the accents'
+beats ride it (from the held pose, the rest of its hold kept), the cart rocks under it, and while
+nothing moves it the wrist sways slowly (`arm_sway`, 6-10° of roll over 2.5-3 s: the held arm's
+breath, only when its hold outlasts the sway; a mark takes the arm from it at once); the arm
+rests when the reply's audio ends (its end, or the hold's own lapse 0.5 s after the last sound),
+at once when the person starts to speak, at a barge-in, the close, the body's turn or a sentence
+in a quiet style. A one-sentence reply never raises it. Between turns: the breath (the book's
+looping idle entry, `breath` at 2° and 0.25 Hz, gliding) whenever the robot is silent, through the
+person's speech too; a thinking glance up or down 0.8 s into the brain's wait (`moments.think_p`
+0.5, never the same way twice, back 0.5-1.3 s into the reply as the waits predict it, or that long
+into the reply's first sound when it comes sooner); at the person's pause after 2 s of their speech
+`listen_nod` (5 s apart, never while their words so far, when the ears read them in time, or else
+their last utterance were a question): its nod with `moments.listener_nod_p` (0.6), the cart's 0.5
+cm rock with `moments.nod_rock_p` (0.3); after a statement `ack_nod`, its nod with
+`moments.ack_nod_p` (0.3), its rock with `nod_rock_p`; hello and bye played in the brain's wait from
+the person's own words (after the body's turn toward them; the book's `moments` name them); the
+brain's `{laugh}` is its composition whole (the grin, the head thrown back, the gripper's click, the
+cart's rock or sway); a smile at the first face (the face's one writer: the speaker gaze's own smile
+is off, `speaker.smile` null). Every discrete head move keeps `moments.head_gap_s` (1 s) from the
+one before. Quiet (`quiet`: a whispering or sleepy style, 23:00-08:00, or the person's voice under
+-30 dBFS): the melody, the breath and the face only. Each conversation's events.jsonl gets `pulse`
+(per sentence: its nuclei's z, the accent with its kind and the parts it moved, and why the others
+were left out), `moment` (each decision, played or why not: `arm_up` and `laugh_sound` among them),
+`quiet` and, at the close, `alive` (the counts, accents a minute of the robot's speech, head moves a
+minute, the listener's cost). Replayed offline on 10-12's voice (15 min, 327 sentences): 7.7 accent
+nods a minute of robot speech, 35 % of sentences with one, 67-73 % of them on a stressed vowel of a
+content word against 44 % for any syllable, every head clip within the arbiter's rules.
+
+```bash
+uv run python scripts/voice_cascade.py switch --flag gestures=on    # the alive layer with it
+grep -h '"event": "moment"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
+grep -h '"arm_up"\|"laugh_sound"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl
+grep -h '"event": "pulse"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail  # kinds, parts
+uv run python scripts/gesture.py play pulse_strong --dry-run   # an ensemble of the engine's own
+grep -h '"event": "alive"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl   # per conversation
+```
+
+**On the word** (`pepin.expression.forecast`, `pepin.expression.schedule`). The engine learns of
+a marker when its sentence goes to the voice (or earlier, from the brain's token stream) and the
+word clock predicts when the word's first vowel is heard: the voice's first chunk 0.10 s after
+the text (its p10, so a stroke errs early), its leading silence of 0.16 s, the character's share
+of the sentence at 0.09 s a character until the conversation's own sentences give their median,
+then the speaker's `audio_lag_s`; exact from the sentence's first fed chunk on. The gesture is
+fitted to the time left (a `ladder` line): as written; with the arm's rise compressed to 0.9 of
+its caps; a smaller version; or its head-and-face floor (each composition has one). Each clip
+then goes at the last moment that lands its stroke `stroke_bias_s` (0.05 s) before the vowel (a
+`send` line). A word's stroke is never more than `stroke_late_s` (0.15 s) late, a feeling's
+never more than `late_s` (0.5 s) nor after the reply's speech, and none lands in the pause after
+a sentence; one that cannot is left out and the rest of its gesture keeps its time. The wheels
+never bind to a word: a mark's rock or sway is fitted as a feeling's (its stroke within `late_s`
+of the word, inside the speech) and left out alone when it has no time or would run past what
+the speech covers. Two arm
+gestures within `units.hold_s` (2.5 s) share one raise: the first holds its last pose (the
+board's `then: hold`; with nothing after it the board rests the arm by itself) and the second
+starts from there (a third from the second's: one unit is at most three strokes). An arm motion
+longer than `short_s` (1 s) plays only when the speech after its stroke covers what follows the
+stroke, up to 0.5 s past it (hello and bye 1 s; the fed audio as it is, 0.7 of a forecast). A
+marker on a reply's first words, seen in the token stream (read with the book's arguments and
+spellings), may send the arm to `ready` and hold it there first: a preparation, never a stroke.
+Where the arm is when a mark is rendered (at rest, or up in a unit: `arm_at` in the
+`performance` line) picks the variants that need it: `{!}` inside a unit is the wrist's flick
+from the held pose, else a nod.
+The voice loop lends the scheduler the arm's planner, the engine's renderer and scene hooks and
+the prosody listener's nuclei (the AUDIO moment), and the player tells the clock what is queued
+ahead of the speaker (a thinking filler holds a reply's first word back only by what was sent
+and its fade); a barge-in's record of what the person heard reads the same clock.
+
+**Meaning** (`pepin.expression.markers`, the resolver in `pepin.expression.render`,
+`pepin.expression.places`; `config/animation.json` `space` and `aliases`; it rides `gestures`).
+The brain marks the word that carries the meaning, inside the sentence (the persona's examples
+stand at least 11 characters in, where the arm has its lead from rest): `{!}` this word (a head
+nod; a wrist flick inside an arm unit), `{point:you|me|NAME}`, `{arc:up|down|out|in|side}`,
+`{size:big|small}`, `{weigh}`, `{count:1|2|3}`, `{draw:round|line|wave}`, `{stop}`, `{offer}`.
+Other spellings are the book's `aliases` (`{beat}` and `{emphasis}` are `{!}`, `{point:i}` is
+`{point:me}`, `{size:huge}` is `{size:big}`); a NAME is any short name in any script, read
+lower-case (`{point:План А}` is `план а`). A mark that names nothing (`{nod}`, `{wave:hi}`,
+`{arc:sideways}`, `{point}` without its argument) is dropped and printed, never taken for a voice
+manner. The same mark with the same argument twice in one reply plays once (`repeat`); pointing
+back and the accent may repeat. Each primitive has a head-and-face floor for each argument,
+plans within the arm's caps at speed 1 from rest and from every cell (a test), and holds the arm
+at most 2 s.
+
+The arm draws in a GESTURE SPACE of ten cells in front of the robot's right side, the viewer's
+left: three columns (the middle, y -0.06 m; the right, -0.13; the outer side, -0.22: 16 cm end
+to end), three rows (0.97, 1.03, 1.12 m: the high ones 7-22 % in the camera's level view, brief
+strokes only), far and, in the right column, near; authored by FK with the hand at least 4 cm
+from the body and from the head's whole reach. A way from rest (or from a held cell) to the
+middle column, to `stop` and to `tucked` goes through home (`ready`): straight, the hand would
+pass the speaker box at 1.1 cm, and the ways between `stop`, `tucked` and the sweep's top pass
+the head; a gesture that ends in the middle goes back home after its hold (the board's own
+straight way to rest from there would pass the speaker box): every primitive's way, from rest
+and from every cell, keeps the hand 1.7 cm from the body. `{point:you}` turns the open hand (palm up) at the person engaged by the attention
+view's bearing and distance; `{point:printer}`, a place of the goal server's book (matched by
+case, spaces and transliteration: `принтер` is `printer`), turns the shut hand toward it from
+where the robot stands, for directions -52..+41 deg of the nose (shoulder pan -68..+25), and the
+head glances its way as an overlay of at most 25 deg on attention's aim (never a change of whom
+it looks at); past the arm's directions the glance alone, a place more than 90 deg from the
+person nothing. The engine keeps one resolver for its life: the speaker gaze's attention view is
+its person, the voice loop gives it the goal server's places book and the robot's map pose
+(read every second on a thread of their own; `pepin.expression.places.GoalPlaces`). Without the
+attention view the person is taken to stand ahead; until the goal server has answered once a
+NAME is neither a place nor a referent and gets a nod.
+
+CATCHMENTS: any other NAME is a referent (`{point:план А}`), given a spot when the brain's mark
+is first rendered and pointed at there for the rest of the conversation, in one order for
+referents and counted items, `space.loci`: the middle, the outer side, then the right (the
+widest pair first). `{count:n}` takes the n-th spot for its item (`#n`) and overwrites what sat
+there; a fourth referent takes the least recently pointed spot; all are logged (`catchment`:
+referent or item, cell, new / again / evicted / overwritten, in the gesture log and each
+conversation's events.jsonl), and an evicted referent mentioned again is placed anew, the one
+moved spot there is. A first mention whose arm did not play (its floor) leaves the spot unseen:
+the next mention is then its first showing, never a contradiction. Every spot is forgotten at
+the conversation's close (`Resolver.forget`). A person's ask takes a mark the same way: the
+gesture tool's engine door and `gesture.py play` read `point:printer`, `count:second`, `!`.
+
+```bash
+uv run python scripts/gesture.py play point --dry-run    # a tool's ask: the first argument (you)
+uv run python scripts/gesture.py play point:printer --dry-run   # the goal server's place, read once
+grep -h '"event": "catchment"\|"event": "repeat"' data/voice/$(date +%Y%m%d)/cascade_*/events.jsonl | tail
+```
+
+**The wheels** (`pepin.expression.wheels`, the speaker gaze's turn and the body atoms
+`body_rock`, `body_wiggle`, `body_turn`; each behind its own flag, no third). Never Nav2: twist
+lines from this Mac straight to the base server on :3336 (the measured motions' method, without
+their 8-15 s ROS start), judged by the base server's own wheel odometry in its 50 Hz state lines
+(the least latency: the same connection; the EKF is ROS's), at most 30° of turn or 2 cm of rock
+per request, a trapezoid at `wheels.yaw_rate_deg_s`/`yaw_acc_deg_s2` (straight:
+`speed_m_s`/`acc_m_s2`) times `speed_scale` (ramps times its square; 0.4 as shipped: a turn at
+12°/s reached in 0.21 s, 30° in about 2.7 s plus 0.1-0.6 s of checks; the gesture engine
+stretches the body's clips by its inverse, as the arm's; a clip faster than the caps is
+refused). Before a
+motion and at every 40 ms tick: the base's state fresh, the cart standing (no twist commanded,
+the wheels still), the bus answering (the arm moves with them: neither waits for the other), no
+stop or cancel of someone else's in the last 30 s; and the goal server's `clearance` (asked ten
+times a second only while a motion runs): nothing navigates, depth_fusion's newest obstacle marks
+(`/depth_marks`) under `wheels.marks_age_s` (1.5 s) old by their own stamp, and the footprint
+swept from here to the target keeps `clearance_m` (0.10 m) from every mark it moves toward. The
+marks are the voxel volume's slice round the whole cart (the lidar, the camera's depth and the
+ToF fans fused; the nearest surface per half degree, 0.15-1.3 m above the floor, out to 3 m),
+so a table leg the camera saw before the head looked away still counts; a bearing the volume
+holds nothing on blocks nothing, and Nav2's inflated costmaps are not read. Without the marks
+(depth_fusion down: `ros/laptop.sh vslam`) every motion is refused with that reason; the raw
+scan never stands in. The marks change only when an observation is fused (the ToF fans, 15 Hz,
+keep the 5 Hz slice coming while the head turns and its frames are not fused): a standing cart's
+identical lidar revolutions count once, so something that steps in behind a standing cart, where
+neither the camera nor the ToF fans look, enters the marks only after the turn has begun, after
+about twelve revolutions on floor the volume has seen a few times and not within a 30° turn on
+floor it has seen forty times (the volume's own code against a simulated lidar). A turn that ends
+short (a stall: under a third of the commanded motion in `stall_s`; or a blocked arc) gets one
+recovery, the same rule whatever stopped it: a straight step of `wheels.backoff_m` (2 cm) away
+from the mark nearest the footprint (forward unless that mark lies ahead of the footprint's
+middle, forward when there is none), checked like any leg, or, when that step is blocked or
+stalls too, a turn of `wheels.backoff_deg` (10°) back the other way. Then the rest of the turn
+once more; if that ends short too, the head alone. The cart never ends a request more than 30°
+from the heading it began at. A drive or the
+conversation's close halts every motion at once, the person speaking a gesture's (a flag and one
+stop line from the voice's own loop); the turn toward the person speaking goes on. Nothing new
+runs on the board; the goal server keeps the newest slice and decodes it once per request on
+this Mac. An older goal server answers `clearance` without the marks and every motion is
+refused: `ros/laptop.sh kick goal_server`.
+
+```bash
+uv run python scripts/gesture.py turn 10 --dry-run          # every check, nothing moves
+uv run python scripts/gesture.py turn 10                    # 10 deg left at wheels.speed_scale; Ctrl-C halts
+uv run python scripts/gesture.py rock 2 --times 1           # 2 cm forward and back
+uv run python scripts/voice_cascade.py switch --flag speaker_gaze=on   # the turn toward a call
+```
+
+```bash
+uv run python scripts/voice_cascade.py switch --flag gestures=on    # off as shipped; live
+uv run python scripts/gesture.py read                               # the arm's angles, no motion
+uv run python scripts/gesture.py play greeting --speed 0.2 --dry-run
+uv run python scripts/gesture.py teach raised                       # torque off, place, Enter
+tail -f data/voice/$(date +%Y%m%d)/cascade_gestures.jsonl           # performances, ladder, send, cue
+```
+
+The base bridge publishes the arm's angles as `/arm/joint_states` (the URDF's joint names, radians,
+at the stamp of the read of joints 1-4, wrist_roll and gripper a tick older: 25 Hz while the arm
+is energised, 5 Hz at rest), which depth_fusion's
+`arm_filter` reads under `config/arm.json` `joints.source: topic`. A board without `config/arm.json`
+in `/opt/pepin/config` never reads or writes the arm, and publishes nothing there. Every
+cue line says the stream second it was planned for, the one it went at and how late; a `send`
+line says when the word was forecast to be heard at each moment (`w_text`, `w_start`,
+`w_audio`), when the clip went and where its stroke was planned, in seconds after the sentence
+went to the voice; the board's `accepted`/`done` come back as `arm` lines with the laptop's
+time.
+
+## People: who is speaking
+
+Person recognition (`pepin.people`, in the voice cascade, flag `people`, off as shipped) names
+the speaker of each utterance in front of the words the brain reads (`[говорит: Саша]`,
+`[говорит: похоже, Саша]`, `[говорит: кто-то новый]`; the prosody words follow, measured against
+that person's own baseline) from the voice (WeSpeaker ResNet34-LM, an utterance of at least 1 s)
+and the face (ArcFace alone on the speaker gaze's tracked face, else on the dominant face of a
+fresh record of the camera channel; the perception service embeds it, `POST /embed`, so the
+voice process loads no face net unless `vision.source` is `snapshot`). A new person is named by the brain's `remember_person(name)` (the stranger who
+spoke last, or the one new face in view when someone introduces them) and deleted by
+`forget_person(name)`. The store is `data/people/people.db` on this Mac (names and embeddings,
+nothing else, never uploaded). Weights, once per checkout (models/ is gitignored):
+
+```bash
+mkdir -p models/voice models/face/buffalo_l
+curl -L -o models/voice/voxceleb_resnet34_LM.onnx \
+  https://huggingface.co/Wespeaker/wespeaker-voxceleb-resnet34-LM/resolve/main/voxceleb_resnet34_LM.onnx
+cp scratch/face_1008/cache/insightface/models/buffalo_l/w600k_r50.onnx models/face/buffalo_l/
+uv run python scripts/voice_cascade.py switch --flag people=on     # off as shipped; live
+uv run python scripts/people.py list                               # who is known, samples
+uv run python scripts/people.py forget Саша                        # name, face, voice: gone
+uv run python scripts/people.py forget-guests --yes                # after a party
+```
+
+Without the robot's camera (`--fake-robot`, a bench) it names by voice alone. Thresholds and
+the reasons for them: `config/people.json`.
 
 ## Camera grid A/B (2026-09-24)
 
@@ -619,6 +1082,7 @@ minute, and every live flag on it back to its default.
 | `camera_stream` | `camera_stamp` | choice: send, grab | grab | yes | which board moment a frame is stamped with: `send`, ustreamer's X-Timestamp (the write to this client); `grab`, the V4L2 capture moved onto the same realtime clock (grab + X-Timestamp - send, pepin.mjpeg.capture_time; needs ?extra_headers=1 on the stream URL and falls back to send per frame without it, counted in the report line) |
 | `camera_stream` | `undistort` | bool | off | yes | the published picture is rectified with the checkerboard calibration (config/camera.json's intrinsics) and its camera_info then says no distortion; a no-op while the camera is uncalibrated, since there is nothing to undo. Rectifying crops to the largest all-valid rectangle, so the field of view narrows. THE MONO RIG's flag: a stereo head is rectified by its own stereo calibration (both eyes onto one pinhole with the rows aligned, which is what a disparity means at all), so the node refuses this one there rather than straighten a picture twice |
 | `camera_stream` | `fold_mask` | bool | on | yes | stereo: rectified pixels past a fold of the calibration's undistortion map (the lens corners the board never reached) go out black, as no data, and the depth there is cut; off publishes the mirrored corners as before |
+| `camera_stream` | `perception_feed` | bool | on | yes | the left picture of every published frame (rectified on a calibrated stereo head) goes to the perception service on the laptop (perception_url) as a JPEG with its stamp, optics and brightness: the one camera channel the speaker gaze, person recognition and see read. The pump drops a reference into a one-slot mailbox; the feed's own thread encodes (perception_quality) and POSTs at perception_hz at most, a slow service costing frames, never the pump's time |
 | `camera_stream` | `static_camera_tf` | bool | off | at start | base_link -> camera_link is broadcast from here (ros/laptop.sh vslam --fixed-head); off, the board's base bridge publishes that edge live from the neck's encoders, because two publishers of one edge fight |
 | `contact_scan` | `contact_scan` | bool | on | yes | the contact line is published; off, the node is a subscriber that costs nothing — the costmap's own contact_layer.enabled is the other end of the same demo switch, and either one alone takes the camera's floor line out |
 | `contact_scan` | `shadow` | bool | on | yes | the last floor pixel on a face stands a band's width UP that face, so its ray lands past the foot: on, that width is taken back off the range (pepin.contact.band_shadow); off is the raw boundary ray |
@@ -647,7 +1111,9 @@ minute, and every live flag on it back to its default.
 | `gaze` | `face_events` | bool | on | yes | the stall look's moments on the head's face (pepin.face_events.StallFace, through the board's head server on PEPIN_HOST:3340): surprised as the head turns to the blocker, a small grin when the look carved a phantom, worried when it confirmed a thing (config/face.json's events) |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim, graceful, dwb, shim_mppi | shim_mppi | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance; graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi; shim_mppi drives each goal on rpp_shim and hands it to mppi for the rest of that goal once the cart is within the knob park_distance_m of the goal (PARKERS) (ros/goto.sh controller NAME). Published latched on controller_selector and goal_checker_selector; the behaviour tree plans at once on a controller change and hands FollowPath the new controller together with that plan |
 | `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
+| `goal_server` | `goal_hull_check` | bool | off | yes | `plan` refuses a goal where the cart's hull standing there would cover a lethal cell of Nav2's global costmap (hull_on_costmap: a person's legs, a chair) before any planner is asked, blaming the goal; off, the planner alone judges the goal and `plan` reports the costmap as unchecked |
 | `goal_server` | `face_events` | bool | on | yes | the drive's moments on the head's face (pepin.face_events, through the board's head server on PEPIN_HOST:3340): focused while a goal runs, struggling for a moment at each new Nav2 recovery, happy on arrival, sad on an abort or a refusal, a flat line on a cancel (config/face.json's events say what each looks like); and a brain lease every 2 s, so the face falls asleep when this node or the WiFi is gone |
+| `goal_server` | `spin_requests` | bool | on | yes | `spin` turns the cart in place by `deg` (+ left, at most a whole turn) with one goal on the behaviour server's Spin, answered like a drive (accepted with the run, done with Nav2's status, the pose and the turn measured on map -> base_link), recorded and stopped by a cancel like one; the brain's turn tool sends it. Off, `spin` is refused with this flag's name |
 | `marks_audit` | `marks_audit` | bool | on | yes | the audit runs; off, the node keeps its subscriptions and computes, publishes and reports nothing |
 | `marks_audit` | `inscribed_counts` | bool | off | yes | the inflation's 99 band (costmap 253, INSCRIBED_INFLATED_OBSTACLE) is judged as a mark too; off, only the 100s a sensor actually wrote |
 | `rtabmap_frame` | `visual_features` | choice: orb, xfeat | xfeat | yes | which features RTAB-Map's VISUAL registration (Reg/Strategy 0, the camera-only strategy, and the visual half of 2) matches when it checks a node the words recognised. xfeat: XFeat keypoints matched by LighterGlue, re-extracted from both nodes' stored pictures at loop-closure time (Vis/FeatureType 15, Vis/CorNNType 6, RGBD/LoopClosureReextractFeatures true); the database is only read. orb: the database's own GFTT/ORB words, the launch table's values. Sent with the strategy and changed live; under ICP alone, and unless RTAB-Map is certainly localising (told so and answered, no switch to mapping waiting), the set is always orb, and a switch to mapping waits until orb's set is in force. xfeat needs the pepin-laptop:xfeat image (/opt/xfeat/rtabmap_xfeat.py); in another image this node sends orb and the report line says why |
@@ -696,6 +1162,8 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `bag_recorder` | `tail_s` | number 0..60 | 2.0 | goal_bag ring: a goal's bag ends this many seconds after the goal ended (the cart settling); the bag is cut this long and ~1 s after the end |
 | `camera_stream` | `scale` | number 0..1 | 0.5 | the published picture as a fraction of the camera's own 1280x720, its optics scaled with it; a change takes the next frame. THE MONO RIG's flag: a stereo head publishes at its calibration's own size (the size the remap tables were built for, the size a matcher's disparity is in pixels of), so the node pins this to 1.0 there and refuses any other value with that reason |
 | `camera_stream` | `camera_stamp_lag_s` | number 0..0.3 | 0.0 | camera_stamp grab only: every grab stamp is dated this many seconds earlier; 0 (the default) FOLLOWS THE CAMERA'S RATE: config/camera.json's rate rule (0.885 x the frame period + 3.5 ms) on the period this node measures from the grab stamps (the median of the last 31 intervals, printed in the report line with the configured rate beside it), because the capture stamp sits one frame period behind the picture at any rate (92 / 48 / 33 ms at 10 / 20 / 30 fps, 2026-10-07, scratch/vio_rate/lag_clip.py); 0.09, the default until 2026-10-07, is the fixed lag of 10 fps. The fixed value dates every grab stamp that much earlier, to the exposure the V4L2 capture stamp sits behind (about one frame period at 10 fps whatever the light: a buffered frame, not the exposure); the send fallback is left alone. Measured with the head's gyro against the pictures' own motion (image flow vs /head/imu, scratch/vio_night/cam_imu_lag.py): 90/90 ms by day, 92/95 ms at night (2026-10-04); with 0.09 live the residual read +1 ms. config/camera.json's head_imu.time_offset_s is measured against stamps dated head_imu.stamp_lag_s at head_imu.camera_fps, and ros/laptop.sh vio reads the live value at its start: restart the VIO after a change |
+| `camera_stream` | `perception_hz` | number 1..30 | 20.0 | perception_feed: frames a second at most sent to the perception service (a frame offered within three quarters of a period of the last one taken is passed over); 20 is the camera's rate, so every frame goes and the service's ring holds 10 s of all of them, while its detector takes 10 a second (config/models.json perception.detect_hz) |
+| `camera_stream` | `perception_quality` | integer 50..100 | 90 | perception_feed: the JPEG quality of the left picture sent (800x600: 77 KB at 90, 61 KB at 85; encoding 0.65 / 0.62 ms in this container, 2026-10-12, scratch/perception_1012/channel_costs.txt); the ring keeps these bytes, so see hands the LLM exactly them |
 | `contact_scan` | `max_range` | number 0.1..10 | 2.0 | metres past which a column is called clear instead of ended; the costmap's contact_layer.obstacle_max_range must match it |
 | `depth_fusion` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `depth_fusion` | `lean_gate_deg` | number 0..90 | 3.0 | a scan taken while the cart leans more than this many degrees is not integrated into the map; only with imu_lean on, which is where the lean is known at all |
@@ -781,6 +1249,9 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `glance_dwell_s` | number 0..3 | 0.6 | above 0 the reverse and stall looks are atomic glances: nothing but a better band takes the head before they are done, the reverse look at reverse_frames or this long after settling, the stall look at frames or ttl_navigation_s; the reverse glance takes the head from the path look at once, even mid-swing, and with reverse_hold_s it is cut at the first forward command (0: no glance, the reverse look waits for a path look to arrive, as before 2026-10-05) |
 | `gaze` | `return_deg_s` | number 0..300 | 0.0 | after a drive the head goes home at this speed, with neck_target; 0: a saccade at the board's top speed. 45 (2026-10-05 to 2026-10-06) made the way home gentle but cost 0.4 s of blind time per drive on eleven tapes, the only thing the speed changes (gaze_ahead headspeed.py); Artem 2026-10-07: fast |
 | `gaze` | `gate_dark_patience_s` | number 0..30 | 1.5 | a look whose frames depth_stream's gate has been dropping as dark (/depth/dark) for this long, board seconds from the first dark frame after the last fused one, gives up as 'dark, no frames' (expired, counted dark in the report line) instead of holding the head for its TTL; the auto exposure catches up in 1-2 s after a turn from a window (the 2026-10-06 bench), and the look ends early anyway once its frames are fused. 0 waits for the TTL |
+| `gaze` | `clip_max_deg` | number 0..90 | 30.0 | a head overlay (kind clip: a gesture's keys added to the holder's aim) with any key further than this off the holder's aim, on either axis, is refused whole (never clamped); 30 lets a glance aside (10-25 deg) through, the gestures themselves keep nearer (a nod 3-10) |
+| `gaze` | `clip_max_hz` | number 0..10 | 2.5 | an overlay whose tilt turns back sooner than half a period of this rate after its last turn is refused: the mast rings at 5.3 Hz after sharp tilts (config/neck.json's tilt_max_acc_deg_s2 note), so tilt oscillations stay under 2.5 Hz; the board's tilt ramp (600 deg/s^2) caps every move's acceleration on its own. 0: no check |
+| `gaze` | `clip_still_deg` | number 0..5 | 2.0 | an overlay whose keys all stay within this of the holder's aim (the breath, +-2.0 deg at 0.25 Hz; the melody, +-0.9 deg) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. 2.0 since 2026-10-13 (the breath at 2 deg), the settle tolerance's 1 deg before |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |
@@ -911,8 +1382,9 @@ the stack does (one zenoh session, opened once) and writes one uncompressed MCAP
 under `/root/pepin-ros/maps/board_rec/<UTC start>/`.
 
 - **What**: `/scan`, `/odom`, `/imu/data_raw`, `/odom_laser`, `/zupt`, `/tof/<n>` and
-  `/tof/<n>/scan`, `/neck/state`, `/tf_static`, and `/cmd_vel` and `/vo` as they arrived: every
-  input of the board's EKF, so its output replays from them. No `/tf` and no camera.
+  `/tof/<n>/scan`, `/neck/state`, `/arm/joint_states`, `/tf_static`, and `/cmd_vel` and `/vo` as
+  they arrived: every input of the board's EKF, so its output replays from them. No `/tf` and no
+  camera.
 - **The cap**: every 30 s the oldest minute files go while the directory holds more than 20 GB or
   the card has under 10 GB free; the file being written is never touched. 20 GB is ~38 h at the
   0.14 MB/s these topics measure.
@@ -1259,26 +1731,27 @@ core; nothing in `vslam.launch.py` starts them. Open a database with the tools o
 
 ## The model services
 
-Docker on macOS has no GPU, so the learned models run on the laptop as two host processes (two
-failure domains), which the containers reach as `http://host.docker.internal:<port>` (bound to
-127.0.0.1):
+Docker on macOS has no GPU and no Neural Engine, so the learned models run on the laptop as three
+host processes (three failure domains), which the containers reach as
+`http://host.docker.internal:<port>` (bound to 127.0.0.1):
 
 | job | process | port | models (device from `config/models.json`) |
 | --- | --- | --- | --- |
 | `depth` | `pepin.depth_service` | 8790 | the mono depth network, RAFT-Stereo (as `ros/depth_host.sh`) |
 | `localization` | `pepin.localization_service` | 8791 | XFeat (`/xfeat`, cpu), LighterGlue (`/match`, cpu), BoQ-DINOv2 place descriptors (`/place`, mps) |
+| `perception` | `pepin.perception_service` | 8792 | the one camera channel: SCRFD (ane), Apple Vision, ArcFace on demand (ane) ("One camera channel") |
 
-Both are launchd jobs run from the repository's uv environment and loaded on demand: their plists
+All are launchd jobs run from the repository's uv environment and loaded on demand: their plists
 live in `~/Library/Application Support/pepin/launchd` (`PEPIN_LAUNCHD_DIR`), so nothing loads them
 at login. While a job is loaded launchd restarts it when it dies. `ros/laptop.sh vslam` starts
-both and `ros/laptop.sh stop` stops them.
+the installed ones and `ros/laptop.sh stop` stops them.
 
 | command | what it does |
 | --- | --- |
-| `ros/models.sh install [depth\|localization\|all]` | write the job's plist and start it; waits for `/health` |
+| `ros/models.sh install [depth\|localization\|perception\|all]` | write the job's plist and start it; waits for `/health` |
 | `ros/models.sh start\|stop\|restart [...]` | load / unload / kill-and-respawn the job |
 | `ros/models.sh status [...]` | launchd's word and each `/health`: every model's tag (its weights' hash), device, requests and ms |
-| `ros/models.sh logs [depth\|localization]` | follow `logs/models_<job>.out` |
+| `ros/models.sh logs [depth\|localization\|perception]` | follow `logs/models_<job>.out` |
 | `ros/models.sh fetch-xfeat` | clone XFeat at the commit the image pins into `models/accelerated_features` |
 | `ros/models.sh uninstall [...]` | stop and remove |
 

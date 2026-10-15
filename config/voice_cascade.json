@@ -9,13 +9,22 @@
     "lead_s": 1.0,
     "floor_min_dbfs": -85.0,
     "continuation_s": 0.8,
-    "turn_model": null,
-    "note": "wake name: a conversation opens only on the robot's name (pepin.voice_live.wake.is_wake); always: every utterance is a turn (the bench). silence_s: the end of the turn is this much quiet after the last loud frame (0.4 s; 0.5 s was the Live gate's). 2026-10-09, 18 of Artem's live utterances with 0.25 s of quiet inserted mid-sentence (scratch/voice_cascade_eot/eot_eval.py): silence 0.5 closed 2-3 of them early, 0.4 3-4, Smart Turn 0.5 15-16, Smart Turn 0.85 13-15; with the continuation merge none stayed cut (the voice always came back within 0.8 s); the close after the last word: 500, 400, 220 (max 500), 220 (max 400 with silence 0.4) ms. start_db: a frame this far above the room's floor is loud. vad_open: a loud frame opens an utterance only when the barge-in's Silero model gives speech at least this probability (0: loudness alone); 2026-10-11 the room's rustles at -46..-32 dBFS opened 20-30 phantom utterances a minute over the -85 floor and each phantom in the 0.8 s after a phrase held the turn ~2 s. lead_s: the audio kept from before the opening; Silero says speech only ~0.4 s into a word (measured on 'как у тебя дела'), so with the old 0.3 s the first word was lost ('у тебя дела'). floor_min_dbfs: the floor never follows the room below this (-85: the XVF3800's noise suppression delivers -90..-94 dBFS between words, 2026-10-09 logs, so a higher floor would call quiet syllables silence; macOS say pads with digital silence; a floor that low opened the gate on -84 dBFS hiss for 15 s at a time, read by Whisper as 'Продолжение следует...'); speech sits at -50..-20 dBFS. continuation_s: the person starting again this soon after an utterance closed (by the model or the silence), before any of the reply was played, cancels the brain's call and the two utterances become one turn (2026-10-09: Smart Turn closed 'сегодня день.' at p 0.97 and the rest of the sentence came as the next turn); 0: off. Once the reply plays, it is a barge-in (flags.barge_in). turn_model: null (the fixed silence alone) or smart-turn-v3.2 (the turn section)"
+    "turn_model": "two-gates",
+    "heard_audio": true,
+    "heard_audio_note": "2026-10-14 (Artem): outside a conversation every utterance that is not a noise line keeps its audio as heard/<HHMMSS_mmm>.wav in the day's folder (data/voice/<day>/; 16 kHz mono 16-bit, the whole cut the transcriber got, lead-in and closing quiet included; named by the local time of its last voiced frame), the path in its row's wav (the day's cascade_heard.jsonl); talk in the room without the robot's name, the family's included, was lost otherwise, and it is kept for batch processing later. Written on a worker thread, never in the ears' way; a failed write logs a warning and drops the file, never the row. Inside a conversation in.wav holds it all. ros/tools/b2_ship.sh moves the files to the bucket after 30 min (the same path under pepin/). false: the rows alone, as before",
+    "note": "wake name:a conversation opens only on the robot's name (pepin.voice_live.wake.is_wake); always: every utterance is a turn (the bench). silence_s: the end of the turn is this much quiet after the last loud frame (0.4 s; 0.5 s was the Live gate's). 2026-10-09, 18 of Artem's live utterances with 0.25 s of quiet inserted mid-sentence (scratch/voice_cascade_eot/eot_eval.py): silence 0.5 closed 2-3 of them early, 0.4 3-4, Smart Turn 0.5 15-16, Smart Turn 0.85 13-15; with the continuation merge none stayed cut (the voice always came back within 0.8 s); the close after the last word: 500, 400, 220 (max 500), 220 (max 400 with silence 0.4) ms. start_db: a frame this far above the room's floor is loud. vad_open: a loud frame opens an utterance only when the barge-in's Silero model gives speech at least this probability (0: loudness alone); 2026-10-11 the room's rustles at -46..-32 dBFS opened 20-30 phantom utterances a minute over the -85 floor and each phantom in the 0.8 s after a phrase held the turn ~2 s. lead_s: the audio kept from before the opening; Silero says speech only ~0.4 s into a word (measured on 'как у тебя дела'), so with the old 0.3 s the first word was lost ('у тебя дела'). floor_min_dbfs: the floor never follows the room below this (-85: the XVF3800's noise suppression delivers -90..-94 dBFS between words, 2026-10-09 logs, so a higher floor would call quiet syllables silence; macOS say pads with digital silence; a floor that low opened the gate on -84 dBFS hiss for 15 s at a time, read by Whisper as 'Продолжение следует...'); speech sits at -50..-20 dBFS. continuation_s: the person starting again this soon after an utterance closed (by the model or the silence), before any of the reply was played, cancels the brain's call and the two utterances become one turn (2026-10-09: Smart Turn closed 'сегодня день.' at p 0.97 and the rest of the sentence came as the next turn); 0: off. Once the reply plays, it is a barge-in (flags.barge_in). turn_model: null (the fixed silence alone), smart-turn-v3.2 (the sound alone) or two-gates (the words of the early read and the sound together); the turn section"
   },
   "turn": {
     "min_silence_s": 0.2,
     "window_s": 8.0,
     "threshold": 0.85,
+    "acoustic": "pause",
+    "text_model": null,
+    "early_close_s": 0.2,
+    "incomplete_s": 0.8,
+    "complete_p": 0.7,
+    "incomplete_p": 0.02,
+    "two_gates_note": "with ears.turn_model two-gates (pepin.voice_cascade.turn_text): the transcriber's early read of a pause (transcriber.early_s 0.15; GigaAM ~35 ms, so the words are judged ~0.2 s into the pause, on the transcriber's thread, no extra call) says complete, incomplete or unsure. Russian rules: incomplete when the last word is a conjunction, preposition, negation, hesitation or intensifier, on 'потому что'/'то есть', openers or the robot's name alone, a question word not read as a question, a trailing comma; complete for a read sentence of two words or more (GigaAM ends every prefix with '.' or '?', so the mark only says it was read). The words complete and the sound agreeing (acoustic pause: the pause itself; smart-turn-v3.2: its p >= threshold, asked at min_silence_s) close the utterance at early_close_s of quiet; words incomplete hold it open to incomplete_s; anything else closes it at ears.silence_s. A continuation (back within ears.continuation_s) is judged with the words before it. text_model namo-ru (videosdk-live Namo-Turn-Detector-v1-Russian, Apache-2.0, 136 MB int8 ONNX, ~13 ms on the CPU) is a second opinion: p <= incomplete_p vetoes (wait), p >= complete_p makes a lone word whole. 2026-10-12, scripts/turn_eval.py (203 of Artem's turns: 148 from the cascade records of 10-11/12, 55 Live cuts of 10-08; and 307 mid-sentence pauses made by inserting quiet at word boundaries), turns cut before the last word / the close after it p50 (mean) ms: as spoken, silence 0.4 8 / 400 (535), silence 0.25 12 / 260 (349), Smart Turn 0.5 13 / 220 (319), two-gates 12 / 260 (367), two-gates early_close_s 0.3 12 / 300 (414); pauses +0.25 s cut: silence 0.4 14, 0.25 37, Smart Turn 0.5 263, 0.85 225, two-gates 27, two-gates 0.3 20, with Smart Turn 0.85 as the sound 24; pauses +0.5 s: silence 0.4 285, 0.25 299, Smart Turn 300, two-gates 262, with namo-ru 243 (but 10 of 203 finished turns waited 0.8 s); pauses +0.8 s: all 295-304, the continuation merge joins ~95 %. The rules call 83 % of true ends complete and 1 % incomplete, 56 % of mid-sentence pause reads complete (a finished-looking prefix) and 11 % incomplete",
     "note": "with ears.turn_model smart-turn-v3.2 (pipecat-ai/smart-turn-v3, smart-turn-v3.2-cpu.onnx: 8 MB int8 ONNX on the CPU, BSD-2-Clause, 23 languages with Russian at 93.5 % on its own benchmark; ~9 ms a call here): at min_silence_s of quiet inside an utterance the model reads its last window_s seconds (zeros in front, as it was trained) on a worker thread, and the utterance closes when it says p >= threshold (0.85: at 0.5 it cut 'сегодня день.' live at p 0.97, and at either it fires in most 0.25 s mid-sentence pauses, which the continuation merge joins back); otherwise ears.silence_s closes it as before. Every turn logs p, the model's own ms and the time saved against the fixed silence"
   },
   "transcriber": {
@@ -35,6 +44,8 @@
       "device": "cpu",
       "threads": 4,
       "quantization": null,
+      "timings": true,
+      "timings_note": "each word's time from the 40 ms frames the decoder emitted its tokens at (onnx-asr with_timestamps, BPE tokens for the e2e models, letters for -ctc/-rnnt), its log-prob, and its vowels from the sound (Praat voicing within 10 dB of the word's loudest step, pepin.voice_cascade.timing): the prosody tag's stretch phrase reads them, the heard event logs them (words: w, t, lp, v). Same model call: 2026-10-12 (scratch/gigaam_timing_1012/timed_cost.py), +0-4 ms on 2-4 s utterances and +10 ms on 6.8 s over the plain read's 52-99 ms. false: the text alone",
       "note": "GigaAM v3 (Sber, MIT), Russian only, on onnxruntime's CPU (pepin.voice_cascade.stt.gigaam). uv sync --group stt-gigaam. model: gigaam-v3-e2e-rnnt or -e2e-ctc (punctuation and capitals), gigaam-v3-rnnt or -ctc (lower case); quantization int8 halves the memory. 2026-10-12, 3 of Artem's cuts (2.6-4.1 s) on the M5 Pro beside the stack (tests/models): loads in 0.9 s, footprint +0.93 GB (int8 +0.5), 56 ms an utterance with 4 threads (Whisper turbo on the GPU 201 ms, +2.6 GB); closed, onnxruntime keeps ~0.4 GB of freed buffers that the next load reuses"
     },
     "parakeet": {
@@ -59,7 +70,7 @@
     },
     "language": "ru",
     "initial_prompt": null,
-    "early_s": 0.15,
+    "early_s": 0.08,
     "note": "Whisper large-v3-turbo, Russian forced. engine mlx: on the Mac's GPU (mlx-whisper); whispercpp: whisper.cpp's server with the encoder on the Neural Engine through CoreML and the decoder on the CPU (pepin.voice_live.whisper_cpp; whispercpp.dir holds bin/whisper-server and models/ggml-<model>.bin beside its -encoder.mlmodelc). 2026-10-09, 15 of Artem's cuts x3 on the M5 Pro (scratch/whisper_ane/bench.py), p50 ms quiet / 12 busy CPU cores / a GPU matmul loop: mlx turbo 174 / 185 / 565, whispercpp turbo 435 / 578 / 445, whispercpp large-v3 842 / 1789 / 976; the GPU runs the 32-layer encoder 2.5x faster than the Neural Engine, so mlx stays the default and whispercpp is the engine for a busy GPU (the voice, the depth and localisation nets), using 0.5 core and no GPU. Words against mlx: turbo 6 edits in 92 words, large-v3 3, the wake name found alike. One run: --set transcriber.engine=whispercpp (whispercpp.model large-v3 for the slower large model); while running: scripts/voice_cascade.py switch --transcriber whispercpp, which writes the key transcriber of data/voice/control.json ('mlx', 'whispercpp', 'whispercpp:large-v3' or {engine, model}; the file's one reader is pepin.voice_cascade.control.ControlFile, with brain and voice beside it) and prints the loop's answer, acted on when the file changes, the new engine loaded beside the old one and swapped between utterances. coreml_units: ane (CPU and Neural Engine), all (CoreML picks the GPU here: 236 ms), gpu, cpu (912 ms); gpu: the decoder on Metal. The first start of an encoder compiles it for the Neural Engine (34 s turbo, 27 s large-v3, once; then 1-3 s). early_s: Whisper starts on an utterance at this much quiet inside it, while the end-of-turn silence is still running, so its words are ready when the utterance closes (0: only after the close). A call costs ~230 ms whatever the length (the 30 s encoder window: 0.5 s of audio 233 ms, 5 s 299 ms, 8 s 326 ms on the M5, 2026-10-09), so decoding only the tail would not get under it; a pause the person talks through wastes one call. Its noise lines (subtitle credits, a bare 'Спасибо.') are dropped (pepin.voice_live.wake.is_hallucination)"
   },
   "brain": {
@@ -70,6 +81,9 @@
     "prewarm": true,
     "max_tool_rounds": 4,
     "timeout_s": 20,
+    "speculative": false,
+    "speculative_min_words": 2,
+    "first_sentence_words": 0,
     "presets": {
       "haiku": {"provider": "anthropic", "model": "claude-haiku-5-5", "thinking": "disabled", "effort": "low", "keep_warm_s": 270},
       "sonnet": {"provider": "anthropic", "model": "claude-sonnet-5-5", "thinking": "between_tools", "effort": "low", "keep_warm_s": 270},
@@ -80,7 +94,7 @@
       "groq-oss": {"provider": "openai", "compact_tools": true, "base_url": "https://api.groq.com/openai/v1", "api_key_env": "GROQ_API_KEY", "model": "openai/gpt-oss-120b", "thinking": null, "effort": null, "reasoning_effort": "low", "extra_body": {"include_reasoning": false}, "persona_file": "voice_cascade_persona_compact.md", "tools": ["where_am_i", "list_places", "go_to", "cancel", "look", "see", "status"], "keep_warm_s": 0},
       "groq-qwen": {"provider": "openai", "compact_tools": true, "base_url": "https://api.groq.com/openai/v1", "api_key_env": "GROQ_API_KEY", "model": "qwen/qwen3.8-27b", "thinking": null, "effort": null, "persona_file": "voice_cascade_persona_compact.md", "tools": ["where_am_i", "list_places", "go_to", "cancel", "look", "see", "status"], "keep_warm_s": 0}
     },
-    "note": "preset picks model + thinking + effort; keys beside it win (--set brain.effort=medium). --brain NAME at start; while running scripts/voice_cascade.py switch --brain NAME (built and warmed, it takes the next turn; the conversation goes on with it afresh, the old brain's history is not carried over). Thinking off: Haiku 5.5 'disabled'; Sonnet 5.5 'between_tools' (it refuses 'disabled'); Opus 5.5 cannot switch thinking off, 'adaptive' + effort low is its floor. Measured first word with a ~3k-token cached persona: Haiku 0.56 s, Sonnet 0.64 s, Opus 2.3 s; a tool round trip adds 1.4 s (Haiku) to 3.4 s (Sonnet). Gemini (provider gemini, GEMINI_API_KEY): thinking off is the lowest each model takes, probed 2026-10-09: 3.5 Flash-Lite refuses thinking_budget 0, takes thinking_level minimal; 3.5 Flash takes budget 0; 3.8 Flash takes budget 0 but still thinks (56 tokens on a greeting) and refuses minimal, so level low; its implicit cache needs a 4096-token prefix and has no write premium; keep_warm_s 0 (a warm-up would re-bill the whole prefix). Groq (provider openai: the OpenAI-compatible endpoint, GROQ_API_KEY; no retries, a 429 is printed): the free tier limits tokens per minute and a 3.5k-token prompt stalled 13-25 s in retries, so its presets take the compact persona and 7 tools with their descriptions cut to a sentence (compact_tools; ~1.3k tokens a call; this key's limit is 8000 input tokens a minute for both models, 2026-10-09); gpt-oss-120b with reasoning low, qwen3.8-27b as it comes. tool_choice required forces a call in a turn's first round (to try on a model that answers '...' instead of calling see). cache: a breakpoint on the persona (tools + persona, shared by every conversation) and on the growing conversation; prewarm: a max_tokens 0 call at start writes it, and again after keep_warm_s without a call (the cache lives 5 min). The key: ANTHROPIC_API_KEY in the environment"
+    "note": "preset picks model + thinking + effort; keys beside it win (--set brain.effort=medium). --brain NAME at start; while running scripts/voice_cascade.py switch --brain NAME (built and warmed, it takes the next turn; the conversation goes on with it afresh, the old brain's history is not carried over). Thinking off: Haiku 5.5 'disabled'; Sonnet 5.5 'between_tools' (it refuses 'disabled'); Opus 5.5 cannot switch thinking off, 'adaptive' + effort low is its floor. Measured first word with a ~3k-token cached persona: Haiku 0.56 s, Sonnet 0.64 s, Opus 2.3 s; a tool round trip adds 1.4 s (Haiku) to 3.4 s (Sonnet). Gemini (provider gemini, GEMINI_API_KEY): thinking off is the lowest each model takes, probed 2026-10-09: 3.5 Flash-Lite refuses thinking_budget 0, takes thinking_level minimal; 3.5 Flash takes budget 0; 3.8 Flash takes budget 0 but still thinks (56 tokens on a greeting) and refuses minimal, so level low; its implicit cache needs a 4096-token prefix and has no write premium; keep_warm_s 0 (a warm-up would re-bill the whole prefix). Groq (provider openai: the OpenAI-compatible endpoint, GROQ_API_KEY; no retries, a 429 is printed): the free tier limits tokens per minute and a 3.5k-token prompt stalled 13-25 s in retries, so its presets take the compact persona and 7 tools with their descriptions cut to a sentence (compact_tools; ~1.3k tokens a call; this key's limit is 8000 input tokens a minute for both models, 2026-10-09); gpt-oss-120b with reasoning low, qwen3.8-27b as it comes. tool_choice required forces a call in a turn's first round (to try on a model that answers '...' instead of calling see). cache: a breakpoint on the persona (tools + persona, shared by every conversation) and on the growing conversation; prewarm: a max_tokens 0 call at start writes it, and again after keep_warm_s without a call (the cache lives 5 min). The key: ANTHROPIC_API_KEY in the environment speculative: the brain is asked at the early read of a pause (transcriber.early_s; with ears.turn_model two-gates only on words judged complete), before the turn closes, in a conversation with nothing in flight, never on fewer than speculative_min_words words, never for a continuation or with person recognition on, at most once an utterance; the reply stays silent (voice, tools and gestures wait) until the close brings the same read, else it is dropped (its call billed, an estimate when cut mid-stream) and the close's words are asked again; the summary counts asked/kept/dropped and the cents wasted. The head start is the close less the read: ~200 ms with silence_s 0.4, ~60 ms with two-gates' 0.25 s close. first_sentence_words: N > 0 appends one line to the persona (the first sentence at most N words; fixed per config, so the cached prefix is too); 0 leaves the persona's own 8. 2026-10-12, scratch/fast_reply/first_sentence.py, Sonnet, one question x5 per arm, two runs in both orders: the persona alone already gave 5 words; with N 6 the first sentence had 4-5 and ended 55-83 ms sooner after the first token, but the first token came 400-800 ms later (p50; slower in 10 of 10 pairs), so the sentence ended 290-680 ms later from the call: no gain on Sonnet. Live Opus turns (126, 10-09..12): first sentence p50 4 words, 29 % over 6, first token to first sentence p50 308 / p90 868 ms: only the tail has room; A/B it on Opus before keeping it."
   },
   "voice": {
     "preset": "qwen3-1.7b",
@@ -137,8 +151,7 @@
   "backchannel": {
     "delay_s": 0.3,
     "min_speech_s": 0.8,
-    "lines": ["угу", "мм"],
-    "note": "a clip (synthesised once at load) when the person has been quiet delay_s inside an utterance of at least min_speech_s, before the end of the turn"
+    "note": "a filler (conversation.fillers.backchannel, by the fillers' rules) when the person has been quiet delay_s inside an utterance of at least min_speech_s, before the end of the turn. lines, the old place of its lines (a list: conversation.language's), wins over the book when given"
   },
   "prosody": {
     "speaker": "Артём",
@@ -146,18 +159,88 @@
     "window": 200,
     "z": 2.0,
     "emotion_model": null,
-    "note": "the tag line names speaker (no speaker ID yet), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean (2.0: Artem's deliberate contrasts sit at 2.7-6 sd, and with five numbers z 1.0 flagged 8 of the 10 tagged phrases of the 2026-10-08 bench): loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
+    "stretch_ratio": 4.0,
+    "stretch_min_s": 0.5,
+    "stretch_note": "a drawn-out vowel joins the tag line spelled as people write one, [Артём: растянуто: прииинтер]: a vowel at least stretch_ratio times this person's usual vowel in its place (the running median; a phrase's last vowel apart) and stretch_min_s long; null ratio: never. Needs transcriber.gigaam.timings. 2026-10-12 (scratch/gigaam_timing_1012/stretch_eval.py, the e2e-rnnt's tokens): Artem's usual vowel 0.10 s, a phrase's last 0.13 s (162 far-field utterances); 'а при́нтер' of cascade_144219 (his stress correction) called прииинтер, 0.36 s x2.8; on the 162 ordinary utterances 7.4 % of words are called (x2.5 and 0.3 s: 3.5 %), most of them his own drawls while thinking (температуруууу, ууумеешь, нуууу); a vowel lengthened x3 by PSOLA called 21 of 40 times, the right letter 14 (a vowel shorter than 0.08 s stays under the floor)",
+    "note": "the tag line names speaker while person recognition is off (config/people.json, switch people; on, it names the recognised person, [говорит: Саша; тише обычного], each person with a baseline of their own, and nobody unknown gets prosody words), says nothing until min_baseline utterances are in the running baseline (the last window of this run), and gives a word for each number at least z of the person's spreads from their mean (2.0: Artem's deliberate contrasts sit at 2.7-6 sd, and with five numbers z 1.0 flagged 8 of the 10 tagged phrases of the 2026-10-08 bench): loudness, rate (syllables/s), pitch (median, st), intonation (5-95 % range, st), long pauses. emotion_model: null, audeering (arousal joins the numbers; CC-BY-NC-SA research weights, 0.7 GB) or emotion2vec (its label quoted; needs funasr installed). scratch/prosody_1008/REPORT.md: the plain numbers separate Artem's deliberate contrasts by 2.7-6 sd; the label models contradict each other"
   },
   "conversation": {
     "idle_close_s": 20.0,
-    "max_session_s": 900.0,
+    "idle_parting": true,
     "report_drive_start": true,
     "error_line": "Извини, у меня сбой связи.",
-    "tool_filler": "Секунду.",
-    "note": "tool_filler: said locally (a clip made at load) when the brain calls a slow tool (see, look, find...) before saying a word in its reply; empty: off. a conversation closes after idle_close_s without the person's voice or a reply (never while a drive runs), on a goodbye, on end_conversation, or at max_session_s. report_drive_start: a drive answers its call when the goal server takes it (the brain says its acknowledgement) and its end comes as a [robot] turn. error_line: said locally when the brain fails before saying anything"
+    "language": "ru",
+    "fillers": {
+      "neutral": ["Хм…", "Ммм…", "Э-э…", "Хм-м…"],
+      "thinking": {
+        "ru": ["Хм.", "Эм.", "М-м."],
+        "en": ["Hmm.", "Um.", "Uh."]
+      },
+      "thinking_min_words": 4,
+      "thinking_chance": [[4, 0.3], [10, 0.7], [20, 1.0]],
+      "any": {
+        "ru": ["Минутку.", "Секунду.", "Сейчас.", "Так, сейчас.", "Один момент.", "Секундочку."],
+        "en": ["One sec.", "Just a moment.", "Hang on.", "Give me a sec.", "Let me see."]
+      },
+      "again": {
+        "ru": ["Ещё секундочку.", "Уже почти.", "Почти готово.", "Сейчас-сейчас."],
+        "en": ["Almost there.", "Just a sec more.", "Bear with me."]
+      },
+      "backchannel": {
+        "ru": ["угу", "ага", "мм"],
+        "en": ["mm-hmm", "uh-huh", "yeah"]
+      },
+      "by_tool": {
+        "see": {
+          "ru": ["Сейчас гляну.", "Так, смотрю.", "Дай гляну."],
+          "en": ["Let me look.", "Looking.", "Let me see that."]
+        },
+        "look": {
+          "ru": ["Сейчас гляну.", "Так, смотрю.", "Дай посмотрю."],
+          "en": ["Let me look.", "Looking.", "Let me check."]
+        },
+        "look_around": {
+          "ru": ["Сейчас осмотрюсь.", "Так, оглядываюсь.", "Дай осмотрюсь."],
+          "en": ["Let me look around.", "Looking around."]
+        },
+        "find": {
+          "ru": ["Сейчас поищу.", "Так, ищу.", "Дай поищу."],
+          "en": ["Let me find it.", "Looking for it.", "Searching."]
+        },
+        "recall": {
+          "ru": ["Дай вспомнить.", "Сейчас вспомню.", "Так, вспоминаю."],
+          "en": ["Let me remember.", "Let me think back."]
+        },
+        "remember_person": {
+          "ru": ["Дай запомнить…", "Секундочку, запоминаю.", "Сейчас, запишу."],
+          "en": ["Let me remember you.", "Okay, remembering you."]
+        },
+        "forget_person": {
+          "ru": ["Хорошо, забываю.", "Ладно, стираю."],
+          "en": ["Okay, forgetting.", "Alright, I'll forget."]
+        },
+        "gesture": {
+          "ru": ["Смотри!", "Вот так!", "Гляди!"],
+          "en": ["Watch!", "Like this!", "Look!"]
+        }
+      }
+    },
+    "filler_language_from": "utterance",
+    "filler_thinking_s": 1.2,
+    "filler_again_s": 4.0,
+    "filler_silent_p": {"thinking": 0.25, "backchannel": 0.25},
+    "filler_cooldown_s": {"backchannel": 2.0},
+    "filler_max_s": {"thinking": 0.6},
+    "filler_fade_ms": 60,
+    "scene_status": true,
+    "scene_heading_sector_deg": 15,
+    "scene_hysteresis_deg": 5,
+    "scene_cell_m": 0.25,
+    "scene_status_note": "2026-10-14 (Artem): every brain input (a person's turn or a [robot] one) begins with a [scene] line, the body's own report of what changed since the last message the brain's history kept (pepin.voice_cascade.scene), e.g. [scene] heading 95; ahead: printer; person: left 40 deg, seen; nothing when nothing changed, every field known at a conversation's first message. Fields: heading (where_am_i's, in sectors scene_heading_sector_deg wide, changed only past a sector's edge by more than scene_hysteresis_deg), position (cells of scene_cell_m, changed only 0.1 m past an edge, with the place it stands at), ahead (a named place within 20 deg of the nose and under 2.5 m, else the person, else nothing named), the person (the speaker gaze's bearing and whether the camera saw them within 3 s), driving / turning in place / standing still. The buckets keep the breath and the wheels' wobble (95 -> 95.3) out of it. Why: after turn(printer) the gaze turned the body back to the person and the brain said the printer was in front of it. Cost: one where_am_i (the goal server's where and places, on a worker) per brain input while on. Live: scripts/voice_cascade.py switch --flag scene_status=off. false: no line and no where_am_i",
+    "note": "fillers (pepin.voice_cascade.fillers): what the robot says by itself into dead air, each context's lines by language ({\"ru\": [...], \"en\": [...]}; a bare list is conversation.language's) and neutral hums for any language. tool: the brain calls a slow tool (pepin.voice_cascade.loop.SLOW_TOOLS) or a gesture before a word of its reply: the tool's by_tool lines, else any. thinking: the brain's first token is not in filler_thinking_s after the turn closed and nothing was said (0: never), and wanted by the question's length (fillers thinking_min_words, default 4: a question of fewer words, \"привет\" or \"где ты?\", gets none, its reply comes fast anyway; fillers thinking_chance, default [[4, 0.3], [10, 0.7], [20, 1.0]]: [words, probability] points, words rising, interpolated linearly and held beyond the ends; words are runs of letters of the person's utterance; the chance multiplies the context's own (1 - filler_silent_p.thinking) in one draw when the moment comes, which spends the moment either way, so at the defaults a 4-word question gets a thinking filler 22 % of the time, 10 words 52 %, 20 and more 75 %; the cooldown is untouched): thinking's lines with the neutral hums, short interjections only, content-blind since nobody knows the answer yet (a whole phrase belongs to tool and again: before filler_fade_ms the player queued the reply behind a filler still playing, and on 2026-10-12 9 of 19 thinking fillers were, the reply waiting 145-1095 ms, median 456, behind clips of 0.8-1.8 s: \"Сейчас…\" 0.80, \"Секундочку…\" 0.88, \"Ммм…\" 1.44, \"Так-так…\" 1.76, \"Хм-м…\" 1.85; scratch/fillers/collisions.py); 2026-10-12, 354 live turns (scratch/fillers/ttft.py): Opus's first token later than 1.2 s after the close in 58 % of its turns (1.5 s: 39 %), flash-lite 9 %. again: the reply still silent filler_again_s after its last filler (0: never). backchannel: flags.backchannel's pause cue. Rules: tool, thinking and again once a reply; filler_cooldown_s the least time between two moments of a context; filler_silent_p the chance a moment passes in silence (a game's \"no bark\"); filler_max_s, per context, the longest clip said (seconds, 0 and up; a context not named says any length): thinking 0.6 (with every thinking clip at most 0.6 s the replies of 2026-10-12 would have waited behind one in 3 of 19 turns, 109-171 ms; 0.5: 9-71 ms; 0.8: 7 turns, up to 371 ms), each filler's clip length logged (events.jsonl filler clip_s); filler_fade_ms (default 60, 0 to 500): a thinking filler is sent to the speaker only this far ahead (not player.lead_s) and when the reply's first audio reaches the player while it still plays, the part not sent yet becomes a linear ramp to silence this long and the reply follows it in the same stream, so the reply waits for at most what was sent and the ramp (at 60: up to 100 ms sent, one 40 ms block over the hold, then the 60 ms ramp), never for the rest of the filler (a clean cut where the voice's tone differs between filler and reply); 0 sends the filler like any audio and the reply waits for its end, as before. Logged: the filler event's fade_ms, and a filler_fade event (faded_ms the ramp, cut_ms the filler dropped, ahead_ms what was sent and played on) whenever a reply met its filler still playing. Unmeasured on the board: the held filler assumes playback starts on the first chunk it gets (a WiFi stall longer than the hold breaks the filler, never the reply); no line again while among the last 3 picked (the lines allowing); only a line whose clip is made (a line synthesised on the spot would hold the voice ahead of the reply). The language: conversation.language at the open, then (filler_language_from utterance) the script of the person's last words: Latin letters en, Cyrillic ru (GigaAM writes Cyrillic alone, so it stays ru; Parakeet and Whisper without a forced language write English in Latin); a language without lines says the neutral hums, the backchannel nothing (a hum under the person's words reads as doubt); config: conversation.language alone. Each said line is logged (events.jsonl filler with its context and language, the turn's fillers). Clips are made by the voice once it is ready, while no job waits, the hums and conversation.language's lines first; a paid voice's are made and said by its local fallback (never a cloud call), and without a fallback no filler is said. {} or \"\": no fillers; the old forms still read: \"tool_filler\": \"Секунду.\" or a list as fillers is any alone; an object without thinking or neutral has none. a conversation closes after idle_close_s without the person's voice or a reply (never while a drive runs), on a goodbye or on end_conversation; no cap on its length (2026-10-14: max_session_s, 900 s, closed a live conversation at 15 min without a word, and the next words were idle until the name). idle_parting: at idle_close_s the brain is first asked, as a [robot] turn, for one short parting line and the close follows that reply; the person speaking meanwhile keeps the conversation open (2026-10-13, a guest: the robot asked her to look at it, she said nothing more, it stood silent 20 s and closed without a word; one Opus call, ~0.4 CAD cents); false: the old silent close. report_drive_start: a drive answers its call when the goal server takes it (the brain says its acknowledgement) and its end comes as a [robot] turn. error_line: said locally when the brain fails before saying anything"
   },
   "money": {
-    "daily_budget_cad": 2.0,
+    "daily_budget_cad": 10.0,
     "max_sessions_per_hour": 60,
     "usd_to_cad": 1.38,
     "prices_usd_per_mtok": {

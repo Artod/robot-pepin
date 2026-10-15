@@ -6,7 +6,7 @@
   "stale_s": 3.0,
   "rate_note": "rate_hz: frames processed per second; a turn that overruns takes the newest frame at once and drops the ones in between (never a queue). hold_s: how long the last face stays in the line after the detector stops seeing it. stale_s: pepin.face_sensor.latest answers None for a line whose frame is older than this.",
   "device": "coreml",
-  "device_note": "onnxruntime's providers for the detector, the identity net and the expression net: coreml = the CoreML provider on every compute unit (Neural Engine, GPU, CPU), mps = the CoreML provider on CPU and GPU (Metal) only, cpu = the CPU provider. MediaPipe's landmarker runs on the CPU (XNNPACK) under every device.",
+  "device_note": "onnxruntime's providers for the detector, the identity net and the expression net: coreml = the CoreML provider on every compute unit (Neural Engine, GPU, CPU), mps = the CoreML provider on CPU and GPU (Metal) only, ane = the CoreML provider on CPU and Neural Engine only (never the GPU), cpu = the CPU provider. MediaPipe's landmarker runs on the CPU (XNNPACK) under every device.",
   "models": {
     "identity": true,
     "expression": true,

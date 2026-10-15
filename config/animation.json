@@ -1,0 +1,842 @@
+{
+  "_note": "The gesture book (pepin.expression.book): the motion atoms, the compositions the brain names in its text ({laugh}) or through the gesture tool, the arm poses taught by hand, the idle layer and the robot's moments. An atom is ONE cycle of keys at shares (at 0..1) of its period_s; a value is a number, \"$param\" or \"-$param\" of its params (drawn uniformly from [lo, hi] at each performance); repeats and hold_s are reserved. Degrees: the head's pan_deg + left, tilt_deg + down (offsets on whatever holds the head); the arm's joints in config/arm.json's convention (additive: offsets on the pose under it; absolute: a pose, starting and ending on rest); the wheels' yaw_deg + left and x_m + forward (pepin.expression.wheels; sized to config/expression.json's wheels caps at speed 1, a clip faster than them is refused). A step's at_s puts the atom's stroke (stroke x its first cycle) that far from the marker's word (negative: before it), p is the chance it plays (1 throughout since 2026-10-13: a variant is one body's ensemble, face, head and arm or wheels together, and the dice are between the variants and in the ranges), params narrow the atom's ranges, a string or a list of strings names a face (name) or a pose (pose). A composition with callable false is the engine's own (the pulse's accents, the listener's nods, the held arm's sway: pepin.expression.listeners asks for it by name, a part it finds busy left out), never a mark of the brain's. A composition's args are the arguments a mark may carry ({point:you}); its style_args pick a variant's argument for a bare mark from the part's style words ({laugh} in a {sinister} part is {laugh:evil}: the variants written for evil, needs arg, win the dice). The breath block at the end is the breath LAYER (a filter under the arm's clips, its note explains). Timing and variety from .claude/research/brain/expression/expressive_motion.md (2026-10-11): strokes on the word or up to 0.2 s before it, amplitude ranges of about +-20 %, period ranges of about +-12 %, optional parts with their odds, mirror images, never the same variant twice running. Arm atoms are sized to config/arm.json's caps (240 deg/s, 2232 deg/s^2 since 2026-10-12) at speed 1 by the swing law in arm_wave's note (73 amp / period^2 for a two-way atom): bigger is slower, never both; raise the caps on the bench before raising these.",
+  "poses": {
+    "note": "Arm poses, one angle per joint of config/arm.json, and a note each: TAUGHT by hand (scripts/gesture.py teach NAME: torque off, the arm placed, its six angles written here) or AUTHORED from the URDF (pepin.arm's forward kinematics of the vendored URDF on config/arm.json's mount, the link boxes ungrown against config/body.json's cart and mast, the speaker box, the pan servo and an estimated head box swept over the neck's whole reach; scratch/arm_poses_1012/). rest is not here: it is config/arm.json's motion.rest_deg. A step naming a pose that is not here is left out (the rest of the gesture plays). A step that names a pose sets period_s so the move from rest keeps the caps: the largest joint travel d moves at 1.5 d / period_s at its fastest (90 deg/s: period_s >= d / 60).",
+    "raised": {"shoulder_pan": -30.0, "shoulder_lift": -50.8, "elbow_flex": 44.0, "wrist_flex": -35.2, "wrist_roll": -50.0, "gripper": 14.5, "note": "TAUGHT by hand 2026-10-12: the forearm forward, the hand up, ready to wave; from the URDF: the hand 8.7 cm from the body and from the head's whole reach, the upper arm 3.2 cm from the speaker box; the hand in the level view; 112 deg from rest, 1.86 s at the caps"},
+    "ready": {"shoulder_pan": -33.5, "shoulder_lift": -84.0, "elbow_flex": 62.5, "wrist_flex": 19.5, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED from the URDF 2026-10-12: half raised, the elbow bent, the hand level and forward toward a person ahead on the centre line; the hand 8.1 cm from the body and 9.4 cm from the head's whole reach, the upper arm 3.1 cm from the speaker box; below the level view; 57 deg from rest, 0.98 s at the caps"},
+    "offer": {"shoulder_pan": -36.5, "shoulder_lift": -46.5, "elbow_flex": 59.5, "wrist_flex": 8.0, "wrist_roll": 0.0, "gripper": 45.0, "note": "AUTHORED from the URDF 2026-10-12: the open hand forward and low toward the person, the moving jaw up (wrist_roll 0: the fixed jaw a palm under it); the hand 6.5 cm from the body and 9.3 cm from the head's whole reach, the upper arm 2.9 cm from the speaker box; below the level view; 69 deg from rest, 1.14 s at the caps"},
+    "emphasis": {"shoulder_pan": 20.0, "shoulder_lift": -44.5, "elbow_flex": -3.0, "wrist_flex": -23.5, "wrist_roll": -50.0, "gripper": 0.0, "note": "AUTHORED from the URDF 2026-10-12: the forearm up beside the head on the right, the hand up and shut (a raised fist for a beat); the hand 3.9 cm from the head's whole reach (7.9 cm in the conversation band), the elbow 4.7 cm from the mast; beside the view; 100 deg from rest, 1.67 s at the caps"},
+    "thinking": {"shoulder_pan": -36.5, "shoulder_lift": -95.0, "elbow_flex": 56.5, "wrist_flex": -11.5, "wrist_roll": -50.0, "gripper": 3.0, "note": "AUTHORED from the URDF 2026-10-12: the hand raised to the chin's height in front and to the right of the head, the elbow back; the hand 3.9 cm from the head's whole reach (6.1 cm in the conversation band), the upper arm 3.0 cm from the speaker box; 1 % of the arm in the level view's lower corner; 88 deg from rest, 1.47 s at the caps"},
+    "tucked": {"shoulder_pan": -44.0, "shoulder_lift": -84.5, "elbow_flex": -1.5, "wrist_flex": 93.0, "wrist_roll": -54.0, "gripper": 0.0, "note": "AUTHORED from the URDF 2026-10-12: close to the body, the forearm upright beside the mast and the hand bent in toward the face (shy, sorry); the hand 3.9 cm from the head's whole reach (4.3 cm in the conversation band), the upper arm 2.5 cm from the speaker box; out of the view; 98 deg from rest, 1.64 s at the caps"},
+    "cell_c_low_far": {"shoulder_pan": -48.0, "shoulder_lift": -68.0, "elbow_flex": 69.0, "wrist_flex": -3.5, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED from the URDF 2026-10-13 (scratch/gesticulation_space/cells.py), the gesture space's middle column, low: the tip at (0.18, -0.06, 0.97) m, the hand level; the hand 6.4 cm from the body and the head's whole reach; out of the view; from rest through home 0.64 s at the caps (straight, the hand would pass the speaker box at 0.8 cm)"},
+    "cell_c_mid_far": {"shoulder_pan": -48.0, "shoulder_lift": -66.0, "elbow_flex": 45.5, "wrist_flex": 15.5, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the middle column, mid: the tip at (0.17, -0.06, 1.03) m, the hand level; the hand 6.9 cm clear; 1 % in the view; from rest through home 0.61 s at the caps; the first locus, item 1, the pinch, the sweep's start"},
+    "cell_c_high_far": {"shoulder_pan": -45.5, "shoulder_lift": -44.0, "elbow_flex": 14.5, "wrist_flex": 10.0, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the middle column, high: the tip at (0.19, -0.07, 1.12) m, the hand 17 deg up; the hand 4.2 cm from the head's whole reach; 22 % in the level view (brief strokes only); from rest through home 0.75 s at the caps"},
+    "cell_r_mid_near": {"shoulder_pan": -31.5, "shoulder_lift": -81.0, "elbow_flex": 29.0, "wrist_flex": 48.5, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the right column, mid, near: the tip at (0.13, -0.13, 1.06) m, the hand level; the hand 4.7 cm clear; out of the view; from rest 0.43 s at the caps; arc:in's end, arc:out's start"},
+    "cell_r_mid_far": {"shoulder_pan": -27.0, "shoulder_lift": -76.5, "elbow_flex": 49.0, "wrist_flex": 23.0, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the right column, mid: the tip at (0.17, -0.14, 1.02) m, the hand level and straight ahead; the hand 7.9 cm clear; out of the view; from rest 0.38 s at the caps; the third locus, item 3, weigh, arc:side's start; its lift, elbow and wrist are the pointing hand's"},
+    "cell_r_high_far": {"shoulder_pan": -31.5, "shoulder_lift": -50.5, "elbow_flex": 15.5, "wrist_flex": 15.5, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the right column, high: the tip at (0.18, -0.13, 1.12) m, the hand 17 deg up; the hand 4.4 cm from the head's whole reach; 19 % in the level view; from rest 0.51 s at the caps; arc:up's end"},
+    "cell_rr_low_far": {"shoulder_pan": -7.5, "shoulder_lift": -62.5, "elbow_flex": 67.5, "wrist_flex": -5.0, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the outer column, low: the tip at (0.19, -0.22, 0.96) m, the hand level, 19 deg outward; the hand 10.0 cm clear; out of the view; from rest 0.51 s at the caps"},
+    "cell_rr_mid_far": {"shoulder_pan": -7.5, "shoulder_lift": -58.0, "elbow_flex": 37.5, "wrist_flex": 18.0, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the outer column, mid: the tip at (0.18, -0.22, 1.03) m, the hand level, 19 deg outward; the hand 9.1 cm clear; out of the view; from rest 0.40 s at the caps; the second locus, item 2, arc:side's end"},
+    "cell_rr_high_far": {"shoulder_pan": -7.5, "shoulder_lift": -34.5, "elbow_flex": -6.5, "wrist_flex": 24.0, "wrist_roll": -50.0, "gripper": 12.0, "note": "AUTHORED 2026-10-13, the outer column, high: the tip at (0.19, -0.23, 1.14) m, the hand 14 deg up; the hand 4.2 cm from the head's whole reach; 7 % in the level view; from rest 0.65 s at the caps; the big sweep's end (its straight way to tucked passes the head: tucked is reached through home)"},
+    "stop": {"shoulder_pan": -24.0, "shoulder_lift": -29.0, "elbow_flex": 6.0, "wrist_flex": -40.5, "wrist_roll": -6.0, "gripper": 0.0, "note": "AUTHORED 2026-10-13: the forearm up, the shut hand raised 59 deg with its flat toward the person ahead (a raised palm); the tip at (0.16, -0.16, 1.20) m; the hand 6.0 cm from the head's whole reach; 25 % in the level view (held 0.6 s at most); reached through home (its straight way to and from tucked passes the head): 0.79 s from rest at the caps, 0.40 s from ready"},
+    "point_open": {"shoulder_pan": -30.5, "shoulder_lift": -76.5, "elbow_flex": 49.0, "wrist_flex": 23.0, "wrist_roll": 0.0, "gripper": 30.0, "note": "AUTHORED 2026-10-13: the open hand, palm up, level and pointing straight ahead (heading 0 at this pan, a degree of pan a degree of heading the other way); the resolver turns its pan toward the person (@toward), clear for pans -68..+25 (the hand >= 5.2 cm, the way from rest through home inward of -38.5)"},
+    "point_shut": {"shoulder_pan": -27.0, "shoulder_lift": -76.5, "elbow_flex": 49.0, "wrist_flex": 23.0, "wrist_roll": -50.0, "gripper": 0.0, "note": "AUTHORED 2026-10-13: the shut hand (the finger) level and pointing straight ahead; the resolver turns its pan toward a place of the room (@bearing), clear for pans -68..+25"}
+  },
+  "atoms": {
+    "head_nod": {
+      "part": "head", "mode": "additive", "stroke": 0.5,
+      "params": {"amp_deg": [3.0, 6.0], "period_s": [0.4, 0.5], "repeats": 1},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.5, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "down and back up, at most 2.5 Hz: the gaze arbiter refuses a tilt that turns back sooner than 0.2 s (clip_max_hz 2.5; the mast rings at 5.3 Hz), and the tilt's 600 deg/s^2 ramp needs 0.2 s for a 6 deg stroke (4 d / T^2), so a 0.4 s cycle at 6 deg is both limits at once; no counter-lift before the stroke: a 1 deg lift in 0.06 s is a turn the arbiter refuses whatever its size"
+    },
+    "head_shake": {
+      "part": "head", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [4.0, 8.0], "period_s": [0.5, 0.6], "repeats": [1, 2]},
+      "keys": [{"at": 0.0, "pan_deg": 0.0}, {"at": 0.25, "pan_deg": "$amp_deg"}, {"at": 0.75, "pan_deg": "-$amp_deg"}, {"at": 1.0, "pan_deg": 0.0}],
+      "mirror": ["pan_deg"],
+      "note": "no: either side first; the pan's first quarter cycle needs 4 d / T^2 within its 2232 deg/s^2 ramp (config/neck.json): 8 deg in 0.125 s"
+    },
+    "head_back": {
+      "part": "head", "mode": "additive", "stroke": 0.3,
+      "params": {"amp_deg": [3.0, 8.0], "period_s": [1.0, 1.6]},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.3, "tilt_deg": "-$amp_deg"}, {"at": 0.7, "tilt_deg": "-$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "the head up and held (energy, joy, a laugh's throw back)"
+    },
+    "head_drop": {
+      "part": "head", "mode": "additive", "stroke": 0.3,
+      "params": {"amp_deg": [2.0, 6.0], "period_s": [1.2, 2.0]},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.3, "tilt_deg": "$amp_deg"}, {"at": 0.7, "tilt_deg": "$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "the head down and held (sadness, doubt, sympathy)"
+    },
+    "head_glance": {
+      "part": "head", "mode": "additive", "stroke": 0.2,
+      "params": {"side_deg": [10.0, 20.0], "up_deg": [3.0, 8.0], "period_s": [1.6, 2.4]},
+      "keys": [{"at": 0.0, "pan_deg": 0.0, "tilt_deg": 0.0}, {"at": 0.2, "pan_deg": "$side_deg", "tilt_deg": "-$up_deg"}, {"at": 0.8, "pan_deg": "$side_deg", "tilt_deg": "-$up_deg"}, {"at": 1.0, "pan_deg": 0.0, "tilt_deg": 0.0}],
+      "mirror": ["pan_deg"],
+      "note": "a look away, up and to a side, and back (thinking: seen as thoughtful and interrupted less)"
+    },
+    "head_cock": {
+      "part": "head", "mode": "additive", "stroke": 0.3,
+      "params": {"pan_deg": [6.0, 10.0], "tilt_deg": [2.0, 4.0], "period_s": [1.0, 1.6]},
+      "keys": [{"at": 0.0, "pan_deg": 0.0, "tilt_deg": 0.0}, {"at": 0.3, "pan_deg": "$pan_deg", "tilt_deg": "$tilt_deg"}, {"at": 0.7, "pan_deg": "$pan_deg", "tilt_deg": "$tilt_deg"}, {"at": 1.0, "pan_deg": 0.0, "tilt_deg": 0.0}],
+      "mirror": ["pan_deg"],
+      "note": "the stand-in for a head tilt (the neck has no roll)"
+    },
+    "recoil": {
+      "part": "head", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [5.0, 8.0], "period_s": [1.0, 1.3]},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "tilt_deg": "-$amp_deg"}, {"at": 0.6, "tilt_deg": "-$amp_deg"}, {"at": 1.0, "tilt_deg": 0.0}],
+      "note": "a quick lift of the head (surprise), held, settled slowly; as quick as the tilt's 600 deg/s^2 ramp allows: 8 deg in 0.25 s"
+    },
+    "head_drift": {
+      "part": "head", "mode": "additive", "stroke": 0.3, "callable": false,
+      "params": {"side_deg": [2.0, 5.0], "up_deg": [0.0, 2.0], "period_s": [2.0, 3.0]},
+      "keys": [{"at": 0.0, "pan_deg": 0.0, "tilt_deg": 0.0}, {"at": 0.3, "pan_deg": "$side_deg", "tilt_deg": "-$up_deg"}, {"at": 0.7, "pan_deg": "$side_deg", "tilt_deg": "-$up_deg"}, {"at": 1.0, "pan_deg": 0.0, "tilt_deg": 0.0}],
+      "mirror": ["pan_deg"],
+      "note": "the idle layer's fidget: a small slow look aside and back"
+    },
+    "breath": {
+      "part": "head", "mode": "additive", "stroke": 0.5, "callable": false, "loop": true,
+      "params": {"amp_deg": 2.0, "period_s": 4.0, "repeats": 3},
+      "keys": [{"at": 0.0, "tilt_deg": 0.0}, {"at": 0.5, "tilt_deg": "-$amp_deg"}, {"at": 1.0, "tilt_deg": "$amp_deg"}],
+      "note": "+-2 deg at 0.25 Hz (config/face.json's breathe_hz), a looped overlay (loop: the arbiter repeats it until released or lapsed, the engine renews it once a period); within the arbiter's clip_still_deg (2 deg, config/knobs.json) it never blinds the head; the idle list's breath while the robot is silent. TWO keys a cycle since 2026-10-13: up over half the period, down over the other half, so the only stops are the turns, where a breath stops anyway; the four-key cycle before (up, down through the middle, back) stopped at the middle every cycle, and with each key a glide that starts and ends at rest (pepin.expression.parts.clip_look, and the arbiter writing a key only once the head has settled) the head read as a floating drift (Artem: a bug)"
+    },
+    "body_turn": {
+      "part": "body", "mode": "additive", "stroke": 0.6,
+      "params": {"amp_deg": [10.0, 30.0], "period_s": [1.5, 2.0]},
+      "keys": [{"at": 0.0, "yaw_deg": 0.0}, {"at": 1.0, "yaw_deg": "$amp_deg"}],
+      "mirror": ["yaw_deg"],
+      "note": "a turn in place (stays turned); 30 deg in 1.5 s keeps config/expression.json's wheels caps (30 deg/s, 90 deg/s^2) at speed 1"
+    },
+    "body_wiggle": {
+      "part": "body", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [2.0, 4.0], "period_s": [1.8, 2.2], "repeats": [1, 2]},
+      "keys": [{"at": 0.0, "yaw_deg": 0.0}, {"at": 0.25, "yaw_deg": "$amp_deg"}, {"at": 0.75, "yaw_deg": "-$amp_deg"}, {"at": 1.0, "yaw_deg": 0.0}],
+      "mirror": ["yaw_deg"],
+      "note": "a slow sway, yaw +-2-4 deg, back to the start pose; the wheels' ramp (90 deg/s^2) makes anything quicker than ~1.8 s a cycle a refusal"
+    },
+    "body_rock": {
+      "part": "body", "mode": "additive", "stroke": 0.5,
+      "params": {"amp_m": [0.01, 0.02], "period_s": [0.9, 1.2]},
+      "keys": [{"at": 0.0, "x_m": 0.0}, {"at": 0.5, "x_m": "$amp_m"}, {"at": 1.0, "x_m": 0.0}],
+      "note": "forward 1-2 cm and back; 2 cm each way in 0.45 s keeps the wheels' ramp (0.5 m/s^2) at speed 1"
+    },
+    "body_wag": {
+      "part": "body", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [2.0, 3.0], "period_s": [1.5, 1.7]},
+      "keys": [{"at": 0.0, "yaw_deg": 0.0}, {"at": 0.25, "yaw_deg": "$amp_deg"}, {"at": 0.75, "yaw_deg": "-$amp_deg"}, {"at": 1.0, "yaw_deg": 0.0}],
+      "mirror": ["yaw_deg"],
+      "note": "the pulse's yaw wiggle (2026-10-13, Artem: the cart's sway is the best part, add a small random yaw wiggle in rhythm): the nose a few degrees to one side, through to the other, back where it began; its keys net to zero, so the cart's heading is the clip's start heading again within the executor's tolerance (wheels.settle_deg, a third of a short leg: ~1 deg); sized to the book's design cap of the wheels' ramp, 90 deg/s^2 at speed 1 (3 deg at 1.5 s needs 64 amp / period^2 = 85; config/expression.json ships 180 since 2026-10-13, so a 1.1 s wag is a proposal for the bench); body_wiggle is the slow sway of the feelings' variants"
+    },
+    "arm_pose": {
+      "part": "arm", "mode": "absolute", "stroke": 1.0,
+      "params": {"period_s": [1.3, 1.5], "hold_s": [1.5, 2.0]},
+      "keys": [{"at": 0.0, "pose": "@from"}, {"at": 0.5, "pose": "@via"}, {"at": 1.0, "pose": "$pose"}],
+      "note": "from where the arm is (@from: rest, or where the step before left it; a unit's held pose when the arm plans the clip from there) to a pose of poses in period_s (the stroke: arriving; the default 1.3 s keeps a move of up to 78 deg within 90 deg/s and 360 deg/s^2, a step naming a pose further from rest sets its own period_s), held hold_s; then the board takes the arm back to rest by itself at its caps and lets go. A pose named @... is a place of the gesture space (space below; pepin.expression.render): through home (@via, its time set so both legs run at one share of the caps) when the straight way would pass the body; a plain pose's way is straight"
+    },
+    "arm_push": {
+      "part": "arm", "mode": "additive", "stroke": 0.5,
+      "params": {"lift_deg": [4.0, 5.0], "elbow_deg": [5.0, 6.5], "period_s": [0.36, 0.4]},
+      "keys": [{"at": 0.0, "shoulder_lift": 0.0, "elbow_flex": 0.0}, {"at": 0.5, "shoulder_lift": "$lift_deg", "elbow_flex": "-$elbow_deg"}, {"at": 1.0, "shoulder_lift": "$lift_deg", "elbow_flex": "-$elbow_deg"}],
+      "note": "the hand pushed 3-4 cm on along the arm (the shoulder forward, the elbow opened) and held there: a point's stroke on its word"
+    },
+    "arm_arc": {
+      "part": "arm", "mode": "absolute", "stroke": 0.6,
+      "params": {"period_s": [1.0, 1.1], "hold_s": [0.3, 0.4]},
+      "keys": [{"at": 0.0, "pose": "@from"}, {"at": 0.3, "pose": "@via"}, {"at": 0.6, "pose": "@path:0"}, {"at": 1.0, "pose": "@path:1"}],
+      "note": "from where the arm is to the first cell of the mark's path (space.paths, its argument's: arc:up), through home when the way must, then on to the next: the stroke is that move, beginning on the word"
+    },
+    "arm_trace": {
+      "part": "arm", "mode": "absolute", "stroke": 0.4,
+      "params": {"period_s": [1.75, 1.8], "hold_s": [0.1, 0.15]},
+      "keys": [{"at": 0.0, "pose": "@from"}, {"at": 0.2, "pose": "@via"}, {"at": 0.4, "pose": "@path:0"}, {"at": 0.55, "pose": "@path:1"}, {"at": 0.7, "pose": "@path:2"}, {"at": 0.85, "pose": "@path:3"}, {"at": 1.0, "pose": "@path:4"}],
+      "note": "from where the arm is to the first cell of the mark's path, then through the path without a stop (draw:round), each leg timed by its travel, a path of fewer cells filling the same time: the stroke is the trace, beginning on the word"
+    },
+    "head_toward": {
+      "part": "head", "mode": "additive", "stroke": 0.25,
+      "params": {"pan_deg": [-25.0, 25.0], "tilt_deg": [-5.0, 5.0], "period_s": [0.9, 1.1]},
+      "keys": [{"at": 0.0, "pan_deg": 0.0, "tilt_deg": 0.0}, {"at": 0.25, "pan_deg": "$pan_deg", "tilt_deg": "$tilt_deg"}, {"at": 0.75, "pan_deg": "$pan_deg", "tilt_deg": "$tilt_deg"}, {"at": 1.0, "pan_deg": 0.0, "tilt_deg": 0.0}],
+      "note": "the head turned a little toward something and back, an overlay on whatever holds the head: a step naming a place of the gesture space (pose @bearing, @arg) turns toward it, within the step's ranges (a place at most 25 deg; the arbiter's clip_max_deg is 30), a step naming none by its own pan and tilt"
+    },
+    "arm_wave": {
+      "part": "arm", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [10.0, 14.0], "period_s": [0.7, 0.8], "repeats": 2},
+      "keys": [{"at": 0.0, "wrist_flex": 0.0}, {"at": 0.3, "wrist_flex": "$amp_deg"}, {"at": 0.7, "wrist_flex": "-$amp_deg"}, {"at": 1.0, "wrist_flex": 0.0}],
+      "mirror": ["wrist_flex"],
+      "note": "the hand waved forward and back by the wrist on the pose under it (raised when taught, else rest): the bye wave, two strokes. THE SWING LAW (every two-way atom of the arm): with the book's cubic the peak acceleration is 73 amp / period^2 (the 0.3 / 0.7 keys are the optimum: a sine sampled finer only steepens its legs), and a stroke bound to a word is refused when the caps (2232 deg/s^2, the 0.98 margin: 2187) would stretch it, so period >= sqrt(73 amp / 2187): 14 deg needs 0.68 s; bigger is slower, never both (2026-10-13: +-7-9 deg at 0.6 s read as no wave at all under the raise)"
+    },
+    "arm_wave_side": {
+      "part": "arm", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [11.0, 14.0], "period_s": [0.7, 0.75], "repeats": 2},
+      "keys": [{"at": 0.0, "shoulder_pan": 0.0}, {"at": 0.3, "shoulder_pan": "$amp_deg"}, {"at": 0.7, "shoulder_pan": "-$amp_deg"}, {"at": 1.0, "shoulder_pan": 0.0}],
+      "mirror": ["shoulder_pan"],
+      "note": "the hand waved side to side by the shoulder's pan on the pose under it: the hello wave (the wrist wave reads as bye), two strokes, the hand +-6-7 cm at the raised pose; 14 deg at 0.7 s is at the swing law's cap (arm_wave's note), so a greeting plays it on the pose's hold, after the raise, where nothing else moves the pan"
+    },
+    "arm_beat": {
+      "part": "arm", "mode": "additive", "stroke": 0.35,
+      "params": {"amp_deg": [20.0, 30.0], "period_s": [1.1, 1.3]},
+      "keys": [{"at": 0.0, "wrist_flex": 0.0}, {"at": 0.35, "wrist_flex": "$amp_deg"}, {"at": 1.0, "wrist_flex": 0.0}],
+      "note": "a down-stroke of the wrist and its rebound; a beat wants 0.15-0.25 s, the caps give 0.45 s (timid until raised)"
+    },
+    "arm_flourish": {
+      "part": "arm", "mode": "additive", "stroke": 0.3,
+      "params": {"roll_deg": [30.0, 45.0], "lift_deg": [10.0, 15.0], "period_s": [1.6, 2.0]},
+      "keys": [{"at": 0.0, "wrist_roll": 0.0, "wrist_flex": 0.0}, {"at": 0.3, "wrist_roll": "$roll_deg", "wrist_flex": "-$lift_deg"}, {"at": 0.7, "wrist_roll": "$roll_deg", "wrist_flex": "-$lift_deg"}, {"at": 1.0, "wrist_roll": 0.0, "wrist_flex": 0.0}],
+      "mirror": ["wrist_roll"],
+      "note": "the hand opened outward by the wrist alone (a shrug's open palm); the shoulder only moves through taught poses"
+    },
+    "wrist_turn": {
+      "part": "arm", "mode": "additive", "stroke": 0.25,
+      "params": {"amp_deg": [24.0, 30.0], "period_s": [1.0, 1.1], "repeats": [1, 2]},
+      "keys": [{"at": 0.0, "wrist_roll": 0.0}, {"at": 0.3, "wrist_roll": "$amp_deg"}, {"at": 0.7, "wrist_roll": "-$amp_deg"}, {"at": 1.0, "wrist_roll": 0.0}],
+      "mirror": ["wrist_roll"],
+      "note": "so-so: the wrist rolled one way and the other, one or two rocks; at the swing law's cap (arm_wave's note): 30 deg needs 1.0 s a cycle, 25 deg 0.92, 20 deg 0.82; Artem 2026-10-13 (the pulse's 8-12 deg at 0.85 s on the temperature reply): too small and too slow, like fifty-fifty, so every so-so is bigger now and as fast as its size allows"
+    },
+    "gripper_click": {
+      "part": "arm", "mode": "additive", "stroke": 1.0,
+      "params": {"amp_deg": [40.0, 48.0], "period_s": [0.8, 0.9], "repeats": [2, 2]},
+      "keys": [{"at": 0.0, "gripper": 0.0}, {"at": 0.5, "gripper": "$amp_deg"}, {"at": 1.0, "gripper": 0.0}],
+      "note": "open wide and shut (the stroke: shut), a clack at ~1.2 Hz; the jaw's bump costs 24 amp / period^2 of acceleration (48 deg at 0.8 s: 1800 of the 2232), so it may open this far at this tempo; 22-28 deg before (Artem 2026-10-13: the gripper's opening is barely visible)"
+    },
+    "gripper_set": {
+      "part": "arm", "mode": "additive", "stroke": 0.4,
+      "params": {"amp_deg": [20.0, 55.0], "period_s": [2.0, 3.0]},
+      "keys": [{"at": 0.0, "gripper": 0.0}, {"at": 0.4, "gripper": "$amp_deg"}, {"at": 0.7, "gripper": "$amp_deg"}, {"at": 1.0, "gripper": 0.0}],
+      "note": "the gripper opened by amp_deg over 0.4 of the period (the stroke: open), held, shut; opened wider since 2026-10-13 (the jaw's range is -10..103: 50 over a pose's 12 is half open), the opening leg lengthened from 0.3 to 0.4 of the period so the wider jaw keeps the caps (6 amp / leg^2: 50 deg over 0.46 s is 1440 of the 2232)"
+    },
+    "face": {
+      "part": "face", "mode": "absolute", "stroke": 0.0,
+      "params": {"period_s": 0.1, "hold_s": [1.5, 2.5]},
+      "keys": [{"at": 0.0, "expression": "$name"}],
+      "note": "one of config/face.json's expressions (name), held hold_s, then the face lapses to what stood before"
+    }
+  },
+  "compositions": {
+    "greeting": {
+      "cooldown_s": 30.0,
+      "bind": "utterance",
+      "family": "greeting",
+      "long": true,
+      "note": "hello: a happy face a little before the word, the hand raised to arrive on the word and WAVED side to side on the hold, two strokes, with the head up and a nod after; or with a nod and the gripper's click on the way; or with the head up and the body's sway; every variant with the arm waves (Artem 2026-10-13: the arm rose and did not wave: the +-8 deg wave ran under the 112 deg raise and the hold after it stood still); the raise 1.0-1.1 s and the hold 1.3-1.4 s covers the wave's two strokes (+-11-12 deg at 0.65-0.68 s: the swing law's cap), the arm's 2.5 s at most before the board's return; long: it may run 1 s past the speech; the floor (no time for the arm): the face and a nod",
+      "variants": [
+        {"weight": 2.0, "steps": [
+          {"atom": "face", "at_s": [-0.3, -0.2], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [3.0, 5.0], "period_s": [1.0, 1.2]}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.3, 1.38], "period_s": [0.95, 1.05]}},
+          {"atom": "arm_wave_side", "at_s": [0.0, 0.05], "params": {"amp_deg": [11.0, 12.0], "period_s": [0.65, 0.68]}},
+          {"atom": "head_nod", "at_s": [1.5, 1.7], "params": {"amp_deg": [2.0, 4.0]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 5.0]}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.3, 1.38], "period_s": [0.95, 1.05]}},
+          {"atom": "arm_wave_side", "at_s": [0.0, 0.05], "params": {"amp_deg": [11.0, 12.0], "period_s": [0.65, 0.68]}},
+          {"atom": "gripper_click", "at_s": [0.3, 0.4], "params": {"period_s": [0.75, 0.85], "repeats": 2}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [3.0, 5.0], "period_s": [1.0, 1.2]}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.3, 1.38], "period_s": [0.95, 1.05]}},
+          {"atom": "arm_wave_side", "at_s": [0.0, 0.05], "params": {"amp_deg": [11.0, 12.0], "period_s": [0.65, 0.68]}},
+          {"atom": "body_wiggle", "at_s": [0.0, 0.2], "params": {"amp_deg": [2.0, 3.0], "period_s": [1.2, 1.5], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.3, -0.1], "params": {"name": ["smile", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0]}}
+        ]}
+      ]
+    },
+    "farewell": {
+      "cooldown_s": 30.0,
+      "bind": "utterance",
+      "family": "farewell",
+      "long": true,
+      "note": "bye: a smile, the hand raised to arrive on the word and waved forward and back on the hold (two strokes, as the greeting's since 2026-10-13), the head dropped a little after; or a smile, a nod and the cart's small rock; long: it may run 1 s past the speech; the floor: the smile and a nod",
+      "variants": [
+        {"weight": 3.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [1.3, 1.38], "period_s": [0.95, 1.05]}},
+          {"atom": "arm_wave", "at_s": [0.0, 0.05], "params": {"amp_deg": [10.0, 12.0], "period_s": [0.65, 0.68]}},
+          {"atom": "head_drop", "at_s": [1.2, 1.5], "params": {"amp_deg": [2.0, 3.0]}}
+        ]},
+        {"weight": 2.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 5.0], "period_s": [0.45, 0.5]}},
+          {"atom": "body_rock", "at_s": [0.0, 0.2], "params": {"amp_m": [0.005, 0.008], "period_s": [0.55, 0.65]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": "smile", "hold_s": [2.0, 3.0]}},
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.45, 0.5]}}
+        ]}
+      ]
+    },
+    "laugh": {
+      "cooldown_s": 20.0,
+      "bind": "utterance",
+      "style_args": {"evil": ["sinister", "evil", "villain", "menacing", "wicked", "зловещий", "зловеще", "злодейский", "злодей", "коварный", "коварно"]},
+      "note": "one body laughing, every part of a variant together (the dice between the variants and in the ranges): the face first, the head THROWN BACK on the word (10-16 deg since 2026-10-13, Artem: more), the gripper's wide click, the cart's rock ON the word's beat (its stroke with the head's, not 0.2-0.4 s after), then a bob of the head; or the face, the head back, the click and the cart's wag; a {laugh} in a part styled sinister, evil, villain, ... (style_args: the brain's {sinister, evil laugh} style makes it {laugh:evil}; the variants written for evil then win the dice) is the sinister face with the sharp teeth, the head back less and held, the click and the rock; the robot's laughing SOUND rocks the cart too (pepin.expression.listeners, pulse.laugh_run); the floors: the face and the head thrown back, one for each. A laugh the brain asks for through the gesture tool before its text has no word to sit on: it plays at once, ~2 s before the voice's ha-ha (2026-10-13 21:13: the tool's laugh ran, then the sound; the rock looked off the beat); the brain's {laugh} mark in the text lands on its word",
+      "variants": [
+        {"weight": 2.0, "steps": [
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": ["grin", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [10.0, 16.0], "period_s": [1.2, 1.5]}},
+          {"atom": "head_nod", "at_s": [1.4, 1.7], "params": {"amp_deg": [2.0, 3.0], "period_s": [0.45, 0.5], "repeats": [2, 3]}},
+          {"atom": "gripper_click", "at_s": [0.3, 0.6], "params": {"repeats": [1, 2]}},
+          {"atom": "body_rock", "at_s": [0.0, 0.15], "params": {"amp_m": [0.012, 0.015], "period_s": [0.7, 0.9]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": "happy", "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [10.0, 14.0], "period_s": [1.2, 1.5]}},
+          {"atom": "gripper_click", "at_s": [0.3, 0.6], "params": {"repeats": [1, 2]}},
+          {"atom": "body_wag", "at_s": [0.0, 0.15]}
+        ]},
+        {"weight": 2.0, "needs": {"arg": "evil"}, "steps": [
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "sinister", "hold_s": [2.5, 3.5]}},
+          {"atom": "head_back", "params": {"amp_deg": [6.0, 10.0], "period_s": [1.8, 2.2]}},
+          {"atom": "gripper_click", "at_s": [0.3, 0.5], "params": {"repeats": 2}},
+          {"atom": "body_rock", "at_s": [0.0, 0.15], "params": {"amp_m": [0.012, 0.015], "period_s": [0.7, 0.9]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": ["grin", "happy"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_back", "params": {"amp_deg": [10.0, 14.0], "period_s": [1.2, 1.4]}}
+        ]},
+        {"floor": true, "needs": {"arg": "evil"}, "steps": [
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "sinister", "hold_s": [2.5, 3.5]}},
+          {"atom": "head_back", "params": {"amp_deg": [6.0, 10.0], "period_s": [1.8, 2.2]}}
+        ]}
+      ]
+    },
+    "doubt": {
+      "cooldown_s": 15.0,
+      "bind": "utterance",
+      "note": "hmm: a skewed mouth, the hand half raised and the wrist so-so, the head cocked (or down a little and aside); or the mouth, the cocked head and the body's slow sway; the raise 0.8-0.85 s, the so-so on the word: TWO rocks of the wrist, +-18-19 deg at 0.8-0.82 s each (fifty-fifty; the swing law's cap for that size, wrist_turn's note; one rock of 20-25 deg in 1 s before: Artem 2026-10-13, too small and too slow), the hold covering them, the arm 2.5 s at most before the board's return (two rocks of 25-30 deg would take 1.0 s each: too long for that budget); the floor: the mouth and the cocked head",
+      "variants": [
+        {"weight": 2.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.03], "params": {"amp_deg": [18.0, 19.0], "period_s": [0.8, 0.82], "repeats": 2}},
+          {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}},
+          {"atom": "arm_pose", "at_s": [-0.15, -0.1], "params": {"pose": "ready", "period_s": [0.8, 0.85], "hold_s": [1.4, 1.45]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.03], "params": {"amp_deg": [18.0, 19.0], "period_s": [0.8, 0.82], "repeats": 2}},
+          {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
+          {"atom": "head_glance", "at_s": [0.2, 0.4], "params": {"side_deg": [6.0, 10.0], "up_deg": 0.0}},
+          {"atom": "arm_pose", "at_s": [-0.15, -0.1], "params": {"pose": "ready", "period_s": [0.8, 0.85], "hold_s": [1.4, 1.45]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}},
+          {"atom": "body_wiggle", "at_s": [0.0, 0.2], "params": {"amp_deg": [2.0, 3.0], "period_s": [1.4, 1.6], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.2, 0.0], "params": {"name": ["thinking", "flat"], "hold_s": [2.0, 3.0]}},
+          {"atom": "head_cock", "at_s": [-0.1, 0.1], "params": {"pan_deg": [6.0, 9.0], "tilt_deg": [2.0, 3.0], "period_s": [1.4, 1.8]}}
+        ]}
+      ]
+    },
+    "thinking": {
+      "cooldown_s": 10.0,
+      "bind": "utterance",
+      "note": "a look away up and to a side, the thinking mouth and the hand to the chin after the look has begun; or the look, the mouth and the body's slow sway (also the slow tool's moment: it fills the wait); at most 2 s of arm: the hand up in 0.9-1.1 s, held 0.4-0.6 s; the floor: the look and the mouth",
+      "variants": [
+        {"steps": [
+          {"atom": "head_glance", "params": {"side_deg": [12.0, 20.0], "up_deg": [4.0, 8.0], "period_s": [2.0, 2.6]}},
+          {"atom": "face", "params": {"name": "thinking", "hold_s": [2.0, 3.0]}},
+          {"atom": "arm_pose", "at_s": [0.9, 1.1], "params": {"pose": "thinking", "period_s": [0.9, 1.1], "hold_s": [0.4, 0.6]}}
+        ]},
+        {"steps": [
+          {"atom": "head_glance", "params": {"side_deg": [12.0, 20.0], "up_deg": [4.0, 8.0], "period_s": [2.0, 2.6]}},
+          {"atom": "face", "params": {"name": "thinking", "hold_s": [2.0, 3.0]}},
+          {"atom": "body_wiggle", "at_s": [0.3, 0.5], "params": {"amp_deg": [2.0, 3.0], "period_s": [1.4, 1.6], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_glance", "params": {"side_deg": [8.0, 12.0], "up_deg": [4.0, 6.0], "period_s": [1.6, 2.0]}},
+          {"atom": "face", "params": {"name": "thinking", "hold_s": [2.0, 3.0]}}
+        ]}
+      ]
+    },
+    "emphasis": {
+      "cooldown_s": 5.0,
+      "bind": "word",
+      "note": "a single sudden nod on the stressed word with a firm mouth and the cart's rock (the wheels fitted loosely: never bound to the word), or the raised fist's beat with the nod and the mouth; bound to its word (never late); the floor: the nod",
+      "variants": [
+        {"weight": 3.0, "steps": [
+          {"atom": "head_nod", "at_s": [-0.15, 0.0], "params": {"amp_deg": [4.0, 6.0], "period_s": [0.4, 0.45]}},
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "focused", "hold_s": [1.2, 1.5]}},
+          {"atom": "body_rock", "at_s": [0.0, 0.1], "params": {"amp_m": [0.01, 0.012], "period_s": [0.7, 0.8]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "arm_beat", "at_s": [-0.2, 0.0]},
+          {"atom": "head_nod", "at_s": [-0.15, 0.0], "params": {"amp_deg": [2.0, 4.0]}},
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "focused", "hold_s": [1.2, 1.5]}},
+          {"atom": "arm_pose", "at_s": [-1.0, -0.85], "params": {"pose": "emphasis", "period_s": [1.75, 1.85], "hold_s": [1.5, 2.0]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}}
+        ]}
+      ]
+    },
+    "surprise": {
+      "cooldown_s": 20.0,
+      "bind": "utterance",
+      "note": "an O mouth just before, the head lifted on the word, the arm half raised, a slow settle; or the mouth, the lift and the cart drawn back a little; at most 2 s of arm: the raise 0.9-1.1 s, held 0.3-0.6 s; the floor: the mouth and the lift",
+      "variants": [
+        {"steps": [
+          {"atom": "face", "at_s": [-0.15, -0.05], "params": {"name": "surprised", "hold_s": [1.5, 2.0]}},
+          {"atom": "recoil"},
+          {"atom": "arm_pose", "at_s": [0.0, 0.3], "params": {"pose": "ready", "period_s": [0.9, 1.1], "hold_s": [0.3, 0.6]}}
+        ]},
+        {"steps": [
+          {"atom": "face", "at_s": [-0.15, -0.05], "params": {"name": "surprised", "hold_s": [1.5, 2.0]}},
+          {"atom": "recoil"},
+          {"atom": "body_rock", "at_s": [0.0, 0.1], "params": {"amp_m": [-0.008, -0.005], "period_s": [0.6, 0.7]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.15, -0.05], "params": {"name": "surprised", "hold_s": [1.5, 2.0]}},
+          {"atom": "recoil"}
+        ]}
+      ]
+    },
+    "agreement": {
+      "cooldown_s": 8.0,
+      "bind": "utterance",
+      "note": "yes: a nod or two, a smile and the open hand offered; or the nods, the smile and the cart's small rock; at most 2 s of arm: the offer in 0.9-1.1 s, held 0.3-0.6 s; the floor: a nod and a smile",
+      "variants": [
+        {"steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [4.0, 6.0], "repeats": [1, 2]}},
+          {"atom": "face", "params": {"name": "smile", "hold_s": [1.5, 2.0]}},
+          {"atom": "arm_pose", "at_s": [0.0, 0.3], "params": {"pose": "offer", "period_s": [0.9, 1.1], "hold_s": [0.3, 0.6]}}
+        ]},
+        {"steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [4.0, 6.0], "repeats": [1, 2]}},
+          {"atom": "face", "params": {"name": "smile", "hold_s": [1.5, 2.0]}},
+          {"atom": "body_rock", "at_s": [0.0, 0.2], "params": {"amp_m": [0.005, 0.008], "period_s": [0.55, 0.65]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [3.0, 5.0]}},
+          {"atom": "face", "params": {"name": "smile", "hold_s": [1.5, 2.0]}}
+        ]}
+      ]
+    },
+    "disagreement": {
+      "cooldown_s": 8.0,
+      "bind": "utterance",
+      "note": "no: a shake or two, a flat mouth, the hand half raised and the wrist so-so; or the shake, the mouth and the body's sway; the raise 0.8-0.85 s, the so-so two rocks of +-18-19 deg at 0.8-0.82 s each (doubt's), the hold covering them; the floor: the shake and the mouth",
+      "variants": [
+        {"steps": [
+          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 8.0]}},
+          {"atom": "face", "params": {"name": "flat", "hold_s": [1.5, 2.0]}},
+          {"atom": "wrist_turn", "at_s": [0.0, 0.03], "params": {"amp_deg": [18.0, 19.0], "period_s": [0.8, 0.82], "repeats": 2}},
+          {"atom": "arm_pose", "at_s": [-0.15, -0.1], "params": {"pose": "ready", "period_s": [0.8, 0.85], "hold_s": [1.4, 1.45]}}
+        ]},
+        {"steps": [
+          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 8.0]}},
+          {"atom": "face", "params": {"name": "flat", "hold_s": [1.5, 2.0]}},
+          {"atom": "body_wiggle", "at_s": [0.0, 0.2], "params": {"amp_deg": [2.0, 3.0], "period_s": [1.2, 1.5], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_shake", "at_s": [-0.1, 0.0], "params": {"amp_deg": [5.0, 6.0], "repeats": 1}},
+          {"atom": "face", "params": {"name": "flat", "hold_s": [1.5, 2.0]}}
+        ]}
+      ]
+    },
+    "shrug": {
+      "cooldown_s": 15.0,
+      "bind": "utterance",
+      "note": "who knows: the open hand offered and turned out, the head down a little and aside, a flat or thinking mouth; or the head, the mouth and the body's sway; at most 2 s of arm: the offer in 0.8-0.9 s, held 0.3-0.5 s, the hand turned out in 0.9-1.0 s on the word; the floor: the head down and the mouth",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_flourish", "at_s": [0.0, 0.1], "params": {"roll_deg": [15.0, 20.0], "period_s": [0.9, 1.0]}},
+          {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
+          {"atom": "head_glance", "params": {"side_deg": [4.0, 6.0], "up_deg": 0.0}},
+          {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}},
+          {"atom": "arm_pose", "at_s": [-0.2, -0.1], "params": {"pose": "offer", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.5]}}
+        ]},
+        {"steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
+          {"atom": "head_glance", "params": {"side_deg": [4.0, 6.0], "up_deg": 0.0}},
+          {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}},
+          {"atom": "body_wiggle", "at_s": [0.0, 0.2], "params": {"amp_deg": [2.0, 3.0], "period_s": [1.2, 1.5], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [2.0, 3.0]}},
+          {"atom": "face", "params": {"name": ["flat", "thinking"], "hold_s": [1.5, 2.5]}}
+        ]}
+      ]
+    },
+    "evil_click": {
+      "cooldown_s": 300.0,
+      "bind": "utterance",
+      "note": "the mischievous one (world domination): the hand raised, the gripper clacking quickly on the way up and at the top, a clenched or sinister grin (the sharp teeth since 2026-10-13), the head lowered; marker only, once in five minutes; the floor: the grin and the head lowered",
+      "variants": [
+        {"steps": [
+          {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "sinister"], "hold_s": [3.0, 3.5]}},
+          {"atom": "body_rock", "at_s": [-0.6, -0.4]},
+          {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [0.6, 0.9], "period_s": [0.9, 1.1]}},
+          {"atom": "gripper_click", "params": {"repeats": 2}, "at_s": [1.4, 1.8]}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "sinister"], "hold_s": [3.0, 3.5]}}
+        ]}
+      ]
+    },
+    "sympathy": {
+      "cooldown_s": 20.0,
+      "bind": "utterance",
+      "note": "small and slow: the head down, a worried mouth and the hand drawn in to the face (tucked); or the head cocked, the mouth and the body's slow sway; at most 2 s of arm: drawn in over 0.9-1.1 s, held 0.4-0.6 s; the floor: the head down and the mouth",
+      "variants": [
+        {"weight": 2.0, "steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [4.0, 6.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}},
+          {"atom": "arm_pose", "at_s": [0.2, 0.4], "params": {"pose": "@pose:tucked", "period_s": [0.9, 1.1], "hold_s": [0.4, 0.6]}}
+        ]},
+        {"weight": 1.0, "steps": [
+          {"atom": "head_cock", "params": {"pan_deg": [5.0, 7.0], "tilt_deg": [3.0, 4.0], "period_s": [2.5, 3.0]}},
+          {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}},
+          {"atom": "body_wiggle", "at_s": [0.2, 0.4], "params": {"amp_deg": [1.5, 2.5], "period_s": [1.6, 2.0], "repeats": 1}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_drop", "params": {"amp_deg": [3.0, 5.0], "period_s": [2.0, 2.5]}},
+          {"atom": "face", "params": {"name": "worried", "hold_s": [2.5, 3.0]}}
+        ]}
+      ]
+    },
+    "accent": {
+      "bind": "word",
+      "note": "{!}: this word carries the point (beat, accent, emphasis are its other spellings). Inside an open arm unit (the arm up: the scene's arm_at) a flick of the wrist at the caps on the word, from the held pose only, with a nod; else a head nod of 2-4 deg; the cart's 1 cm rock with either (fitted loosely: the wheels never bind to a word); never opens a unit; the floor: the nod",
+      "variants": [
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "arm_beat", "at_s": [-0.05, 0.0], "params": {"amp_deg": [8.0, 10.0], "period_s": [0.5, 0.55]}},
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}}
+        ]}
+      ]
+    },
+    "point": {
+      "bind": "word",
+      "args": ["you", "me", "*"],
+      "note": "you: the open hand, palm up, toward the person (their bearing from attention), a push and a hold across the word; me: the hand drawn in to the body (tucked, through home) and two taps; a place of the room (its name from the places book): the shut hand toward it and the head's glance its way (at most 25 deg), the head's glance alone beyond the arm's pans, nothing past 90 deg from the person; anything else a referent: the shut hand to its spot for the conversation (a catchment). Floors: a nod, the head dropped, the glance; a name with no places to ask about, a nod",
+      "variants": [
+        {"needs": {"arg": "you"}, "steps": [
+          {"atom": "arm_pose", "at_s": [-0.12, -0.08], "params": {"pose": "@toward", "period_s": [0.85, 0.95], "hold_s": [0.35, 0.5]}},
+          {"atom": "arm_push", "at_s": [0.0, 0.05]},
+          {"atom": "head_nod", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [0.4, 0.45]}}
+        ]},
+        {"floor": true, "needs": {"arg": "you"}, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [3.0, 3.5], "period_s": [0.4, 0.45]}}
+        ]},
+        {"needs": {"arg": "me"}, "steps": [
+          {"atom": "arm_pose", "at_s": [-0.15, -0.1], "params": {"pose": "@pose:tucked", "period_s": [1.0, 1.05], "hold_s": [0.2, 0.25]}},
+          {"atom": "arm_beat", "at_s": [0.0, 0.05], "params": {"amp_deg": [5.0, 6.0], "period_s": [0.42, 0.45], "repeats": 2}},
+          {"atom": "head_drop", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "needs": {"arg": "me"}, "steps": [
+          {"atom": "head_drop", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]},
+        {"needs": {"arg": "place"}, "steps": [
+          {"atom": "arm_pose", "at_s": [-0.12, -0.08], "params": {"pose": "@bearing", "period_s": [0.85, 0.95], "hold_s": [0.4, 0.5]}},
+          {"atom": "arm_push", "at_s": [0.0, 0.05]},
+          {"atom": "head_toward", "at_s": [-0.1, 0.0], "params": {"pose": "@bearing", "pan_deg": [-25.0, 25.0], "tilt_deg": 0.0, "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "needs": {"arg": "place"}, "steps": [
+          {"atom": "head_toward", "at_s": [-0.1, 0.0], "params": {"pose": "@bearing", "pan_deg": [-25.0, 25.0], "tilt_deg": 0.0, "period_s": [1.0, 1.2]}}
+        ]},
+        {"needs": {"arg": "thing"}, "steps": [
+          {"atom": "arm_pose", "at_s": [-0.12, -0.08], "params": {"pose": "@locus", "period_s": [0.8, 0.9], "hold_s": [0.3, 0.4]}},
+          {"atom": "arm_push", "at_s": [0.0, 0.05], "params": {"lift_deg": [3.0, 4.0], "elbow_deg": [4.0, 5.0]}},
+          {"atom": "head_toward", "at_s": [-0.1, 0.0], "params": {"pan_deg": -3.0, "tilt_deg": 2.0, "period_s": [0.9, 1.0]}}
+        ]},
+        {"floor": true, "needs": {"arg": "name"}, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}}
+        ]}
+      ]
+    },
+    "arc": {
+      "bind": "phrase",
+      "args": ["up", "down", "out", "in", "side"],
+      "note": "a change or a direction (grew, fell, far away, here, aside): the hand from the path's first cell to its next that way (space.paths: up from home to the right column's top, down back, out from near to far, in from far to near, side from the right column to the outer one), the head 2-3 deg the same way; the floor: the head's move alone",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_arc", "at_s": [-0.05, 0.0], "params": {"period_s": [1.0, 1.1], "hold_s": [0.3, 0.4]}},
+          {"atom": "head_toward", "at_s": [0.15, 0.25], "params": {"pose": "@arg", "pan_deg": [-3.0, 3.0], "tilt_deg": [-3.0, 3.0], "period_s": [0.9, 1.0]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_toward", "at_s": [-0.05, 0.0], "params": {"pose": "@arg", "pan_deg": [-3.0, 3.0], "tilt_deg": [-3.0, 3.0], "period_s": [0.9, 1.0]}}
+        ]}
+      ]
+    },
+    "size": {
+      "bind": "phrase",
+      "args": ["big", "small"],
+      "note": "big (large, wide, all of it): the hand swept from the middle up and out (space.paths size:big) opening the gripper, the head back 2-3 deg; small (tiny, a little): a pinch in front of the middle, the head dropped 2 deg; the floors: the head's move alone",
+      "variants": [
+        {"needs": {"arg": "big"}, "steps": [
+          {"atom": "arm_arc", "at_s": [-0.05, 0.0], "params": {"period_s": [1.15, 1.25], "hold_s": [0.3, 0.4]}},
+          {"atom": "gripper_set", "at_s": [0.3, 0.35], "params": {"amp_deg": [45.0, 50.0], "period_s": [1.1, 1.14]}},
+          {"atom": "head_back", "at_s": [0.1, 0.2], "params": {"amp_deg": [2.5, 3.0], "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "needs": {"arg": "big"}, "steps": [
+          {"atom": "head_back", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.5, 3.0], "period_s": [1.0, 1.2]}}
+        ]},
+        {"needs": {"arg": "small"}, "steps": [
+          {"atom": "arm_pose", "at_s": [-0.15, -0.1], "params": {"pose": "@pose:cell_c_mid_far", "period_s": [0.8, 0.9], "hold_s": [0.4, 0.5]}},
+          {"atom": "gripper_set", "at_s": [0.0, 0.05], "params": {"amp_deg": [-10.0, -9.0], "period_s": [0.6, 0.7]}},
+          {"atom": "head_drop", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "needs": {"arg": "small"}, "steps": [
+          {"atom": "head_drop", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]}
+      ]
+    },
+    "weigh": {
+      "bind": "phrase",
+      "note": "one way or the other, fifty-fifty: the hand rocked in front (the wrist rolled and the shoulder panned in phase, 0.65-0.7 s a cycle), two cycles or one, the head cocked; the floor: the cocked head",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_pose", "at_s": [-0.25, -0.2], "params": {"pose": "@pose:cell_r_mid_far", "period_s": [0.55, 0.6], "hold_s": [0.3, 0.4]}},
+          {"atom": "wrist_turn", "at_s": [-0.05, 0.0], "params": {"amp_deg": [8.0, 9.0], "period_s": [0.62, 0.65], "repeats": 2}},
+          {"atom": "arm_wave_side", "at_s": [-0.05, 0.0], "params": {"amp_deg": [5.0, 6.0], "period_s": [0.62, 0.65], "repeats": 2}},
+          {"atom": "head_cock", "at_s": [-0.05, 0.0], "params": {"pan_deg": [3.0, 4.0], "tilt_deg": [1.0, 2.0], "period_s": [1.2, 1.4]}}
+        ]},
+        {"steps": [
+          {"atom": "arm_pose", "at_s": [-0.25, -0.2], "params": {"pose": "@pose:cell_r_mid_far", "period_s": [0.55, 0.6], "hold_s": [0.3, 0.4]}},
+          {"atom": "wrist_turn", "at_s": [-0.05, 0.0], "params": {"amp_deg": [8.0, 9.0], "period_s": [0.62, 0.65], "repeats": 1}},
+          {"atom": "arm_wave_side", "at_s": [-0.05, 0.0], "params": {"amp_deg": [5.0, 6.0], "period_s": [0.62, 0.65], "repeats": 1}},
+          {"atom": "head_cock", "at_s": [-0.05, 0.0], "params": {"pan_deg": [3.0, 4.0], "tilt_deg": [1.0, 2.0], "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_cock", "at_s": [-0.05, 0.0], "params": {"pan_deg": [3.0, 4.0], "tilt_deg": [1.0, 2.0], "period_s": [1.0, 1.2]}}
+        ]}
+      ]
+    },
+    "count": {
+      "bind": "word",
+      "args": ["1", "2", "3"],
+      "note": "items in a row: item n at the n-th spot of space.loci (the middle, the outer, the right: the widest pair first, the same spots as the referents', which it takes over), a wrist beat there, the head a step to the item's side; the floor: the head's step",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_pose", "at_s": [-0.12, -0.08], "params": {"pose": "@count", "period_s": [0.8, 0.9], "hold_s": [0.25, 0.35]}},
+          {"atom": "arm_beat", "at_s": [0.0, 0.05], "params": {"amp_deg": [6.0, 8.0], "period_s": [0.5, 0.55]}},
+          {"atom": "head_toward", "at_s": [-0.05, 0.0], "params": {"pose": "@arg", "pan_deg": [-3.0, 3.0], "tilt_deg": [0.0, 2.0], "period_s": [0.8, 0.9]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_toward", "at_s": [-0.05, 0.0], "params": {"pose": "@arg", "pan_deg": [-3.0, 3.0], "tilt_deg": [0.0, 2.0], "period_s": [0.8, 0.9]}}
+        ]}
+      ]
+    },
+    "draw": {
+      "bind": "phrase",
+      "args": ["round", "line", "wave"],
+      "note": "the shape of a thing: the hand traced through the cells of space.paths without a stop (round: three quarters of a loop from the middle over the top and the outer side down to home; line: across from the middle to the outer side; wave: low, high, low, across), over the full height of the space; the head looks at the hand; the floor: a nod",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_trace", "at_s": [-0.05, 0.0], "params": {"period_s": [1.75, 1.8], "hold_s": [0.1, 0.15]}},
+          {"atom": "head_toward", "at_s": [0.0, 0.1], "params": {"pan_deg": -3.0, "tilt_deg": 2.0, "period_s": [0.9, 1.0]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_nod", "at_s": [-0.1, 0.0], "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}}
+        ]}
+      ]
+    },
+    "stop": {
+      "bind": "word",
+      "note": "wait, no: the flat of the hand raised toward the person (through home), held 0.5-0.6 s, a flat mouth, the head back a little (no shake: a no is the spoken word's); the floor: the mouth and the head",
+      "variants": [
+        {"steps": [
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "flat", "hold_s": [1.2, 1.5]}},
+          {"atom": "arm_pose", "at_s": [-0.1, -0.05], "params": {"pose": "@pose:stop", "period_s": [0.95, 1.0], "hold_s": [0.5, 0.6]}},
+          {"atom": "head_back", "at_s": [0.0, 0.05], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "face", "at_s": [-0.2, -0.1], "params": {"name": "flat", "hold_s": [1.2, 1.5]}},
+          {"atom": "head_back", "at_s": [-0.05, 0.0], "params": {"amp_deg": [2.0, 2.5], "period_s": [1.0, 1.2]}}
+        ]}
+      ]
+    },
+    "offer": {
+      "bind": "phrase",
+      "note": "here, look, take this: the open hand offered palm up, low and forward, held 0.5-0.7 s, the head cocked, a smile; the floor: the cocked head and the smile",
+      "variants": [
+        {"steps": [
+          {"atom": "arm_pose", "at_s": [-0.1, -0.05], "params": {"pose": "offer", "period_s": [0.75, 0.85], "hold_s": [0.5, 0.7]}},
+          {"atom": "head_cock", "at_s": [0.0, 0.1], "params": {"pan_deg": [3.0, 4.0], "tilt_deg": [2.0, 2.5], "period_s": [1.2, 1.4]}},
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": "smile", "hold_s": [1.2, 1.5]}}
+        ]},
+        {"floor": true, "steps": [
+          {"atom": "head_cock", "at_s": [-0.05, 0.0], "params": {"pan_deg": [3.0, 4.0], "tilt_deg": [2.0, 2.5], "period_s": [1.2, 1.4]}},
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": "smile", "hold_s": [1.2, 1.5]}}
+        ]}
+      ]
+    },
+    "pulse_weak": {
+      "callable": false,
+      "bind": "word",
+      "note": "the engine's own (pepin.expression.listeners), never a mark: an accent of the robot's voice from pulse.beat_z to pulse.strong_z: the head's nod, with the arm up the wrist's beat (a flex down-stroke or a roll there and back; pulse.wrist_beat_p of them), the cart's 0.5 cm sway or its 2-2.5 deg yaw wag (pulse.wheel_accent_share of them, steady); the dice between the variants pair the wrist's flex with the cart's rock (both fore and aft) and the wrist's roll with the cart's wag (both sideways: one body moving one way), the chooser never drawing the same variant twice running; the roll 18-20 deg at 0.82-0.85 s (the swing law's cap, wrist_turn's note; 8-12 at 0.85 before, Artem 2026-10-13: too small, too slow); the listeners leave out a part that is busy or has no time, the book draws the rest; under the arm's beats the breath layer goes on (breath below: the accents swell it)",
+      "variants": [
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "arm_beat", "params": {"amp_deg": [12.0, 16.0], "period_s": [0.75, 0.85]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
+        ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [18.0, 20.0], "period_s": [0.82, 0.85], "repeats": 1}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.0, 2.5]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.0, 2.5]}}
+        ]}
+      ]
+    },
+    "pulse_strong": {
+      "callable": false,
+      "bind": "word",
+      "note": "the engine's own: an accent at pulse.strong_z or over: the nod, with the arm up the wrist's beat (the flex with the cart's 1 cm rock, the roll 22-25 deg with the cart's wag: pulse_weak's pairing)",
+      "variants": [
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "arm_beat", "params": {"amp_deg": [16.0, 20.0], "period_s": [0.85, 0.95]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
+        ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [22.0, 25.0], "period_s": [0.92, 0.95], "repeats": 1}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.5, 3.0]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.01, 0.01], "period_s": [0.7, 0.8]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.0, 4.0], "period_s": [0.4, 0.45]}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.5, 3.0]}}
+        ]}
+      ]
+    },
+    "pulse_peak": {
+      "callable": false,
+      "bind": "word",
+      "note": "the engine's own: the reply's strongest accent (once a reply, over pulse.strong_z): the deepest nod, with the arm up the biggest wrist's beat (the flex with the cart's 1-1.5 cm rock, the roll 26-30 deg with the cart's widest wag: pulse_weak's pairing)",
+      "variants": [
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
+          {"atom": "arm_beat", "params": {"amp_deg": [20.0, 24.0], "period_s": [0.95, 1.05]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.012, 0.015], "period_s": [0.85, 0.95]}}
+        ]},
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
+          {"atom": "wrist_turn", "params": {"amp_deg": [26.0, 30.0], "period_s": [1.02, 1.05], "repeats": 1}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.5, 3.0], "period_s": [1.6, 1.7]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.012, 0.015], "period_s": [0.85, 0.95]}}
+        ]},
+        {"needs": {"arm": "rest"}, "steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [3.5, 4.5], "period_s": [0.42, 0.45]}},
+          {"atom": "body_wag", "params": {"amp_deg": [2.5, 3.0], "period_s": [1.6, 1.7]}}
+        ]}
+      ]
+    },
+    "pulse_laugh": {
+      "callable": false,
+      "bind": "word",
+      "note": "the engine's own: an accent of the voice's laughing (a run of pulse.laugh_run accents pulse.laugh_gap_s apart): the cart's rock, the happy face and a bob of the head, each part where it is free (the cart takes the next accent once its rock is over)",
+      "variants": [
+        {"steps": [
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.008], "period_s": [0.55, 0.65]}},
+          {"atom": "face", "at_s": [-0.1, 0.0], "params": {"name": "happy", "hold_s": [1.0, 1.5]}},
+          {"atom": "head_nod", "params": {"amp_deg": [1.5, 2.5], "period_s": [0.4, 0.45]}}
+        ]}
+      ]
+    },
+    "listen_nod": {
+      "callable": false,
+      "bind": "utterance",
+      "note": "the engine's own: the listener's nod at the person's pause (moments.listener_nod_p) with the cart's 0.5 cm rock (moments.nod_rock_p)",
+      "variants": [
+        {"steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 3.0], "period_s": [0.45, 0.5]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
+        ]}
+      ]
+    },
+    "ack_nod": {
+      "callable": false,
+      "bind": "utterance",
+      "note": "the engine's own: the acknowledgement after the person's statement (moments.ack_nod_p) with the cart's 0.5 cm rock (moments.nod_rock_p)",
+      "variants": [
+        {"steps": [
+          {"atom": "head_nod", "params": {"amp_deg": [2.0, 2.0], "period_s": [0.45, 0.45]}},
+          {"atom": "body_rock", "params": {"amp_m": [0.005, 0.005], "period_s": [0.5, 0.6]}}
+        ]}
+      ]
+    },
+    "arm_sway": {
+      "callable": false,
+      "bind": "utterance",
+      "note": "the engine's own: the held arm's breath, a slow sway of the wrist over the pose a unit holds (the arm up), sent while nothing else moves it; the head's share of the breath is the idle layer's loop (idle below)",
+      "variants": [
+        {"needs": {"arm": "up"}, "steps": [
+          {"atom": "wrist_turn", "params": {"amp_deg": [6.0, 10.0], "period_s": [2.5, 3.0], "repeats": 1}}
+        ]}
+      ]
+    }
+  },
+  "idle": [
+    {"part": "head", "atoms": ["head_drift"], "every_s": [20.0, 60.0], "when": "conversation"},
+    {"part": "head", "atoms": ["breath"], "every_s": 0.2, "when": "conversation", "unless": "speaking", "after_speech_s": 0}
+  ],
+  "moments": {
+    "slow_tool": "thinking",
+    "greeting_due": "greeting",
+    "farewell_due": "farewell",
+    "note": "a moment of the robot (pepin.expression.conversation) -> the composition it performs, under the caps; greeting_due and farewell_due: the person's hello and bye, played in the brain's wait by the engine's listeners"
+  },
+  "aliases": {
+    "note": "another spelling of a marker -> its canonical name or name:arg (pepin.expression.markers): the brain is shown the canonical ones, these catch what it writes instead",
+    "!": "accent", "beat": "accent", "emphasis": "accent",
+    "point:i": "point:me", "point:myself": "point:me", "point:yourself": "point:you",
+    "arc:right": "arc:side", "arc:left": "arc:side", "arc:far": "arc:out", "arc:away": "arc:out", "arc:forward": "arc:out",
+    "arc:near": "arc:in", "arc:toward": "arc:in", "arc:back": "arc:in", "arc:rise": "arc:up", "arc:fall": "arc:down",
+    "size:large": "size:big", "size:huge": "size:big", "size:wide": "size:big", "size:all": "size:big",
+    "size:tiny": "size:small", "size:little": "size:small", "size:narrow": "size:small",
+    "draw:circle": "draw:round", "draw:ball": "draw:round", "draw:straight": "draw:line", "draw:waves": "draw:wave",
+    "count:first": "count:1", "count:second": "count:2", "count:third": "count:3"
+  },
+  "space": {
+    "note": "The gesture space in front of the robot (pepin.expression.render's resolver; DESIGN.md 4.3-4.6; the cells are poses above, AUTHORED by scratch/gesticulation_space/cells.py): the home a way to the middle goes through (via_pan_deg: a target pan inward of it; via: poses always), the referents' and the counted items' spots in the order they are taken (the widest pair first), the cells each path-drawing mark goes through, the head's offset (pan + left, tilt + down) for a mark that turns the head its argument's way, the pointing hand (its poses straight ahead, the clear pan range, the arm's and the neck's pan axes in the cart frame, a person's distance when attention gives none), the marks the brain may repeat in a reply",
+    "home": "ready",
+    "via_pan_deg": -38.5,
+    "via": ["stop", "tucked"],
+    "loci": ["cell_c_mid_far", "cell_rr_mid_far", "cell_r_mid_far"],
+    "paths": {
+      "arc:up": ["ready", "cell_r_high_far"],
+      "arc:down": ["cell_r_high_far", "ready"],
+      "arc:out": ["cell_r_mid_near", "cell_r_mid_far"],
+      "arc:in": ["cell_r_mid_far", "cell_r_mid_near"],
+      "arc:side": ["cell_r_mid_far", "cell_rr_mid_far"],
+      "size:big": ["cell_c_mid_far", "cell_rr_high_far"],
+      "draw:round": ["cell_c_mid_far", "cell_r_high_far", "cell_rr_mid_far", "ready"],
+      "draw:line": ["cell_c_mid_far", "cell_r_mid_far", "cell_rr_mid_far"],
+      "draw:wave": ["cell_c_low_far", "cell_r_high_far", "cell_rr_low_far"]
+    },
+    "head": {
+      "arc:up": [0.0, -3.0], "arc:down": [0.0, 3.0], "arc:out": [0.0, -2.0], "arc:in": [0.0, 2.0], "arc:side": [-3.0, 0.0],
+      "count:1": [2.0, 1.0], "count:2": [-2.0, 1.0], "count:3": [0.0, 2.0]
+    },
+    "pointing": {"open": "point_open", "shut": "point_shut", "pan_deg": [-68.0, 25.0], "arm_axis_m": [-0.037, -0.136], "neck_m": [-0.058, 0.0], "person_m": 1.2},
+    "again": ["point", "accent"]
+  },
+  "breath": {
+    "note": "THE BREATH LAYER (pepin.expression.breath; 2026-10-13, Artem: during a gesticulation only the gripper's tip moved while the shoulder stood dead; the arm must breathe in all its joints while it is up, never on the base). A part's breath is a FILTER under everything the part plays, not one more atom: per servo a slow sinusoid (amp_deg, period_s, phase as a share of a turn) of ABSOLUTE time, added to the knots of every arm trajectory planned over a held pose (pepin.expression.parts.ArmPart.plan): the posture's renewals, a mark's stroke from the unit, the pulse's wrist beats and the flat idle clips the listeners send back to back between them (clip_s each, pepin.expression.listeners arm_breath) all carry it, so the arm never stands dead while it is up and a beat rides a breathing arm. A hold freezes the breath where the last knot left it; the next clip blends from that frozen offset to the live breath over blend_s (no jump), a clip that ends at rest blends it out, and a clip planned from rest (the raise) gets none (when: up). THE PULSE FEEDS IT: each accent's ensemble sent while the arm is up swells the amplitude by accent_gain[its name], decaying over accent_decay_s (a weak accent half as much again, a peak two and a half times for a moment), so the breath rises and falls with the voice. The held pose the engine reasons about stays the clean one (a unit's name, the posture's compare); the arm's real place is the pose plus the frozen offset. A knot the breath would push past a limit or a cap plays without it: the gesture never loses to its breath. Per part: a part absent keeps its older way (the head's breath is the idle list's looping atom through the gaze arbiter's keys, where a filter cannot ride; the wheels' sway is the pulse's atoms, measured legs); the arm is the first user, the older arm_sway composition (the wrist alone) plays when this block has no arm. PROPOSALS, untuned on the robot: the phases set the elbow against the shoulder so the hand stays roughly in place while the arm breathes, the wrist a quarter turn behind; the amplitudes 1.5-4 deg (the roll the widest: it carries no inertia); the periods near the head's 4 s breath, the roll slower so the two never lock",
+    "arm": {
+      "when": "up",
+      "joints": {
+        "shoulder_pan": {"amp_deg": 1.5, "period_s": 4.2, "phase": 0.0},
+        "shoulder_lift": {"amp_deg": 2.0, "period_s": 4.2, "phase": 0.0},
+        "elbow_flex": {"amp_deg": 2.5, "period_s": 4.2, "phase": 0.5},
+        "wrist_flex": {"amp_deg": 2.0, "period_s": 4.2, "phase": 0.25},
+        "wrist_roll": {"amp_deg": 4.0, "period_s": 5.0, "phase": 0.0},
+        "gripper": {"amp_deg": 1.5, "period_s": 4.2, "phase": 0.5}
+      },
+      "blend_s": 0.6,
+      "accent_gain": {"pulse_weak": 0.5, "pulse_strong": 1.0, "pulse_peak": 1.5},
+      "accent_decay_s": 1.2,
+      "clip_s": 3.0
+    }
+  }
+}

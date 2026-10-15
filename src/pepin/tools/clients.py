@@ -3,8 +3,10 @@
 The tools hold no truth of their own (``.claude/research/brain/CONTRACTS.md``): where the robot
 is and the places are the goal server's (TCP 3337, :mod:`pepin.goal_link`), the head is the gaze
 arbiter's (HTTP 3339 on this Mac, :mod:`pepin.gaze_link`), what is where is ``world``'s (HTTP
-8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the camera's
-(ustreamer, HTTP 8080).
+8798), the voice is ``pepin.audio_server``'s (TCP 3338) and the picture is the one camera
+channel's (the perception service, HTTP 8792 on this Mac, fed by camera_stream), or ustreamer's
+(HTTP 8080 on the board) while the live ``vision.source`` says snapshot; who stands in front of
+the robot is that channel's records, read with the speaker gaze's attention where one runs.
 Each client here speaks one of them and nothing else; none of them can send the wheels a twist.
 
 Every Protocol is what a tool relies on, so a fake stands in for a service in the tests
@@ -30,12 +32,19 @@ import wave
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
 
 from pepin import goal_link
 from pepin.gaze_link import GAZE_PORT, ask
 from pepin.neck import NeckConfig, angle_limits
 from pepin.tools.registry import Image, ToolError
+
+if TYPE_CHECKING:  # numpy's modules: loaded by the clients that use them
+    from pepin.expression.speaker import Attention, AttentionView
+    from pepin.perception.client import Perception
+    from pepin.perception.record import Record
+    from pepin.perception.source import VisionSource
+    from pepin.pixel_to_map import Box, Located, Pose2D, Stamped
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +56,7 @@ GAZE_URL = f"http://127.0.0.1:{GAZE_PORT}"  # the gaze arbiter's door, beside Na
 # the answer is waited a little longer than that.
 LOOK_ANSWER_S = 15.0
 HTTP_TIMEOUT_S = 3.0
+MOVING_PHASES = ("saccade", "returning")  # the arbiter's phases of a head on its way
 
 
 class ServiceDownError(ToolError):
@@ -81,6 +91,24 @@ class GoalServer(Protocol):
         """Cancel every goal on the robot; the ``cancelled`` answer."""
         ...
 
+    def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+        """Whether a goal there would be driven, asked without motion: the ``plan`` answer
+        (``ok``, ``cell``, ``reason``, ``blames``, ``length_m``; a plan found also says where
+        it ends, ``end`` {x, y, yaw_deg} with the heading None when its last pose has none,
+        and how far short of the goal, ``short_m`` and ``short_deg``) or an ``error`` event."""
+        ...
+
+    def pose_at(
+        self, frame: str, stamp: float | None = None, parent: str = "map"
+    ) -> dict[str, Any]:
+        """Where ``frame`` (``base_link`` or ``camera_link``) was in ``parent`` (``map``, or
+        ``odom`` for how it moved, smooth across a localisation update) at ``stamp`` (seconds,
+        the board's clock: a camera record's own stamp), out of TF's history; None, the newest
+        there is. The ``pose_at`` answer (``ok``; x, y, z, qx, qy, qz, qw, yaw_deg; ``stamp``,
+        the server's ``now`` and ``age_s``; else ``kind`` and ``reason``) or an ``error``
+        event (an old build: "unknown command")."""
+        ...
+
 
 class GoalServerLink:
     """:class:`GoalServer` over TCP, through :mod:`pepin.goal_link`: one connection per command."""
@@ -113,6 +141,23 @@ class GoalServerLink:
         """The ``cancelled`` answer, waited for as long as the server may take to confirm it."""
         return self._ask({"cmd": "cancel"}, timeout_s=goal_link.CANCEL_CONFIRM_S + 3.0)
 
+    def plan(self, x: float, y: float, yaw_deg: float) -> dict[str, Any]:
+        """The ``plan`` answer, waited for as long as the planner may take."""
+        request = {"cmd": "plan", "x": x, "y": y, "yaw_deg": yaw_deg}
+        return self._ask(request, timeout_s=goal_link.PLAN_WAIT_S + 5.0)
+
+    def pose_at(
+        self, frame: str, stamp: float | None = None, parent: str = "map"
+    ) -> dict[str, Any]:
+        """The ``pose_at`` answer (its lookup waits half a second at most, well inside the
+        ask's own timeout)."""
+        request: dict[str, Any] = {"cmd": "pose_at", "frame": frame}
+        if stamp is not None:
+            request["stamp"] = stamp
+        if parent != "map":
+            request["parent"] = parent
+        return self._ask(request)
+
     def _ask(
         self, request: dict[str, Any], timeout_s: float = goal_link.ASK_TIMEOUT_S
     ) -> dict[str, Any]:
@@ -131,14 +176,30 @@ class GoalServerLink:
 @dataclass(frozen=True)
 class HeadPose:
     """Where the head points: ``pan_deg`` left of the nose (+) or right (-), ``tilt_deg`` below
-    level (+) or above it (-)."""
+    level (+) or above it (-); when the arbiter said, whether it is moving now and from which
+    moment (the board's clock) its pictures are still (its ``blind_until``: settled plus one
+    frame period)."""
 
     pan_deg: float
     tilt_deg: float
+    moving: bool = field(default=False, compare=False)
+    still_from: float | None = field(default=None, compare=False)
 
     def as_dict(self) -> dict[str, float]:
         """The pose as a tool's payload, rounded to a tenth of a degree."""
         return {"pan_deg": round(self.pan_deg, 1), "tilt_deg": round(self.tilt_deg, 1)}
+
+
+@dataclass(frozen=True)
+class Seen:
+    """The picture ``see`` last showed the model: where the head pointed for it, the pixel space
+    a box drawn on it is in (the camera channel's rectified left eye, or the raw left eye of a
+    snapshot: :mod:`pepin.perception.record`'s names) and the channel's frame number (None for
+    a snapshot)."""
+
+    head: HeadPose
+    space: str
+    seq: int | None = None
 
 
 @dataclass(frozen=True)
@@ -243,12 +304,16 @@ class GazeNeck:
         return HeadPose(0.0, self.cfg.reference.pitch_deg)
 
     def pose(self) -> HeadPose:
-        """The encoders' newest reading, as the arbiter heard it, in degrees."""
+        """The encoders' newest reading, as the arbiter heard it, in degrees, with its phase
+        (a saccade or a return is a move) and ``blind_until`` (still from then on)."""
         state = self._ask("/state", None, HTTP_TIMEOUT_S)
         pan, tilt = state.get("pan_rad"), state.get("tilt_rad")
         if pan is None or tilt is None:
             raise ToolError("the neck's encoders have not been heard (is the board's neck up?)")
-        return HeadPose(_deg(float(pan)), _deg(float(tilt)))
+        until = state.get("blind_until")
+        still_from = float(until) if isinstance(until, (int, float)) else None
+        moving = state.get("phase") in MOVING_PHASES
+        return HeadPose(_deg(float(pan)), _deg(float(tilt)), moving, still_from)
 
     def turn(self, pan_deg: float | None, tilt_deg: float | None) -> HeadMove:
         """A look at those angles, held for the person band's TTL; an axis left None stays
@@ -401,13 +466,88 @@ def _fetch(
 class Camera(Protocol):
     """The head camera: one picture on demand."""
 
-    def snapshot(self) -> Image:
-        """The newest frame as a JPEG: for a stereo head, the left eye, upright."""
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The newest frame as a JPEG: for a stereo head, the left eye, upright. A camera that
+        keeps frames already taken (the perception service's ring) gives the newest one exposed
+        at ``not_before`` (the board's clock: the head still from then on) or later, waiting up
+        to ``wait_s`` for one; one that takes its picture now may ignore both."""
         ...
 
     def health(self) -> dict[str, Any]:
         """Whether the camera streams, and at what rate."""
         ...
+
+
+class ServiceCamera:
+    """:class:`Camera` over the perception service's ring (:mod:`pepin.perception`): the JPEG
+    camera_stream sent of its rectified left eye, the same bytes and frame number the gaze's
+    and person recognition's records came from, from the loopback (< 1 ms); never a snapshot of
+    its own. The service down is an error that names it and how to start it."""
+
+    HINT = (
+        "Start it with ros/models.sh start perception (it is fed by camera_stream in"
+        " pepin-vslam, flag perception_feed). For today ustreamer's snapshots serve instead:"
+        " scripts/voice_cascade.py switch --knob vision.source=snapshot in the running voice,"
+        " or perception.source snapshot in config/models.json for a process started after"
+    )
+
+    def __init__(self, service: Perception) -> None:
+        """The service's client."""
+        self.service = service
+
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The newest frame exposed at ``not_before`` or later, waited for up to ``wait_s``,
+        else the newest there is (marked not still)."""
+        frame = self.service.still(not_before, wait_s)
+        if frame is None:
+            raise self._down()
+        return Image(
+            frame.data,
+            "image/jpeg",
+            frame.width,
+            frame.height,
+            frame={"seq": frame.seq, "still": frame.still, "optics": frame.optics},
+        )
+
+    def health(self) -> dict[str, Any]:
+        """The service's frames: whether they come, their rate, the eye's size."""
+        h = self.service.health()
+        if h is None:
+            raise self._down()
+        frames = h.get("frames", {})
+        idle = frames.get("idle_s")
+        return {
+            "online": idle is not None and float(idle) < 2.0,
+            "fps": frames.get("per_s"),
+            "source": f"perception service ({self.service.url})",
+        }
+
+    def _down(self) -> ServiceDownError:
+        why = getattr(self.service, "last_error", "") or "no answer"
+        if not getattr(self.service, "down", False) and self.service.health() is not None:
+            why = "it has no frame: camera_stream is not feeding it"
+        return ServiceDownError("perception service", self.service.url, why, self.HINT)
+
+
+class SwitchedCamera:
+    """:class:`Camera` that asks the live ``vision.source`` at every picture: the perception
+    service's ring, or ustreamer's snapshot (the path before it)."""
+
+    def __init__(self, source: VisionSource, service: Camera, snapshot: Camera) -> None:
+        self.source, self.service, self.snapshot_camera = source, service, snapshot
+
+    @property
+    def current(self) -> Camera:
+        """The camera the switch names now."""
+        return self.service if self.source.service else self.snapshot_camera
+
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """The current camera's picture."""
+        return self.current.snapshot(not_before, wait_s)
+
+    def health(self) -> dict[str, Any]:
+        """The current camera's health."""
+        return self.current.health()
 
 
 class UstreamerCamera:
@@ -424,8 +564,9 @@ class UstreamerCamera:
         self.base = f"http://{host}:{port}"
         self.timeout_s = timeout_s
 
-    def snapshot(self) -> Image:
-        """``GET /snapshot``, cut to one eye when the head is a stereo rig."""
+    def snapshot(self, not_before: float | None = None, wait_s: float = 0.0) -> Image:
+        """``GET /snapshot``, cut to one eye when the head is a stereo rig (taken now: the
+        stamp and the wait are not needed)."""
         data = _fetch(
             urllib.request.Request(self.base + "/snapshot"),
             self.timeout_s,
@@ -752,3 +893,191 @@ class BaseBody:
             "the base server has not read the servos' temperatures yet (it does every 5 s, while"
             " the bus answers); ask again in a few seconds"
         )
+
+
+# -- the person in front of the robot, and the picture's points: pepin.pixel_to_map's inputs ----
+
+# The speaker gaze's own rule (config/expression.json speaker.match_deg, a contract test keeps
+# the two equal): a face or a body this near a person's bearing is that person.
+MATCH_DEG = 20.0
+CHANNEL_HINT = "Start it with ros/models.sh start perception (fed by camera_stream in pepin-vslam)"
+
+
+@dataclass(frozen=True)
+class PersonSighting:
+    """The person the robot talks with in one frame of the camera channel: their box in that
+    frame's pixels (``space``: the channel's rectified left eye), whether it is their ``face``
+    or their ``body``, their bearing in the cart's frame (degrees, + left), how far their head
+    is turned from the camera (degrees, + their own left; a face only), how many people the
+    frame holds, its number in the channel's ring, how this person was chosen, and the frame's
+    exposure ``stamp`` (seconds, the board's clock: the record's own, as camera_stream dates
+    the frame; None from a source that has none)."""
+
+    box: tuple[float, float, float, float]
+    space: str
+    kind: str
+    bearing_deg: float
+    yaw_deg: float | None
+    people: int
+    seq: int
+    chosen: str
+    stamp: float | None = None
+
+
+class Sightings(Protocol):
+    """Who is in front of the robot (the approach tool's speaker)."""
+
+    def speaker(self, head: HeadPose) -> PersonSighting | None:
+        """The person the robot talks with, in a frame exposed while the head stood at ``head``
+        (from its ``still_from`` on); None when the frame shows nobody; :class:`ToolError`
+        (:class:`ServiceDownError`) saying why it cannot tell."""
+        ...
+
+
+class ChannelSightings:
+    """:class:`Sightings` from the one camera channel (:mod:`pepin.perception`): the newest
+    record exposed since the head stood still, and in it the person the speaker gaze holds
+    (``attention``, its :class:`pepin.expression.speaker.AttentionView`: the face, else the body
+    box, within :data:`MATCH_DEG` of their bearing), else, with no gaze or nobody engaged, the
+    widest face (the nearest), else the tallest body box. The boxes are the record's own, in the
+    rectified left eye the frame is; nothing is detected or rectified here. While ``source``
+    (the live ``vision.source``) says snapshot the channel is not the camera, and the speaker is
+    not measured."""
+
+    def __init__(
+        self,
+        service: Perception,
+        source: VisionSource | None = None,
+        attention: AttentionView | None = None,
+        *,
+        wait_s: float = 0.4,
+        match_deg: float = MATCH_DEG,
+    ) -> None:
+        """``wait_s``: how long to wait for a record exposed after the head settled (config/
+        models.json perception.look_wait_s, the gaze's own wait)."""
+        self.service, self.source, self.attention = service, source, attention
+        self.wait_s, self.match_deg = wait_s, match_deg
+
+    def speaker(self, head: HeadPose) -> PersonSighting | None:
+        """See :meth:`Sightings.speaker`."""
+        from pepin.perception.record import RECTIFIED_LEFT
+
+        if self.source is not None and not self.source.service:
+            raise ToolError(
+                "the person is measured on the camera channel's frames, and vision.source is"
+                " snapshot now: switch it back (scripts/voice_cascade.py switch --knob"
+                " vision.source=service), or call see() and give the person's box from its"
+                " picture; nothing moved"
+            )
+        record = self.service.latest(0, head.still_from, self.wait_s)
+        if record is None:
+            if self.service.down or self.service.health() is None:
+                why = getattr(self.service, "last_error", "") or "no answer"
+                raise ServiceDownError("perception service", self.service.url, why, CHANNEL_HINT)
+            raise ToolError(
+                f"the camera channel has no frame taken since the head stopped (waited"
+                f" {self.wait_s:.1f} s; is camera_stream's perception_feed on?); nothing moved"
+            )
+        if record.optics != RECTIFIED_LEFT:
+            raise ToolError(
+                f"the camera channel's frames are {record.optics or 'unnamed'} pixels, not the"
+                " rectified left eye: no stereo calibration in camera_stream; nothing moved"
+            )
+        faces = [
+            _Seen("face", f.box, head.pan_deg + f.pan_deg, f.yaw_deg, f.width_px)
+            for f in record.faces
+        ]
+        bodies = [
+            _Seen("body", p.box, head.pan_deg + p.pan_deg, None, p.height_deg)
+            for p in record.persons
+        ]
+        people = max(len(faces), len(bodies))
+        if people == 0:
+            return None
+        view = self.attention.attention() if self.attention is not None else None
+        if view is not None and view.bearing_deg is not None and view.phase not in IDLE:
+            bearing = view.bearing_deg
+            for group in (faces, bodies):
+                near = [s for s in group if abs(_wrap_deg(s.bearing - bearing)) <= self.match_deg]
+                if near:
+                    best = min(near, key=lambda s: abs(_wrap_deg(s.bearing - bearing)))
+                    return best.sighting(people, record, "the person the gaze holds")
+            shown = ", ".join(f"{s.bearing:+.0f}" for s in faces or bodies)
+            raise ToolError(
+                f"the person the robot talks with is at {bearing:+.0f} deg and the newest"
+                f" picture shows nobody there (people at {shown} deg): ask them to step into"
+                " view, or turn the head toward them with look first; nothing moved"
+            )
+        if faces:
+            return max(faces, key=lambda s: s.size).sighting(
+                people, record, "the widest face (the nearest)"
+            )
+        return max(bodies, key=lambda s: s.size).sighting(
+            people, record, "the tallest body (the nearest)"
+        )
+
+
+IDLE = ("idle", "paused")  # the gaze's phases without a person engaged (a drive pauses it)
+
+
+class Facing(Protocol):
+    """The speaker gaze as a tool reads and asks it (the approach tool: nobody in view, a voice
+    to go by; the turn tool): its snapshot, the body turned to the person it holds, and the
+    person kept through a turn in place someone else makes."""
+
+    def attention(self) -> Attention:
+        """The snapshot now (:class:`pepin.expression.speaker.AttentionView`)."""
+        ...
+
+    def face_person(self, why: str) -> str | None:
+        """Turn the body to the person engaged, the whole bearing in one request; None when the
+        turn runs (or one already does), else why not."""
+        ...
+
+    def keep_person(self, why: str) -> Attention | str:
+        """A turn in place of the body's begins (a drive to the cascade, which pauses the gaze):
+        the person engaged is kept through it, the head on them as the body comes round; the
+        snapshot right after (their bearing as the turn starts), else why not."""
+        ...
+
+
+@dataclass(frozen=True)
+class _Seen:
+    """A face or a body of a record, with its bearing in the cart's frame and its size (a face's
+    width in pixels, a body's height in degrees)."""
+
+    kind: str
+    box: tuple[float, float, float, float]
+    bearing: float
+    yaw_deg: float | None
+    size: float
+
+    def sighting(self, people: int, record: Record, chosen: str) -> PersonSighting:
+        """As the tools' :class:`PersonSighting`, with ``record``'s number and stamp."""
+        from pepin.perception.record import RECTIFIED_LEFT
+
+        return PersonSighting(
+            self.box, RECTIFIED_LEFT, self.kind, self.bearing, self.yaw_deg, people, record.seq,
+            chosen, record.stamp,
+        )  # fmt: skip
+
+
+def _wrap_deg(deg: float) -> float:
+    """An angle wrapped to -180..180 degrees."""
+    return (deg + 180.0) % 360.0 - 180.0
+
+
+class Eyes(Protocol):
+    """Points of the picture as points of the map (:class:`pepin.pixel_to_map.Locator`)."""
+
+    def locate(self, box: Box, space: str, at: Stamped | None = None) -> Located:
+        """Where the thing under ``box`` is, the box in pixels of ``space`` (the rectified
+        left eye of the camera channel's frames, or the raw left eye of a snapshot: the one it
+        was drawn on, rectified here only when raw), placed with TF's poses at its frame's
+        stamp (``at``) or, None, with the neck and the cart of now;
+        :class:`pepin.pixel_to_map.LocateError` saying why not."""
+        ...
+
+    def aim(self, x: float, y: float, z: float, pose: Pose2D) -> HeadPose:
+        """The head angles that look at map point ``(x, y, z)`` from ``pose``."""
+        ...

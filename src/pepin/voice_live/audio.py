@@ -106,6 +106,7 @@ class Pacer:
         self._cursor = 0.0  # when the next block sent will play
         self._ending = False
         self._last_feed = 0.0
+        self._hold: float | None = None  # a lead shorter than lead_s while it is set (hold())
         self.sent_s = 0.0
         self.first_play_s: float | None = None  # when the first block of the session was sent
 
@@ -117,6 +118,29 @@ class Pacer:
             self._last_feed = self._clock()
             self._cond.notify_all()
 
+    def hold(self, seconds: float | None) -> None:
+        """Send what is queued at most ``seconds`` ahead of the speaker instead of ``lead_s``
+        (audio that may still be faded: :meth:`fade` shapes only what is not sent yet); None
+        goes back to ``lead_s``."""
+        with self._cond:
+            self._hold = seconds
+            self._cond.notify_all()
+
+    def fade(self, seconds: float) -> tuple[float, float]:
+        """End what is queued and not yet sent in a linear ramp to silence over ``seconds``
+        (whole samples at the speaker's rate, from full level at the first sample not sent) and
+        drop the rest; (seconds ramped, seconds dropped). Nothing changes when less than the
+        ramp is queued: that audio ends by itself as soon."""
+        with self._cond:
+            ramp = round(seconds * self.rate)
+            queued = len(self._buffer) // SAMPLE_BYTES
+            if ramp <= 0 or queued < ramp:
+                return 0.0, 0.0
+            head = np.frombuffer(bytes(self._buffer[: ramp * SAMPLE_BYTES]), dtype="<i2")
+            shaped = np.round(head * np.linspace(1.0, 0.0, ramp)).astype("<i2").tobytes()
+            self._buffer[:] = shaped
+            return ramp / self.rate, (queued - ramp) / self.rate
+
     def end(self) -> None:
         """The turn is complete: play out what is queued, then end the utterance."""
         with self._cond:
@@ -124,11 +148,13 @@ class Pacer:
             self._cond.notify_all()
 
     def flush(self) -> None:
-        """Barge-in: drop what is queued and silence the speaker now."""
+        """Barge-in: drop what is queued (and any :meth:`hold` on it) and silence the speaker
+        now."""
         with self._cond:
             self._buffer.clear()
             self._levels.clear()
             self._ending = False
+            self._hold = None
             self._cursor = min(self._cursor, self._clock())
         self._safe(self.speaker.flush)
 
@@ -145,9 +171,10 @@ class Pacer:
         finish = False
         with self._cond:
             stalled = now - self._last_feed > STALL_S  # a remainder no more audio is joining
+            lead = self.lead_s if self._hold is None else self._hold
             while self._buffer and (len(self._buffer) >= self._block or self._ending or stalled):
                 cursor = max(self._cursor, now)
-                if cursor - now > self.lead_s:
+                if cursor - now > lead:
                     break
                 block = bytes(self._buffer[: self._block])
                 del self._buffer[: self._block]
@@ -161,7 +188,7 @@ class Pacer:
             while self._levels and self._levels[0][0] <= now:
                 due_levels.append(self._levels.popleft()[1])
             next_level = self._levels[0][0] if self._levels else math.inf
-            next_send = self._cursor - self.lead_s if self._buffer else math.inf
+            next_send = self._cursor - lead if self._buffer else math.inf
         if blocks and self.first_play_s is None:
             self.first_play_s = now
         for block in blocks:

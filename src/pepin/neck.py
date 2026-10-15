@@ -140,7 +140,30 @@ def speed_ticks(deg_s: float) -> int:
 
 def acc_units(deg_s2: float) -> int:
     """A ramp in degrees a second squared as the Acceleration register's units, 1..254."""
-    return min(254, max(1, round(deg_s2 / ACC_UNIT_DEG_S2)))
+    return min(ACC_UNITS_TOP, max(1, round(deg_s2 / ACC_UNIT_DEG_S2)))
+
+
+ACC_UNITS_TOP = 254  # the Acceleration register's top
+# A servo is IN FLIGHT above this encoder speed (~13 deg/s). Its Acceleration register is its
+# deceleration too: a ramp written mid-flight that cannot stop it before its target lets it
+# sail through the target, its EEPROM limit (a clamp on goals, never a brake) and the
+# encoder's zero (the neck, 2026-10-13: the pulse's glide keys, 1-3 units, over a 2000 ticks/s
+# turn). Each driver keeps the ramp at least :func:`braking_units` while a servo flies.
+MOVING_TICKS_S = 150
+
+
+def braking_units(speed_ticks_s: float, way_ticks: float) -> int:
+    """The least Acceleration (register units of 100 ticks/s^2) that stops a servo moving at
+    ``speed_ticks_s`` within ``way_ticks`` of its target (signed: the target less the
+    position): v^2 / 2d with a fifth in hand. A servo moving away from its target, or on it,
+    needs the register's top (it must turn round, or is there); one that stands needs 0, so
+    any ramp asked is honoured at rest."""
+    if abs(speed_ticks_s) <= MOVING_TICKS_S:
+        return 0
+    if way_ticks * speed_ticks_s <= 0 or abs(way_ticks) < 1.0:
+        return ACC_UNITS_TOP
+    units = 1.2 * speed_ticks_s * speed_ticks_s / (2.0 * abs(way_ticks)) / 100.0
+    return min(ACC_UNITS_TOP, max(0, math.ceil(units)))
 
 
 @dataclass(frozen=True)

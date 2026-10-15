@@ -3,7 +3,8 @@
 # the lidar from the goal server's `where` (127.0.0.1:3337, Nav2 on this Mac), the planner it
 # picked, the last snapshot and recognition reports of the laptop's mapping, the three ToF sensors
 # reaching the laptop (ros/tools/tof_check.py: a rate and a reading each), the Foxglove bridge,
-# the board's clock against the laptop's (its chrony) with the stamp -> receipt p50 of the key
+# the camera channel (the perception service's /health: frames coming, detections, faces), the
+# board's clock against the laptop's (its chrony) with the stamp -> receipt p50 of the key
 # streams here (ros/tools/stream_latency.py, 2 s in pepin-macnav), the laptop nodes still waiting
 # for their /tf_static edges (their "tf_static: WAITING" WARNs of the last 3 min, read by
 # pepin.static_facts; no new node is started for it), and one plan from the planner
@@ -42,6 +43,20 @@ rec="$(grep '\[rtabmap_frame\]: rtabmap frame:' <<<"$LOG" | tail -2 \
 if grep -qE '^[1-9]' <<<"$rec"; then say OK recognise "$rec"; else say FAIL recognise "$rec"; fi
 fg="$("$HERE/foxglove.sh" check 2>&1 | grep -cE '^FAIL fg\.[345] ')"
 if [ "$fg" = 0 ]; then say OK foxglove "bridge answers"; else say FAIL foxglove "no handshake"; fi
+PPORT="${PEPIN_PERCEPTION_PORT:-8792}"
+vis="$(curl -s -m 2 "http://127.0.0.1:$PPORT/health" | python3 -c '
+import json, sys
+try:
+    h = json.load(sys.stdin)
+except ValueError:
+    sys.exit("FAIL not answering (ros/models.sh start perception)")
+f, d, latest = h["frames"], h["detect"], h.get("latest") or {}
+if f["idle_s"] is None or f["idle_s"] > 2:
+    sys.exit("FAIL up, no frames from camera_stream (its perception_feed flag?)")
+print("OK %.1f frames/s in, %.1f detected/s, %.0f ms, %d faces %d persons now" % (
+    f["per_s"], d["per_s"], d["ms"]["total"]["median"], latest.get("faces", 0),
+    latest.get("persons", 0)))' 2>&1)"
+if [ "${vis%% *}" = OK ]; then say OK vision "${vis#OK }"; else say FAIL vision "${vis#FAIL }"; fi
 BOARD="${BOARD:-${PEPIN_HOST:-10.0.0.187}}"
 chrony="$(ssh -o ConnectTimeout=3 -o BatchMode=yes "root@$BOARD" chronyc -c tracking 2>/dev/null | head -1)"
 myip="$(ipconfig getifaddr "$(route -n get "$BOARD" 2>/dev/null | awk '/interface:/ {print $2}')" 2>/dev/null)"

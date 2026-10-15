@@ -197,7 +197,8 @@
         <!-- No WouldA...RecoveryHelp gate in front of the round robin: those conditions answer
              FAILURE for the codes a footprint-checking planner or a boxed-in controller actually
              return (START_OCCUPIED among them), and the whole recovery was skipped for exactly the
-             situations it exists for. Every manoeuvre below is collision-checked on its own. -->
+             situations it exists for. The spins and back-ups below are NOT collision-checked while
+             the behaviour server's simulate_ahead_time is 0 (2026-10-14): hence no forward drives. -->
         <Sequence>
           <ReactiveFallback name="RecoveryFallback">
             <GoalUpdated/>
@@ -208,28 +209,23 @@
               </Sequence>
               <!-- Tried in turn, one per failed attempt, twenty attempts before giving up: a wheel
                    on a carpet edge or a caster set sideways needs variety and persistence, not a
-                   spin and a shrug. Every move is short and collision-checked against the costmap. -->
+                   spin and a shrug. Every move is short; the time allowance is its only guard. -->
               <!-- time_allowance on every move: the rear is unsensed, and a retreat that has not covered its
                    distance in twice its nominal time is pushing something (a box, run 0087: 10-20 s per push). -->
+              <!-- 2026-10-14: no forward drives in the recovery since the behaviour server runs with
+                   simulate_ahead_time 0 (Artem's choice for the Spin on the dock): a DriveOnHeading
+                   then sees nothing, and run 101 (21:21) drove RockLeft and RockRight into his desk
+                   and pushed it for 4 s. Spins and back-ups stay (the rear was unsensed all along,
+                   their time allowance is the guard). -->
               <BackUp backup_dist="0.20" backup_speed="0.10" time_allowance="5" error_code_id="{backup_code_id}"/>
-              <Sequence name="Rock">
-                <BackUp backup_dist="0.10" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
-                <DriveOnHeading dist_to_travel="0.25" speed="0.20" time_allowance="4"/>
-              </Sequence>
+              <BackUp backup_dist="0.10" backup_speed="0.10" time_allowance="4" error_code_id="{backup_code_id}"/>
               <Spin spin_dist="1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
-              <Sequence name="RockLeft">
-                <Spin spin_dist="0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
-                <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
-              </Sequence>
-              <Sequence name="RockRight">
-                <Spin spin_dist="-0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
-                <DriveOnHeading dist_to_travel="0.20" speed="0.15" time_allowance="4"/>
-              </Sequence>
+              <Spin spin_dist="0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
+              <Spin spin_dist="-0.5" time_allowance="6" error_code_id="{spin_error_code}"/>
               <Sequence name="LongRetreat">
                 <BackUp backup_dist="0.35" backup_speed="0.15" time_allowance="6" error_code_id="{backup_code_id}"/>
                 <Wait wait_duration="1.0"/>
               </Sequence>
-              <DriveOnHeading dist_to_travel="0.30" speed="0.25" time_allowance="4"/>
               <Spin spin_dist="-1.57" time_allowance="6" error_code_id="{spin_error_code}"/>
             </RoundRobin>
           </ReactiveFallback>

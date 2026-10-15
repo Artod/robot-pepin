@@ -1,4 +1,10 @@
-"""The brain's text stream cut into sentences the voice can start on, and cleaned for speech."""
+"""The brain's text stream cut into sentences the voice can start on, and cleaned for speech.
+
+The splitter also reports a sentence before it is whole (:meth:`SentenceSplitter.ahead`), the
+body's ``text_ahead`` (:class:`pepin.voice_cascade.stages.Ahead`): a gesture marker the brain
+has just closed, and the first word of a round's first sentence (a yes or a no), each known
+0.18 s (p50) before its sentence ends.
+"""
 
 from __future__ import annotations
 
@@ -9,10 +15,17 @@ _SOFT = re.compile(r"[,;:]\s|\s[—–-]\s")  # noqa: RUF001 -- the dashes are m
 _MARKUP = re.compile(r"[*_#`~>|]+")
 # [notes], (stage directions) and {style markers} are not speech
 _ASIDE = re.compile(r"\[[^\]]*\]|\([^)]*\)|\{[^}]*\}")
-_STYLE = re.compile(r"\s*\{\s*(?:style\s*:\s*)?([^{}]*?)\s*\}\s*", re.IGNORECASE)
 _SPACES = re.compile(r"\s+")
 _WORDS = re.compile(r"\w+")
+_CLOSED = re.compile(r"\{[^{}]*\}")  # a whole marker
+_FIRST_WORD = re.compile(r"^\W*\w+\W")  # a word followed by what ends it
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001
+
+
+def in_braces(text: str, pos: int) -> bool:
+    """Whether ``pos`` lies inside a marker's braces: a ``{`` opened before it and not closed
+    (markers never nest, :mod:`pepin.expression.markers`)."""
+    return text.rfind("{", 0, pos) > text.rfind("}", 0, pos)
 
 
 class SentenceSplitter:
@@ -20,7 +33,9 @@ class SentenceSplitter:
 
     A sentence ends at ``. ! ? …`` followed by a space (``3.5`` does not end one) or at a line
     break. A first sentence still open after ``soft_chars`` is cut at its last comma or dash, so
-    a long opening clause does not hold the voice back.
+    a long opening clause does not hold the voice back. Neither happens inside a marker's braces
+    (``{happy. excited}``, ``{style: whispering}``): a marker reaches the voice whole, and a
+    sentence waits while one is still open.
     """
 
     def __init__(self, soft_chars: int = 90) -> None:
@@ -28,13 +43,16 @@ class SentenceSplitter:
         self.soft_chars = soft_chars
         self._buffer = ""
         self._emitted = 0
+        self._told = (0, 0, False)  # the open sentence's number, its markers and word told
 
     def feed(self, text: str) -> list[str]:
         """The sentences ``text`` completes."""
         self._buffer += text
         out: list[str] = []
         while True:
-            match = _END.search(self._buffer)
+            buffer = self._buffer
+            ends = (m for m in _END.finditer(buffer) if not in_braces(buffer, m.start()))
+            match = next(ends, None)
             if match is None or (match.end() == len(self._buffer) and match.group().strip()):
                 # "... 3." at the end may still become "3.5": wait for what follows the stop
                 break
@@ -48,12 +66,32 @@ class SentenceSplitter:
             and not out
             and len(self._buffer) > self.soft_chars
         ):
-            cuts = list(_SOFT.finditer(self._buffer))
+            buffer = self._buffer
+            cuts = [c for c in _SOFT.finditer(buffer) if not in_braces(buffer, c.start())]
             if cuts and cuts[-1].start() > 20:
                 cut = cuts[-1].start() + 1
                 out.append(self._buffer[:cut].strip())
                 self._buffer = self._buffer[cut:]
         self._emitted += len(out)
+        return out
+
+    def ahead(self) -> list[str]:
+        """The open sentence so far (markers as written), once each time a marker in it has
+        just closed and once when the splitter's first sentence has its first word whole; []
+        when there is nothing new. Ask after each :meth:`feed`."""
+        text = self._buffer.lstrip()
+        number, markers, word = self._told
+        if number != self._emitted:  # a new open sentence
+            number, markers, word = self._emitted, 0, False
+        out: list[str] = []
+        closed = len(_CLOSED.findall(text))
+        if closed > markers:
+            markers = closed
+            out.append(text)
+        if not word and not self._emitted and _FIRST_WORD.match(_ASIDE.sub(" ", text).lstrip()):
+            word = True
+            out = out or [text]
+        self._told = (number, markers, word)
         return out
 
     def flush(self) -> str:
@@ -69,16 +107,6 @@ def speakable(text: str) -> str:
     """``text`` without what a voice must not read out: markup (asterisks, hashes, backticks),
     asides in brackets or parentheses (a model's notes to itself) and style markers in braces."""
     return _SPACES.sub(" ", _MARKUP.sub(" ", _ASIDE.sub(" ", text))).strip()
-
-
-def split_style(sentence: str) -> tuple[str | None, str]:
-    """A sentence's leading style marker and the rest: ``"{шёпотом} Я тут."`` is
-    ``("шёпотом", "Я тут.")`` (``{style: шёпотом}`` too); ``{}`` is ``""``, back to the plain
-    voice; ``(None, sentence)`` when it starts with no marker."""
-    match = _STYLE.match(sentence)
-    if match is None:
-        return None, sentence
-    return _SPACES.sub(" ", match.group(1)).strip(), sentence[match.end() :]
 
 
 def clip_key(text: str) -> str:

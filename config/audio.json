@@ -1,0 +1,18 @@
+{
+  "_note": "The reSpeaker XVF3800 array: what the board's audio server streams (pepin.audio_server, pepin-audio.service; the board gets this file by hand, scp to /opt/pepin/config/, and reads it at start: systemctl restart pepin-audio), and the array's geometry the laptop computes the voice's direction from (pepin.audio_doa). The array's calibration into the cart's frame is config/expression.json speaker.doa, not here.",
+  "raw_mics": true,
+  "raw_mics_note": "2026-10-14: with the 6-channel firmware (respeaker_xvf3800_usb_dfu_firmware_v2.1.1_16k6ch.bin: capture channels 1-2 the processed stereo as before, 3-6 the four microphones before any processing) the server sends the four raw channels to the laptop as raw frames beside the processed frames, the same 20 ms, seq and board stamp (pepin.audio_link; 4 x 16 kHz x 2 B = 128 kB/s on top of the processed 32 kB/s, about 1.3 Mbit/s in all on the WiFi link). false: the link as before 2026-10-14. With the 2-channel firmware the switch does nothing (the hello says raw_channels 0 and the laptop keeps the chip's direction).",
+  "capture_channels": "auto",
+  "capture_channels_note": "channels arecord asks the array for: auto reads the card's capture interface (/proc/asound/cardN/stream0, the firmware's count: 2 or 6) at every open; a number forces it (2 = the processed stereo alone on either firmware; --capture-channels on the command line overrides).",
+  "array": {
+    "mics_m": [[0.033, -0.033], [0.033, 0.033], [-0.033, 0.033], [-0.033, -0.033]],
+    "speed_of_sound_m_s": 343.0,
+    "note": "ESTIMATED 2026-10-14 (not measured on this board): the four microphones' x, y in metres in the firmware's own frame, in the order of the raw channels (capture channels 3, 4, 5, 6). Sources: the firmware's AEC_MIC_ARRAY_GEO readout as the Seeed wiki prints it ((0.033, -0.033), (0.033, 0.033), (-0.033, 0.033), (-0.033, -0.033), z 0), the XMOS XVF3800 user guide's square configuration (66 mm along each side) and Seeed's 2D drawing (a 66.00 x 66.00 mm square at 90 deg on the diameter-100 mm board). Not verified: that raw channel 3 is the geometry's first microphone and the order runs the same way round; a rotation or a mirror of the order is absorbed by the calibration (ros/tools/doa_calibrate.py --source mac --write measures the array's frame against the cart's: front, left, behind, right), any other order is not and shows there as a fit refused or quarters far from 90 deg apart."
+  },
+  "doa": {
+    "band_hz": [300.0, 3400.0],
+    "grid_deg": 1.0,
+    "nfft": 1024,
+    "note": "the laptop's SRP-PHAT (pepin.audio_doa): the GCC-PHAT cross-spectra of the six microphone pairs steered over a grid_deg grid of azimuths and summed over the voice band band_hz; above c / 2d = 2.6 kHz the 66 mm pairs alias, the six pairs and the band's width keep the lobes down. nfft: the FFT size of each 512-sample Silero chunk (zero-padded)."
+  }
+}

@@ -95,6 +95,14 @@ class GoalServerFake(LineServer):
         elif cmd == "go":
             send({"event": "accepted", "x": 0.0, "y": 0.0, "yaw_deg": 0.0})
             send({"event": "done", "status": 4, "seconds": 1.0})
+        elif cmd == "plan":
+            send({"event": "plan", "x": request["x"], "ok": True, "cell": "free",
+                  "end": {"x": 1.2, "y": -0.5, "yaw_deg": None}, "short_m": 0.3,
+                  "short_deg": None})  # fmt: skip
+        elif cmd == "pose_at":
+            stamp = request.get("stamp", 1000.0)
+            send({"event": "pose_at", "ok": True, "frame": request["frame"], "stamp": stamp,
+                  "now": 1000.0, "age_s": 1000.0 - stamp, "yaw_deg": 35.0})  # fmt: skip
 
 
 @pytest.fixture
@@ -104,13 +112,32 @@ def goal_server() -> Iterator[GoalServerFake]:
     server.close()
 
 
-def test_the_goal_server_link_speaks_the_four_commands(goal_server: GoalServerFake) -> None:
+def test_the_goal_server_link_speaks_the_five_commands(goal_server: GoalServerFake) -> None:
     link = GoalServerLink("127.0.0.1", goal_server.port)
     assert link.where()["y"] == 2.0
     assert link.places() == {"home": {"x": 0.0, "y": 0.0, "yaw_deg": 0.0}}
     assert [e["event"] for e in link.go({"cmd": "go", "place": "home"})] == ["accepted", "done"]
     assert link.cancel()["event"] == "cancelled"
-    assert [r["cmd"] for r in goal_server.asked] == ["where", "places", "go", "cancel"]
+    planned = link.plan(1.5, -0.5, 90.0)
+    assert planned["ok"] is True and planned["cell"] == "free"
+    assert planned["end"] == {"x": 1.2, "y": -0.5, "yaw_deg": None}, "a last pose without heading"
+    assert (planned["short_m"], planned["short_deg"]) == (0.3, None)
+    assert [r["cmd"] for r in goal_server.asked] == ["where", "places", "go", "cancel", "plan"]
+    assert goal_server.asked[-1] == {"cmd": "plan", "x": 1.5, "y": -0.5, "yaw_deg": 90.0}
+
+
+def test_the_goal_server_link_asks_where_a_frame_was_at_a_stamp(
+    goal_server: GoalServerFake,
+) -> None:
+    """``pose_at`` with the record's own stamp, and without one for the newest pose."""
+    link = GoalServerLink("127.0.0.1", goal_server.port)
+    then = link.pose_at("camera_link", 998.75)
+    assert (then["ok"], then["age_s"], then["yaw_deg"]) == (True, 1.25, 35.0)
+    assert link.pose_at("base_link")["stamp"] == 1000.0
+    assert goal_server.asked == [
+        {"cmd": "pose_at", "frame": "camera_link", "stamp": 998.75},
+        {"cmd": "pose_at", "frame": "base_link"},
+    ]
 
 
 def test_a_goal_server_nobody_runs_is_named() -> None:
@@ -206,7 +233,7 @@ def test_the_neck_reports_a_denial_in_the_arbiter_s_words(gaze: GazeDoorFake) ->
 def test_the_neck_s_reach_and_rest_come_from_its_config() -> None:
     head = GazeNeck(f"http://127.0.0.1:{closed_port()}", NECK)
     reach = head.reach()
-    assert reach.pan_left_deg == pytest.approx(155.7, abs=0.5)
+    assert reach.pan_left_deg == pytest.approx(164.0, abs=0.5)
     assert reach.refusal(0.0, 70.0) is not None and reach.refusal(-150.0, 60.0) is None
     assert head.rest().tilt_deg == 23.8
     with pytest.raises(ServiceDownError, match="gaze arbiter"):
@@ -325,6 +352,34 @@ def test_the_camera_over_http(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         server.shutdown()
         server.server_close()
+
+
+def test_both_eyes_over_http_for_the_locator() -> None:
+    """pepin.pixel_to_map.UstreamerPairs: the same /snapshot, both eyes, upright."""
+    from pepin.pixel_to_map import LocateError, UstreamerPairs
+
+    frame = np.zeros((60, 160, 3), dtype=np.uint8)
+    frame[:, 80:] = 255  # upside down: the right half of the wire frame is the left eye
+    picture = jpeg(frame)
+
+    class Ustreamer(WorldFake):
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(picture)))
+            self.end_headers()
+            self.wfile.write(picture)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Ustreamer)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        pair = UstreamerPairs("127.0.0.1", server.server_address[1], upside_down=True).grab()
+        assert pair.left.shape == pair.right.shape == (60, 80, 3)
+        assert pair.left.mean() > 200 and pair.right.mean() < 50
+    finally:
+        server.shutdown()
+        server.server_close()
+    with pytest.raises(LocateError, match=r"the camera .* is not answering"):
+        UstreamerPairs("127.0.0.1", closed_port(), upside_down=True, timeout_s=1.0).grab()
 
 
 class FakeLink:

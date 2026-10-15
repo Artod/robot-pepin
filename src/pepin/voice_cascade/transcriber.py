@@ -14,6 +14,7 @@ waits for the call in flight, and the old one is closed (its memory freed).
 
 from __future__ import annotations
 
+import concurrent.futures
 import threading
 import time
 from collections.abc import Callable
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from pepin.voice_cascade.config import STT_DEVICES, TRANSCRIBER_ENGINES, CascadeConfig
-from pepin.voice_cascade.stages import Transcriber
+from pepin.voice_cascade.stages import TimedTranscriber, Transcriber, Transcript
 from pepin.voice_cascade.stt.runtime import footprint_mb
 
 CONTROL_KEY = "transcriber"  # the control file's key
@@ -74,6 +75,54 @@ def choice_of(value: Any, config: CascadeConfig) -> Choice | None:
     if engine not in TRANSCRIBER_ENGINES:
         return None
     return Choice(engine, model or model_of(config, engine))
+
+
+def read_timed(transcriber: Transcriber, pcm: bytes) -> Transcript:
+    """The words in ``pcm`` with their timings when ``transcriber`` gives them (none when it
+    cannot)."""
+    if isinstance(transcriber, TimedTranscriber):
+        return transcriber.transcribe_timed(pcm)
+    return Transcript(transcriber.transcribe(pcm))
+
+
+class Reading(concurrent.futures.Future[str]):
+    """An early read as the ears hold it, a future of its text, with the timed transcript
+    kept beside it for the loop (None until it is read)."""
+
+    transcript: Transcript | None = None
+
+
+def read_early(
+    executor: concurrent.futures.Executor, transcriber: Transcriber, pcm: bytes
+) -> Reading:
+    """:func:`read_timed` of ``pcm`` on ``executor``; cancelled before it starts, it never
+    runs (as an executor's own future)."""
+    reading = Reading()
+
+    def run() -> None:
+        if not reading.set_running_or_notify_cancel():
+            return
+        try:
+            transcript = read_timed(transcriber, pcm)
+        except BaseException as error:  # handed to whoever waits, as an executor would
+            reading.set_exception(error)
+            return
+        reading.transcript = transcript
+        reading.set_result(transcript.text)
+
+    executor.submit(run)
+    return reading
+
+
+def transcript_of(
+    heard: str | Transcript, early: concurrent.futures.Future[str] | None
+) -> Transcript:
+    """What a read gave: a late read's transcript, or an early read's text with the transcript
+    it kept (the text alone when it kept none)."""
+    if isinstance(heard, Transcript):
+        return heard
+    kept = early.transcript if isinstance(early, Reading) else None
+    return kept if kept is not None and kept.text == heard else Transcript(heard)
 
 
 def build_transcriber(
@@ -166,6 +215,12 @@ class SwitchingTranscriber:
         """The words in ``pcm``, by the engine in use."""
         with self._lock:
             return self._current.transcribe(pcm)
+
+    def transcribe_timed(self, pcm: bytes) -> Transcript:
+        """The words in ``pcm`` with their timings, by the engine in use (none from an engine
+        that gives none)."""
+        with self._lock:
+            return read_timed(self._current, pcm)
 
     def poll(self) -> None:
         """Start loading the wanted engine if it differs from the one in use."""
