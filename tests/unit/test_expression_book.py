@@ -242,12 +242,12 @@ def test_a_mark_s_list_reads_the_argument_that_chooses_those_that_set_and_those_
         return read_mark(inner, WORDS)
 
     assert mark("snap:3,fast") == Mark("gesture", "snap", None, ("3", "fast"))
-    assert mark("head_nod:6, 0.4") == Mark("gesture", "head_nod", None, ("6", "0.4"))
-    assert mark("head_nod:amp_deg=6,Repeats = 2") == Mark(
-        "gesture", "head_nod", None, ("amp_deg=6", "repeats=2")
+    assert mark("head_back:6, 0.4") == Mark("gesture", "head_back", None, ("6", "0.4"))
+    assert mark("head_back:amp_deg=6,Repeats = 2") == Mark(
+        "gesture", "head_back", None, ("amp_deg=6", "repeats=2")
     )
-    assert mark("head_nod:3,zz,amp_deg=x,nope=2,1,2") == Mark(
-        "gesture", "head_nod", None, ("3", "1"), ("zz", "amp_deg=x", "nope=2", "2")
+    assert mark("head_back:3,zz,amp_deg=x,nope=2,1,2") == Mark(
+        "gesture", "head_back", None, ("3", "1"), ("zz", "amp_deg=x", "nope=2", "2")
     )  # two numbers for its two parameters, the third left out
     assert mark("point:you,fast") == Mark("gesture", "point", "you", (), ("fast",))
     assert mark("size:huge,2") == Mark("gesture", "size", "big", (), ("2",))  # through an alias
@@ -255,7 +255,16 @@ def test_a_mark_s_list_reads_the_argument_that_chooses_those_that_set_and_those_
     assert mark("beat:3") == Mark("gesture", "accent", None, (), ("3",))
     assert mark("laugh:loud") == Mark("gesture", "laugh", None, (), ("loud",))
     assert mark("arc:sideways,2") is None  # it needs an argument that chooses, got none
-    assert mark("nod:3") is None  # no intent
+    assert mark("bow:3") is None  # no intent
+    # the nod and the shake take one argument that chooses (a count or slow) and nothing else;
+    # their old spellings and an unread number play their first (2026-10-15: the brain's
+    # {head_shake:4,15,0.6} read as 4 deg over 15 s), a word they do not take drops them
+    assert mark("nod:3") == Mark("gesture", "nod", "3")
+    assert mark("shake:slow") == Mark("gesture", "shake", "slow")
+    assert mark("head_nod:4") == Mark("gesture", "nod", None, (), ("4",))
+    assert mark("head_shake:4,15,0.6") == Mark("gesture", "shake", None, (), ("4", "15", "0.6"))
+    assert mark("nod:3,amp_deg=20") == Mark("gesture", "nod", "3", (), ("amp_deg=20",))
+    assert mark("nod:fast") is None
     assert read("point:printer", WORDS) == ("gesture", "point", "printer")  # one: as before
     assert read("point:plan b", WORDS) == ("gesture", "point", "plan b")
     (part,) = parse("Вот так {snap:2,fast,loud} щёлк.", WORDS).parts

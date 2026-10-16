@@ -191,9 +191,12 @@ class Composition:
     ``style_args``: an argument -> the style words of the part that choose it for a bare marker
     (``{laugh}`` in a ``{sinister}`` part is ``{laugh:evil}``), ``settings``: the arguments that
     set its steps' parameters instead (a word, or :data:`NUMBER` for a mark's number:
-    ``{snap:3,fast}``), ``wraps``: the atom an auto-wrapper plays (None: written by hand), and
+    ``{snap:3,fast}``), ``wraps``: the atom an auto-wrapper plays (None: written by hand),
     ``bare``: whether a mark may name it without the argument that chooses (its first plays:
-    ``{style}`` is ``{style:default}``)."""
+    ``{style}`` is ``{style:default}``), and ``paced``: whether its head steps play as quick as
+    the neck and the gaze arbiter allow a clip (each step's period at least
+    :func:`pepin.expression.parts.least_period` at the renderer's neck limits, its head clip's
+    moves landed ahead of their keyframes: the nod, the shake)."""
 
     name: str
     variants: tuple[Variant, ...]
@@ -208,6 +211,7 @@ class Composition:
     settings: Mapping[str, tuple[Setting, ...]] = field(default_factory=dict)
     wraps: str | None = None
     bare: bool = False
+    paced: bool = False
 
 
 @dataclass(frozen=True)
@@ -332,8 +336,10 @@ class Event:
 class Clip:
     """What one part plays of a performance: its tracks and events, when it starts relative to
     the performance's sync point (negative: before the word), where its stroke and its end are
-    (seconds from its start), the layer it plays on, and whether its owner repeats it until
-    withdrawn (``loop``: a looping step's, :attr:`Step.loop`)."""
+    (seconds from its start), the layer it plays on, whether its owner repeats it until
+    withdrawn (``loop``: a looping step's, :attr:`Step.loop`), and whether it is a paced
+    composition's head (``paced``: its moves land ahead of their keyframes as quick as the neck
+    allows, :func:`pepin.expression.parts.clip_look`)."""
 
     part: PartName
     offset_s: float
@@ -345,6 +351,7 @@ class Clip:
     loop: bool = False
     then: Then = "rest"  # the arm: rest after it, or hold its last pose ``hold_s`` (a unit)
     hold_s: float = 0.0
+    paced: bool = False
 
     @property
     def styles_only(self) -> bool:

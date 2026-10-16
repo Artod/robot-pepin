@@ -243,7 +243,9 @@ def mark(text: str, vocabulary: Vocabulary) -> Mark | None:
     a word or a number that sets parameters (:class:`Takes`; an argument the intent lists
     chooses before a number does: ``{count:2}``), ``key=value`` with a number for a parameter
     it takes; anything else left out. None when no intent is named or one that needs an
-    argument that chooses got none."""
+    argument that chooses got none: a ``bare`` one plays its first when only numbers and
+    ``key=value`` were left out (``{nod:5}`` is ``{nod}``, the 5 left out), never past a word
+    (``{style:whispering}`` is the voice's manner)."""
     whole = gesture(text, vocabulary)
     if whole is not None:
         return Mark(*whole)
@@ -291,7 +293,9 @@ def mark(text: str, vocabulary: Vocabulary) -> Mark | None:
         else:
             ignored.append(item)
     if chosen is None and choose:
-        return None
+        words = [i for i in ignored if "=" not in i and number_of(i) is None]
+        if name not in vocabulary.bare or words:
+            return None
     return Mark("gesture", name, chosen, tuple(args), tuple(ignored))
 
 

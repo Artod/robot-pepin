@@ -24,7 +24,9 @@ key's ``pose`` is a pose's name, ``"$pose"`` or a reference into the gesture spa
 (``"@from"``, ``"@via"``, ``"@path:0"``; :mod:`pepin.expression.render` resolves them, as it
 does a step's ``pose`` that starts with ``@``). A step's ``name`` of ``"$arg"`` is its mark's
 argument (only beside arguments that choose); a composition's ``bare`` lets a mark name it
-without one (its first plays). Every mistake is a ``ValueError``
+without one (its first plays), its ``paced`` plays its head steps as quick as the neck and the
+gaze arbiter allow (:attr:`pepin.expression.animation.Composition.paced`: a step's period_s is
+then a floor). Every mistake is a ``ValueError``
 naming where it is, at load: a book that loads plays.
 
 The arm's ``rest`` pose is not the book's: it is config/arm.json's ``motion.rest_deg``, the pose
@@ -290,7 +292,8 @@ def span(
     ``fits`` admits when given: one style of the dance with the arm where it is; a nested
     composition's steps from its step's ``at_s``), each step played ``stretch`` times slower
     round its stroke (the engine's speed scales); (0, 0) when no step moves the part (or the
-    book lacks the intent)."""
+    book lacks the intent). A paced composition's head steps are counted at their book's
+    period_s, the floor the renderer may lengthen to the neck's pace."""
     composition = book.compositions.get(intent)
     if composition is None:
         return 0.0, 0.0
@@ -586,6 +589,7 @@ def _composition(
         {str(a): tuple(str(w).lower() for w in ws) for a, ws in style_args.items()},
         settings,
         bare=bare_,
+        paced=bool(body.get("paced", False)),
     )
 
 

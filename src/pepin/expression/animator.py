@@ -125,7 +125,7 @@ from pepin.expression.conversation import (
 from pepin.expression.executors import Executor, Outcome, Renewing
 from pepin.expression.markers import Cue, Part, Playout, cues, mark
 from pepin.expression.mix import stretched
-from pepin.expression.parts import GENTLE_SHARE, ArmPart, HeadPart
+from pepin.expression.parts import GENTLE_SHARE, ArmPart, HeadPart, NeckLimits
 from pepin.expression.render import BookRenderer, Resolver, WeightedChooser
 from pepin.expression.schedule import (
     NOT_YET,
@@ -302,7 +302,8 @@ class GestureEngine:
             playout, self._latency, lambda kind, fields: self.record(kind, fields)
         )
         self.book, self.config = load()
-        self.renderer = BookRenderer(self.book, WeightedChooser(), self.resolver)
+        self.renderer = BookRenderer(self.book, WeightedChooser(), self.resolver,
+                                     self._head_limits())  # fmt: skip
         self._apply_knobs()
         self._on = on
         self._lock = threading.RLock()
@@ -370,7 +371,8 @@ class GestureEngine:
                 return f"the gesture book did not load: {error}"
             with self._lock:  # the engine's thread holds it for a whole step
                 self.book, self.config = book, config
-                self.renderer = BookRenderer(book, self.renderer.chooser, self.resolver)
+                self.renderer = BookRenderer(book, self.renderer.chooser, self.resolver,
+                                             self._head_limits())  # fmt: skip
                 self._apply_knobs()
                 self._on = True
                 self._idle_next.clear()
@@ -1189,6 +1191,12 @@ class GestureEngine:
                 self._renew_at[part] = due
             wait = due - now if wait is None else min(wait, due - now)
         return wait
+
+    def _head_limits(self) -> NeckLimits:
+        """The head part's neck limits and clip bounds, what a paced composition's head steps
+        are paced by (a head that is no :class:`HeadPart`: the shipped defaults)."""
+        head = self.parts.get("head")
+        return head.limits if isinstance(head, HeadPart) else NeckLimits()
 
     def _apply_knobs(self) -> None:
         """The arm's part checks against the speed scale its clips are stretched by, carries the

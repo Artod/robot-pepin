@@ -258,10 +258,9 @@ class Body:
             FacePart,
             HeadDoor,
             HeadPart,
-            NeckLimits,
+            load_neck_limits,
         )
         from pepin.expression.trajectory import ArmLink, ArmStatus
-        from pepin.neck import NeckConfig
         from pepin.voice_cascade.log import append_line, day_dir
 
         def record(kind: str, fields: dict[str, Any]) -> None:
@@ -305,7 +304,7 @@ class Body:
         head = HeadPart(
             door,
             latency_s=float(head_knobs.get("latency_s", 0.1)),
-            limits=NeckLimits.of(NeckConfig.from_json(config_file("neck.json")).motion),
+            limits=load_neck_limits(),
             fade_s=float(fades.get("head", 0.35) if isinstance(fades, dict) else fades),
             on_answer=head_answered,
         )

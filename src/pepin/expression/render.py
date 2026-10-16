@@ -29,6 +29,12 @@ at the parent step's ``at_s`` plus their own, merge into the parts' clips as any
 one on the same part cuts the earlier), take no argument of the mark, and are listed in
 :attr:`pepin.expression.animation.Performance.nested`.
 
+A PACED composition (``paced``: the nod, the shake) plays each head step at the least period
+the renderer's ``head`` limits allow it (:func:`pepin.expression.parts.least_period`: every
+move at its axis's ramp, the tilt's the arbiter's ``clip_acc_max_deg_s2``, landed a settle
+ahead, the tilt's turns within ``clip_max_hz``), its drawn ``period_s`` a floor, and marks its
+head clip ``paced`` for :func:`pepin.expression.parts.clip_look`.
+
 THE RESOLVER (:class:`Resolver`; DESIGN.md §4.3-§4.6, the gesture space of config/animation.json's
 ``space``). A pose named ``@...`` in an atom's key or a step's ``pose`` is a place in the space:
 
@@ -115,6 +121,7 @@ from pepin.expression.animation import (
     Variant,
 )
 from pepin.expression.markers import Cue, number_of
+from pepin.expression.parts import NeckLimits, least_period
 from pepin.expression.places import Room
 from pepin.expression.speaker import AttentionView
 
@@ -562,11 +569,16 @@ class BookRenderer:
         book: Book,
         chooser: WeightedChooser | None = None,
         resolver: Resolver | None = None,
+        head: NeckLimits | None = None,
     ) -> None:
-        """``chooser`` defaults to a fresh :class:`WeightedChooser`."""
+        """``chooser`` defaults to a fresh :class:`WeightedChooser`; ``head``: the neck's limits
+        and the arbiter's clip bounds a paced composition's head steps are paced by (the head
+        part's, :class:`pepin.expression.parts.HeadPart`; None: config/neck.json's as shipped
+        and the knobs' defaults, :class:`pepin.expression.parts.NeckLimits`)."""
         self.book = book
         self.chooser = chooser or WeightedChooser()
         self.resolver = resolver or Resolver()
+        self.head = head if head is not None else NeckLimits()
 
     def render(
         self,
@@ -627,6 +639,8 @@ class BookRenderer:
                       layer)  # fmt: skip
         looping = {d.atom.part for d in playing if d.step.loop}
         clips = tuple(replace(c, loop=True) if c.part in looping else c for c in clips)
+        if composition.paced:
+            clips = tuple(replace(c, paced=True) if c.part == "head" else c for c in clips)
         return Performance(intent, seed, index, clips, cue, tuple(nested))
 
     def settings(self, composition: Composition, args: Sequence[str]) -> tuple[Setting, ...]:
@@ -678,7 +692,8 @@ class BookRenderer:
         out: list[Drawn] = []
         for index, step in enumerate(steps):
             if step.composition is None:
-                drawn = self._aimed(self._draw(self._set(step, settings), rng), ctx)
+                drawn = self._paced(self._aimed(self._draw(self._set(step, settings), rng), ctx),
+                                    ctx)  # fmt: skip
                 if MARK_ARG in drawn.names.values():
                     arg = ctx.meaning.arg or ""
                     names = {k: arg if v == MARK_ARG else v for k, v in drawn.names.items()}
@@ -804,6 +819,17 @@ class BookRenderer:
         names = [pose_name(k.pose, drawn.names) for k in drawn.atom.keys if k.pose]
         spatial = any(n.startswith(REF) and n not in (FROM, VIA) for n in names)
         return spatial and not self._can(drawn, ctx)
+
+    def _paced(self, drawn: Drawn, ctx: Context) -> Drawn:
+        """A paced composition's head step at the least period the neck and the arbiter allow
+        (:func:`pepin.expression.parts.least_period` at :attr:`head`), its drawn period_s a
+        floor: as quick as the head goes, never quicker than the book asks."""
+        if not ctx.composition.paced or drawn.atom.part != "head":
+            return drawn
+        least = least_period(drawn.atom, drawn.params, self.head)
+        if least <= drawn.params[PERIOD]:
+            return drawn
+        return replace(drawn, params={**drawn.params, PERIOD: least})
 
     def _aimed(self, drawn: Drawn, ctx: Context) -> Drawn:
         """A head step naming a place of the space turned toward it: its ``pan_deg`` and
