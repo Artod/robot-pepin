@@ -723,7 +723,7 @@ def test_a_slow_tool_s_moment_performs_thinking_now() -> None:
 
 
 def test_the_idle_layer_fidgets_only_in_a_quiet_conversation() -> None:
-    rig = Rig(idle_after_speech_s=5.0)
+    rig = Rig(seed=5, idle_after_speech_s=5.0)  # seeded: unseeded it failed ~4 % of runs
     rig.tick(70.0)
     assert not rig.played("head")  # no conversation
     rig.engine.opened(Heard(0.0, 1.0, "Пепин"))
