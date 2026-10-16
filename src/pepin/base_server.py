@@ -391,12 +391,14 @@ class NeckMove:
 @dataclass
 class NeckLease:
     """The head held at a ``neck_target`` until ``until`` (monotonic seconds), at that target's
-    own speed and ramp ceilings (None: the motion settings' maxima)."""
+    own speed and ramp ceilings (None: the motion settings' maxima) and the tilt's own ramp
+    (None: the tilt's ceiling, ``tilt_max_acc_deg_s2``, under the ramp)."""
 
     targets: tuple[int, int]
     speed_deg_s: float | None
     acc_deg_s2: float | None
     until: float
+    tilt_acc_deg_s2: float | None = None
 
 
 @dataclass
@@ -487,9 +489,12 @@ class NeckMover:
         speed_deg_s: float | None,
         acc_deg_s2: float | None,
         now: float,
+        tilt_acc_deg_s2: float | None = None,
     ) -> dict[str, Any] | None:
         """One ``neck_target``: hold the head at these joint angles (pan positive left, tilt the
-        pitch below level) for the next ``lease_s``, at most at these speed and ramp ceilings.
+        pitch below level) for the next ``lease_s``, at most at these speed and ramp ceilings;
+        ``tilt_acc_deg_s2`` is the tilt's own ramp for this target (a head gesture's quick nod),
+        honoured up to ``max_acc_deg_s2`` in place of ``tilt_max_acc_deg_s2`` (None: that one).
 
         A refusal answers an error reply: a jog holds the head, the servos cannot be written,
         the reference ticks are unread (no angle has a tick then), a target outside the limits
@@ -510,7 +515,9 @@ class NeckMover:
             return target_error(f"pan {pan_deg:+.1f} deg, tilt {tilt_deg:+.1f} deg: {outside}")
         self._preempt("preempted by neck_target", now)
         self._held = None
-        self._owner = NeckLease(targets, speed_deg_s, acc_deg_s2, now + self.motion.lease_s)
+        self._owner = NeckLease(
+            targets, speed_deg_s, acc_deg_s2, now + self.motion.lease_s, tilt_acc_deg_s2
+        )
         return None
 
     def home(self, *, hold: bool, now: float) -> dict[str, Any] | None:
@@ -838,14 +845,24 @@ class NeckMover:
             )
 
     def _goal(
-        self, targets: tuple[int, int], speed_deg_s: float | None, acc_deg_s2: float | None
+        self,
+        targets: tuple[int, int],
+        speed_deg_s: float | None,
+        acc_deg_s2: float | None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> ServoGoal:
         """Energised at ``targets`` at the asked pace, capped by the motion settings in force (the
-        tilt's ramp by its own ceiling too)."""
+        tilt's ramp by its own ceiling too, or, when the target asks the tilt for a ramp of its
+        own, by ``max_acc_deg_s2`` alone)."""
         top_speed, top_acc = self.motion.max_speed_deg_s, self.motion.max_acc_deg_s2
         speed = top_speed if speed_deg_s is None else min(speed_deg_s, top_speed)
         acc = top_acc if acc_deg_s2 is None else min(acc_deg_s2, top_acc)
-        tilt_acc = min(acc, self.motion.tilt_max_acc_deg_s2)
+        tilt_top = self.motion.tilt_max_acc_deg_s2
+        if tilt_acc_deg_s2 is None:
+            tilt_acc = min(acc, tilt_top)
+        else:
+            tilt_acc = min(tilt_acc_deg_s2, top_acc)
+            tilt_top = max(tilt_top, tilt_acc)
         units, tilt_units = acc_units(acc), acc_units(tilt_acc)
         if self.in_flight():
             # the register brakes too: a ramp under v^2 / 2d (the speed by the encoder, d the
@@ -856,9 +873,10 @@ class NeckMover:
                 braking_units(v, t - h) if here is not None else 0
                 for v, t, h in zip(self._speed, targets, here or targets, strict=True)
             )
-            # never above an axis's own ceiling: the tilt's keeps the mast from rocking, and
-            # the full ramp is the hardest brake there is anyway
-            tops = (acc_units(top_acc), acc_units(self.motion.tilt_max_acc_deg_s2))
+            # never above an axis's own ceiling: the tilt's keeps the mast from rocking (a
+            # target's own tilt ramp lifts it for that target), and the full ramp is the
+            # hardest brake there is anyway
+            tops = (acc_units(top_acc), acc_units(tilt_top))
             kept = (
                 max(units, min(needed[0], tops[0])),
                 max(tilt_units, min(needed[1], tops[1])),
@@ -879,7 +897,9 @@ class NeckMover:
         """What the servos should hold this tick, from whoever holds the head."""
         owner = self._owner
         if isinstance(owner, NeckLease):
-            return self._goal(owner.targets, owner.speed_deg_s, owner.acc_deg_s2)
+            return self._goal(
+                owner.targets, owner.speed_deg_s, owner.acc_deg_s2, owner.tilt_acc_deg_s2
+            )
         if isinstance(owner, NeckMove):
             return self._goal(owner.targets, None, None)
         if isinstance(owner, NeckJog):
@@ -1452,9 +1472,12 @@ class BaseServerCore:
         try:
             pan, tilt = _angle(message, "pan_rad"), _angle(message, "tilt_rad")
             speed, acc = _ceiling(message, "speed_deg_s"), _ceiling(message, "acc_deg_s2")
+            tilt_acc = _ceiling(message, "tilt_acc_deg_s2")
         except (TypeError, ValueError) as exc:
             return target_error(f"bad target: {exc}")
-        return self._mover.target(pan, tilt, speed_deg_s=speed, acc_deg_s2=acc, now=now)
+        return self._mover.target(
+            pan, tilt, speed_deg_s=speed, acc_deg_s2=acc, now=now, tilt_acc_deg_s2=tilt_acc
+        )
 
     def _step_neck(self, now: float) -> None:
         """The neck's tick: a move's arrival, a jog's stride, a lease's end, the one write."""

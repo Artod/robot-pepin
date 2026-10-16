@@ -15,7 +15,8 @@ Wire format, one JSON object per line in both directions::
                      {"cmd": "ping"}                              which servos answer on the bus
                      {"cmd": "neck"}                              the neck's encoders (pan, tilt)
                      {"cmd": "neck_target", "pan_rad": <rad>, "tilt_rad": <rad>,
-                      "speed_deg_s": <optional>, "acc_deg_s2": <optional>}
+                      "speed_deg_s": <optional>, "acc_deg_s2": <optional>,
+                      "tilt_acc_deg_s2": <optional>}
                                                                   hold the head there (the joint
                                                                   angles of pepin.neck: pan +
                                                                   left, tilt = pitch below level)
@@ -229,16 +230,21 @@ class BaseClient(JsonLinesClient):
         *,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """Hold the head at these joint angles (pepin.neck: pan positive left, tilt the pitch
         below level) for the board's lease (config/neck.json ``motion.lease_s``); repeat it
         within the lease or the head goes home and is let go. The speed and ramp are ceilings
-        under the board's own; a refusal lands in :meth:`neck_error`."""
+        under the board's own; ``tilt_acc_deg_s2`` the tilt's own ramp for this target, up to
+        ``motion.max_acc_deg_s2`` in place of ``tilt_max_acc_deg_s2``; a refusal lands in
+        :meth:`neck_error`."""
         message: dict[str, Any] = {"cmd": "neck_target", "pan_rad": pan_rad, "tilt_rad": tilt_rad}
         if speed_deg_s is not None:
             message["speed_deg_s"] = speed_deg_s
         if acc_deg_s2 is not None:
             message["acc_deg_s2"] = acc_deg_s2
+        if tilt_acc_deg_s2 is not None:
+            message["tilt_acc_deg_s2"] = tilt_acc_deg_s2
         self.send(message)
 
     def ask_neck(self) -> None:
