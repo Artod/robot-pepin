@@ -342,6 +342,7 @@ def test_a_table_without_a_shapes_style_writes_no_shape_tables() -> None:
     for g in plain["idle"]["gestures"]:  # the gestures of those styles alone
         if "styles" in g:
             g["styles"] = [s for s in g["styles"] if s not in gone] or ["manga"]
+    plain["style"] = "pepin"  # its own default: the file's (kawaii) is one of the gone
     table = parse_face_table(plain)
     assert shape_styles(table) == () and shape_style(table) is None
     assert load_shapes(table) is None and generated_shapes(table) == {}
