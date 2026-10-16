@@ -480,7 +480,7 @@ const FACE_TABLE = {
    "flap_shapes": 3.0
   }
  ],
- "style": 0,
+ "style": 4,
  "expressions": [
   {
    "name": "neutral",

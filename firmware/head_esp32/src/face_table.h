@@ -56,7 +56,7 @@ enum Style : uint8_t {
   kStyleComics = 5,
 };
 constexpr const char* kStyleNames[kStyleCount] = {"pepin", "rose", "manga", "anime", "kawaii", "comics"};
-constexpr int kStyleDefault = 0;  // config/face.json `style`
+constexpr int kStyleDefault = 4;  // config/face.json `style`
 // (a shapes style's entry: flap_shapes and the background; its <style>_table.h has
 // the rest)
 struct StyleSpec {

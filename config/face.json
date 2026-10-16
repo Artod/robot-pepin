@@ -58,7 +58,7 @@
     "accent": "#7FE8FF",
     "note": "RGB, converted to RGB565 for the panel. lip, cavity, teeth, tongue, cheek, moustache, heart and shade (the lighter band at the bottom of an open mouth, the drool and the plump tongue's highlight: the later styles'; this style draws none) are the face's elements: an expression's `colors` overrides any of them (these are the defaults) and the firmware tweens them with the parameters; background, text and accent are the screen's and the info screen's"
   },
-  "style": "pepin",
+  "style": "kawaii",
   "styles": {
     "pepin": {
       "brief": "cyan line face",
