@@ -464,6 +464,15 @@ class WheelsExecutor:
             return "the wheels turn toward the speaker"
         return held
 
+    def gesture_moving(self) -> bool:
+        """Whether a gesture's motion (a body clip: a dance's rock) runs or waits its turn; a
+        gaze turn or a door's motion is none. Reads only what is in memory: the head part asks
+        it as a clip leaves, so the arbiter lets the clip ride on this rock
+        (:class:`pepin.expression.parts.HeadPart`)."""
+        with self._lock:
+            jobs = (self._current, self._pending)
+        return any(job is not None and job.source == "gesture" for job in jobs)
+
     def play(self, clip: Clip) -> Outcome:
         """A gesture's body clip: its legs queued (refused at once past the limits or caps)."""
         legs = legs_of(clip, self.settings)

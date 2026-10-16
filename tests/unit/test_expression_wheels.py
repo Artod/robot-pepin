@@ -574,6 +574,26 @@ def test_a_gaze_turn_wins_over_a_gesture_and_a_gesture_waits_its_turn() -> None:
     assert reports and reports[0].done
 
 
+def test_gesture_moving_says_a_gesture_s_rock_runs_and_never_a_gaze_turn() -> None:
+    """The head part asks it as a clip leaves (the arbiter lets a dance's head step ride on its
+    own rock): true from a body clip's queueing to its end, false through a gaze turn."""
+    r = rig()
+    assert not r.wheels.gesture_moving()
+    seen: list[bool] = []  # asked mid-motion, on the wheels' thread
+    r.base.at(r.clock.now + 0.3, lambda base: seen.append(r.wheels.gesture_moving()))
+    assert r.wheels.play(book_clip("body_rock", amp_m=0.01, period_s=1.0)).ok
+    assert r.wheels.gesture_moving(), "queued: already the gesture's"
+    for _ in range(500):
+        if r.said:
+            break
+        time.sleep(0.005)
+    assert r.said and "(gesture): done" in r.said[-1] and seen == [True]
+    assert not r.wheels.gesture_moving()
+    r.base.at(r.clock.now + 0.3, lambda base: seen.append(r.wheels.gesture_moving()))
+    assert turn(r, 10.0).done and seen == [True, False], "a gaze turn is not a gesture's"
+    assert not r.wheels.gesture_moving()
+
+
 # ---- never on the caller's thread ----------------------------------------------------------------
 class StillBase:
     """A base that always reads standing, fresh (for real-clock tests)."""

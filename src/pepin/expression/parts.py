@@ -692,8 +692,11 @@ class HeadPart:
     """The head as relative overlays through the gaze arbiter (:mod:`pepin.expression.head`): a
     gesture's clip as source ``voice.gesture``, the idle layer's as ``voice.idle`` (marked
     ``idle``: it gives way to any other overlay; ``loop`` when its atom loops); fading a layer
-    releases its source over the fade, so the head eases back onto the person. A refusal is
-    logged once (the same one again is only counted) and the clip dropped: never retried."""
+    releases its source over the fade, so the head eases back onto the person. A clip posted
+    while the voice's own wheels move for a gesture (``own_wheels``: the wheels executor's word)
+    is marked ``own_wheels``: the arbiter lets it play over that rock, never over a navigation
+    drive. A refusal is logged once (the same one again is only counted) and the clip dropped:
+    never retried."""
 
     part: PartName = "head"
 
@@ -706,12 +709,16 @@ class HeadPart:
         fade_s: float = 0.35,
         run: Callable[[Callable[[], None]], None] | None = None,
         on_answer: Answered | None = None,
+        own_wheels: Callable[[], bool] | None = None,
     ) -> None:
         """``fade_s``: how long :meth:`rest` eases the head back (config/expression.json's
         ``layers.fade_s.head``); ``run(fn)`` runs a door call off the caller's thread (one
         :class:`Serial` thread by default, so a release never overtakes the look before it; a
-        test runs it inline); ``on_answer(request, refusal)`` hears every answer."""
+        test runs it inline); ``on_answer(request, refusal)`` hears every answer;
+        ``own_wheels()``: whether the voice's wheels move for a gesture now
+        (:meth:`pepin.expression.wheels.WheelsExecutor.gesture_moving`; None: never)."""
         self.door = door
+        self.own_wheels = own_wheels
         self._latency_s = latency_s
         self.limits = limits if limits is not None else NeckLimits()
         self.fade_s = fade_s
@@ -759,6 +766,8 @@ class HeadPart:
         self.run(withdraw)
 
     def _post(self, request: ClipLook) -> None:
+        if self.own_wheels is not None and self.own_wheels():  # asked as the look leaves
+            request["target"]["own_wheels"] = True
         refusal = self.door.look(request)
         if self.on_answer is not None:
             try:

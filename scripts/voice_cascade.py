@@ -276,7 +276,8 @@ class Body:
         def head_answered(request: ClipLook, refusal: str | None) -> None:
             target = request["target"]
             record("head", {"source": request["source"], "keys": len(target["keys"]),
-                            "loop": target.get("loop", False), "ok": refusal is None,
+                            "loop": target.get("loop", False),
+                            "own_wheels": target.get("own_wheels", False), "ok": refusal is None,
                             "why": refusal or ""})  # fmt: skip
 
         motion = load_arm_motion()
@@ -307,6 +308,7 @@ class Body:
             limits=load_neck_limits(),
             fade_s=float(fades.get("head", 0.35) if isinstance(fades, dict) else fades),
             on_answer=head_answered,
+            own_wheels=wheels.gesture_moving if wheels is not None else None,
         )
         channel: Any = FakeFace()
         eyes: Any = FakeEyesChannel()

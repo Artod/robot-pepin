@@ -32,7 +32,9 @@ offsets added to whatever holds the head (the speaker gaze's ``voice.speaker`` l
 each key written at its time with its own speed ceiling (``neck_target``'s ``speed_deg_s``); the
 holder keeps its status, TTL and aim, and the head goes back to it at the end. Bounded by
 ``clip_max_deg``, ``clip_max_hz`` and the reach (refused whole, never clamped), refused over a
-better band, during a drive and on a base server without ``neck_target``; an ``idle`` overlay
+better band, during a navigation drive, over wheels someone else turns (an overlay marked
+``own_wheels`` plays over its requester's own gesture's rock: the dance) and on a base server
+without ``neck_target``; an ``idle`` overlay
 (breathing) gives way to any other, a ``loop`` repeats until released or lapsed and is answered
 at once (a finite one when it ends), and one within ``clip_still_deg`` does not blind the head.
 ``/release`` {source, fade_s} is a source's word to let go of everything it asked, its overlay
@@ -173,6 +175,7 @@ from pepin.gaze import (
     depression_deg,
     home_aim,
     look_from_json,
+    overlay_drive_refusal,
 )
 from pepin.gaze_gate import DARK_FRAME_TOPIC
 from pepin.gaze_link import GAZE_PORT, JsonDoor
@@ -240,7 +243,6 @@ TF_WAIT_S = 0.2
 COLUMN_WAIT_S = 1.0  # one /fusion/column answer
 SCAN_MAX_AGE_S = 2.0  # a scan or a fan older than this explains no cell
 ANSWER_SLACK_S = 2.0  # a door waits for a request's TTL plus the move timeout plus this
-OVERLAY_DRIVE_REFUSAL = "no head overlay during a drive: the wheels turn"
 EXECUTOR_THREADS = 4  # the stall look blocks one while the subscriptions keep coming
 
 FLAGS = FlagSet(
@@ -1002,10 +1004,14 @@ class Gaze(Node):
 
     def _driving_refusal(self, look: Look) -> str | None:
         """Why a person's or a sensor's look cannot move the head during a drive: only on a base
-        server that moves the neck at rest alone. An overlay never plays during a drive."""
+        server that moves the neck at rest alone. An overlay never plays during a navigation
+        drive, nor over wheels turned for anyone but its own requester's gesture
+        (:func:`pepin.gaze.overlay_drive_refusal`: a dance's head step over its own rock)."""
         moving = self._driving or self._head.wheels_moving
-        if look.kind == "clip" and moving:
-            return OVERLAY_DRIVE_REFUSAL
+        if look.overlay is not None:
+            return overlay_drive_refusal(
+                look.overlay, navigating=self._driving, wheels_moving=self._head.wheels_moving
+            )
         if self._head.moves_while_driving or look.band < PERSON:
             return None
         if moving:
