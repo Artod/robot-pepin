@@ -764,6 +764,21 @@ def main() -> int:
             mac_doa.series = gaze.series  # ...and picks the raw chunks the Mac's direction reads
     alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
     body.engine.journal = loop.record  # the gesture space's catchment and repeat rows
+    # The sounds: the registry's through the voice's own stream (speech wins: a sound waits for
+    # the reply in flight, speech fades it out), the body dancing on their beats; the brain's
+    # sound tool and its {sound:NAME} and {dance} marks reach the player.
+    from pepin.expression.listeners import MusicPulse
+    from pepin.sound_player import StreamSoundPlayer
+
+    sounds = StreamSoundPlayer(
+        player,
+        voice_busy=lambda: loop.current is not None or player.speaking(),
+        lag_s=body.engine.config.audio_lag_s,
+        journal=loop.record,
+        say=lambda line: print(line, flush=True),
+    ).start()
+    MusicPulse(body.engine, journal=loop.record).attach(sounds)
+    robot.sounds = sounds
     alive.start()
     if doze is not None:
         doze.start()
@@ -789,6 +804,7 @@ def main() -> int:
         if moving and fake_drive_s is None:
             print("halt:", robot.halt(), flush=True)
     finally:
+        sounds.close()  # the sound playing stopped and its row written while the loop's log is open
         alive.close()
         room.close()
         if gaze is not None:
