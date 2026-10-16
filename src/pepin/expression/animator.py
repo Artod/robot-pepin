@@ -47,15 +47,16 @@ loop gives it the goal server's; none, or one never read: a place's name gets it
 catchments forgotten at the conversation's close; its ``catchment`` and ``repeat`` rows go to
 the engine's record and to the conversation's events.jsonl (:attr:`GestureEngine.journal`).
 
-Caps (config/expression.json ``caps``) hold the markers and the moments back, never a tool or
-the command line, which a person asked for: per part (a sentence or a clause of one), per
-reply, per minute, arm gestures per minute, an intent's own per minute (``laugh``: 1, waived
-while the person's own laugh is fresh), and each composition's ``cooldown_s`` per mark and
-argument. The accent (``{!}``) is outside those counts, one a part; a series (``count``) counts
-once a reply, its later items passing every count; a mark of an atom's auto-wrapper (a single
-basic move) counts under ``per_part`` alone unless ``caps.atoms_counted``. Arm gestures are
-counted on the final version (the ladder's: a mark that fell to its head-and-face floor used no
-arm). Nested compositions count as their parent: one gesture, its cooldown alone.
+Caps (config/expression.json ``caps``) hold the markers and the moments back, never a tool or the
+command line, which a person asked for, nor a mark of the eyes or the face alone (the eyes' looks,
+the face's drawing style; the face's marks are never capped either): per part (a sentence or a
+clause of one), per reply, per minute, arm gestures per minute, an intent's own per minute
+(``laugh``: 1, waived while the person's own laugh is fresh), and each composition's ``cooldown_s``
+per mark and argument. The accent (``{!}``) is outside those counts, one a part; a series
+(``count``) counts once a reply, its later items passing every count; a mark of an atom's
+auto-wrapper (a single basic move) counts under ``per_part`` alone unless ``caps.atoms_counted``.
+Arm gestures are counted on the final version (the ladder's: a mark that fell to its head-and-face
+floor used no arm). Nested compositions count as their parent: one gesture, its cooldown alone.
 
 A requester ends its own move with :meth:`release` (what that very request holds fades, what
 it still waits for is dropped), and sees what waits with :meth:`pending` (each clip's part,
@@ -111,7 +112,7 @@ from pepin.expression.animation import (
     Performance,
     Scene,
 )
-from pepin.expression.book import loops, vocabulary
+from pepin.expression.book import composition_parts, loops, vocabulary
 from pepin.expression.breath import ArmBreath
 from pepin.expression.conversation import (
     GESTURES,
@@ -196,7 +197,7 @@ class EngineConfig:
     late_s: float = 0.5
     poll_s: float = 0.02
     fade_s: Mapping[str, float] = field(
-        default_factory=lambda: {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
+        default_factory=lambda: {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35, "eyes": 0.1}
     )
     idle_resume_s: float = 2.0
     idle_after_speech_s: float = 5.0
@@ -783,8 +784,15 @@ class GestureEngine:
         turn, index = (cue.turn, cue.index) if cue is not None else (None, None)
         composition = self.book.compositions.get(request.intent)
         own = composition is not None and not composition.callable
+        book = self.book
+        moves = (
+            composition_parts(book.compositions, book.atoms, request.intent) if composition else ()
+        )
         capped = (
-            request.priority in (Priority.MARK, Priority.MOMENT) and not request.clips and not own
+            request.priority in (Priority.MARK, Priority.MOMENT)
+            and not request.clips
+            and not own
+            and not (moves and set(moves) <= {"face", "eyes"})  # the face's: never capped
         )
         tally = self._tally(request.intent, turn) if capped else "counted"
         if capped:
@@ -989,7 +997,7 @@ class GestureEngine:
         if outcome.ok:
             fields["stroke_s"] = round(stroke_s, 3)
         self.record("cue", fields)
-        if outcome.ok:
+        if outcome.ok and not clip.styles_only:  # a style never holds the face
             if clip.part == "arm":  # the reply a held unit belongs to (closed with it)
                 self._held_turn = waiting.turn if clip.then == "hold" else None
             seconds = outcome.seconds if outcome.seconds > 0 else clip.duration_s
@@ -1021,6 +1029,8 @@ class GestureEngine:
                 refusal = arm_refusal(view, self.config.arm_past_arc)
                 if refusal is not None:
                     return refusal
+        if clip.styles_only:  # the head server arbitrates a style beside the expression
+            return None
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
 
     def _view(self) -> Attention:
@@ -1072,12 +1082,13 @@ class GestureEngine:
 
     def _face_now(self, now: float) -> str | None:
         """The expression the face clip holding the face shows at ``now`` (its latest event
-        begun and not lapsed), None when none of the engine's does."""
+        begun and not lapsed; a drawing style is none), None when none of the engine's does."""
         held = self._playing.get("face")
         if held is None or now >= held.ends:
             return None
         showing = None
-        for event in sorted(held.clip.events, key=lambda e: e.t_s):
+        expressions = [e for e in held.clip.events if e.dof == "expression"]
+        for event in sorted(expressions, key=lambda e: e.t_s):
             at = held.started + event.t_s
             if at > now:
                 break

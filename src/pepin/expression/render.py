@@ -89,7 +89,11 @@ from typing import Any
 
 from pepin.arm_motion import GRIPPER_ZERO_DEG
 from pepin.expression.animation import (
+    EVENT_DOFS,
+    FACE_STYLE,
     HOLD,
+    MARK_ARG,
+    MOMENT_DOFS,
     NUMBER,
     PERIOD,
     PERSON,
@@ -668,12 +672,18 @@ class BookRenderer:
         nested: list[tuple[str, int]],
         settings: Sequence[Setting] = (),
     ) -> list[Drawn]:
-        """``steps`` drawn in order (each atom's step aimed; a nested composition's variant and
-        steps drawn from its own seed, placed from its step's ``at_s``, listed in ``nested``)."""
+        """``steps`` drawn in order (each atom's step aimed, a name of ``$arg`` its mark's
+        argument; a nested composition's variant and steps drawn from its own seed, placed from
+        its step's ``at_s``, listed in ``nested``)."""
         out: list[Drawn] = []
         for index, step in enumerate(steps):
             if step.composition is None:
-                out.append(self._aimed(self._draw(self._set(step, settings), rng), ctx))
+                drawn = self._aimed(self._draw(self._set(step, settings), rng), ctx)
+                if MARK_ARG in drawn.names.values():
+                    arg = ctx.meaning.arg or ""
+                    names = {k: arg if v == MARK_ARG else v for k, v in drawn.names.items()}
+                    drawn = replace(drawn, names=names)
+                out.append(drawn)
                 continue
             plays = rng.random() < step.p
             at_s = rng.uniform(step.at_s.lo, step.at_s.hi)
@@ -897,23 +907,30 @@ class BookRenderer:
                 if cycle > 0 and key.at == 0.0 and atom.keys[-1].at == 1.0:
                     continue  # the previous cycle's last key stands there already
                 t = (cycle + at) * period
-                joints = {**pose, **{k: v for k, v in key.values.items() if k != "expression"}}
+                joints = {**pose, **{k: v for k, v in key.values.items() if k not in EVENT_DOFS}}
                 for dof, raw in joints.items():
                     value = number(raw, params)
                     if drawn.mirrored and dof in atom.mirror:
                         value = -value
                     times.setdefault(dof, []).append(t)
                     values.setdefault(dof, []).append(value)
-                face = key.values.get("expression")
-                if isinstance(face, str):
-                    name = drawn.names.get("name", "") if face == "$name" else face
-                    events.append(Event(t, name, hold if hold > 0 else None))
+                for dof in EVENT_DOFS:  # the face's expression, the eyes' iris and effect
+                    named = key.values.get(dof)
+                    if isinstance(named, str):
+                        name = drawn.names.get("name", "") if named == "$name" else named
+                        events.append(Event(t, name, hold if hold > 0 else None, dof))
         end = repeats * period
+        if hold > 0 and atom.part == "eyes":  # an eye's iris or effect holds as its look does
+            events = [replace(e, hold_s=end + hold - e.t_s) for e in events]
         if hold > 0 and atom.part != "face":
             for dof in times:
+                if dof in MOMENT_DOFS:  # a blink is a moment, never held
+                    continue
                 times[dof].append(end + hold)
                 values[dof].append(values[dof][-1])
         duration = end + hold
+        if events and not times and all(e.dof == FACE_STYLE for e in events):
+            duration = end  # the head server holds a style: the face stays free for expressions
         if back is not None:
             here = {dof: vals[-1] for dof, vals in values.items()}
             duration += _leg_s(_travel(here, back)) / BACK_SHARE
@@ -954,7 +971,7 @@ def _traced(keyed: Keyed, legs: int) -> Keyed:
 
 def _numbers(key: Key, params: Mapping[str, float]) -> dict[str, float]:
     """A key's own joint values as numbers."""
-    return {k: number(v, params) for k, v in key.values.items() if k != "expression"}
+    return {k: number(v, params) for k, v in key.values.items() if k not in EVENT_DOFS}
 
 
 Unrolled = tuple[PartName, float, float, float, list[Track], list[Event]]
@@ -975,7 +992,7 @@ def merge(unrolled: Sequence[Unrolled], layer: Layer) -> tuple[Clip, ...]:
                 Track(tr.dof, tr.mode, tuple(t + shift for t in tr.times), tr.values)
                 for tr in step_tracks
             ]
-            events += [Event(e.t_s + shift, e.name, e.hold_s) for e in step_events]
+            events += [replace(e, t_s=e.t_s + shift) for e in step_events]
         first = steps[0]
         clips.append(
             Clip(

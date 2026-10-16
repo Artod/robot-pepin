@@ -9,6 +9,8 @@ One :class:`Executor` per body part turns a rendered clip into requests to that 
   (:mod:`pepin.expression.head`), atomic like a glance and played on top of whatever holds the
   head; fading it withdraws the request and the head falls back to its holder;
 * ``face``: the clip's events as the head server's timed expressions (:class:`FaceChannel`);
+* ``eyes``: the clip's look as the head server's timed eyes overrides, its blinks, winks and
+  effects at their times (:class:`EyesChannel`); fading it lets the eyes go;
 * ``body``: small motions of the wheels while standing, through :class:`Wheels`
   (:class:`pepin.expression.wheels.WheelsExecutor`; :class:`NoBody` and :class:`NoWheels` where
   there is no robot).
@@ -35,7 +37,7 @@ import math
 import threading
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 
 from pepin.expression.animation import Clip, Layer, PartName, Performance
 
@@ -96,7 +98,8 @@ class Renewing(Protocol):
 
 
 class FaceChannel(Protocol):
-    """The face as :class:`pepin.head_link.HeadClient` sends to it (a non-blocking line)."""
+    """The face as :class:`pepin.head_link.HeadClient` sends to it (non-blocking lines): its
+    expression and its drawing style."""
 
     def express(
         self,
@@ -107,6 +110,33 @@ class FaceChannel(Protocol):
         transition_ms: float | None = None,
     ) -> None:
         """Show expression ``name`` (held until replaced when ``hold_s`` is None)."""
+        ...
+
+    def style(self, name: str | None, ms: float | None = None) -> None:
+        """Draw the mouth in style ``name``: for ``ms``, or standing when None; None lets this
+        source's styles go."""
+        ...
+
+
+class EyesChannel(Protocol):
+    """The eyes as :class:`pepin.head_link.HeadClient` sends to them (non-blocking lines, one
+    source's)."""
+
+    def eyes(self, *, ms: float | None = None, side: str = "both", **fields: Any) -> None:
+        """Override the eyes' look (:class:`pepin.head_link.Eyes`' fields, config/face.json's
+        units) on ``side``: until replaced when ``ms`` is None, else for ``ms``."""
+        ...
+
+    def eyes_release(self) -> None:
+        """This source overrides the eyes no more (its effect ends too)."""
+        ...
+
+    def blink(self, side: str = "both") -> None:
+        """One blink: both eyes, or a wink of ``side``."""
+        ...
+
+    def eyes_effect(self, name: str | None, ms: float | None = None) -> None:
+        """The inner rings' effect ``name`` for ``ms`` (None: until replaced); None ends it."""
         ...
 
 

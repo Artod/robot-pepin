@@ -1,17 +1,22 @@
-// Pepin's head: the mouth on the 1.9" screen, the head IMU, and the serial link to the board's
-// head server (pepin.head_server). Core 1 draws the face; core 0 samples the IMU; the UART's
-// event task parses the host's frames. WiFi is never started and Bluetooth's RAM is released.
+// Pepin's head: the mouth on the 1.9" screen, the eyes' LED rings, the head IMU, and the
+// serial link to the board's head server (pepin.head_server). Core 1 draws the face and sends
+// the eyes; core 0 samples the IMU; the UART's event task parses the host's frames. WiFi is
+// never started and Bluetooth's RAM is released.
 #include <Arduino.h>
 #include <esp_bt.h>
+#include <string.h>
 #include <freertos/queue.h>
 #include <freertos/semphr.h>
 
 #include "display.h"
+#include "eyes.h"
+#include "eyes_driver.h"
 #include "face_anime.h"
 #include "face_model.h"
 #include "face_render.h"
 #include "face_table.h"
 #include "imu.h"
+#include "pins.h"
 #include "protocol.h"
 
 namespace {
@@ -24,10 +29,13 @@ constexpr uint8_t kBootBrightness = 200;
 enum Mode : uint8_t { kModeFace = 0, kModeInfo = 1, kModeAsleep = 2 };
 
 struct FaceCommand {
-  uint8_t type;  // 'E', 'M', or 'B' (brightness and the face's style, from a 'C')
+  uint8_t type;  // 'E', 'M', 'Y', or 'B' (the brightnesses and the face's style, from a 'C')
   uint8_t a;     // expression id / mouth level / brightness
   uint8_t b;     // intensity / the style (0xFF: unchanged)
+  uint8_t c;     // the eyes' brightness (0xFF: unchanged)
+  uint8_t d;     // the eye look set choice (0xFF: unchanged)
   uint16_t ms;   // transition
+  uint8_t eyes[head::kEyesBytesEffect];  // a 'Y' payload (b: its length)
 };
 
 SemaphoreHandle_t g_tx;        // one frame at a time on the wire
@@ -43,6 +51,7 @@ head::Parser g_parser;
 face::FaceModel g_model;
 face::AnimeModel g_anime;  // the shape engine, following g_model in the anime style
 face::Layout g_layout;
+eyes::EyeModel g_eyes;     // the rings, following g_model and the host's 'Y'
 
 // One frame onto the wire. `droppable`: when the TX buffer cannot take it whole, it is counted
 // and dropped rather than waited for (the IMU must not stall on a slow reader). The frame is
@@ -99,11 +108,16 @@ void dispatch(uint8_t type, const uint8_t* p, size_t n) {
       return;
     case head::kExpression:
       if (n != 4) return;
-      cmd = {head::kExpression, p[0], p[1], head::get_u16(p + 2)};
+      cmd = {head::kExpression, p[0], p[1], 0, 0, head::get_u16(p + 2), {}};
       break;
     case head::kMouth:
       if (n != 1) return;
-      cmd = {head::kMouth, p[0], 0, 0};
+      cmd = {head::kMouth, p[0], 0, 0, 0, 0, {}};
+      break;
+    case head::kEyes:
+      if (n != head::kEyesBytes && n != head::kEyesBytesEffect) return;
+      cmd = {head::kEyes, 0, (uint8_t)n, 0, 0, 0, {}};
+      memcpy(cmd.eyes, p, n);
       break;
     case head::kInfo:
       if (xSemaphoreTake(g_info_lock, pdMS_TO_TICKS(5)) == pdTRUE) {
@@ -112,9 +126,14 @@ void dispatch(uint8_t type, const uint8_t* p, size_t n) {
       }
       return;
     case head::kConfig:
-      if (n != head::kConfigBytes && n != head::kConfigBytesStyled) return;
-      head::imu_configure({p[0], head::get_u16(p + 1), p[3], p[4], p[5]});
-      cmd = {'B', p[6], n >= head::kConfigBytesStyled ? p[7] : (uint8_t)0xFF, 0};
+      if (n != head::kConfigBytes && n != head::kConfigBytesStyled && n != head::kConfigBytesEyes &&
+          n != head::kConfigBytesEyeSet) {
+        return;
+      }
+      head::imu_configure(head::imu_config_of(p));  // the chip set up again only if it changed
+      cmd = {'B', p[6], n >= head::kConfigBytesStyled ? p[7] : (uint8_t)0xFF,
+             n >= head::kConfigBytesEyes ? p[8] : (uint8_t)0xFF,
+             n >= head::kConfigBytesEyeSet ? p[9] : (uint8_t)0xFF, 0, {}};
       break;
     default:
       return;
@@ -144,6 +163,9 @@ void setup() {
   Serial.onReceive(on_receive, false);
   head::display_begin(kBootBrightness);
   g_model.seed(esp_random());  // the idle gestures differ from boot to boot
+  g_eyes.seed(esp_random());   // and the blinks
+  head::eyes_begin(pins::kEyesData);
+  g_eyes.selfTest(millis());   // one LED round the chain: the soldering's order and angles
   head::imu_start(on_imu);
   g_last_rx_ms = millis();
 }
@@ -169,9 +191,13 @@ void loop() {
       if (mode != kModeAsleep) g_model.setExpression(cmd.a, cmd.b / 255.0f, cmd.ms, now);
     } else if (cmd.type == head::kMouth) {
       g_model.setMouth(cmd.a / 255.0f, now);
+    } else if (cmd.type == head::kEyes) {
+      g_eyes.setOverride(eyes::decode_override(cmd.eyes, cmd.b), now);
     } else if (cmd.type == 'B') {
       head::display_brightness(cmd.a);
       if (cmd.b < face::kStyleCount) g_model.setStyle(cmd.b, now);
+      if (cmd.c != 0xFF) g_eyes.setBrightness(cmd.c);
+      if (cmd.d != 0xFF) g_eyes.setSet(cmd.d);
     }
   }
 
@@ -211,6 +237,9 @@ void loop() {
     }
     ++frames;
   }
+  // the eyes every frame, the info screen included (the model's state stands still under it)
+  g_eyes.follow(g_model, now);
+  head::eyes_show(g_eyes.frame().rgb);
 
   if ((int32_t)(now - next_status) >= 0) {
     next_status += kStatusPeriodMs;
@@ -241,6 +270,11 @@ void loop() {
     s.config_id = imu.config_id;
     s.version = head::kFirmwareVersion;
     s.free_heap_kb = (uint16_t)(ESP.getFreeHeap() / 1024);
+    s.eyes_ma = g_eyes.frame().milliamps;
+    s.eyes_brightness = g_eyes.brightness();
+    s.eyes_mode = g_eyes.mode();
+    s.eye_layout = eyes::kLayoutId;
+    s.eye_set = g_eyes.set();
     uint8_t payload[head::kStatusBytes];
     send(head::kStatus, payload, head::pack_status(s, payload), true);
   }

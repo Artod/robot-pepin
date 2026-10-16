@@ -15,10 +15,16 @@ A marker is one pair of braces with no brace inside::
                           (as above), words and numbers that set the intent's parameters (the
                           book's ``settings``: ``fast``, a number; an atom's auto-wrapper: one
                           number is its repeats, several its parameters in their order) and
-                          ``key=value`` for a parameter by name ({head_nod:amp_deg=6})
+                          ``key=value`` for a parameter by name ({head_nod:amp_deg=6};
+                          ``s=`` is a step's ``hold_s``, the seconds a look holds: {glow:red,s=2})
     {gesture:laugh}       the same, the channel spelled out
     {face:smile}          one expression of config/face.json, on its own
-    {style:whispering}    the voice's manner from here on, in free words as the voice takes them
+    {style:rose}          the mouth drawn in a style of config/face.json: the book's ``style``
+                          intent when it takes the argument ({style:rose,s=0}, {style:rose,hold}
+                          from now on; :func:`pepin.expression.book.with_styles`); {style} alone
+                          the standing style again (a ``bare`` intent: its first argument)
+    {style:whispering}    any other: the voice's manner from here on, in free words as the voice
+                          takes them
     {}                    the plain voice again
     {whispering}          a bare name that is no intent is a style when it is made of the
                           persona's style words (:data:`STYLE_WORDS`: ``{happy, excited}``)
@@ -69,6 +75,9 @@ STYLE_WORDS = frozenset(
     ("whispering", "quiet", "sad", "tired", "happy", "excited", "calm", "slow", "warm")
 )
 _STYLE_SPLIT = re.compile(r"[\s,]+")
+# A parameter's short spelling in a mark's key=value: s, the seconds a step holds (its hold_s,
+# pepin.expression.animation.HOLD)
+KEYS: Mapping[str, str] = {"s": "hold_s"}
 ANY = "*"  # a composition's argument that takes any short name (a place, a referent)
 ARG = re.compile(r"^[^\W_][\w .'\-]{0,23}$")  # such a name: a letter or a digit first, 1-24 long
 _VOWELS = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001 -- Cyrillic vowels
@@ -94,15 +103,17 @@ class Vocabulary:
     """The names a marker may carry: the intents (config/animation.json's compositions), the
     face's expressions (config/face.json), the arguments each intent takes that choose
     (``args``: an intent absent from it takes none; ``"*"`` any short name), those that set its
-    parameters (``takes``) and the intents' other spellings (``aliases``: ``"beat"`` ->
-    ``"accent"``, ``"point:i"`` -> ``"point:me"``). A bare name is an intent when it is one,
-    else a style when it is made of :data:`STYLE_WORDS`."""
+    parameters (``takes``), the intents' other spellings (``aliases``: ``"beat"`` ->
+    ``"accent"``, ``"point:i"`` -> ``"point:me"``) and those a bare marker may name though
+    they take arguments that choose (``bare``: the renderer plays their first). A bare name is
+    an intent when it is one, else a style when it is made of :data:`STYLE_WORDS`."""
 
     intents: frozenset[str]
     faces: frozenset[str]
     args: Mapping[str, tuple[str, ...]] = field(default_factory=dict, hash=False)
     aliases: Mapping[str, str] = field(default_factory=dict, hash=False)
     takes: Mapping[str, Takes] = field(default_factory=dict, hash=False)
+    bare: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -213,6 +224,9 @@ def read_mark(inner: str, vocabulary: Vocabulary) -> Mark | None:
             return mark(name, vocabulary)
         if channel == "face":
             return Mark("face", name.lower()) if name.lower() in vocabulary.faces else None
+        drawn = mark(text, vocabulary)  # {style:rose}: the face's style, when the book takes it
+        if drawn is not None:
+            return drawn
         return Mark("style", _SPACES.sub(" ", name).strip())
     found = mark(text, vocabulary)
     if found is not None or ":" in text:
@@ -255,6 +269,7 @@ def mark(text: str, vocabulary: Vocabulary) -> Mark | None:
             continue
         key, equals, value = (x.strip() for x in item.partition("="))
         if equals:
+            key = KEYS.get(key, key)
             if key in takes.keys and number_of(value) is not None:
                 args.append(f"{key}={value}")
             else:
@@ -303,7 +318,7 @@ def gesture(text: str, vocabulary: Vocabulary) -> Named | None:
         return None
     takes = vocabulary.args.get(name, ())
     if arg is None:
-        return None if takes else ("gesture", name, None)
+        return None if takes and name not in vocabulary.bare else ("gesture", name, None)
     if arg in takes or (ANY in takes and ARG.match(arg) is not None):
         return "gesture", name, arg
     return None

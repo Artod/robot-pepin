@@ -1,16 +1,38 @@
 """Head server: runs on the board and owns the head ESP32's serial port (TCP 3340).
 
-The ESP32 under the stereo camera is the robot's mouth (its 1.9" screen) and carries the head
-IMU (an MPU6050 glued to the camera body). This process is the only one that opens its port
-(``/dev/pepin-head``, the CH340 at 921600 baud, framing in :mod:`pepin.head_link`), and it does
-four things with it:
+The ESP32 under the stereo camera is the robot's mouth (its 1.9" screen) and eyes (two LED
+rings around the lenses), and carries the head IMU (an MPU6050 glued to the camera body). This
+process is the only one that opens its port (``/dev/pepin-head``, the CH340 at 921600 baud,
+framing in :mod:`pepin.head_link`), and it does five things with it:
 
 - **The face.** Any client sends expressions, robot events (config/face.json's table), speech
   levels and info screens. One arbiter decides what shows: every source (the goal server, the
   voice loop, the LLM's tools) holds at most one standing expression and one timed one, the
   newest request of all wins, and a timed one lapses back to whatever stood before it. Only a
   change goes down the wire. Speech levels ('M', the board's own audio server while it plays)
-  and info screens ('T') pass straight through.
+  and info screens ('T') pass straight through. The mouth's drawing style (config/face.json
+  ``styles``: ``style``, ``style_release``) is arbitrated the same way beside the expression:
+  per source one standing and one timed, the newest wins, a timed one lapses back to the
+  newest standing one or to the base (config/face.json's ``style``, or a ``config``'s); it
+  goes down in the 'C' frame when it changes, with the IMU's config and id as they stand (the
+  firmware sets the IMU up again, a reset and 100 ms without samples, only when those change;
+  one built before 2026-10-15 did on every 'C').
+- **The eyes.** An expression sets the eyes' own look with the mouth's; any client overrides it
+  field by field (brows, lids, gaze, iris, glow; :class:`pepin.head_link.Eyes`). A second
+  arbiter decides what shows: every source holds at most one standing override and one timed
+  one, each field of each eye shows the newest override that sets it, and a timed one lapses
+  back to what stood before it. The gaze node's ``gaze`` (where the head looks) is the gaze
+  layer, under every other source's override; while the head follows a person the eyes look
+  straight out, at theirs. The inner rings' effect (``eyes_effect``: spin, pulse, ...) is
+  arbitrated the same way beside the look (per source one standing and one timed, the newest
+  wins, a timed one lapses here; a one-shot asked for without a time holds its own length,
+  config/face.json ``eyes.effects``), and goes down in the 'Y' frame's 19-byte form when it
+  changes. Only a change goes down the wire ('Y', the whole override each time); a blink or a
+  wink goes at once. The eyes' brightness is config/face.json's, sent with the IMU's config
+  ('C') to a firmware that has eyes; so is their look set (``eyes.eye_set``: follow the face
+  style, classic or kawaii; live through a ``config``), to a firmware whose status carries the
+  set in force (one built before the sets drops a 'C' of ten bytes whole, and its first status
+  gets one of nine).
 - **The head IMU.** Every 'I' frame's samples go to the subscribed clients (the C++ base bridge)
   as one JSON line, each sample with both clocks: the ESP32's micros, unwrapped, and its moment
   on this board's monotonic clock.
@@ -23,7 +45,8 @@ four things with it:
   its line is written, by reading both clocks back to back.
 - **The brain lease.** A laptop process (the goal server, with its face flag on) renews a lease
   every few seconds; once a lease was taken and every lease has lapsed, the laptop or the WiFi
-  is gone and the face falls asleep (config/face.json's ``brain_lost``). The ESP32 falls asleep
+  is gone and the face falls asleep (config/face.json's ``brain_lost``) with the sleepy look's
+  own eyes: every eyes override is held back until a brain is here again. The ESP32 falls asleep
   on its own when this server goes silent (3 s without a frame).
 
 A status line goes to every client once a second and to the journal once a minute. Run on the
@@ -54,20 +77,35 @@ from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from pepin.face import FaceTable, load_face_table
+from pepin.face import (
+    EYE_EFFECTS,
+    EYE_SET_CHOICES,
+    FaceTable,
+    eye_set_id,
+    load_face_table,
+)
 from pepin.head_link import (
+    BLINKS,
     CONFIG,
     EXPRESSION,
+    EYE_RELEASE,
+    EYE_STANDING,
+    EYES,
+    EYES_BRIGHTNESS,
     FIRMWARE_DEFAULTS,
     HEAD_PORT,
     IMU,
     IMU_SAMPLE,
     INFO,
     MOUTH,
+    NO_EFFECT,
     OVERHEAD,
     PING,
     PONG,
+    SIDES,
     STATUS,
+    Eyes,
+    EyesFrame,
     FrameDecoder,
     HeadStatus,
     ImuConfig,
@@ -75,6 +113,7 @@ from pepin.head_link import (
     decode_status,
     encode_config,
     encode_expression,
+    encode_eyes,
     encode_frame,
     encode_info,
     encode_mouth,
@@ -100,6 +139,10 @@ OUTBOX_LINES = 400  # ~2 s of the IMU stream at 200 lines/s before a subscriber 
 # INT); an error in it shifts every IMU pair of the clock map by the same amount.
 I2C_READ_S = 0.00045
 PING_BYTES = 4
+EYES_FIRMWARE = 4  # the first firmware with eyes: 'Y', the 'C' frame's ninth byte, the longer 'S'
+GAZE_SOURCE = "gaze"  # the eyes' gaze layer ({"cmd": "gaze"}): under every other override
+EYE_COMMAND_KEYS = ("cmd", "source", "side", "ms")  # an eyes command's keys beside the fields
+ONE_SHOTS = ("sparkle", "flash")  # the effects that end on their own (eyes.cpp one_shot)
 
 
 # -- the serial port ------------------------------------------------------------------------------
@@ -479,6 +522,134 @@ class FaceArbiter:
         return sorted({source for source, _ in self._held})
 
 
+@dataclass(frozen=True)
+class StyleRequest:
+    """One source's drawing style for the mouth (config/face.json ``styles``), until when
+    (None: standing)."""
+
+    source: str
+    name: str
+    until: float | None
+    seq: int
+
+
+class StyleArbiter:
+    """The mouth's drawing style: each source holds one standing and one timed request, the
+    newest of all wins, and a lapsed timed one falls back to the newest still standing (none:
+    the base style)."""
+
+    def __init__(self) -> None:
+        """Nobody asked for a style: the base one draws."""
+        self._held: dict[tuple[str, bool], StyleRequest] = {}
+        self._seq = 0
+
+    def set(self, source: str, name: str, *, hold_s: float | None, now: float) -> None:
+        """``source`` asks for style ``name``: standing (``hold_s`` None) or for ``hold_s``
+        seconds."""
+        self._seq += 1
+        until = None if hold_s is None else now + hold_s
+        self._held[(source, until is not None)] = StyleRequest(source, name, until, self._seq)
+
+    def clear(self, source: str) -> None:
+        """``source`` asks for no style any more."""
+        self._held.pop((source, False), None)
+        self._held.pop((source, True), None)
+
+    def showing(self, now: float) -> StyleRequest | None:
+        """The winning request (None: the base style); lapsed ones are dropped here."""
+        for key in [k for k, r in self._held.items() if r.until is not None and r.until <= now]:
+            del self._held[key]
+        return max(self._held.values(), key=lambda r: r.seq, default=None)
+
+    def sources(self) -> list[str]:
+        """Who holds a request."""
+        return sorted({source for source, _ in self._held})
+
+
+@dataclass(frozen=True)
+class EyesRequest:
+    """One source's override of the eyes ``side`` names (0 both, 1 left, 2 right), until when
+    (None: standing)."""
+
+    source: str
+    eyes: Eyes
+    side: int
+    until: float | None
+    seq: int
+
+
+@dataclass(frozen=True)
+class EffectRequest:
+    """One source's effect on the inner rings (:data:`pepin.face.EYE_EFFECTS`), until when
+    (None: standing)."""
+
+    source: str
+    name: str
+    until: float | None
+    seq: int
+
+
+class EyesArbiter:
+    """What the eyes show over the expression's own look: each source holds one standing and
+    one timed override, each field of each eye shows the newest live override that sets it
+    (the gaze layer's under every other source's), and a lapsed timed one falls back to what
+    stood before it. The effect beside it: each source one standing and one timed, the newest
+    live one runs."""
+
+    def __init__(self) -> None:
+        """Nobody overrides anything: the expression's own eyes and effect."""
+        self._held: dict[tuple[str, bool], EyesRequest] = {}
+        self._effects: dict[tuple[str, bool], EffectRequest] = {}
+        self._seq = 0
+
+    def set(self, source: str, eyes: Eyes, *, side: int, hold_s: float | None, now: float) -> None:
+        """``source`` overrides ``eyes``' fields on ``side``: standing (``hold_s`` None) or for
+        ``hold_s`` seconds."""
+        self._seq += 1
+        until = None if hold_s is None else now + hold_s
+        self._held[(source, until is not None)] = EyesRequest(source, eyes, side, until, self._seq)
+
+    def set_effect(self, source: str, name: str, *, hold_s: float | None, now: float) -> None:
+        """``source`` runs effect ``name``: standing (``hold_s`` None) or for ``hold_s``
+        seconds."""
+        self._seq += 1
+        until = None if hold_s is None else now + hold_s
+        self._effects[(source, until is not None)] = EffectRequest(source, name, until, self._seq)
+
+    def end_effect(self, source: str) -> None:
+        """``source`` runs no effect any more."""
+        self._effects.pop((source, False), None)
+        self._effects.pop((source, True), None)
+
+    def clear(self, source: str) -> None:
+        """``source`` overrides nothing any more, its effect included."""
+        self._held.pop((source, False), None)
+        self._held.pop((source, True), None)
+        self.end_effect(source)
+
+    def effect(self, now: float) -> EffectRequest | None:
+        """The effect that runs (None: the look's own); lapsed ones are dropped here."""
+        for key in [k for k, r in self._effects.items() if r.until is not None and r.until <= now]:
+            del self._effects[key]
+        return max(self._effects.values(), key=lambda r: r.seq, default=None)
+
+    def showing(self, now: float) -> tuple[Eyes, Eyes]:
+        """The left eye's override and the right one's; lapsed ones are dropped here."""
+        for key in [k for k, r in self._held.items() if r.until is not None and r.until <= now]:
+            del self._held[key]
+        left = right = Eyes()
+        for r in sorted(self._held.values(), key=lambda r: (r.source != GAZE_SOURCE, r.seq)):
+            if r.side != 2:
+                left = r.eyes.over(left)
+            if r.side != 1:
+                right = r.eyes.over(right)
+        return left, right
+
+    def sources(self) -> list[str]:
+        """Who holds an override or an effect."""
+        return sorted({source for source, _ in self._held} | {s for s, _ in self._effects})
+
+
 class BrainLeases:
     """Who on the laptop says it is here, until when."""
 
@@ -576,14 +747,32 @@ class HeadService:
         self._unwrapper = MicrosUnwrapper()
         self.clock_map = ClockMap(settings.bucket_s, settings.window_s)
         self.arbiter = FaceArbiter()
+        self.styles = StyleArbiter()
+        self.eyes = EyesArbiter()
         self.leases = BrainLeases()
         self._moments: dict[tuple[str, str], float] = {}  # (source, event): when last shown
         self.moments_dropped = 0
         self._config = settings.imu
         self._configs: dict[int, ImuConfig] = {0: FIRMWARE_DEFAULTS, self._config.id: self._config}
         self._brightness = settings.brightness
-        self._style = table.style  # the face's style, sent with every 'C' (config/face.json)
+        # the base style (config/face.json's, or a config's): what draws while no source asks
+        # for one; the style that draws goes with every 'C'
+        self._style = table.style
+        self._sent_style: str | None = None  # the style the last 'C' carried
+        # ...and the eyes' brightness (config/face.json's eyes.power.brightness)
+        self._eyes_brightness = (
+            EYES_BRIGHTNESS if table.eyes is None else round(table.eyes.power["brightness"])
+        )
+        self._config_eyes = False  # the last 'C' carried the eyes' brightness
+        # ...and their look set (config/face.json's eyes.eye_set, or a config's)
+        self._eye_set = EYE_SET_CHOICES[0] if table.eyes is None else table.eyes.eye_set
+        self._config_sets = False  # the last 'C' carried the eye set
         self._sent_face: tuple[str, float] | None = None
+        # the eyes' override and effect (its name and request) as last sent
+        self._sent_eyes: tuple[Eyes, Eyes, tuple[str, int] | None] | None = None
+        self._gaze: dict[str, Any] | None = None  # the newest gaze command, as it came
+        self.eye_frames = 0
+        self.blinks = 0
         self._subscribers: set[Subscriber] = set()
         self._rate = ChipRate()  # the IMU's rate in ESP32 time
         self._pings: dict[int, float] = {}
@@ -687,12 +876,34 @@ class HeadService:
         self._rate.reset()
         self._mismatches = 0
         self._sent_face = None
+        self._sent_eyes = None
+        self._sent_style = None
         self.resyncs += 1
-        logger.info("head: sending config %s, style %s and the face (%s)", self._config.id,
-                    self._style, why)  # fmt: skip
-        style = self._table.style_id_of(self._style)
-        self._send(CONFIG, encode_config(self._config, self._brightness, style))
+        logger.info("head: sending config %s, style %s, the face and the eyes (%s)",
+                    self._config.id, self._style_shown(self._clock())[0], why)  # fmt: skip
+        self._send_config()
         self._next_ping = 0.0
+
+    def _send_config(self) -> bool:
+        """The 'C' frame: the IMU's config, the screen's brightness, the style that draws and,
+        to a firmware that has eyes (or one not heard from yet), the eyes' brightness: firmware
+        3 drops a 'C' of nine bytes whole, and its status then asks for the config again. The
+        eye set rides behind it to a firmware whose status carries the set in force (or one not
+        heard from yet): a firmware 4 built before the sets drops a 'C' of ten bytes whole, and
+        its first status gets one of nine (:meth:`_on_status`)."""
+        esp = self._esp_status
+        eyes = esp is None or esp.version >= EYES_FIRMWARE
+        sets = eyes and (esp is None or esp.eye_set is not None)
+        style = self._style_shown(self._clock())[0]
+        payload = encode_config(self._config, self._brightness, self._table.style_id_of(style),
+                                self._eyes_brightness if eyes else None,
+                                eye_set_id(self._eye_set) if sets else None)  # fmt: skip
+        sent = self._send(CONFIG, payload)
+        self._config_eyes = sent and eyes
+        self._config_sets = sent and sets
+        if sent:
+            self._sent_style = style
+        return sent
 
     # -- from the ESP32 -----------------------------------------------------------------------
 
@@ -804,6 +1015,11 @@ class HeadService:
                 self._sent_face = None  # sent again at the next tick
         else:
             self._mismatches = 0
+        # a firmware with eyes that was sent the config without them, one with the eye sets
+        # sent it without the set, or one without them sent a 'C' it dropped
+        stale = not self._config_eyes or self._config_sets != (status.eye_set is not None)
+        if status.version >= EYES_FIRMWARE and stale and self._link is not None:
+            self._send_config()
         self._server.broadcast(self.status(received))
 
     # -- from the clients ---------------------------------------------------------------------
@@ -853,6 +1069,64 @@ class HeadService:
         if cmd == "clear":
             self.arbiter.clear(source)
             return self._ack(cmd, now)
+        if cmd == "style":
+            name = message.get("name")
+            if name is None:
+                self.styles.clear(source)
+                return self._style_ack(cmd, now)
+            known = [s.name for s in self._table.styles]
+            if name not in known:
+                raise ValueError(f"no face style {name!r}: {', '.join(known)}")
+            ms = message.get("ms")
+            hold = None if ms is None else max(float(ms), 0.0) / 1000.0
+            self.styles.set(source, str(name), hold_s=hold, now=now)
+            return self._style_ack(cmd, now)
+        if cmd == "style_release":
+            self.styles.clear(source)
+            return self._style_ack(cmd, now)
+        if cmd == "eyes":
+            fields = {k: v for k, v in message.items() if k not in EYE_COMMAND_KEYS}
+            eyes = Eyes.of(fields)
+            if eyes.empty:
+                raise ValueError("an eyes override sets a field at least (eyes_release lets go)")
+            ms = message.get("ms")
+            hold = None if ms is None else max(float(ms), 0.0) / 1000.0
+            self.eyes.set(source, eyes, side=_side(message.get("side")), hold_s=hold, now=now)
+            return self._eyes_ack(cmd, now)
+        if cmd == "eyes_effect":
+            name = message.get("name")
+            if name is None or name == NO_EFFECT:
+                self.eyes.end_effect(source)
+                return self._eyes_ack(cmd, now)
+            if name not in EYE_EFFECTS:
+                raise ValueError(f"no eye effect {name!r}: {', '.join(EYE_EFFECTS[1:])} or null")
+            ms = message.get("ms")
+            hold = None if ms is None else max(float(ms), 0.0) / 1000.0
+            if hold is None and name in ONE_SHOTS:  # it ends by itself: so does the request
+                hold = self._one_shot_s(str(name))
+            self.eyes.set_effect(source, str(name), hold_s=hold, now=now)
+            return self._eyes_ack(cmd, now)
+        if cmd == "eyes_release":
+            self.eyes.clear(source)
+            if source == GAZE_SOURCE:
+                self._gaze = None
+            return self._eyes_ack(cmd, now)
+        if cmd in ("blink", "wink"):
+            side = _side(message.get("side"))
+            if cmd == "wink" and side == 0:
+                raise ValueError("a wink is the left eye's or the right one's: side left or right")
+            blink = side + 1  # BLINKS: both, a wink of the left, of the right
+            sent = self._tick_eyes(now, blink)
+            self.blinks += 1
+            return {"type": "ack", "cmd": cmd, "blink": BLINKS[blink], "sent": sent}
+        if cmd == "gaze":
+            x, y = _signed_unit(message.get("x", 0.0)), _signed_unit(message.get("y", 0.0))
+            tracking = bool(message.get("tracking", False))
+            self._gaze = {"x": x, "y": y, "tracking": tracking}
+            # Following a person, the head points at them: the eyes look straight out, at theirs.
+            eyes = Eyes.of({"gaze_x": 0.0 if tracking else x, "gaze_y": 0.0 if tracking else y})
+            self.eyes.set(GAZE_SOURCE, eyes, side=0, hold_s=None, now=now)
+            return self._eyes_ack(cmd, now)
         if cmd == "mouth":
             self._send(MOUTH, encode_mouth(_unit(message.get("level", 0.0))))
             return {"type": "ack", "cmd": cmd}
@@ -891,28 +1165,77 @@ class HeadService:
             "by": showing.source if showing else None,
         }
 
+    def _style_ack(self, cmd: str, now: float) -> dict[str, Any]:
+        sent = self._tick_style(now)
+        style, by = self._style_shown(now)
+        return {"type": "ack", "cmd": cmd, "style": style, "by": by, "sent": sent}
+
+    def _style_shown(self, now: float) -> tuple[str, str | None]:
+        """The style that draws and the source whose request it is (None: the base)."""
+        showing = self.styles.showing(now)
+        return (self._style, None) if showing is None else (showing.name, showing.source)
+
+    def _eyes_ack(self, cmd: str, now: float) -> dict[str, Any]:
+        self._tick_eyes(now)
+        return {"type": "ack", "cmd": cmd, **self._eyes_shown(now)}
+
+    def _eyes_shown(self, now: float) -> dict[str, Any]:
+        """The eyes' override as it stands, both eyes in one when they are alike, and the
+        effect when one runs."""
+        left, right = self.eyes.showing(now)
+        effect = self.eyes.effect(now)
+        running = {} if effect is None else {"effect": effect.name}
+        if left == right:
+            return {"eyes": left.as_dict(), **running, "by": self.eyes.sources()}
+        return {"left": left.as_dict(), "right": right.as_dict(), **running,
+                "by": self.eyes.sources()}  # fmt: skip
+
+    def _one_shot_s(self, name: str) -> float:
+        """How long one-shot effect ``name`` plays on the firmware (config/face.json
+        ``eyes.effects``: the sparkle's twinkles and their fade, the flash)."""
+        fx = self._table.eyes.effects if self._table.eyes is not None else {}
+        if name == "sparkle":
+            return (fx.get("sparkle_ms", 1200.0) + 2.0 * fx.get("sparkle_rise_ms", 140.0)) / 1000.0
+        return fx.get("flash_ms", 260.0) / 1000.0
+
     def _configure(self, message: dict[str, Any]) -> dict[str, Any]:
-        new_id = self._config.id % 255 + 1
-        config = ImuConfig(
-            id=new_id,
+        """A ``config``: a new IMU config id only when the sampling (rate, DLPF, ranges)
+        changes, so a style, an eye set or a brightness alone leaves the head IMU running (the
+        firmware sets the chip up again on any other id); nothing is applied when a value is
+        refused."""
+        sampling = ImuConfig(
+            id=self._config.id,
             rate_hz=int(message.get("imu_rate_hz", self._config.rate_hz)),
             dlpf=int(message.get("dlpf", self._config.dlpf)),
             accel_fs=int(message.get("accel_fs", self._config.accel_fs)),
             gyro_fs=int(message.get("gyro_fs", self._config.gyro_fs)),
         )
-        self._brightness = min(max(int(message.get("brightness", self._brightness)), 0), 255)
+        brightness = int(message.get("brightness", self._brightness))
+        eyes = int(message.get("eyes_brightness", self._eyes_brightness))
         style = str(message.get("style", self._style))
-        style_byte = self._table.style_id_of(style)  # KeyError naming the known styles
+        self._table.style_id_of(style)  # KeyError naming the known styles
+        eye_set = str(message.get("eye_set", self._eye_set))
+        eye_set_id(eye_set)  # ValueError naming the choices
+        self._brightness = min(max(brightness, 0), 255)
         self._style = style
-        self._config = config
-        self._configs[config.id] = config
-        self._mismatches = 0
-        sent = self._send(CONFIG, encode_config(config, self._brightness, style_byte))
-        line = encode_line(self.imu_config_line(config))
-        for subscriber in self._subscribers:
-            subscriber.post(line)
+        self._eye_set = eye_set
+        self._eyes_brightness = min(max(eyes, 0), 255)
+        changed = sampling != self._config
+        if changed:
+            self._config = replace(sampling, id=self._config.id % 255 + 1)
+            self._configs[self._config.id] = self._config
+            self._mismatches = 0
+        config = self._config
+        sent = self._send_config()
+        if changed:  # the subscribers' samples are taken at it from now on
+            line = encode_line(self.imu_config_line(config))
+            for subscriber in self._subscribers:
+                subscriber.post(line)
+        style, by = self._style_shown(self._clock())
         return {"type": "ack", "cmd": "config", "config": asdict(config),
-                "brightness": self._brightness, "style": self._style, "sent": sent}  # fmt: skip
+                "brightness": self._brightness, "style": style, "style_by": by,
+                "eyes_brightness": self._eyes_brightness, "eye_set": self._eye_set,
+                "sent": sent}  # fmt: skip
 
     # -- the clocks ---------------------------------------------------------------------------
 
@@ -939,6 +1262,8 @@ class HeadService:
                 self.arbiter.clear("brain")
             self._brain_was_lost = lost
         self._tick_face(now)
+        self._tick_style(now)
+        self._tick_eyes(now)
         if now >= self._next_report:
             self._next_report = now + REPORT_EVERY_S
             logger.info("%s", self.report(now))
@@ -953,11 +1278,57 @@ class HeadService:
         if self._send(EXPRESSION, encode_expression(self._table.id_of(name), intensity, ms)):
             self._sent_face = (name, intensity)
 
+    def _tick_style(self, now: float) -> bool:
+        """The style that draws down the wire in a 'C' when it changed; whether one went."""
+        if self._link is None or self._style_shown(now)[0] == self._sent_style:
+            return False
+        return self._send_config()
+
+    def _tick_eyes(self, now: float, blink: int = 0) -> bool:
+        """The eyes' override down the wire when it changed (or with a ``blink``): one 'Y' for
+        both eyes when they are alike, one each otherwise, every frame the whole override of its
+        eyes (an eye with nothing overridden: a frame of sentinels for its side; a release, which
+        the firmware applies to both eyes, only for both); the effect in the first frame's
+        19-byte form when it changed (its rest of life, or none once it ended), never ended by
+        a release while it runs. Asleep (every brain lease lapsed) nothing is overridden: the
+        sleepy look's own eyes and effect, no laptop's override held over them; the overrides
+        come back with a brain."""
+        left, right = self.eyes.showing(now)
+        effect = self.eyes.effect(now)
+        if self._settings.brain_lease and self.leases.lost(now):
+            left = right = Eyes()
+            effect = None
+        running = None if effect is None else (effect.name, effect.seq)
+        shown = (left, right, running)
+        if self._link is None or (shown == self._sent_eyes and not blink):
+            return False
+        before = self._sent_eyes[2] if self._sent_eyes is not None else None
+        call: tuple[str, int] | None = None  # the effect byte and its life, when it changed
+        if running != before and effect is not None:
+            life = 0 if effect.until is None else round((effect.until - now) * 1000.0)
+            call = (effect.name, life)
+        elif running != before and before is not None:
+            call = (NO_EFFECT, 0)
+        frames = [(0, left)] if left == right else [(1, left), (2, right)]
+        sent = True
+        for i, (side, eyes) in enumerate(frames):
+            release = side == 0 and eyes.empty and effect is None
+            mode = EYE_RELEASE if release else EYE_STANDING
+            if i == 0 and call is not None and not release:
+                eyes = replace(eyes, effect=call[0], effect_ms=call[1])
+            frame = EyesFrame(eyes, mode, 0, blink if i == 0 else 0, side)
+            sent = self._send(EYES, encode_eyes(frame)) and sent
+        if sent:
+            self._sent_eyes = shown
+            self.eye_frames += len(frames)
+        return sent
+
     # -- what it says ---------------------------------------------------------------------------
 
     def status(self, now: float) -> dict[str, Any]:
         """The server's and the ESP32's numbers, for the status line."""
         showing = self.arbiter.showing(now)
+        style, style_by = self._style_shown(now)
         esp = self._esp_status
         return {
             "type": "status",
@@ -981,10 +1352,21 @@ class HeadService:
             "clock": self.clock_map.state(),
             "config": asdict(self._config),
             "brightness": self._brightness,
-            "style": self._style,
+            "style": style,
+            "style_by": style_by,
+            "style_sources": self.styles.sources(),
             "showing": showing.name if showing else self._settings.resting,
             "by": showing.source if showing else None,
             "sources": self.arbiter.sources(),
+            "eyes": {
+                **self._eyes_shown(now),
+                "brightness": self._eyes_brightness,
+                "set": self._eye_set,  # the setting the 'C' carries
+                "set_shown": None if esp is None else esp.eye_set,  # the status's
+                "gaze": self._gaze,
+                "frames": self.eye_frames,
+                "blinks": self.blinks,
+            },
             "moments_dropped": self.moments_dropped,
             "leases": self.leases.alive(now),
             "brain_lost": self.leases.lost(now),
@@ -1001,10 +1383,18 @@ class HeadService:
         chip = (
             "no status from the ESP32"
             if esp is None
-            else f"face {esp['fps']:.1f} fps ({esp['mode']}), imu {esp['imu_rate_hz']} Hz"
-            f" {esp['imu_state']} (who 0x{esp['who_am_i']:02x}), i2c errors {esp['i2c_errors']},"
-            f" dropped {esp['dropped']}, rx errors {esp['rx_errors']}"
+            else f"firmware {esp['version']}, face {esp['fps']:.1f} fps ({esp['mode']}), imu"
+            f" {esp['imu_rate_hz']} Hz {esp['imu_state']} (who 0x{esp['who_am_i']:02x}), i2c"
+            f" errors {esp['i2c_errors']}, dropped {esp['dropped']}, rx errors {esp['rx_errors']}"
         )
+        if esp is not None and esp["eyes_ma"] is not None:
+            shown = "" if esp["eye_set"] is None else f", set {esp['eye_set']}"
+            chip += (
+                f", eyes {esp['eyes_ma']} mA at brightness {esp['eyes_brightness']}"
+                f" (mode {esp['eyes_mode']}, layout {esp['eye_layout']}{shown})"
+            )
+        eyes = s["eyes"]
+        overridden = ", ".join(eyes["by"]) or "nobody"
         clock = s["clock"]
         timing = (
             f"clock {clock['offset_s']:+.6f} s, {clock['esp_fast_ppm']:+.1f} ppm,"
@@ -1015,14 +1405,35 @@ class HeadService:
         return (
             f"head: link {s['link']}, {chip}; crc errors {s['crc_errors']}, samples"
             f" {s['imu_samples']} (gaps {s['imu_gaps']}), {timing}; showing {s['showing']}"
-            f" ({s['by'] or 'nobody'}), leases {s['leases'] or 'none'}, subscribers"
-            f" {s['subscribers']}, clients {s['clients']}"
+            f" ({s['by'] or 'nobody'}), style {s['style']} ({s['style_by'] or 'the base'}),"
+            f" eyes overridden by {overridden} (brightness {eyes['brightness']}, set"
+            f" {eyes['set']}, {eyes['frames']} frames, {eyes['blinks']} blinks), leases"
+            f" {s['leases'] or 'none'}, subscribers {s['subscribers']}, clients {s['clients']}"
         )
 
 
 def _unit(value: Any) -> float:
     """A number clamped to 0..1."""
     return min(max(float(value), 0.0), 1.0)
+
+
+def _signed_unit(value: Any) -> float:
+    """A number clamped to -1..1."""
+    return min(max(float(value), -1.0), 1.0)
+
+
+def _side(value: Any) -> int:
+    """An eye command's side ("both", "left", "right", or 0..2; absent: both) as the 'Y' frame's
+    byte; ``ValueError`` otherwise."""
+    if value is None:
+        return 0
+    if isinstance(value, str):
+        if value not in SIDES:
+            raise ValueError(f"side {value!r}: {', '.join(SIDES)}")
+        return SIDES.index(value)
+    if isinstance(value, bool) or int(value) not in range(len(SIDES)):
+        raise ValueError(f"side {value!r}: {', '.join(SIDES)}")
+    return int(value)
 
 
 def stop_on_sigterm() -> threading.Event:

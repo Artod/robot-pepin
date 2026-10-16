@@ -17,4 +17,11 @@ constexpr int kImuSda = 21;
 constexpr int kImuScl = 22;
 constexpr int kImuInt = 27;
 
+// The eyes' WS2812B chain (both rings of both eyes in series, eye_table.h has the order): one
+// data line, 3.3 V from the ESP32 into the first ring's DIN (that ring's 5 V through a 1N4007,
+// so its 4.3 V rail reads 3.3 V as high). The board is potted: the pin is whichever free GPIO
+// the iron can reach. Free on this board: 26 (the default), 25, 33, 13, 14, 19, 5, 16, 17;
+// taken: 27 (the IMU's INT), 32 (the backlight), 21/22 (I2C), 23/18/15/2/4 (the panel).
+constexpr int kEyesData = 26;
+
 }  // namespace pins

@@ -737,7 +737,8 @@ the face comes and goes in the frames, while sitting down or standing up still m
 ## Gestures: the body as one animated character
 
 The voice cascade's brain names an intent inline before the word it belongs to (`{greeting}`,
-`{laugh}`, `{face:smile}`; `{whispering}` and `{}` stay the voice's style) and the gesture engine
+`{laugh}`, `{face:smile}`, `{style:manga}`; `{whispering}`, `{}` and a `{style:...}` naming no
+face style stay the voice's manner) and the gesture engine
 (`pepin.expression`) decides how: it renders the intent from `config/animation.json` (atoms,
 the twelve feelings and the co-speech marks, taught poses; a seed logged with every performance),
 fits it to the time left before its word (below) and plays it through each part's one owner.
@@ -774,6 +775,32 @@ clip holds its part until a state it excludes or another clip takes it, renewed 
 once a period (an overlay's TTL is one period and a second); the drift plays over it and the
 loop comes back after; an idle entry of the book may set its own `after_speech_s` (0: a breath
 right after a reply) over `layers.idle_after_speech_s`.
+
+**The eyes** (`pepin.expression.parts.EyesPart`, the head server's source `expression`, beside the
+face and like it: on the mark, quiet with it, never capped). An eye clip of the book is the head
+server's timed eyes overrides (brows, lids, gaze, glow, iris colour), one at each change of its
+look, lapsing at its end, its blinks and winks at their times and its inner rings' effect for its
+hold; a fade lets the eyes go. The brain's three lines: `{wink}` / `{wink:left}` (the robot's own
+eye), `{glow:red}` / `{glow:red,s=2}` (red, orange, green, blue, pink, white), and
+`{eyes:frown}` ... `{eyes:spin,s=2}` (frown, brows_up, squint, sparkle, flash, spin, pulse,
+flicker, doze, tear), each of those names a mark of its own too (`{frown:1.5}`, `{spin:2}`: one
+positional argument at most, the rest `key=value`, `s` the seconds). The evil click winks as
+the hand arrives; the idle layer names no eye atom (the firmware
+blinks by itself). **Dozing** (`pepin.expression.doze`, flag `doze`, on): with no conversation
+open and nothing on the face for `doze.idle_after_s` (30 s), the head server's source `doze`
+holds `sleepy` (its eyes doze, its z floats up); the wake word, any moment of a conversation, a
+drive or another source on the face (the head server's status) lets it go at once.
+
+**The mouth's style** (the book's `style` atom and mark, through the face part: the head server's
+`style`, source `expression`; never capped, never the idle layer's). `{style:manga}` draws the
+mouth in that style of `config/face.json` for 4 s (the book's), `{style:manga,s=2}` for 2,
+`{style:manga,hold}` or `s=0` from now on (the brain's standing choice), `{style}` alone lets the
+brain's style go (back to the standing one, else `config/face.json`'s `style`). The names are
+read from `config/face.json` at load (`pepin.expression.book.with_styles`), never written in the
+book, and the brain reads one line a style there (`style:NAME — brief`, `pepin.face.style_lines`;
+a style's `brief` beside its note). A style clip lasts its period and never books nor holds the
+face, so an expression on the same word plays too; a fade or the doze leaves the style. The
+`express` tool's `style` is the `llm` source's gag for the expression's seconds.
 
 **The alive layer** (`pepin.expression.prosody`, `pepin.expression.listeners`; it rides
 `gestures`, no flag of its own). The prosody listener hears every chunk of a reply as the player
@@ -1055,6 +1082,8 @@ uv run python scripts/voice_cascade.py switch --flag speaker_gaze=on   # the tur
 
 ```bash
 uv run python scripts/voice_cascade.py switch --flag gestures=on    # off as shipped; live
+uv run python scripts/voice_cascade.py switch --flag doze=off       # the face awake when idle
+uv run python scripts/gesture.py play eyes:spin,s=2 --dry-run       # the eyes' calls, timed
 uv run python scripts/gesture.py read                               # the arm's angles, no motion
 uv run python scripts/gesture.py play greeting --speed 0.2 --dry-run
 uv run python scripts/gesture.py teach raised                       # torque off, place, Enter
@@ -1183,6 +1212,7 @@ minute, and every live flag on it back to its default.
 | `gaze` | `path_gaze` | bool | on | yes | while a drive runs, the head looks along the plan path_lookahead_s ahead (pan clamped to path_pan_clamp_deg, a dead-band of path_deadband_deg); only with a base server that moves the neck while driving (neck_target), otherwise idle |
 | `gaze` | `reverse_gaze` | bool | on | yes | a reverse leg the plan announces (reverse_min_m) or a recovery drives (reverse_recovery) turns the head reverse_pan_deg toward the side the rear swings to at its first reversing command, any other after reverse_min_s, any with the rear tight at once; with reverse_hold_s the look is let go at the first forward command; only with a base server that moves the neck while driving |
 | `gaze` | `face_events` | bool | on | yes | the stall look's moments on the head's face (pepin.face_events.StallFace, through the board's head server on PEPIN_HOST:3340): surprised as the head turns to the blocker, a small grin when the look carved a phantom, worried when it confirmed a thing (config/face.json's events) |
+| `gaze` | `eye_gaze` | bool | on | yes | the eyes' pupils follow where the head is sent: its target off the body's nose (pan over the neck's reach, tilt off home), -1..1, to the board's head server as its gaze layer on a change of 2 % or more, at most 10 Hz; centred while the speaker gaze holds the head on a person; off, the gaze layer is released and the eyes look as the expression has them |
 | `goal_server` | `controller` | choice: mppi, rpp, rpp_shim, graceful, dwb, shim_mppi | shim_mppi | yes | what follows the plan: mppi is Nav2's MPPI controller for every planner, held to the mark's heading by the yaw-checking goal checker; rpp is each planner's own Regulated Pure Pursuit from PLANNERS, ending on position alone as before 2026-09-23; rpp_shim is the reversing RPP inside Nav2's RotationShimController, which turns the cart to the mark's heading in place once it is inside the goal tolerance; graceful and dwb are Nav2's Graceful and DWB controllers, for an A/B against mppi; shim_mppi drives each goal on rpp_shim and hands it to mppi for the rest of that goal once the cart is within the knob park_distance_m of the goal (PARKERS) (ros/goto.sh controller NAME). Published latched on controller_selector and goal_checker_selector; the behaviour tree plans at once on a controller change and hands FollowPath the new controller together with that plan |
 | `goal_server` | `start_needs_placement` | bool | on | yes | a goal or a mark waits for the laptop's word on /localization/placement (pepin_bringup.rtabmap_frame, latched) that this start of RTAB-Map is PLACED — a node of the loaded map recognised, or an operator's seed — and nothing heard is refused like not placed. Off, a fresh map -> base_link is enough, as before 2026-09-23 |
 | `goal_server` | `goal_hull_check` | bool | off | yes | `plan` refuses a goal where the cart's hull standing there would cover a lethal cell of Nav2's global costmap (hull_on_costmap: a person's legs, a chair) before any planner is asked, blaming the goal; off, the planner alone judges the goal and `plan` reports the costmap as unchecked |

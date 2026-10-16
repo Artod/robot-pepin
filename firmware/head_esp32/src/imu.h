@@ -20,6 +20,19 @@ struct ImuConfig {
 // mast's jerks.
 constexpr ImuConfig kImuDefaults = {0, 1000, 3, 1, 1};
 
+// A 'C' payload's IMU part: id u8, rate u16 (LE), DLPF u8, accel FS u8, gyro FS u8.
+inline ImuConfig imu_config_of(const uint8_t* p) {
+  return {p[0], (uint16_t)(p[1] | (p[2] << 8)), p[3], p[4], p[5]};
+}
+
+// Whether two configurations sample the chip alike (the id too: every sample echoes it). A
+// 'C' that changes neither, only the face's style or a brightness, leaves the running chip
+// alone: setting it up again resets it and waits 100 ms, a hole in the stream.
+inline bool same_sampling(const ImuConfig& a, const ImuConfig& b) {
+  return a.id == b.id && a.rate_hz == b.rate_hz && a.dlpf == b.dlpf && a.accel_fs == b.accel_fs &&
+         a.gyro_fs == b.gyro_fs;
+}
+
 struct ImuSample {
   uint32_t t_us;  // micros() at the data-ready edge (polled: at the poll, less half its period)
   int16_t a[3];   // raw counts, the chip's axes
@@ -54,7 +67,8 @@ using ImuSink = void (*)(const ImuSample* samples, size_t n);
 // Start the task (core 0); it finds the chip, retries every second while it is absent.
 void imu_start(ImuSink sink);
 
-// A new configuration, applied by the task at its next sample; thread-safe.
+// A new configuration, applied by the task at its next sample (the chip set up again) unless
+// it samples as the running one does (same_sampling); thread-safe.
 void imu_configure(const ImuConfig& config);
 
 ImuStats imu_stats();

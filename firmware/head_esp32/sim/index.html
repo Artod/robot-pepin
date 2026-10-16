@@ -28,14 +28,23 @@
   .sub { color: var(--muted); margin: 0 0 16px; }
   section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
             padding: 14px; margin-bottom: 14px; }
-  /* the head: the stereo camera (two lenses: the eyes) above the screen (the mouth) */
+  /* the head: the stereo camera (two lenses: the eyes' rings) above the screen (the mouth) */
   .head { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 26px 0; }
-  .camera { width: 420px; max-width: 90%; height: 96px; border-radius: 22px;
-            background: linear-gradient(#2a3036, #1a1f24); border: 1px solid #39424b;
-            display: flex; justify-content: space-between; align-items: center; padding: 0 58px; }
-  .lens { width: 64px; height: 64px; border-radius: 50%;
-          background: radial-gradient(circle at 38% 35%, #4b6a80 0 8%, #10161c 14% 55%, #050709 70%);
-          border: 5px solid #0c0f12; box-shadow: 0 0 0 2px #39424b; }
+  .camera { width: 460px; max-width: 95%; border-radius: 22px; padding: 12px 14px;
+            background: linear-gradient(#2a3036, #1a1f24); border: 1px solid #39424b; }
+  canvas.eyes { display: block; width: 100%; height: auto; border-radius: 12px; }
+  canvas.eyes.raw { width: 344px; max-width: 100%; }
+  .rings { display: grid; grid-template-columns: 1fr; gap: 6px; margin-top: 10px; }
+  .ring { display: grid; grid-template-columns: 56px 130px 1fr 52px 90px; gap: 8px; align-items: center;
+          font-size: 12px; color: var(--muted); }
+  .ring input[type=range] { width: 100%; }
+  .ring output { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
+  select, input[type=number] { background: #0f1317; color: var(--text); border: 1px solid var(--line);
+                               border-radius: 6px; padding: 4px 6px; font: inherit; }
+  .yfield { display: grid; grid-template-columns: 52px 84px 1fr 52px; gap: 8px; align-items: center;
+            font-size: 12px; color: var(--muted); }
+  .yfield input[type=range] { width: 100%; }
+  .yfield output { text-align: right; color: var(--text); font-variant-numeric: tabular-nums; }
   .bezel { background: #050607; border: 1px solid #2c343b; border-radius: 14px; padding: 12px;
            width: 666px; max-width: 100%; }
   canvas#face { display: block; width: 100%; height: auto; aspect-ratio: 320 / 170;
@@ -73,10 +82,11 @@
 <main>
   <div>
     <h1>Pepin's face</h1>
-    <p class="sub">The head's 1.9" ST7789 (320x170) as the firmware draws it: the same model,
-      renderer and table (<code>config/face.json</code>), pixel for pixel.</p>
+    <p class="sub">The head's 1.9" ST7789 (320x170) and the LED rings round the lenses as the firmware
+      draws them: the same models, renderers and table (<code>config/face.json</code>), pixel for pixel and
+      byte for byte.</p>
     <section class="head">
-      <div class="camera"><div class="lens"></div><div class="lens"></div></div>
+      <div class="camera"><canvas id="eyes" class="eyes" width="344" height="158"></canvas></div>
       <div class="bezel"><canvas id="face" width="320" height="170"></canvas></div>
       <div class="stats">
         <span>showing <b id="st-expr">neutral</b></span>
@@ -88,6 +98,60 @@
       </div>
       <label><input type="checkbox" id="smooth"> smooth pixels (the panel itself is not)</label>
       <label>style <select id="style"></select> (the head server's 'C' config carries it; <code>config/face.json</code> <code>style</code>)</label>
+    </section>
+    <section>
+      <h2>Eyes (the LED rings: 'E' sets their look, 'Y' overrides it, 'C' byte 9 their brightness)</h2>
+      <canvas id="eyes-raw" class="eyes raw" width="344" height="158"></canvas>
+      <div class="stats" style="margin-top:8px">
+        <span>eyes <b id="st-eyes-ma">0</b> mA</span>
+        <span>brightness <b id="st-eyes-b">64</b></span>
+        <span>mode <b id="st-eyes-mode">expression</b></span>
+        <span>layout id <b id="st-eyes-layout">-</b></span>
+        <span>set <b id="st-eyes-set">classic</b></span>
+        <span>paint <b id="st-eyes-ms">0.0</b> ms</span>
+      </div>
+      <div class="row">
+        <label>brightness <input type="range" id="eyes-brightness" min="0" max="255" value="64"><output id="eyes-brightness-v">64</output></label>
+        <button id="eyes-selftest">Self-test sweep</button>
+        <label>look set ('C' byte 10) <select id="eyes-set"><option value="0">follow the face style</option><option value="1">classic</option><option value="2">kawaii</option></select></label>
+        <label><input type="checkbox" id="eyes-film" checked> the head shows the film view (unchecked: the raw LEDs)</label>
+      </div>
+      <p class="note">Above: the raw LEDs on the rings, as seen facing the robot (its left eye on the right); the
+        first LED of each ring is ringed, the chain runs from it the way the arrow points. The current is the
+        frame's estimate after the cap (<code>eyes.power</code>).</p>
+      <details id="layout">
+        <summary>Layout (the chain's order, each ring's first LED and winding; the boot sweep shows the real one)</summary>
+        <div class="rings" id="rings"></div>
+        <div class="row">
+          <button id="layout-copy">Copy as face.json eyes.layout.rings</button>
+          <span class="note" id="layout-copied" style="margin:0"></span>
+        </div>
+      </details>
+      <details id="override">
+        <summary>'Y' override (the host's brows, lids, gaze, colour and blinks over the expression)</summary>
+        <div class="row">
+          <label>mode <select id="y-mode"><option value="1">standing</option><option value="2">timed</option><option value="0">release</option></select></label>
+          <label>ms <input type="number" id="y-ms" value="1500" min="0" max="65535" style="width:80px"></label>
+          <label>side <select id="y-side"><option value="0">both eyes</option><option value="1">left (the robot's)</option><option value="2">right</option></select></label>
+        </div>
+        <div class="params" id="y-fields"></div>
+        <div class="row">
+          <label>iris <input type="color" id="y-iris" value="#ff2020"> <input type="checkbox" id="y-iris-keep" checked> keep the expression's</label>
+        </div>
+        <div class="row">
+          <label>effect <select id="y-effect"></select></label>
+          <label>effect ms <input type="number" id="y-effect-ms" value="0" min="0" max="65535" style="width:80px"> (0: a one-shot's own length, a standing one until stopped)</label>
+        </div>
+        <div class="row">
+          <button id="y-send">Send 'Y'</button>
+          <button id="y-blink">blink</button>
+          <button id="y-wink-l">wink left</button>
+          <button id="y-wink-r">wink right</button>
+          <button id="y-release">release</button>
+        </div>
+        <p class="note">payload <code id="y-hex"></code> (16 bytes, or 19 with an effect)</p>
+        <span class="note">effect running: <b id="st-eyes-fx">none</b></span>
+      </details>
     </section>
     <section>
       <h2>Info screen ('T', the show tool)</h2>
@@ -158,6 +222,8 @@ mode: idle</textarea>
 </script>
 <script src="shape_tables.js"></script>
 <script src="anime.js"></script>
+<script src="eye_table.js"></script>
+<script src="eyes.js"></script>
 <script src="sim.js"></script>
 </body>
 </html>

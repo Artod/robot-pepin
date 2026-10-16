@@ -780,7 +780,8 @@ BASE_PORT = 3336  # pepin.base_link.BASE_PORT
 
 
 class Face(Protocol):
-    """The mouth on the head's screen and the info screen beside it (the head server)."""
+    """The mouth on the head's screen, the info screen beside it and the eyes round the lenses
+    (the head server)."""
 
     def express(self, name: str, seconds: float) -> dict[str, Any]:
         """Show expression ``name`` for ``seconds``; the head server's ack (what shows now)."""
@@ -790,6 +791,24 @@ class Face(Protocol):
         """Show ``text`` (pepin.head_link.show_items markup) for ``seconds``; the ack."""
         ...
 
+    def eyes(self, fields: dict[str, float], seconds: float) -> dict[str, Any]:
+        """Override the eyes' ``fields`` (pepin.head_link.Eyes, config/face.json's units) for
+        ``seconds``; the ack."""
+        ...
+
+    def wink(self, side: str) -> dict[str, Any]:
+        """Wink the robot's ``side`` eye ("left" or "right") once; the ack."""
+        ...
+
+    def effect(self, name: str, seconds: float) -> dict[str, Any]:
+        """Run the eyes' effect ``name`` (pepin.face.EYE_EFFECTS) for ``seconds``; the ack."""
+        ...
+
+    def style(self, name: str, seconds: float) -> dict[str, Any]:
+        """Draw the mouth in style ``name`` (config/face.json ``styles``) for ``seconds``, then
+        back to the standing one; the ack."""
+        ...
+
     def health(self) -> dict[str, Any]:
         """The head server's link, what it shows, the face's frame rate."""
         ...
@@ -797,9 +816,9 @@ class Face(Protocol):
 
 class HeadFace:
     """:class:`Face` through the board's head server (``pepin.head_server``, TCP 3340): one
-    connection per call, its answer awaited. The tools' expressions are the ``llm`` source's and
-    always timed, so the face goes back by itself to whatever stood before (a drive's focus, the
-    voice loop's listening)."""
+    connection per call, its answer awaited. The tools' expressions, eyes overrides and styles
+    are the ``llm`` source's and always timed, so the face goes back by itself to whatever stood
+    before (a drive's focus, the voice loop's listening)."""
 
     SOURCE = "llm"
     HINT = "Is the board up and pepin-head running on it, with the head's ESP32 plugged in?"
@@ -816,6 +835,27 @@ class HeadFace:
     def show(self, text: str, seconds: float) -> dict[str, Any]:
         """A ``show`` of ``text``."""
         return self._ask({"cmd": "show", "text": text, "seconds": seconds})
+
+    def eyes(self, fields: dict[str, float], seconds: float) -> dict[str, Any]:
+        """An ``eyes`` override of the ``llm`` source, held ``seconds``."""
+        request = {"cmd": "eyes", "source": self.SOURCE, "ms": round(seconds * 1000), **fields}
+        return self._ask(request)
+
+    def wink(self, side: str) -> dict[str, Any]:
+        """A ``wink`` of ``side``."""
+        return self._ask({"cmd": "wink", "source": self.SOURCE, "side": side})
+
+    def effect(self, name: str, seconds: float) -> dict[str, Any]:
+        """An ``eyes_effect`` of the ``llm`` source, for ``seconds``."""
+        request = {"cmd": "eyes_effect", "source": self.SOURCE, "name": name,
+                   "ms": round(seconds * 1000)}  # fmt: skip
+        return self._ask(request)
+
+    def style(self, name: str, seconds: float) -> dict[str, Any]:
+        """A ``style`` of the ``llm`` source, for ``seconds``."""
+        request = {"cmd": "style", "source": self.SOURCE, "name": name,
+                   "ms": round(seconds * 1000)}  # fmt: skip
+        return self._ask(request)
 
     def health(self) -> dict[str, Any]:
         """The status line, cut to what a person checks first."""

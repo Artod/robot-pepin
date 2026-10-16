@@ -483,10 +483,14 @@ class FakeSpeech:
 
 @dataclass
 class FakeFace:
-    """The head server's face: what was expressed and shown, in order."""
+    """The head server's face: what was expressed, shown and drawn, in order."""
 
     expressed: list[tuple[str, float]] = field(default_factory=list)
     shown: list[tuple[str, float]] = field(default_factory=list)
+    eyed: list[tuple[dict[str, float], float]] = field(default_factory=list)
+    winked: list[str] = field(default_factory=list)
+    effects: list[tuple[str, float]] = field(default_factory=list)
+    styles: list[tuple[str, float]] = field(default_factory=list)
     down: bool = False
 
     def express(self, name: str, seconds: float) -> dict[str, Any]:
@@ -505,6 +509,35 @@ class FakeFace:
         self._check()
         self.shown.append((text, seconds))
         return {"type": "ack", "cmd": "show", "items": len(text.splitlines()), "sent": True}
+
+    def eyes(self, fields: dict[str, float], seconds: float) -> dict[str, Any]:
+        """Keep it."""
+        self._check()
+        self.eyed.append((dict(fields), seconds))
+        return {"type": "ack", "cmd": "eyes", "eyes": dict(fields), "by": ["llm"]}
+
+    def wink(self, side: str) -> dict[str, Any]:
+        """Keep it."""
+        self._check()
+        self.winked.append(side)
+        return {"type": "ack", "cmd": "wink", "blink": side, "sent": True}
+
+    def effect(self, name: str, seconds: float) -> dict[str, Any]:
+        """Keep it."""
+        self._check()
+        self.effects.append((name, seconds))
+        return {"type": "ack", "cmd": "eyes_effect", "eyes": {}, "effect": name, "by": ["llm"]}
+
+    def style(self, name: str, seconds: float) -> dict[str, Any]:
+        """Keep it; an unknown style is refused as the head server refuses it."""
+        self._check()
+        from pepin.face import load_face_table
+
+        known = [s.name for s in load_face_table().styles]
+        if name not in known:
+            raise ToolError(f"the head server refused it: no face style {name!r}")
+        self.styles.append((name, seconds))
+        return {"type": "ack", "cmd": "style", "style": name, "by": "llm", "sent": True}
 
     def health(self) -> dict[str, Any]:
         """Up, unless down."""

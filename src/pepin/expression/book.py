@@ -18,14 +18,19 @@ parameter a mark's number sets (``"repeats"``, ``"gripper_snap.repeats"``: only 
 steps), a word -> parameter -> a number or ``[lo, hi]``. Every atom that renders bare (no
 ``$name``/``$pose``, no place of the gesture space but ``@from`` and ``@via``) and has no
 composition of its name gets a generated one (:func:`wrapper`; a hand-written one of the name
-wins). A key value is a number, ``"$param"`` or ``"-$param"``; on the face a name or
-``"$name"``; a key's ``pose`` is a pose's name, ``"$pose"`` or a reference into the gesture space
+wins). A key value is a number, ``"$param"`` or ``"-$param"``; on the face's expression and the
+eyes' iris and effect (:data:`pepin.expression.animation.EVENT_DOFS`) a name or ``"$name"``; a
+key's ``pose`` is a pose's name, ``"$pose"`` or a reference into the gesture space
 (``"@from"``, ``"@via"``, ``"@path:0"``; :mod:`pepin.expression.render` resolves them, as it
-does a step's ``pose`` that starts with ``@``). Every mistake is a ``ValueError``
+does a step's ``pose`` that starts with ``@``). A step's ``name`` of ``"$arg"`` is its mark's
+argument (only beside arguments that choose); a composition's ``bare`` lets a mark name it
+without one (its first plays). Every mistake is a ``ValueError``
 naming where it is, at load: a book that loads plays.
 
 The arm's ``rest`` pose is not the book's: it is config/arm.json's ``motion.rest_deg``, the pose
-the board returns to by itself (:func:`with_rest`).
+the board returns to by itself (:func:`with_rest`); nor are the face's drawing styles: the style
+mark's arguments beside ``default`` are config/face.json's ``styles`` (:func:`with_styles`). The
+idle layer never switches the face's style.
 
 Owners after slice 0: C (``space``, poses, compositions, ``aliases``), A (``moments``,
 ``idle``); a new block is read here by its owner, with defaults, so an older book still loads.
@@ -35,15 +40,19 @@ from __future__ import annotations
 
 import math
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import replace
 from pathlib import Path
 from typing import Any, cast, get_args
 
 from pepin.expression.animation import (
     BINDS,
+    EVENT_DOFS,
+    FACE_STYLE,
     HOLD,
     IDLE_STATES,
+    MARK_ARG,
+    MOMENT_DOFS,
     NUMBER,
     PARTS,
     PERIOD,
@@ -67,10 +76,12 @@ from pepin.expression.animation import (
     Value,
     Variant,
 )
-from pepin.expression.markers import ANY, Takes, Vocabulary
+from pepin.expression.markers import ANY, KEYS, Takes, Vocabulary
 from pepin.expression.markers import ARG as ARG_ANY
 from pepin.expression.speaker import AttentionPhase
 from pepin.expression.trajectory import JOINTS
+from pepin.face import EYE_EFFECTS
+from pepin.head_link import EYE_RANGES
 from pepin.overlay import read_json
 from pepin.sounds import SOUND, SOUND_LINE
 
@@ -79,8 +90,9 @@ REST = "rest"  # the arm's base pose, from config/arm.json
 DOFS: dict[PartName, tuple[str, ...]] = {
     "arm": JOINTS,
     "head": ("pan_deg", "tilt_deg"),
-    "face": ("expression",),
+    "face": ("expression", FACE_STYLE),
     "body": ("yaw_deg", "x_m"),
+    "eyes": (*EYE_RANGES, *MOMENT_DOFS, "iris", "effect"),
 }
 RESERVED = (PERIOD, REPEATS, HOLD)
 STEP_ONLY = (REPEATS, HOLD)  # a step's reserved parameters, never an atom's (2026-10-14)
@@ -99,6 +111,8 @@ SAID = {
     "gripper": "gripper",
 }  # fmt: skip
 CLAUSE = re.compile(r"[:;,(]")  # a note's first clause ends at the first of these
+SHORT = {param: key for key, param in KEYS.items()}  # hold_s -> s, as a mark line spells it
+COLOUR = re.compile(r"#[0-9A-Fa-f]{6}")  # an eyes' iris colour
 
 
 def load_book(path: str | Path | None = None) -> Book:
@@ -148,18 +162,31 @@ def with_rest(book: Book, rest: Mapping[str, float]) -> Book:
     return replace(book, poses={**book.poses, REST: dict(rest)})
 
 
+def with_styles(book: Book, styles: Iterable[str]) -> Book:
+    """``book`` with the face's drawing ``styles`` (config/face.json's: :func:`style_names`)
+    among the arguments of its style mark (``{style:rose}``: its step's ``$arg`` names the
+    style); a book without that mark as it is."""
+    composition = book.compositions.get(FACE_STYLE)
+    if composition is None:
+        return book
+    args = (*composition.args, *(s for s in styles if s not in composition.args))
+    styled = replace(composition, args=args)
+    return replace(book, compositions={**book.compositions, FACE_STYLE: styled})
+
+
 def vocabulary(book: Book, faces: frozenset[str]) -> Vocabulary:
     """What a marker may name: the book's callable compositions (the engine's own ensembles
     are not a marker's) with the arguments each takes (those that choose, and those that set
-    its parameters: :func:`takes`) and their other spellings, the face's expressions, and the
-    sound tool's reserved mark (:data:`pepin.sounds.SOUND`: ``{sound:NAME}``, any short name;
-    the engine logs it until the tool lands)."""
+    its parameters: :func:`takes`), those a bare mark may name, and their other spellings, the
+    face's expressions, and the sound tool's reserved mark (:data:`pepin.sounds.SOUND`:
+    ``{sound:NAME}``, any short name; the engine logs it until the tool lands)."""
     names = intents(book)
     args = {name: book.compositions[name].args for name in names if book.compositions[name].args}
     taken = {name: takes(book, book.compositions[name]) for name in names}
     args[SOUND] = (ANY,)
+    bare = frozenset(name for name in names if book.compositions[name].bare)
     return Vocabulary(frozenset((*names, SOUND)), faces, args, dict(book.aliases),
-                      {name: t for name, t in taken.items() if t != Takes()})  # fmt: skip
+                      {name: t for name, t in taken.items() if t != Takes()}, bare)  # fmt: skip
 
 
 def takes(book: Book, composition: Composition) -> Takes:
@@ -176,17 +203,21 @@ def takes(book: Book, composition: Composition) -> Takes:
     return Takes(words, 1 if NUMBER in settings else 0, keys)
 
 
-def mark_lines(book: Book) -> tuple[str, ...]:
+def mark_lines(book: Book, styles: Sequence[str] = ()) -> tuple[str, ...]:
     """The brain's vocabulary of gestures, one line per composition a mark reaches (callable,
     not another mark's spelling: ``emphasis`` is the accent's; hello and bye are the brain's
     own since 2026-10-14), in the book's order: its name and arguments (``a|b`` one of them,
     ``NAME`` any short name, ``[...]`` optional, ``N`` a number, an auto-wrapper's parameters
     in their order), a dash, and at most six words: the note's first clause, or for an
-    auto-wrapper its part and what it moves; last, the sound tool's reserved ``sound:NAME``
-    (:data:`pepin.sounds.SOUND_LINE`)."""
-    lines = []
+    auto-wrapper its part and what it moves; the style mark's place takes ``styles`` when
+    given (the face's: :func:`pepin.face.style_lines`, one a style); last, the sound tool's
+    reserved ``sound:NAME`` (:data:`pepin.sounds.SOUND_LINE`)."""
+    lines: list[str] = []
     for name in intents(book):
         if name in book.aliases:
+            continue
+        if name == FACE_STYLE and styles:
+            lines += styles
             continue
         composition = book.compositions[name]
         lines.append(f"{name}{_spelled(book, composition)} — {brief(book, composition)}")
@@ -205,15 +236,23 @@ def brief(book: Book, composition: Composition) -> str:
 
 
 def _spelled(book: Book, composition: Composition) -> str:
-    """A mark line's arguments (:func:`mark_lines`)."""
+    """A mark line's arguments (:func:`mark_lines`); beside an argument that chooses, a number
+    that sets one parameter is spelled by its name (one positional argument at most:
+    ``glow:red|...[,s=N]``)."""
     choose = "|".join("NAME" if a == ANY else a for a in composition.args)
     if composition.wraps is not None:
         sets = "N|" + ",".join(book.atoms[composition.wraps].params)
     else:
         words = "|".join(w for w in composition.settings if w != NUMBER)
-        sets = ",".join(x for x in ("N" if NUMBER in composition.settings else "", words) if x)
+        targets = {s.param for s in composition.settings.get(NUMBER, ())}
+        number = "N"
+        if choose and len(targets) == 1:
+            (param,) = targets
+            number = f"{SHORT.get(param, param)}=N"
+        sets = ",".join(x for x in (number if NUMBER in composition.settings else "", words) if x)
     if choose:
-        return f":{choose}" + (f"[,{sets}]" if sets else "")
+        spelled = f":{choose}" + (f"[,{sets}]" if sets else "")
+        return f"[{spelled}]" if composition.bare else spelled
     return f"[:{sets}]" if sets else ""
 
 
@@ -225,6 +264,13 @@ def face_names(path: str | Path | None = None) -> frozenset[str]:
         path = config_file("face.json")
     data = read_json(path)
     return frozenset(str(row["name"]) for row in data.get("expressions", []))
+
+
+def style_names(path: str | Path | None = None) -> tuple[str, ...]:
+    """The face's drawing styles (config/face.json's ``styles``, in the firmware's order)."""
+    from pepin.face import load_face_table
+
+    return tuple(s.name for s in load_face_table(path).styles)
 
 
 def intents(book: Book) -> tuple[str, ...]:
@@ -388,7 +434,8 @@ def _atom(name: str, body: Mapping[str, Any]) -> Atom:
                 continue
             if dof not in DOFS[cast(PartName, part)]:
                 raise ValueError(f"{where}.keys[{i}].{dof}: not a degree of freedom of the {part}")
-            values[dof] = _value(f"{where}.keys[{i}].{dof}", value, params, dof == "expression")
+            values[dof] = _value(f"{where}.keys[{i}].{dof}", value, params, dof in EVENT_DOFS)
+            _eye_name(f"{where}.keys[{i}].{dof}", dof, values[dof])
         pose = raw.get("pose")
         if pose is not None and part != "arm":
             raise ValueError(f"{where}.keys[{i}].pose: only the arm has poses")
@@ -409,6 +456,17 @@ def _atom(name: str, body: Mapping[str, Any]) -> Atom:
         mirror,
         bool(body.get("callable", True)),
     )
+
+
+def _eye_name(where: str, dof: str, value: Value) -> None:
+    """An eyes' named value checked (a ``$`` parameter aside): an ``iris`` colour is ``#RRGGBB``,
+    an ``effect`` one of :data:`pepin.face.EYE_EFFECTS`."""
+    if not isinstance(value, str) or value.startswith(("$", "-$")):
+        return
+    if dof == "iris" and not COLOUR.fullmatch(value):
+        raise ValueError(f"{where}: an iris colour is #RRGGBB, not {value!r}")
+    if dof == "effect" and value not in EYE_EFFECTS:
+        raise ValueError(f"{where}: one of {', '.join(EYE_EFFECTS)}, not {value!r}")
 
 
 def _value(where: str, value: Any, params: Mapping[str, Range], named: bool) -> Value:
@@ -470,6 +528,9 @@ def _composition(
             for needed in _named_params(atom):
                 if needed not in choices:
                     raise ValueError(f"{at}.params.{needed}: {atom.name} needs one")
+            for dof in {d for k in atom.keys for d, v in k.values.items() if v == "$name"}:
+                for chosen in choices.get("name", ()):
+                    _eye_name(f"{at}.params.name", dof, chosen)
             p = float(step.get("p", 1.0))
             if not 0.0 < p <= 1.0:
                 raise ValueError(f"{at}.p: in (0, 1]")
@@ -499,6 +560,12 @@ def _composition(
         raise ValueError(f"{where}.bind: one of {', '.join(BINDS)}")
     family = body.get("family")
     args, settings = _args(where, body.get("args", []), variants, atoms)
+    bare_ = bool(body.get("bare", False))
+    if bare_ and not args:
+        raise ValueError(f"{where}.bare: only beside arguments that choose (the first plays)")
+    named_arg = any(MARK_ARG in s.choices.get("name", ()) for v in variants for s in v.steps)
+    if named_arg and not args:
+        raise ValueError(f"{where}: a step's name {MARK_ARG} needs arguments that choose")
     style_args = body.get("style_args", {})
     if not isinstance(style_args, dict):
         raise ValueError(f"{where}.style_args: arg -> the style words that choose it")
@@ -518,6 +585,7 @@ def _composition(
         callable_,
         {str(a): tuple(str(w).lower() for w in ws) for a, ws in style_args.items()},
         settings,
+        bare=bare_,
     )
 
 
@@ -672,6 +740,9 @@ def _idle(
         if name not in compositions or composition_parts(compositions, atoms, name) != {part}:
             raise ValueError(f"{where}.compositions: {name!r} is no composition of the {part} "
                              "alone")  # fmt: skip
+        if _styles_face(compositions, atoms, name):
+            raise ValueError(f"{where}.compositions: {name} switches the face's style, never "
+                             "the idle layer's")  # fmt: skip
     if not names:
         raise ValueError(f"{where}.compositions: at least one")
     when = body.get("when", "conversation")
@@ -689,6 +760,21 @@ def _idle(
         raise ValueError(f"{where}.after_speech_s: seconds >= 0, or absent")
     return Idle(cast(PartName, part), names, every, when, states,
                 None if after is None else float(after))  # fmt: skip
+
+
+def _styles_face(
+    compositions: Mapping[str, Composition], atoms: Mapping[str, Atom], name: str
+) -> bool:
+    """Whether a step of composition ``name`` (a nested one's included) switches the face's
+    drawing style."""
+    for variant in compositions[name].variants:
+        for step in variant.steps:
+            if step.composition is not None:
+                if _styles_face(compositions, atoms, step.composition):
+                    return True
+            elif any(FACE_STYLE in key.values for key in atoms[step.atom].keys):
+                return True
+    return False
 
 
 def _aliases(raw: Any, compositions: Mapping[str, Composition]) -> dict[str, str]:

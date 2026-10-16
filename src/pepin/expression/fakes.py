@@ -173,7 +173,7 @@ class FakeExecutor:
 
 @dataclass
 class FakeFace:
-    """The face: every expression shown is kept."""
+    """The face: every expression shown and every style drawn is kept."""
 
     calls: list[Call] = field(default_factory=list)
 
@@ -187,6 +187,57 @@ class FakeFace:
     ) -> None:
         """Recorded."""
         self.calls.append(("express", (name, intensity, hold_s, transition_ms)))
+
+    def style(self, name: str | None, ms: float | None = None) -> None:
+        """Recorded."""
+        self.calls.append(("style", (name, ms)))
+
+
+@dataclass
+class FakeHeadFace:
+    """The head server's door for one source (the doze's): expressions and clears kept, the
+    status line scripted (``last_status["sources"]``: who holds a request)."""
+
+    calls: list[Call] = field(default_factory=list)
+    last_status: dict[str, Any] | None = None
+
+    def express(
+        self,
+        name: str,
+        *,
+        intensity: float = 1.0,
+        hold_s: float | None = None,
+        transition_ms: float | None = None,
+    ) -> None:
+        """Recorded."""
+        self.calls.append(("express", (name, intensity, hold_s, transition_ms)))
+
+    def clear(self) -> None:
+        """Recorded."""
+        self.calls.append(("clear", ()))
+
+
+@dataclass
+class FakeEyesChannel:
+    """The eyes: every call kept, a look as ``("eyes", (ms, side, fields))``."""
+
+    calls: list[Call] = field(default_factory=list)
+
+    def eyes(self, *, ms: float | None = None, side: str = "both", **fields: Any) -> None:
+        """Recorded."""
+        self.calls.append(("eyes", (ms, side, fields)))
+
+    def eyes_release(self) -> None:
+        """Recorded."""
+        self.calls.append(("eyes_release", ()))
+
+    def blink(self, side: str = "both") -> None:
+        """Recorded."""
+        self.calls.append(("blink", (side,)))
+
+    def eyes_effect(self, name: str | None, ms: float | None = None) -> None:
+        """Recorded."""
+        self.calls.append(("eyes_effect", (name, ms)))
 
 
 @dataclass
@@ -663,7 +714,15 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         from pepin.expression.clearance import GoalServerView, Surroundings
         from pepin.expression.conversation import ConversationObserver, LiveFlag
         from pepin.expression.door import OverlayDoor
-        from pepin.expression.executors import Executor, FaceChannel, NoBody, NoWheels, Wheels
+        from pepin.expression.doze import Doze, DozeFace
+        from pepin.expression.executors import (
+            Executor,
+            EyesChannel,
+            FaceChannel,
+            NoBody,
+            NoWheels,
+            Wheels,
+        )
         from pepin.expression.markers import Playout
         from pepin.expression.parts import HeadDoor
         from pepin.expression.speaker import DoaSource, FaceFinder, GazeDoor
@@ -673,10 +732,13 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
 
         playout: Playout = FakePlayout()
         executor = WheelsExecutor(lambda listener: FakeBase(FakeClock()), GoalServerView())
-        observers: list[ConversationObserver] = [RecordingObserver(), WheelsGuard(executor)]
-        flag: LiveFlag = FakeFlag("gestures")
+        doze = Doze(FakeHeadFace())
+        observers: list[ConversationObserver] = [RecordingObserver(), WheelsGuard(executor), doze]
+        flags: list[LiveFlag] = [FakeFlag("gestures"), doze]
+        dozes: list[DozeFace] = [FakeHeadFace(), HeadClient("board", source="doze")]
         parts: list[Executor] = [FakeExecutor("arm"), NoBody(), executor]
         faces: list[FaceChannel] = [FakeFace(), HeadClient("board", source="voice")]
+        eyes: list[EyesChannel] = [FakeEyesChannel(), HeadClient("board", source="expression")]
         arm: ArmLink = FakeArmLink()
         door: GazeDoor = FakeGazeDoor()
         finder: list[FaceFinder] = [FakeFaceFinder(), FakeScene(FakeGazeDoor())]
@@ -685,7 +747,8 @@ if TYPE_CHECKING:  # every fake, and the real clients that already exist, satisf
         heads: list[HeadDoor] = [FakeHeadDoor(), OverlayDoor()]
         bases: list[BaseLink] = [FakeBase(FakeClock()), BaseClient("board")]
         views: list[Surroundings] = [FakeView(FakeBase(FakeClock())), GoalServerView()]
-        del playout, observers, flag, parts, faces, arm, door, finder, doa, wheels, heads
+        del playout, observers, flags, dozes, parts, faces, eyes, arm, door, finder, doa, wheels
+        del heads
         del bases, views
 
     def _contract(engine: GestureEngine, gaze: SpeakerGazeWorker) -> None:

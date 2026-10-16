@@ -19,15 +19,29 @@
 //                        320x170 RGB565 little-endian on stdout, as R writes it
 //   F type hex           protocol.cpp: the frame of that type around that payload, as hex
 //   T hex                protocol.cpp: a 'T' payload parsed, one line per item (or "bad")
+//   G t                  the eyes: the model updated to t ms and the eye model following it,
+//                        then one text line: the 48 LEDs' RGB bytes as hex (the driver's,
+//                        after the brightness, gamma, cap and soft start), the current
+//                        estimate in mA and the eyes' mode
+//   O hex t              the eyes: a 'Y' payload (16 or 19 bytes) applied at t ms
+//   B value t            the eyes: the 'C' config's eyes brightness (0..255) at t ms
+//   K t                  the eyes: the boot self-test started at t ms
+//   X choice t           the eyes: the 'C' config's eye-set byte (0 follow the style, 1
+//                        classic, 2 kawaii) at t ms
+//   I hex hex            imu.h: a 'C' payload running, then another: "keep" when the second
+//                        leaves the chip alone (same_sampling: the style or a brightness
+//                        alone), "setup" when the task sets the chip up again
 //
 // Build: clang++ -std=c++17 -O1 -I../src dump.cpp ../src/face_model.cpp ../src/face_render.cpp
-//        ../src/face_anime.cpp ../src/protocol.cpp
+//        ../src/face_anime.cpp ../src/protocol.cpp ../src/eyes.cpp
 #include <stdio.h>
 #include <string.h>
 
+#include "eyes.h"
 #include "face_anime.h"
 #include "face_model.h"
 #include "face_render.h"
+#include "imu.h"
 #include "protocol.h"
 
 static size_t unhex(const char* text, uint8_t* out) {
@@ -50,6 +64,7 @@ using namespace face;
 
 static Layout g_layout;
 static AnimeModel g_anime;
+static eyes::EyeModel g_eyes;
 static uint16_t g_strip_a[kScreenWidth * (kScreenHeight / 2)];
 static uint16_t g_strip_b[kScreenWidth * (kScreenHeight - kScreenHeight / 2)];
 
@@ -144,6 +159,43 @@ int main() {
         const head::InfoItem& it = g_info.items[i];
         printf("%u|%u|%s|%s\n", it.kind, it.frac, it.key, it.value);
       }
+    } else if (strcmp(op, "G") == 0) {
+      unsigned t;
+      scanf("%u", &t);
+      model.update(t);
+      g_eyes.follow(model, t);
+      const eyes::Frame& f = g_eyes.frame();
+      for (int i = 0; i < eyes::kLedCount * 3; ++i) printf("%02x", f.rgb[i]);
+      printf(" %u %u %u\n", (unsigned)f.milliamps, (unsigned)g_eyes.mode(), (unsigned)g_eyes.set());
+    } else if (strcmp(op, "O") == 0) {
+      unsigned t;
+      scanf("%s %u", g_hex, &t);
+      const size_t n = unhex(g_hex, g_bytes);
+      if (n == eyes::kOverrideBytes || n == eyes::kOverrideBytesEffect) {
+        g_eyes.setOverride(eyes::decode_override(g_bytes, n), t);
+      }
+    } else if (strcmp(op, "B") == 0) {
+      unsigned v, t;
+      scanf("%u %u", &v, &t);
+      (void)t;
+      g_eyes.setBrightness((uint8_t)v);
+    } else if (strcmp(op, "I") == 0) {
+      static char other[sizeof g_hex];
+      static uint8_t next[sizeof g_bytes];
+      scanf("%s %s", g_hex, other);
+      unhex(g_hex, g_bytes);
+      unhex(other, next);
+      const head::ImuConfig running = head::imu_config_of(g_bytes);
+      printf("%s\n", head::same_sampling(running, head::imu_config_of(next)) ? "keep" : "setup");
+    } else if (strcmp(op, "K") == 0) {
+      unsigned t;
+      scanf("%u", &t);
+      g_eyes.selfTest(t);
+    } else if (strcmp(op, "X") == 0) {
+      unsigned v, t;
+      scanf("%u %u", &v, &t);
+      (void)t;
+      g_eyes.setSet((uint8_t)v);
     } else if (strcmp(op, "S") == 0) {
       unsigned t;
       scanf("%u", &t);

@@ -20,7 +20,8 @@ from the JSON by this module, and a unit test refuses a stale copy::
                                             tables and the shape engine's)
     uv run python -m pepin.face --check     exit 1 when a file is stale
     uv run python -m pepin.face             the expressions and events, one per line
-    uv run python -m pepin.face --lines     the brain's list of faces (face:NAME, a brief)
+    uv run python -m pepin.face --lines     the brain's list of faces (face:NAME, a brief) and
+                                            of styles (style:NAME, a brief)
 """
 
 from __future__ import annotations
@@ -29,6 +30,7 @@ import argparse
 import json
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -75,6 +77,26 @@ STYLE_OWN = {
 }
 MAX_VARIANTS = 3  # the firmware's kMaxVariants
 BRIEF_WORDS = 6  # a brief's most words (the brain's list)
+# The eyes (config/face.json `eyes`): the LED rings round the lenses, their elements (each with a
+# colour per expression and style), the rings of the chain and the sides (the robot's own)
+EYE_HEADER = FIRMWARE / "src" / "eye_table.h"
+EYE_SCRIPT = FIRMWARE / "sim" / "eye_table.js"
+EYE_ELEMENTS = ("iris", "highlight", "brow", "lid", "cheek")
+EYE_RINGS = ("inner", "outer")
+EYE_SIDES = ("left", "right")
+# the eye parameters the host's 'Y' frame may override (the rest are the expression's)
+EYE_OVERRIDABLE = (
+    "brow_pos", "brow_raise", "brow_width", "lid_top", "lid_bottom", "gaze_x", "gaze_y", "glow",
+)  # fmt: skip
+# the inner ring's fast effects, by the id the firmware and the 'Y' frame's effect byte carry
+EYE_EFFECTS = ("none", "sparkle", "flash", "spin", "pulse", "flicker", "doze", "tear")
+# the eye look sets, by the id the firmware and the status carry (eye_table.h EyeSet)
+EYE_SETS = ("classic", "kawaii")
+# the 'C' config's eye-set byte by its value (config/face.json `eyes.eye_set`): 0 follows the
+# face style (`eyes.style_sets`), then each set (its EYE_SETS id + 1)
+EYE_SET_CHOICES = ("follow", *EYE_SETS)
+# an eyes block as given: its params, its colours and its effect (None: the base's), by style
+_EyeLayer = tuple[dict[str, float], dict[str, str], "str | None"]
 # a later style's block as given: its params, its colours and its effects (None: the
 # expression's own), by that style
 _Styled = list[tuple[dict[str, Any], dict[str, str], "tuple[str, ...] | None"]]
@@ -129,8 +151,9 @@ class Expression:
 class FaceStyle:
     """One way of drawing the face: its elements' colours and the background, its numbers
     (the line's thickness range, the tooth gaps, the shade band, the outlines), its engine
-    (``params`` or ``shapes``), for a shapes style its own keys (:data:`SHAPES_OWN`), and the
-    earlier style it is ``like`` ('' when none)."""
+    (``params`` or ``shapes``), for a shapes style its own keys (:data:`SHAPES_OWN`), the
+    earlier style it is ``like`` ('' when none) and a brief for the brain's list
+    (:func:`style_lines`)."""
 
     name: str
     colors: dict[str, str]
@@ -138,6 +161,7 @@ class FaceStyle:
     engine: str = ENGINES[0]
     own: dict[str, Any] = field(default_factory=dict)
     like: str = ""
+    brief: str = ""  # the brain's line (style_lines); none: the note's first clause
 
 
 @dataclass(frozen=True)
@@ -182,6 +206,102 @@ class Idle:
 
 
 @dataclass(frozen=True)
+class EyeRing:
+    """One ring of the LED chain: which eye (an index of :data:`EYE_SIDES`), which ring (of
+    :data:`EYE_RINGS`), its LED count, its first LED's index in the chain, the angle of that
+    LED (degrees from the top, clockwise as seen facing the robot) and whether the chain runs
+    clockwise round it."""
+
+    eye: int
+    ring: int
+    n: int
+    first: int
+    first_deg: float
+    clockwise: bool
+
+    def angles(self) -> tuple[float, ...]:
+        """Each LED's angle in chain order, degrees from the top, clockwise as seen, 0..360."""
+        step = 360.0 / self.n * (1.0 if self.clockwise else -1.0)
+        return tuple((self.first_deg + k * step) % 360.0 for k in range(self.n))
+
+
+@dataclass(frozen=True)
+class EyeLook:
+    """An expression's eyes in one style: the eye parameters' values in the table's order, the
+    eye elements' colours (``#RRGGBB`` in :data:`EYE_ELEMENTS` order) and its default effect
+    (of :data:`EYE_EFFECTS`)."""
+
+    values: tuple[float, ...]
+    colors: tuple[str, ...]
+    effect: str = EYE_EFFECTS[0]
+
+
+@dataclass(frozen=True)
+class EyeSet:
+    """One look set (:data:`EYE_SETS`): its params' defaults over the table's, and whether a
+    blink or a wink closes into the upper arc (``shut_arc``, the bottom lid rising to
+    ``shut_lid``) instead of dark."""
+
+    name: str
+    defaults: dict[str, float]
+    shut_arc: bool = False
+    shut_lid: float = 0.72
+
+
+@dataclass(frozen=True)
+class EyeTable:
+    """config/face.json's ``eyes`` block, checked: the eye parameters, the look sets, each
+    expression's look per set and style (``set_looks[set][expression][style]``; ``looks`` is
+    the first set's), which set each face style follows, the chain's rings, the numbers the
+    firmware and the simulator share (geometry, timing, power, effects, the layout's
+    millimetres), the palette, and the looks given by name for ids not in the table yet."""
+
+    params: tuple[FaceParam, ...]
+    set_looks: tuple[tuple[tuple[EyeLook, ...], ...], ...]
+    rings: tuple[EyeRing, ...]
+    layout: dict[str, float]
+    geometry: dict[str, float]
+    timing: dict[str, float]
+    power: dict[str, float]
+    colors: dict[str, str]
+    effects: dict[str, float] = field(default_factory=dict)
+    sets: tuple[EyeSet, ...] = ()
+    style_sets: tuple[int, ...] = ()  # the set each style (the table's styles order) follows
+    by_name: tuple[str, ...] = ()  # the names the by_name block carries
+    eye_set: str = EYE_SET_CHOICES[0]  # what the head server's 'C' asks for (EYE_SET_CHOICES)
+
+    @property
+    def looks(self) -> tuple[tuple[EyeLook, ...], ...]:
+        """The classic set's looks, ``[expression][style]``."""
+        return self.set_looks[0]
+
+    @property
+    def led_count(self) -> int:
+        """The LEDs in the chain."""
+        return sum(r.n for r in self.rings)
+
+    @property
+    def layout_id(self) -> int:
+        """A byte naming the chain's layout (the rings' order, angles and windings), reported
+        in the firmware's status so the host can tell a head flashed with another table."""
+        data = bytearray()
+        for r in self.rings:
+            deg = round(r.first_deg) % 360
+            data += bytes((r.eye, r.ring, r.n, deg & 0xFF, deg >> 8, int(r.clockwise)))
+        return _crc8(bytes(data))
+
+    @property
+    def gamma(self) -> tuple[int, ...]:
+        """The duty (0..255) for each perceptual value 0..255: value^gamma."""
+        g = self.power["gamma"]
+        return tuple(round(255.0 * (i / 255.0) ** g) for i in range(256))
+
+    def led_angles(self) -> tuple[float, ...]:
+        """Every LED's angle in chain order (degrees from the top, clockwise as seen)."""
+        return tuple(a for r in self.rings for a in r.angles())
+
+
+@dataclass(frozen=True)
 class FaceTable:
     """config/face.json, checked: the parameters, the expressions by id, the events, the
     styles and the one in force."""
@@ -197,6 +317,7 @@ class FaceTable:
     idle: Idle
     styles: tuple[FaceStyle, ...] = (FaceStyle(BASE_STYLE, {}, {}),)
     style: str = BASE_STYLE
+    eyes: EyeTable | None = None  # None: a table from before the eyes (no `eyes` block)
 
     @property
     def names(self) -> tuple[str, ...]:
@@ -241,6 +362,14 @@ class FaceTable:
         except KeyError:
             known = ", ".join(self.events)
             raise KeyError(f"no face event {name!r}; the table has {known}") from None
+
+
+def eye_set_id(name: str) -> int:
+    """The 'C' config's eye-set byte for ``name`` (:data:`EYE_SET_CHOICES`: 0 follow the face
+    style, 1 classic, 2 kawaii); ``ValueError`` naming the choices otherwise."""
+    if name not in EYE_SET_CHOICES:
+        raise ValueError(f"no eye set {name!r}: {', '.join(EYE_SET_CHOICES)}")
+    return EYE_SET_CHOICES.index(name)
 
 
 def load_face_table(path: str | Path | None = None) -> FaceTable:
@@ -314,7 +443,7 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
         for i, style_spec in enumerate(styles[1:]):
             style_name = style_spec.name
             block = dict(entry.get(style_name, {}))
-            bad = sorted(set(block) - {"params", "colors", "effects", "note"})
+            bad = sorted(set(block) - {"params", "colors", "effects", "eyes", "note"})
             if bad:
                 raise ValueError(f"expression {name}: {style_name} has no {', '.join(bad)}")
             own_params = dict(block.get("params", {}))
@@ -406,6 +535,7 @@ def parse_face_table(data: dict[str, Any]) -> FaceTable:
         idle=_idle(data.get("idle", {"enabled": False}), names, params, styles),
         styles=styles,
         style=style,
+        eyes=_eyes(data, names, styles) if "eyes" in data else None,
     )
 
 
@@ -471,7 +601,9 @@ def _styles(
         if engine not in ENGINES:
             raise ValueError(f"style {name}: engine {engine!r}, one of {', '.join(ENGINES)}")
         extra = SHAPES_OWN if engine == "shapes" else ()
-        bad = sorted(set(spec) - set(numbers) - {"colors", "note", "engine", "like", *extra})
+        bad = sorted(
+            set(spec) - set(numbers) - {"colors", "note", "brief", "engine", "like", "eyes", *extra}
+        )
         if bad:
             raise ValueError(f"style {name}: unknown {', '.join(bad)}")
         for key in numbers:
@@ -483,7 +615,8 @@ def _styles(
         base = dict(liked.colors) if liked else {k: colors[k] for k in (*ELEMENTS, "background")}
         shapes_own = {k: v for k, v in (liked.own if liked else {}).items() if k != "shapes"}
         shapes_own.update({k: spec[k] for k in extra if k in spec})
-        style = FaceStyle(name, {**base, **own}, numbers, engine, shapes_own, like)
+        brief = str(spec.get("brief") or re.split(r"[:;,(]", str(spec.get("note", "")))[0])
+        style = FaceStyle(name, {**base, **own}, numbers, engine, shapes_own, like, brief.strip())
         styles.append(style)
         by_name[name] = style
     return tuple(styles)
@@ -575,6 +708,267 @@ def _idle(
     )
 
 
+def _crc8(data: bytes) -> int:
+    """CRC-8 (polynomial 0x07, initial 0): the head protocol's, over the layout's bytes."""
+    crc = 0
+    for b in data:
+        crc ^= b
+        for _ in range(8):
+            crc = ((crc << 1) ^ 0x07) & 0xFF if crc & 0x80 else (crc << 1) & 0xFF
+    return crc
+
+
+def _numbers(block: dict[str, Any], where: str, keys: tuple[str, ...]) -> dict[str, float]:
+    """``block`` as floats over exactly ``keys`` (a note allowed)."""
+    given = {k: v for k, v in block.items() if k != "note"}
+    missing = sorted(set(keys) - set(given))
+    unknown = sorted(set(given) - set(keys))
+    if missing or unknown:
+        raise ValueError(f"{where}: missing {missing or '-'}, unknown {unknown or '-'}")
+    return {k: float(given[k]) for k in keys}
+
+
+EYE_LAYOUT_MM = (
+    "inner_radius_mm", "outer_radius_mm", "lens_radius_mm", "eye_gap_mm", "led_mm",
+    "film_sigma_mm",
+)  # fmt: skip
+EYE_POWER = ("cap_ma", "led_ma", "quiescent_ma", "soft_start_ms", "gamma", "brightness")
+EYE_TIMING = (
+    "blink_close_ms", "blink_open_ms", "wink_hold_ms", "flutter", "saccade_ms", "saccade_amp",
+    "breath_hz", "override_ms", "self_test_ms", "sparkle_turns",
+)  # fmt: skip
+EYE_EFFECT_NUMBERS = (
+    "sparkle_ms", "sparkle_rate", "sparkle_rise_ms", "sparkle_gain", "flash_ms", "flash_gain",
+    "spin_hz", "spin_head_deg", "spin_tail_deg", "spin_dim", "pulse_hz", "pulse_depth",
+    "flicker_min_ms", "flicker_max_ms", "flicker_floor", "doze_hz", "doze_depth", "doze_sink",
+    "tear_period_ms", "tear_fall_ms", "tear_tail_deg", "tear_r", "tear_g", "tear_b",
+)  # fmt: skip
+EYE_GEOMETRY = (
+    "brow_span_deg", "brow_pull", "brow_half_min_deg", "brow_half_max_deg", "brow_soft_deg",
+    "brow_floor", "brow_floor_soft", "brow_dim", "brow_lift", "brow_sag_deg", "lid_soft",
+    "catchlight_out", "catchlight_up", "gaze_gain", "highlight_power", "highlight_gain",
+    "lower_lid_half_min_deg",
+    "lower_lid_half_max_deg", "lower_lid_glow", "cheek_half_deg", "cheek_glow",
+    "sparkle_half_deg", "z_sink", "breath_depth",
+)  # fmt: skip
+
+
+def _eye_block(
+    block: Any, where: str, by_name: dict[str, FaceParam], sets: bool = False
+) -> tuple[dict[str, float], dict[str, str], str | None]:
+    """An ``eyes`` block of an expression or a style block: its params, its colours and its
+    default effect (None: not given); with ``sets`` the later sets' nested blocks are left in
+    place for :func:`_eye_layers`."""
+    if not isinstance(block, dict):
+        raise ValueError(f"{where}: eyes is a block of params")
+    given = dict(block)
+    given.pop("note", None)
+    if sets:
+        for name in EYE_SETS[1:]:
+            given.pop(name, None)
+    colors = _color_block(dict(given.pop("colors", {})), f"{where} eyes", EYE_ELEMENTS)
+    effect = given.pop("effect", None)
+    if effect is not None and str(effect) not in EYE_EFFECTS:
+        raise ValueError(f"{where}: eyes effect {effect!r}, one of {', '.join(EYE_EFFECTS)}")
+    unknown = sorted(set(given) - set(by_name))
+    if unknown:
+        raise ValueError(f"{where}: eyes: unknown params {', '.join(unknown)}")
+    return {k: float(v) for k, v in given.items()}, colors, None if effect is None else str(effect)
+
+
+def _eye_layers(block: Any, where: str, by_name: dict[str, FaceParam]) -> list[_EyeLayer]:
+    """An expression's eyes block as one layer per set: the classic look (the block itself)
+    and each later set's nested block."""
+    layers = [_eye_block(block, where, by_name, sets=True)]
+    for name in EYE_SETS[1:]:
+        nested = block.get(name, {}) if isinstance(block, dict) else {}
+        layers.append(_eye_block(nested, f"{where}: {name}", by_name))
+    return layers
+
+
+def _eye_look(where: str, given: dict[str, float], colors: dict[str, str],
+              params: tuple[FaceParam, ...], effect: str) -> EyeLook:  # fmt: skip
+    """The values and colours of one look, each value checked against its range."""
+    values = []
+    for p in params:
+        v = float(given.get(p.name, p.default))
+        if not p.lo <= v <= p.hi:
+            raise ValueError(f"{where}: eyes {p.name} {v} outside {p.lo}..{p.hi}")
+        values.append(v)
+    return EyeLook(tuple(values), tuple(colors[e] for e in EYE_ELEMENTS), effect)
+
+
+def _eyes(data: dict[str, Any], names: list[str], styles: tuple[FaceStyle, ...] = ()) -> EyeTable:
+    """The ``eyes`` block, checked: the params with their ranges, the chain's rings (every ring
+    of both eyes once), the numbers, the palette per style and every expression's look per
+    style (``like`` carries the eyes as it carries the mouth, an expression's and a style's)."""
+    block = data["eyes"]
+    styles = styles or (FaceStyle(BASE_STYLE, {}, {}),)
+    style_names = tuple(s.name for s in styles)
+    likes = {s.name: s.like for s in styles}
+    params = []
+    for name, spec in block["params"].items():
+        lo, hi = (float(v) for v in spec["range"])
+        default = float(spec["default"])
+        if not lo <= default <= hi:
+            raise ValueError(f"eyes param {name}: default {default} outside {lo}..{hi}")
+        params.append(FaceParam(name, default, lo, hi, str(spec.get("note", ""))))
+    by_name = {p.name: p for p in params}
+    missing = sorted(set(EYE_OVERRIDABLE) - set(by_name))
+    if missing:
+        raise ValueError(f"eyes: the 'Y' frame's params are missing: {', '.join(missing)}")
+    layout = dict(block["layout"])
+    counts = {"inner": int(layout.pop("inner_leds")), "outer": int(layout.pop("outer_leds"))}
+    rings = []
+    first = 0
+    for spec in layout.pop("rings"):
+        eye, ring = str(spec["eye"]), str(spec["ring"])
+        if eye not in EYE_SIDES or ring not in EYE_RINGS:
+            raise ValueError(f"eyes layout: ring {spec}: eye of {EYE_SIDES}, ring of {EYE_RINGS}")
+        n = counts[ring]
+        rings.append(
+            EyeRing(EYE_SIDES.index(eye), EYE_RINGS.index(ring), n, first,
+                    float(spec.get("first_deg", 0.0)), bool(spec.get("clockwise", True)))
+        )  # fmt: skip
+        first += n
+    if sorted((r.eye, r.ring) for r in rings) != sorted(
+        (e, k) for e in range(len(EYE_SIDES)) for k in range(len(EYE_RINGS))
+    ):
+        raise ValueError("eyes layout: each eye's inner and outer ring once")
+    mm = _numbers(layout, "eyes layout", EYE_LAYOUT_MM)
+    power = _numbers(block["power"], "eyes power", EYE_POWER)
+    if power["cap_ma"] <= 0 or not 0 <= power["brightness"] <= 255 or power["gamma"] <= 0:
+        raise ValueError("eyes power: cap_ma > 0, brightness 0..255, gamma > 0")
+    timing_block = dict(block["timing"])
+    spans = {}
+    for key in ("blink_every_s", "saccade_every_s"):
+        lo, hi = (float(v) for v in timing_block.pop(key))
+        if not 0.0 < lo <= hi:
+            raise ValueError(f"eyes timing: {key} {lo}..{hi}, 0 < min <= max")
+        spans[key.replace("_every_s", "_min_s")] = lo
+        spans[key.replace("_every_s", "_max_s")] = hi
+    timing = {**_numbers(timing_block, "eyes timing", EYE_TIMING), **spans}
+    geometry = _numbers(block["geometry"], "eyes geometry", EYE_GEOMETRY)
+    if geometry["highlight_power"] != int(geometry["highlight_power"]):
+        raise ValueError("eyes geometry: highlight_power is an integer")
+    effects_block = dict(block["effects"])
+    if tuple(effects_block.pop("names", ())) != EYE_EFFECTS:
+        raise ValueError(f"eyes effects: names are {', '.join(EYE_EFFECTS)}, in that order")
+    effects = _numbers(effects_block, "eyes effects", EYE_EFFECT_NUMBERS)
+    if not 0.0 <= timing["flutter"] <= 1.0:
+        raise ValueError("eyes timing: flutter is a share 0..1")
+    colors = _color_block(dict(block["colors"]), "eyes colors", EYE_ELEMENTS)
+    missing = sorted(set(EYE_ELEMENTS) - set(colors))
+    if missing:
+        raise ValueError(f"eyes colors: no default for {', '.join(missing)}")
+    sets_block = dict(block.get("sets", {}))
+    if tuple(sets_block.pop("names", EYE_SETS)) != EYE_SETS:
+        raise ValueError(f"eyes sets: names are {', '.join(EYE_SETS)}, in that order")
+    sets = []
+    for name in EYE_SETS:
+        spec = dict(sets_block.get(name, {}))
+        bad = sorted(set(spec) - {"params", "shut_arc", "shut_lid", "note"})
+        if bad:
+            raise ValueError(f"eyes set {name}: unknown {', '.join(bad)}")
+        defaults = {str(k): float(v) for k, v in dict(spec.get("params", {})).items()}
+        unknown = sorted(set(defaults) - set(by_name))
+        if unknown:
+            raise ValueError(f"eyes set {name}: unknown params {', '.join(unknown)}")
+        shut_arc, shut_lid = bool(spec.get("shut_arc", False)), float(spec.get("shut_lid", 0.72))
+        sets.append(EyeSet(name, defaults, shut_arc, shut_lid))
+    style_sets_block = {k: v for k, v in dict(block.get("style_sets", {})).items() if k != "note"}
+    for style_name, set_name in style_sets_block.items():
+        if str(set_name) not in EYE_SETS:
+            raise ValueError(f"eyes style_sets: {style_name}: no set {set_name!r}")
+
+    def set_of(style: str) -> int:
+        """The set a style follows: its own entry, else the one of the style it is like."""
+        while style:
+            if style in style_sets_block:
+                return EYE_SETS.index(str(style_sets_block[style]))
+            style = likes.get(style, "")
+        return 0
+
+    style_sets = tuple(set_of(s) for s in style_names)
+    eye_set_choice = str(block.get("eye_set", EYE_SET_CHOICES[0]))
+    eye_set_id(eye_set_choice)  # ValueError naming the choices
+    named_block = {k: v for k, v in dict(block.get("by_name", {})).items() if k != "note"}
+    named = {str(k): _eye_layers(v, f"eyes by_name {k}", by_name) for k, v in named_block.items()}
+    palettes = [colors]
+    for style in style_names[1:]:
+        own = data.get("styles", {}).get(style, {}).get("eyes", {})
+        _, style_colors, _ = _eye_block(own, f"style {style}", by_name)
+        if set(own) - {"colors", "note"}:
+            raise ValueError(f"style {style}: eyes carries colors only")
+        liked = style_names.index(likes[style]) if likes[style] else 0
+        palettes.append({**palettes[liked], **style_colors})
+    # per expression and set: its params, colours and effect (the by_name block, then the
+    # `like` base, then its own), and each later style's eyes block over the set's look
+    set_looks: list[list[tuple[EyeLook, ...]]] = [[] for _ in EYE_SETS]
+    given_of: dict[str, list[list[_EyeLayer]]] = {}  # [set][style]
+    for entry in data["expressions"]:
+        name = str(entry["name"])
+        where = f"expression {name}"
+        empty: list[list[_EyeLayer]] = [[({}, {}, None) for _ in style_names] for _ in EYE_SETS]
+        base = given_of.get(str(entry.get("like")), empty)
+        own_sets = _eye_layers(entry.get("eyes", {}), where, by_name)
+        # each later style's block, over the block of the style it is like
+        styled: list[_EyeLayer] = []
+        for style in style_names[1:]:
+            sp, sc, se = _eye_block(
+                entry.get(style, {}).get("eyes", {}), f"{where}: {style}", by_name
+            )
+            if likes[style] and likes[style] != BASE_STYLE:
+                lp, lc, le = styled[style_names.index(likes[style]) - 1]
+                sp, sc, se = {**lp, **sp}, {**lc, **sc}, se if se is not None else le
+            styled.append((sp, sc, se))
+        layered: list[list[_EyeLayer]] = []
+        for k in range(len(EYE_SETS)):
+            from_name = named.get(name, [({}, {}, None) for _ in EYE_SETS])[k]
+            per_style_layers: list[_EyeLayer] = []
+            for i in range(len(style_names)):
+                b = base[k][i]
+                o = own_sets[k] if i == 0 else styled[i - 1]
+                merged_params = {**from_name[0], **b[0], **o[0]} if i == 0 else {**b[0], **o[0]}
+                merged_colors = {**from_name[1], **b[1], **o[1]} if i == 0 else {**b[1], **o[1]}
+                effect = o[2] if o[2] is not None else (b[2] if b[2] is not None else from_name[2])
+                if i > 0 and o[2] is None and b[2] is None:
+                    effect = None
+                per_style_layers.append((merged_params, merged_colors, effect))
+            layered.append(per_style_layers)
+        given_of[name] = layered
+        for k, eye_set in enumerate(sets):
+            first_params, first_colors, first_effect = layered[k][0]
+            per_style = []
+            for i, style in enumerate(style_names):
+                sp, sc, se = layered[k][i]
+                params_here = {**eye_set.defaults, **first_params, **({} if i == 0 else sp)}
+                colors_here = {**palettes[i], **first_colors, **sc}
+                effect = se if se is not None else (first_effect or EYE_EFFECTS[0])
+                where_set = f"{where}: {eye_set.name} {style}"
+                per_style.append(
+                    _eye_look(where_set, params_here, colors_here, tuple(params), effect)
+                )
+            set_looks[k].append(tuple(per_style))
+    if any(len(looks) != len(names) for looks in set_looks):
+        raise ValueError("eyes: a look per expression")
+    return EyeTable(
+        params=tuple(params),
+        set_looks=tuple(tuple(looks) for looks in set_looks),
+        rings=tuple(rings),
+        layout=mm,
+        geometry=geometry,
+        timing=timing,
+        power=power,
+        colors=colors,
+        effects=effects,
+        sets=tuple(sets),
+        style_sets=style_sets,
+        by_name=tuple(named),
+        eye_set=eye_set_choice,
+    )
+
+
 def _lipsync(block: dict[str, float]) -> dict[str, float]:
     """The lip-sync block, checked: a positive window and a floor below full."""
     if not block["window_s"] > 0.0 or not block["floor_db"] < block["full_db"]:
@@ -598,6 +992,26 @@ def face_lines(table: FaceTable) -> tuple[str, ...]:
     """The brain's list of faces, one line each: ``face:NAME — brief`` (the mark that shows it);
     the expressions without a brief are left out."""
     return tuple(f"face:{e.name} — {e.brief}" for e in table.expressions if e.brief)
+
+
+def catalogue(table: FaceTable, style: str) -> tuple[str, ...]:
+    """The expressions ``style`` draws, by id: those with a look in it (every expression has
+    one in each style today)."""
+    index = [s.name for s in table.styles].index(style)
+    return tuple(e.name for e in table.expressions if index < len(e.looks))
+
+
+def style_lines(table: FaceTable) -> tuple[str, ...]:
+    """The brain's list of the face's drawing styles, one line each: ``style:NAME — brief``
+    (the mark that draws the mouth in it), the one config/face.json's ``style`` names marked
+    the default, and the ids it draws that not every style does (``; adds: ...``; none today)."""
+    shared = set.intersection(*(set(catalogue(table, s.name)) for s in table.styles))
+    lines = []
+    for s in table.styles:
+        line = f"style:{s.name} — {s.brief}" + (", the default" if s.name == table.style else "")
+        adds = [name for name in catalogue(table, s.name) if name not in shared]
+        lines.append(line + (f"; adds: {', '.join(adds)}" if adds else ""))
+    return tuple(lines)
 
 
 def _camel(name: str) -> str:
@@ -863,12 +1277,274 @@ def render_script(table: FaceTable) -> str:
     )
 
 
+def _unit(angles: tuple[float, ...], fn: Callable[[float], float]) -> tuple[float, ...]:
+    """``fn`` (sin or cos) of each angle in degrees, to 9 significant digits (a float's worth:
+    the firmware and the simulator parse the same decimal to the same float)."""
+    import math
+
+    values = (float(f"{fn(math.radians(a)):.9g}") for a in angles)
+    return tuple(0.0 if abs(v) < 1e-9 else v for v in values)
+
+
+def render_eye_header(table: FaceTable) -> str:
+    """eye_table.h: the eyes' table as C++ constants for the firmware (and its native tests)."""
+    eyes = table.eyes
+    if eyes is None:
+        raise ValueError("no eyes block")
+    import math
+
+    angles = eyes.led_angles()
+    led_eye = [r.eye for r in eyes.rings for _ in range(r.n)]
+    led_kind = [r.ring for r in eyes.rings for _ in range(r.n)]
+
+    def row(values: tuple[float, ...]) -> str:
+        return ", ".join(_float(v) for v in values)
+
+    def looks_of(k: int, style: int) -> list[str]:
+        return [
+            f"      {{{row(look[style].values)}}},  // {i} {table.names[i]}"
+            for i, look in enumerate(eyes.set_looks[k])
+        ]
+
+    def colors_of(k: int, style: int) -> list[str]:
+        return [
+            f"      {{{', '.join('0x' + c[1:].upper() + 'u' for c in look[style].colors)}}},"
+            f"  // {i} {table.names[i]}"
+            for i, look in enumerate(eyes.set_looks[k])
+        ]
+
+    def per_set(render: Callable[[int, int], list[str]]) -> list[str]:
+        out = []
+        for k, eye_set in enumerate(eyes.sets):
+            out.append(f"  {{  // {eye_set.name}")
+            for s, name in enumerate(table.style_names):
+                out += [f"    {{  // {name}", *render(k, s), "    },"]
+            out.append("  },")
+        return out
+
+    lines = [
+        f"// {GENERATED}",
+        "#pragma once",
+        "",
+        "#include <stdint.h>",
+        "",
+        "namespace eyes {",
+        "",
+        "// face_table.h's counts (eyes.cpp checks them against face::)",
+        f"constexpr int kStyleCount = {len(table.styles)};",
+        f"constexpr int kExpressionCount = {len(table.expressions)};",
+        "",
+        "// the chain: ring by ring in wire order, each LED's eye (the robot's own left/right),",
+        "// ring and angle from the top (degrees, clockwise as seen facing the robot), with its",
+        "// unit vector (sin: to the viewer's right, cos: up)",
+        f"constexpr int kEyeCount = {len(EYE_SIDES)};",
+        "enum Eye : uint8_t {",
+        *(f"  k{_camel(s)} = {i}," for i, s in enumerate(EYE_SIDES)),
+        "};",
+        "enum RingKind : uint8_t {",
+        *(f"  k{_camel(k)} = {i}," for i, k in enumerate(EYE_RINGS)),
+        "};",
+        f"constexpr int kRingCount = {len(eyes.rings)};",
+        "struct Ring {",
+        "  uint8_t eye;",
+        "  uint8_t kind;",
+        "  uint8_t n;",
+        "  uint8_t first;  // its first LED's index in the chain",
+        "  float first_deg;",
+        "  bool clockwise;",
+        "};",
+        "constexpr Ring kRings[kRingCount] = {",
+        *(
+            f"  {{{r.eye}, {r.ring}, {r.n}, {r.first}, {_float(r.first_deg)}, "
+            f"{'true' if r.clockwise else 'false'}}},  // {EYE_SIDES[r.eye]} {EYE_RINGS[r.ring]}"
+            for r in eyes.rings
+        ),
+        "};",
+        f"constexpr int kLedCount = {eyes.led_count};",
+        f"constexpr uint8_t kLedEye[kLedCount] = {{{', '.join(map(str, led_eye))}}};",
+        f"constexpr uint8_t kLedKind[kLedCount] = {{{', '.join(map(str, led_kind))}}};",
+        f"constexpr float kLedDeg[kLedCount] = {{{row(angles)}}};",
+        f"constexpr float kLedSin[kLedCount] = {{{row(_unit(angles, math.sin))}}};",
+        f"constexpr float kLedCos[kLedCount] = {{{row(_unit(angles, math.cos))}}};",
+        f"constexpr uint8_t kLayoutId = 0x{eyes.layout_id:02X};  // the status's eye layout id",
+        "",
+        f"constexpr int kParamCount = {len(eyes.params)};",
+        "enum Param : uint8_t {",
+        *(f"  k{_camel(p.name)} = {i},  // {p.note}" for i, p in enumerate(eyes.params)),
+        "};",
+        f"constexpr float kParamMin[kParamCount] = {{{row(tuple(p.lo for p in eyes.params))}}};",
+        f"constexpr float kParamMax[kParamCount] = {{{row(tuple(p.hi for p in eyes.params))}}};",
+        "",
+        "// the eyes' elements: each expression's colour of each, 0xRRGGBB, by style",
+        f"constexpr int kElementCount = {len(EYE_ELEMENTS)};",
+        "enum Element : uint8_t {",
+        *(f"  kEl{_camel(name)} = {i}," for i, name in enumerate(EYE_ELEMENTS)),
+        "};",
+        "// the look sets (the 'C' config's eye-set byte: 0 follows the style, else id + 1),",
+        "// which set each style follows, and whether a set's blink closes into the upper arc",
+        f"constexpr int kEyeSetCount = {len(EYE_SETS)};",
+        "enum EyeSet : uint8_t {",
+        *(f"  kSet{_camel(name)} = {i}," for i, name in enumerate(EYE_SETS)),
+        "};",
+        "constexpr const char* kEyeSetNames[kEyeSetCount] = {"
+        + ", ".join(f'"{name}"' for name in EYE_SETS)
+        + "};",
+        "constexpr uint8_t kEyeSetOfStyle[kStyleCount] = {"
+        + ", ".join(str(k) for k in eyes.style_sets)
+        + "};",
+        "constexpr bool kEyeSetShutArc[kEyeSetCount] = {"
+        + ", ".join("true" if s.shut_arc else "false" for s in eyes.sets)
+        + "};",
+        "constexpr float kEyeSetShutLid[kEyeSetCount] = {"
+        + ", ".join(_float(s.shut_lid) for s in eyes.sets)
+        + "};",
+        "",
+        "// the inner ring's fast effects, by id (the 'Y' frame's effect byte)",
+        f"constexpr int kEffectCount = {len(EYE_EFFECTS)};",
+        "enum Effect : uint8_t {",
+        *(f"  kFx{_camel(name)} = {i}," for i, name in enumerate(EYE_EFFECTS)),
+        "};",
+        "constexpr const char* kEffectNames[kEffectCount] = {"
+        + ", ".join(f'"{name}"' for name in EYE_EFFECTS)
+        + "};",
+        "// each expression's default effect, by set and style",
+        "constexpr uint8_t kLookEffect[kEyeSetCount][kStyleCount][kExpressionCount] = {",
+        *(
+            line
+            for k, eye_set in enumerate(eyes.sets)
+            for line in (
+                f"  {{  // {eye_set.name}",
+                *(
+                    "    {"
+                    + ", ".join(f"kFx{_camel(look[s].effect)}" for look in eyes.set_looks[k])
+                    + f"}},  // {name}"
+                    for s, name in enumerate(table.style_names)
+                ),
+                "  },",
+            )
+        ),
+        "};",
+        "// each expression's eyes, by set and style",
+        "constexpr float kLooks[kEyeSetCount][kStyleCount][kExpressionCount][kParamCount] = {",
+        *per_set(looks_of),
+        "};",
+        "constexpr uint32_t kColors[kEyeSetCount][kStyleCount][kExpressionCount][kElementCount]"
+        " = {",
+        *per_set(colors_of),
+        "};",
+        "",
+        "// geometry: what the params mean on the rings",
+        *(f"constexpr float k{_camel(k)} = {_float(v)};" for k, v in eyes.geometry.items()),
+        "",
+        "// timing",
+        *(f"constexpr float k{_camel(k)} = {_float(v)};" for k, v in eyes.timing.items()),
+        "",
+        "// the effects' numbers",
+        *(f"constexpr float k{_camel(k)} = {_float(v)};" for k, v in eyes.effects.items()),
+        "",
+        "// power: the current cap, the soft start, the gamma, the default brightness",
+        *(
+            f"constexpr float k{_camel(k)} = {_float(v)};"
+            for k, v in eyes.power.items()
+            if k != "brightness"
+        ),
+        f"constexpr uint8_t kBrightnessDefault = {int(eyes.power['brightness'])};",
+        "// the duty for each perceptual value 0..255 (value^gamma)",
+        "constexpr uint8_t kGammaTable[256] = {",
+        *(
+            "  " + ", ".join(str(v) for v in eyes.gamma[i : i + 16]) + ","
+            for i in range(0, 256, 16)
+        ),
+        "};",
+        "",
+        "}  // namespace eyes",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_eye_script(table: FaceTable) -> str:
+    """eye_table.js: the same table for the simulator (a plain script: it loads from file://)."""
+    eyes = table.eyes
+    if eyes is None:
+        raise ValueError("no eyes block")
+    import math
+
+    angles = eyes.led_angles()
+    payload = {
+        "params": [
+            {"name": p.name, "default": p.default, "min": p.lo, "max": p.hi, "note": p.note}
+            for p in eyes.params
+        ],
+        "overridable": list(EYE_OVERRIDABLE),
+        "elements": list(EYE_ELEMENTS),
+        "sides": list(EYE_SIDES),
+        "ring_kinds": list(EYE_RINGS),
+        "rings": [
+            {
+                "eye": r.eye,
+                "kind": r.ring,
+                "n": r.n,
+                "first": r.first,
+                "first_deg": r.first_deg,
+                "clockwise": r.clockwise,
+            }
+            for r in eyes.rings
+        ],
+        "leds": {
+            "eye": [r.eye for r in eyes.rings for _ in range(r.n)],
+            "kind": [r.ring for r in eyes.rings for _ in range(r.n)],
+            "deg": list(angles),
+            "sin": list(_unit(angles, math.sin)),
+            "cos": list(_unit(angles, math.cos)),
+        },
+        "layout_id": eyes.layout_id,
+        "layout": eyes.layout,
+        "effects": list(EYE_EFFECTS),
+        "sets": [
+            {"name": s.name, "shut_arc": s.shut_arc, "shut_lid": s.shut_lid} for s in eyes.sets
+        ],
+        "style_sets": list(eyes.style_sets),
+        "looks": [
+            [
+                [
+                    {
+                        "values": list(look.values),
+                        "colors": [int(c[1:], 16) for c in look.colors],
+                        "effect": EYE_EFFECTS.index(look.effect),
+                    }
+                    for look in per_style
+                ]
+                for per_style in looks
+            ]
+            for looks in eyes.set_looks
+        ],
+        "geometry": eyes.geometry,
+        "timing": eyes.timing,
+        "effect_numbers": eyes.effects,
+        "power": eyes.power,
+        "colors": eyes.colors,
+        "gamma": list(eyes.gamma),
+    }
+    body = json.dumps(payload, indent=1, ensure_ascii=False)
+    return (
+        f"// {GENERATED}\n"
+        f"const EYE_TABLE = {body};\n"
+        'if (typeof module !== "undefined") module.exports = EYE_TABLE;\n'
+    )
+
+
 def generated(table: FaceTable) -> dict[Path, str]:
-    """Each generated file and the text it must hold: the parametric tables, and the shape
-    engine's when the table has a shapes style (pepin.face_shapes)."""
+    """Each generated file and the text it must hold: the parametric tables, the shape
+    engine's when the table has a shapes style (pepin.face_shapes), and the eyes' when the
+    table has an ``eyes`` block."""
     from pepin.face_shapes import generated_shapes
 
-    return {HEADER: render_header(table), SCRIPT: render_script(table), **generated_shapes(table)}
+    files = {HEADER: render_header(table), SCRIPT: render_script(table), **generated_shapes(table)}
+    if table.eyes is not None:
+        files[EYE_HEADER] = render_eye_header(table)
+        files[EYE_SCRIPT] = render_eye_script(table)
+    return files
 
 
 def stale(table: FaceTable) -> list[Path]:
@@ -885,7 +1561,7 @@ def main(argv: list[str] | None = None) -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--write", action="store_true", help="regenerate the firmware/sim tables")
     mode.add_argument("--check", action="store_true", help="exit 1 when a generated file is stale")
-    mode.add_argument("--lines", action="store_true", help="the brain's list of faces")
+    mode.add_argument("--lines", action="store_true", help="the brain's list of faces and styles")
     args = parser.parse_args(argv)
     # the public file alone: the generated tables are tracked, and a private overlay's faces
     # never enter them (pepin.overlay)
@@ -897,7 +1573,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"wrote {path.relative_to(REPO)}")
         return 0
     if args.lines:
-        print("\n".join(face_lines(table)))
+        print("\n".join((*face_lines(table), *style_lines(table))))
         return 0
     if args.check:
         old = stale(table)

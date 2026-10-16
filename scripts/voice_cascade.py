@@ -28,6 +28,7 @@ about a second, a voice once its model has loaded, a transcriber between utteran
     uv run python scripts/voice_cascade.py switch --brain sonnet --voice qwen3-1.7b
     uv run python scripts/voice_cascade.py switch --transcriber whispercpp
     uv run python scripts/voice_cascade.py switch --flag gestures=on   # config/expression.json
+    uv run python scripts/voice_cascade.py switch --flag doze=off      # the face awake when idle
     uv run python scripts/voice_cascade.py switch --flag people=on     # config/people.json
     uv run python scripts/voice_cascade.py switch --knob vision.source=snapshot  # models.json
 
@@ -231,20 +232,34 @@ class Body:
         logs: Path,
         wheels: WheelsExecutor | None = None,
     ) -> Body:
-        """The engine over the real arm, head, face and ``wheels`` (``fake``: a fake arm that
-        answers at rest and a head door that only records; ``face`` False: a face that only
-        records; no ``wheels``: the body never moves), every performance, cue and answer logged
-        to ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
+        """The engine over the real arm, head, face, eyes and ``wheels`` (``fake``: a fake arm
+        that answers at rest and a head door that only records; ``face`` False: a face and eyes
+        that only record; no ``wheels``: the body never moves), every performance, cue and
+        answer logged to ``logs/<day>/cascade_gestures.jsonl`` and the notable ones printed."""
         from pepin.arm_motion import load_arm_motion
         from pepin.expression.animation import PartName
         from pepin.expression.animator import GestureEngine, engine_config
         from pepin.expression.arm_link import ArmClient
-        from pepin.expression.book import face_names, load_book, vocabulary, with_rest
+        from pepin.expression.book import (
+            face_names,
+            load_book,
+            style_names,
+            vocabulary,
+            with_rest,
+            with_styles,
+        )
         from pepin.expression.door import OverlayDoor
         from pepin.expression.executors import Executor, NoBody
-        from pepin.expression.fakes import FakeArmLink, FakeFace, FakeHeadDoor
+        from pepin.expression.fakes import FakeArmLink, FakeEyesChannel, FakeFace, FakeHeadDoor
         from pepin.expression.head import ClipLook
-        from pepin.expression.parts import ArmPart, FacePart, HeadDoor, HeadPart, NeckLimits
+        from pepin.expression.parts import (
+            ArmPart,
+            EyesPart,
+            FacePart,
+            HeadDoor,
+            HeadPart,
+            NeckLimits,
+        )
         from pepin.expression.trajectory import ArmLink, ArmStatus
         from pepin.neck import NeckConfig
         from pepin.voice_cascade.log import append_line, day_dir
@@ -270,7 +285,8 @@ class Body:
 
         def load() -> Any:
             data = read_json(config_file("expression.json"))
-            return with_rest(load_book(), motion.rest_deg), engine_config(data)
+            book = with_styles(with_rest(load_book(), motion.rest_deg), style_names())
+            return book, engine_config(data)
 
         closers: list[Any] = []
         link: ArmLink
@@ -283,6 +299,7 @@ class Body:
         arm_knobs = knobs.get("parts", {}).get("arm", {})
         head_knobs = knobs.get("parts", {}).get("head", {})
         face_knobs = knobs.get("parts", {}).get("face", {})
+        eyes_knobs = knobs.get("parts", {}).get("eyes", face_knobs)
         door: HeadDoor = FakeHeadDoor() if fake else OverlayDoor()
         fades = knobs.get("layers", {}).get("fade_s", {})
         head = HeadPart(
@@ -293,10 +310,11 @@ class Body:
             on_answer=head_answered,
         )
         channel: Any = FakeFace()
-        if face:
+        eyes: Any = FakeEyesChannel()
+        if face:  # the face and the eyes: one connection, the expression source's
             from pepin.head_link import HeadClient
 
-            channel = HeadClient(host, source="expression").start()
+            channel = eyes = HeadClient(host, source="expression").start()
             closers.append(channel)
         arm = ArmPart(
             link,
@@ -308,6 +326,7 @@ class Body:
         parts: dict[PartName, Executor] = {
             "arm": arm,
             "face": FacePart(channel, latency_s=float(face_knobs.get("latency_s", 0.05))),
+            "eyes": EyesPart(eyes, latency_s=float(eyes_knobs.get("latency_s", 0.05))),
             "head": head,
             "body": wheels if wheels is not None else NoBody(),
         }
@@ -512,12 +531,17 @@ def main() -> int:
     events = Events(StatePrinter())
     quiet_run = args.speaker_wav is not None or bench
     face: Any = None
+    doze: Any = None  # the face asleep outside a conversation (flag doze)
+    dozing_head: Any = None
     if not quiet_run and not args.no_face:  # the robot speaks: its face follows
+        from pepin.expression.doze import DOZE, Doze, doze_config
         from pepin.face_events import VoiceStateFace
         from pepin.head_link import HeadClient
 
         face = VoiceStateFace(HeadClient(args.host, source="voice").start())
         events.subscribe(face)
+        dozing_head = HeadClient(args.host, source=DOZE).start()
+        doze = Doze(dozing_head, lambda: doze_config(read_json(config_file("expression.json"))))
 
     stamp = time.strftime("%H%M%S")
     speaker: WavSpeaker | BoardLink
@@ -716,8 +740,12 @@ def main() -> int:
         ledger=ledger if setup.paid else None,
         turn=turn,
         switchboard=switchboard,
-        observers=[*guards, body.engine, alive, people] + ([gaze] if gaze is not None else []),
-        flags=[body.engine, people] + ([gaze] if gaze is not None else []),
+        observers=[*guards, body.engine, alive, people]
+        + ([gaze] if gaze is not None else [])
+        + ([doze] if doze is not None else []),
+        flags=[body.engine, people]
+        + ([gaze] if gaze is not None else [])
+        + ([doze] if doze is not None else []),
         taps=[body.engine],
         vocabulary=body.vocabulary,
         people=people,
@@ -735,6 +763,8 @@ def main() -> int:
     alive.journal = loop.record  # pulse, moment, quiet and alive events, the same way
     body.engine.journal = loop.record  # the gesture space's catchment and repeat rows
     alive.start()
+    if doze is not None:
+        doze.start()
     b = config.brain
     print(
         f"listening: {setup.name} = {b.model} (thinking {b.thinking}, effort {b.effort}, cache"
@@ -743,6 +773,7 @@ def main() -> int:
         f" {config.prosody_tags}, turn_model {config.turn_model}, speculative {b.speculative},"
         f" first sentence {b.first_sentence_words or 'as the persona says'}, gestures"
         f" {'on' if body.engine.on else 'off'}, people {'on' if people.on else 'off'},"
+        f" doze {'on' if doze is not None and doze.on else 'off'},"
         f" vision.source {vision.value}"
         f"{f' ({watch.cell()})' if watch is not None else ''}. Logs:"
         f" {args.logs}; switch: scripts/voice_cascade.py switch --brain NAME --voice NAME"
@@ -771,6 +802,9 @@ def main() -> int:
         transcriber.close()  # whisper.cpp's server, when that engine is in use
         if face is not None:
             face.close()
+        if doze is not None:
+            doze.close()  # the face let go: nobody listens any more
+            dozing_head.close()
         body.close()
         for closable in (mic, speaker):
             close = getattr(closable, "close", None)

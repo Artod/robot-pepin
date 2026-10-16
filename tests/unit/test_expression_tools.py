@@ -29,6 +29,8 @@ def test_the_tool_s_names_are_the_book_s_intents() -> None:
     assert set(intents(BOOK)) - set(GESTURES) - singles == {
         "accent", "point", "arc", "size", "weigh", "count", "draw", "stop", "offer", "snap",
         "dance",
+        "wink", "glow", "eyes", "frown", "brows_up", "squint",
+        "style",
     }  # fmt: skip
     schema = TOOLS["gesture"].input_schema()
     assert schema["properties"]["name"]["enum"] == list(GESTURES)

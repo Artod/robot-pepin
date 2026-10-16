@@ -46,6 +46,43 @@ def test_express_shows_an_expression_for_a_while() -> None:
     assert "between 1 and 60" in call(robot, "express", emotion="sad", seconds=600)["why"]
 
 
+def test_express_tunes_the_eyes_for_the_same_seconds_and_winks() -> None:
+    face = FakeFace()
+    robot = fake_robot(face=face)
+    result = call(robot, "express", emotion="worried", seconds=3, brows=-0.6, lids=0.4)
+    assert result == {
+        "ok": True,
+        "showing": "worried",
+        "seconds": 3.0,
+        "eyes": {"brow_raise": -0.6, "lid_top": 0.4},
+    }
+    assert face.eyed == [({"brow_raise": -0.6, "lid_top": 0.4}, 3.0)]
+    assert call(robot, "express", emotion="grin", wink="left")["winked"] == "left"
+    assert face.winked == ["left"] and len(face.eyed) == 1  # a wink alone overrides nothing
+    assert "brows must be between -1 and 1" in call(robot, "express", emotion="sad", brows=2)["why"]
+    assert "glow must be between 0 and 1" in call(robot, "express", emotion="sad", glow=-1)["why"]
+    assert "must be one of left, right" in call(robot, "express", emotion="sad", wink="up")["why"]
+    spun = call(robot, "express", emotion="thinking", seconds=2, effect="spin")
+    assert spun["effect"] == "spin" and face.effects == [("spin", 2.0)]
+    cried = call(robot, "express", emotion="sad", seconds=3, effect="tear")
+    assert cried["effect"] == "tear" and face.effects[-1] == ("tear", 3.0)
+    assert "must be one of sparkle" in call(robot, "express", emotion="sad", effect="twirl")["why"]
+
+
+def test_express_draws_the_mouth_in_another_style_for_the_same_seconds() -> None:
+    """A gag: the style for the expression's seconds; the styles are config/face.json's, an
+    unknown one refused with them before anything shows."""
+    face = FakeFace()
+    robot = fake_robot(face=face)
+    styles = [s.name for s in load_face_table().styles]
+    result = call(robot, "express", emotion="grin", seconds=3, style=styles[-1])
+    assert result == {"ok": True, "showing": "grin", "seconds": 3.0, "style": styles[-1]}
+    assert face.styles == [(styles[-1], 3.0)]
+    refused = call(robot, "express", emotion="sad", style="neon")["why"]
+    assert refused == f"style must be one of {', '.join(styles)}, not 'neon'"
+    assert face.expressed == [("grin", 3.0)]  # nothing shown for the refused one
+
+
 def test_show_puts_lines_on_the_screen() -> None:
     face = FakeFace()
     robot = fake_robot(face=face)
@@ -128,6 +165,12 @@ def test_head_face_speaks_the_head_servers_door() -> None:
         assert server.got[-1] == {"cmd": "express", "source": "llm", "name": "grin", "hold_s": 3.0}
         face.show("a\nb: 1 C", 5.0)
         assert server.got[-1] == {"cmd": "show", "text": "a\nb: 1 C", "seconds": 5.0}
+        face.eyes({"brow_raise": -0.6}, 2.5)
+        assert server.got[-1] == {"cmd": "eyes", "source": "llm", "ms": 2500, "brow_raise": -0.6}
+        face.wink("right")
+        assert server.got[-1] == {"cmd": "wink", "source": "llm", "side": "right"}
+        face.style("manga", 2.0)
+        assert server.got[-1] == {"cmd": "style", "source": "llm", "name": "manga", "ms": 2000}
         assert face.health()["face_fps"] == 49.0
         with pytest.raises(ToolError, match="refused it: no expression 'smug'"):
             face.express("smug", 1.0)

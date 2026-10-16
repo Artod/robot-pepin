@@ -93,6 +93,15 @@ looks. A look whose frames depth_stream's gate has been dropping as too dark (``
 ``gate_dark_patience_s`` without a fused one between gives up as "dark, no frames" (expired,
 counted as dark in the report line) instead of holding the head for its whole TTL.
 
+THE EYES' GAZE (behind ``eye_gaze``). Where the head is sent, off the body's nose (the pan over
+the neck's reach on that side, + to the robot's right as the eyes have it, the tilt off home over
+its reach up or down, -1..1), goes to the
+board's head server as ``{"cmd": "gaze", "x", "y", "tracking"}``
+(:class:`pepin.head_link.EyeGazeLink`: on a change of 2 % or more, at most 10 Hz, again every
+5 s), with ``tracking`` while the speaker gaze holds the head (:data:`TRACKING_SOURCES`); the
+head server lays it under every other eyes override. The pupils lead the head: the target, not
+the encoders, so they are there first.
+
 Flags (:data:`FLAGS`) and knobs (config/knobs.json's ``gaze`` block), all live: ``ros/flags.sh
 set gaze <name> <value>``; the report line every 30 s carries the counts, the driver, the last
 stall look and the flags.
@@ -106,7 +115,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import numpy as np
 from action_msgs.msg import GoalStatusArray
@@ -139,6 +148,7 @@ from pepin.gaze import (
     BaseServerHead,
     EitherHead,
     GazeSettings,
+    GazeState,
     HeadReading,
     Look,
     LookTally,
@@ -152,6 +162,7 @@ from pepin.gaze import (
 )
 from pepin.gaze_gate import DARK_FRAME_TOPIC
 from pepin.gaze_link import GAZE_PORT, JsonDoor
+from pepin.head_link import EyeGazeLink, GazeSink
 from pepin.marks_audit import scan_points, transform_xy
 from pepin.neck import JOINT_NAMES, NeckConfig
 from pepin.path_gaze import (
@@ -205,6 +216,8 @@ STALL_SOURCE = "nav.stall"
 PATH_SOURCE = "nav.path"
 REVERSE_SOURCE = "nav.reverse"
 RETURN_SOURCE = "nav.return"  # the slow way home after a drive
+# The looks that hold the head on a person: the speaker gaze (pepin.expression.head.SPEAKER).
+TRACKING_SOURCES = ("voice.speaker",)
 
 STEP_HZ = 20.0
 STATE_HZ = 10.0
@@ -281,6 +294,19 @@ FLAGS = FlagSet(
         on_when="always, with the head on the robot",
         off_when="the face gets in the way of a test; a moment sent while off is simply not sent",
     ),
+    Flag(
+        "eye_gaze",
+        True,
+        description="the eyes' pupils follow where the head is sent: its target off the body's"
+        " nose (pan over the neck's reach, tilt off home), -1..1, to the board's head server"
+        " as its gaze layer on a change of 2 % or more, at most 10 Hz; centred while the"
+        " speaker gaze holds the head on a person; off, the gaze layer is released and the"
+        " eyes look as the expression has them",
+        why="on (the eyes, 2026-10-15): the robot shows where it looks before the neck gets"
+        " there; a line costs the serial link one 21-byte frame, and only on a change",
+        on_when="always, with the eyes on the head",
+        off_when="the eyes' own look is under test, or the head server is not there",
+    ),
 )
 
 
@@ -294,11 +320,42 @@ class _Inputs:
     marks: Any = None
 
 
-def face_client(host: str) -> FaceSink:
-    """The head server's door for the stall look's moments (``source`` gaze), on the board."""
+class HeadDoor(FaceSink, GazeSink, Protocol):
+    """The board's head server as this node speaks to it: the stall look's moments, the eyes'
+    gaze and its release."""
+
+    def eyes_release(self) -> None:
+        """This source overrides the eyes no more."""
+        ...
+
+
+def face_client(host: str) -> HeadDoor:
+    """The head server's door for the stall look's moments and the eyes' gaze (``source``
+    gaze), on the board."""
     from pepin.head_link import HEAD_PORT, HeadClient
 
     return HeadClient(host, HEAD_PORT, source="gaze").start()
+
+
+def eye_gaze(target: Aim, home: Aim, reach: Reach) -> tuple[float, float]:
+    """Where the head is sent as the eyes' gaze_x and gaze_y, -1..1: x the pan off the body's
+    nose over the neck's reach on that side (+ the robot's right: the pan's sign turned), y the
+    tilt off home over the reach above or below it (+ up)."""
+    right, left = -reach.pan[0], reach.pan[1]  # how far the neck turns each way
+    pan = target.pan_rad  # + left of the nose
+    x = 0.0
+    if pan > 0.0 and left > 0.0:
+        x = -pan / left
+    elif pan < 0.0 and right > 0.0:
+        x = -pan / right
+    up, down = home.tilt_rad - reach.tilt[0], reach.tilt[1] - home.tilt_rad
+    lift = home.tilt_rad - target.tilt_rad  # the tilt is + below level
+    y = 0.0
+    if lift > 0.0 and up > 0.0:
+        y = lift / up
+    elif lift < 0.0 and down > 0.0:
+        y = lift / down
+    return min(max(x, -1.0), 1.0), min(max(y, -1.0), 1.0)
 
 
 class Gaze(Node):
@@ -315,9 +372,11 @@ class Gaze(Node):
         neck_path = str(self.declare_parameter("neck_config", str(config_file("neck.json"))).value)
         self._switches = Switches(self, with_knobs(FLAGS, load_knobs("gaze")))
         self._face_host = host
+        self._head_door: HeadDoor | None = None
         self._face: StallFace | None = None
+        self._eye_link: EyeGazeLink | None = None
         if self._switches.on("face_events"):  # opened now: its first moment is not lost
-            self._face = StallFace(face_client(host))
+            self._face = StallFace(self._door_to_head())
         self._cfg = NeckConfig.from_json(neck_path)
         self._reach = Reach.of(self._cfg)
         self._link = JsonLineLink(host, port, self._on_line, name="base server")
@@ -417,14 +476,25 @@ class Gaze(Node):
         self._up = True
 
     def close(self) -> None:
-        """Close the door, the link, the face's door and the TF listener, before the node is
-        destroyed."""
+        """Close the door, the link, the head server's door (the face's moments cleared, the
+        eyes' gaze released) and the TF listener, before the node is destroyed."""
         if self._door is not None:
             self._door.close()
+        if self._eye_link is not None and self._head_door is not None:
+            self._head_door.eyes_release()
         if self._face is not None:
-            self._face.close()
+            self._face.close()  # ...and the head server's door with it
+        elif self._head_door is not None:
+            self._head_door.close()
         self._link.stop()
         self._tf.close()
+
+    def _door_to_head(self) -> HeadDoor:
+        """The head server's door, one connection for the stall look's moments and the eyes'
+        gaze, opened at its first use."""
+        if self._head_door is None:
+            self._head_door = face_client(self._face_host)
+        return self._head_door
 
     def _stall_face(self) -> StallFace | None:
         """The stall look's face while ``face_events`` is on (opened at the first moment when the
@@ -432,8 +502,22 @@ class Gaze(Node):
         if not self._switches.on("face_events"):
             return None
         if self._face is None:
-            self._face = StallFace(face_client(self._face_host))
+            self._face = StallFace(self._door_to_head())
         return self._face
+
+    def _eyes(self, state: GazeState) -> None:
+        """Where the head is sent, to the eyes' gaze while ``eye_gaze`` is on (released once
+        when it goes off)."""
+        if not self._switches.on("eye_gaze"):
+            if self._eye_link is not None:
+                self._door_to_head().eyes_release()
+                self._eye_link = None
+            return
+        if self._eye_link is None:
+            self._eye_link = EyeGazeLink(self._door_to_head())
+        home = self._arbiter.home
+        x, y = eye_gaze(state.target or home, home, self._reach)
+        self._eye_link.update(x, y, state.source in TRACKING_SOURCES, time.monotonic())
 
     # ---- settings ------------------------------------------------------------------------------
     def _knob(self, name: str) -> float:
@@ -657,6 +741,7 @@ class Gaze(Node):
         if key != self._state_key:  # every change goes out at once, between the 10 Hz lines
             self._state_key = key
             self._state_pub.publish(String(data=state.to_json()))
+        self._eyes(state)
         self._book_looks(now)
 
     def _book_looks(self, now: float) -> None:
@@ -1242,6 +1327,7 @@ class Gaze(Node):
             f" {c['settled']}, refused {c['refused']}, timeouts {c['timeouts']};"
             f" {self._looks.text()}; stall looks: {stalls}; last: {self._last_stall}"
             f"{f'; {self._tf_misses} TF misses' if self._tf_misses else ''};"
+            f"{f' eye gaze {self._eye_link.sends} sends;' if self._eye_link else ''}"
             f" flags: {self._switches.state()}"
         )
         self._looks = LookTally()

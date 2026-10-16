@@ -29,7 +29,14 @@ atom's own ranges, ``wraps`` naming the atom), so the brain may name a single ba
 
 The degrees of freedom, per part: the arm's joints (:data:`pepin.expression.trajectory.JOINTS`,
 degrees, config/arm.json's convention), the head's ``pan_deg`` (+ left) and ``tilt_deg`` (+ down),
-the face's ``expression``, the wheels' ``yaw_deg`` (+ left) and ``x_m`` (+ forward).
+the face's ``expression`` and its drawing ``style`` (one of config/face.json's ``styles``, held
+by the head server for the step's hold_s, standing without one; :data:`STYLE_DEFAULT` lets it go;
+never the idle layer's), the wheels' ``yaw_deg`` (+ left) and ``x_m`` (+ forward), the eyes'
+look (the head server's eye fields, :data:`pepin.head_link.EYE_RANGES`, in config/face.json's
+units: ``brow_pos``, ``brow_raise``, ``lid_top``, ``glow``, ...), their moments
+(:data:`MOMENT_DOFS`: a ``blink``, a ``wink`` of the robot's left eye for a value above 0 and of
+its right below as config/face.json's ``wink`` has it, the look let go: ``release``) and their
+named changes (:data:`EVENT_DOFS`: the ``iris`` colour, the inner rings' ``effect``).
 
 Blending, per part: a gesture's absolute tracks replace the base layer while they play, its
 additive tracks add to it; the idle layer adds only while no gesture plays on that part; a new
@@ -56,8 +63,22 @@ from typing import Literal, Protocol
 from pepin.expression.markers import Cue
 from pepin.expression.trajectory import Then
 
-PartName = Literal["arm", "head", "face", "body"]
-PARTS: tuple[PartName, ...] = ("arm", "head", "face", "body")
+PartName = Literal["arm", "head", "face", "body", "eyes"]
+PARTS: tuple[PartName, ...] = ("arm", "head", "face", "body", "eyes")
+# The degrees of freedom whose key value is a name (a face's expression or drawing style, the
+# eyes' iris colour "#RRGGBB", an effect of pepin.face.EYE_EFFECTS): each key is an event, never
+# a track
+EVENT_DOFS: tuple[str, ...] = ("expression", "iris", "effect", "style")
+# The face's drawing style: its degree of freedom, and the composition (with the atom) whose
+# mark draws the mouth in a style of config/face.json ({style:rose}); the style named
+# STYLE_DEFAULT lets the face's style go, back to the standing one ({style} alone)
+FACE_STYLE = "style"
+STYLE_DEFAULT = "default"
+# A step's named parameter that is its mark's argument as written (the style of {style:rose})
+MARK_ARG = "$arg"
+# The eyes' degrees of freedom whose keys are moments (a blink, a wink, the look let go): played
+# at their keys' times, never held over a step's hold_s
+MOMENT_DOFS: tuple[str, ...] = ("blink", "wink", "release")
 Layer = Literal["base", "gesture", "idle"]
 Mode = Literal["absolute", "additive"]
 Value = float | str  # a number, "$param" or "-$param"; on the face's ``expression`` a name
@@ -170,7 +191,9 @@ class Composition:
     ``style_args``: an argument -> the style words of the part that choose it for a bare marker
     (``{laugh}`` in a ``{sinister}`` part is ``{laugh:evil}``), ``settings``: the arguments that
     set its steps' parameters instead (a word, or :data:`NUMBER` for a mark's number:
-    ``{snap:3,fast}``), and ``wraps``: the atom an auto-wrapper plays (None: written by hand)."""
+    ``{snap:3,fast}``), ``wraps``: the atom an auto-wrapper plays (None: written by hand), and
+    ``bare``: whether a mark may name it without the argument that chooses (its first plays:
+    ``{style}`` is ``{style:default}``)."""
 
     name: str
     variants: tuple[Variant, ...]
@@ -184,6 +207,7 @@ class Composition:
     style_args: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     settings: Mapping[str, tuple[Setting, ...]] = field(default_factory=dict)
     wraps: str | None = None
+    bare: bool = False
 
 
 @dataclass(frozen=True)
@@ -295,11 +319,13 @@ class Track:
 
 @dataclass(frozen=True)
 class Event:
-    """A discrete change of a rendered clip (the face's expression): when, what, how long."""
+    """A discrete change of a rendered clip (the face's expression, the eyes' iris or effect:
+    ``dof``, :data:`EVENT_DOFS`): when, what, how long."""
 
     t_s: float
     name: str
     hold_s: float | None = None
+    dof: str = "expression"
 
 
 @dataclass(frozen=True)
@@ -319,6 +345,14 @@ class Clip:
     loop: bool = False
     then: Then = "rest"  # the arm: rest after it, or hold its last pose ``hold_s`` (a unit)
     hold_s: float = 0.0
+
+    @property
+    def styles_only(self) -> bool:
+        """Whether it only draws the face in a style: the head server arbitrates that beside
+        the expression, so such a clip never books nor holds the face."""
+        return (
+            bool(self.events) and not self.tracks and all(e.dof == FACE_STYLE for e in self.events)
+        )
 
 
 @dataclass(frozen=True)

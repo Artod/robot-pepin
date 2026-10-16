@@ -13,7 +13,9 @@ Every body part keeps its one owner, and expression goes THROUGH that owner:
 * the head: the gaze arbiter (:mod:`pepin.gaze`), by band, TTL and preemption; the speaker gaze
   holds the head as its base layer (:mod:`pepin.expression.speaker`), a head gesture is a
   relative ``clip`` played on top of whatever holds it (:mod:`pepin.expression.head`);
-* the face: the board's head server (:mod:`pepin.head_link`), the newest request wins;
+* the face and its eyes: the board's head server (:mod:`pepin.head_link`), the newest request
+  wins (the eyes' field by field: :class:`pepin.expression.parts.EyesPart`); outside a
+  conversation the face dozes (:mod:`pepin.expression.doze`, its own switch ``doze``);
 * the wheels: small turns in place and rocks while standing, from this Mac to the base server
   behind the goal server's word (:mod:`pepin.expression.wheels`), never waited for.
 

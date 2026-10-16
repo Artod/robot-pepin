@@ -142,10 +142,13 @@ void imu_task(void*) {
   for (;;) {
     if (g_has_pending) {
       portENTER_CRITICAL(&g_lock);
-      cfg = g_pending;
+      const ImuConfig next = g_pending;
       g_has_pending = false;
       portEXIT_CRITICAL(&g_lock);
-      running = false;
+      if (!same_sampling(next, cfg)) {  // a style or a brightness alone: the chip runs on
+        cfg = next;
+        running = false;
+      }
     }
     if (!running) {
       count = 0;

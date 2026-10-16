@@ -4,10 +4,12 @@
 
 const Face = require("./face.js");
 const Anime = require("./anime.js");
+const Eyes = require("./eyes.js");
 
 const words = require("fs").readFileSync(0, "utf8").split(/\s+/).filter((w) => w.length);
 const model = new Face.FaceModel();
 const anime = new Anime.AnimeModel();
+const eyes = new Eyes.EyeModel();
 let style = Face.T.style;
 const out = [];
 let i = 0;
@@ -46,6 +48,28 @@ while (i < words.length) {
   } else if (op === "M") {
     const level = next(), t = next();
     model.setMouth(level, t);
+  } else if (op === "G") {
+    const t = next();
+    model.update(t);
+    eyes.follow(model, t);
+    const hex = Array.from(eyes.frame.rgb, (v) => v.toString(16).padStart(2, "0")).join("");
+    out.push(Buffer.from(`${hex} ${eyes.frame.milliamps} ${eyes.mode()} ${eyes.set}\n`));
+  } else if (op === "O") {
+    const hex = words[i++], t = next();
+    const bytes = Buffer.from(hex, "hex");
+    if (bytes.length === Eyes.OVERRIDE_BYTES || bytes.length === Eyes.OVERRIDE_BYTES_EFFECT) {
+      eyes.setOverride(Eyes.decodeOverride(bytes), t);
+    }
+  } else if (op === "B") {
+    const v = next();
+    next();
+    eyes.setBrightness(v);
+  } else if (op === "K") {
+    eyes.selfTest(next());
+  } else if (op === "X") {
+    const v = next();
+    next();
+    eyes.setSet(v);
   } else if (op === "S") {
     model.update(next());
     const s = model.shape();

@@ -23,7 +23,8 @@ NOT_FOR_THE_BRAIN = frozenset({"say", "find", "look_around", "map_tree"})
 ECHO = "echo"  # the brain that repeats what it heard (no API call)
 API_KEYS = {"gemini": "GEMINI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}
 # The persona file's line the book's vocabulary of gestures replaces, one mark a line
-# (pepin.expression.book.mark_lines): the book is the one source of the marks' names
+# (pepin.expression.book.mark_lines): the book is the one source of the marks' names, and
+# config/face.json of the styles' (pepin.face.style_lines, one a style)
 MARKS_SLOT = "<!-- the marks: generated from config/animation.json -->"
 FIRST_SENTENCE = (
     "Your first sentence has at most {n} {words} and ends with a full stop, a question mark or"
@@ -95,12 +96,13 @@ def build_brain(
         raise RuntimeError(f"{key} missing: set -a; . ./.env; set +a (the main checkout's .env)")
     from pepin.deployment import config_file
     from pepin.expression.book import load_book, mark_lines
+    from pepin.face import load_face_table, style_lines
     from pepin.overlay import read_text
     from pepin.tools.schemas import gemini_function_declarations, openai_tools
 
     b = config.brain
-    persona = persona_text(read_text(config_file(b.persona_file)), b.first_sentence_words,
-                           mark_lines(load_book()))  # fmt: skip
+    marks = mark_lines(load_book(), style_lines(load_face_table()))
+    persona = persona_text(read_text(config_file(b.persona_file)), b.first_sentence_words, marks)
     brain: Brain
     if b.provider == "openai":
         from pepin.voice_cascade.chat_brain import ChatBrain

@@ -36,7 +36,7 @@ from ros_stubs import (  # noqa: E402
     Time,
 )
 
-from pepin.gaze import PERSON, Aim, HeldLook, Look, Outcome  # noqa: E402
+from pepin.gaze import IDLE, PERSON, Aim, HeldLook, Look, Outcome, Reach  # noqa: E402
 from pepin.neck import NeckConfig  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
@@ -73,10 +73,18 @@ class FakeTf:
 
 
 class FaceSink:
-    """The head server's door as the stall look's face speaks to it."""
+    """The head server's door as the stall look's face and the eyes' gaze speak to it."""
 
     def __init__(self) -> None:
         self.said: list[tuple[str, ...]] = []
+        self.gazes: list[tuple[float, float, bool]] = []
+        self.releases = 0
+
+    def gaze(self, x: float, y: float, *, tracking: bool = False) -> None:
+        self.gazes.append((x, y, tracking))
+
+    def eyes_release(self) -> None:
+        self.releases += 1
 
     def event(self, name: str, *, end: bool = False) -> None:
         self.said.append(("event", name))
@@ -246,7 +254,7 @@ def test_the_topics_the_service_and_the_flags(node: Gaze) -> None:
     } <= set(node.subs)
     # on by default since 2026-10-06 (24 drives with them live)
     assert node._switches.on("stall_look") and node._switches.on("path_gaze")
-    assert node._switches.on("reverse_gaze")
+    assert node._switches.on("reverse_gaze") and node._switches.on("eye_gaze")
     assert int(node._switches["frames"]) == 3
     line = next(t for t in node.logger.texts("info") if t.startswith("gaze up:"))
     assert "stall_look=on" in line
@@ -510,6 +518,47 @@ def test_the_report_line(node: Gaze) -> None:
     line = node.logger.texts("info")[-1]
     assert line.startswith("gaze: driver neck_goto (base server connected), phase home")
     assert "stall looks: none" in line and "flags: stall_look=on" in line
+
+
+# ---- the eyes' gaze -----------------------------------------------------------------------------
+def test_the_eyes_gaze_is_the_target_over_the_reach_on_its_side() -> None:
+    home = Aim(0.0, 0.4)
+    reach = Reach(pan=(-2.0, 1.0), tilt=(-0.6, 1.4))  # 2 rad right, 1 left; 1 up, 1 down of home
+    assert gaze_node.eye_gaze(home, home, reach) == (0.0, 0.0)
+    # the pan is + to the robot's left, the eyes' x + to its right; the tilt + below level
+    assert gaze_node.eye_gaze(Aim(0.5, -0.1), home, reach) == pytest.approx((-0.5, 0.5))
+    assert gaze_node.eye_gaze(Aim(-0.5, 0.9), home, reach) == pytest.approx((0.25, -0.5))
+    assert gaze_node.eye_gaze(Aim(3.0, 3.0), home, reach) == (-1.0, -1.0)  # clamped
+
+
+def test_the_tracking_source_is_the_speaker_gazes() -> None:
+    from pepin.expression.head import SPEAKER
+
+    assert gaze_node.TRACKING_SOURCES == (SPEAKER,)
+
+
+def test_the_eyes_follow_where_the_head_is_sent_and_let_go_when_off(node: Gaze) -> None:
+    face = node._head_door
+    assert isinstance(face, FaceSink)
+    node._step()
+    assert face.gazes == [(0.0, 0.0, False)]  # home
+    node._step()
+    assert len(face.gazes) == 1  # nothing changed: nothing sent
+    state_line(node, pan_ticks=2029, tilt_ticks=2311)  # a base server that takes neck_target
+    target = Aim(0.5, 0.2)
+    node._arbiter.submit(Look("voice.speaker", (target,), IDLE, 0, 0.0, 5.0), node._now())
+    node._eye_link._at -= 1.0  # type: ignore[union-attr]  # the 10 Hz slot is open
+    node._step()
+    x, y = gaze_node.eye_gaze(target, node._arbiter.home, node._reach)
+    assert x < -0.1 and y > 0.1  # left of the nose (the eyes' x is + to the right), above home
+    assert face.gazes[-1] == (pytest.approx(x), pytest.approx(y), True)  # on the person
+    node._report()
+    assert "eye gaze 2 sends; flags:" in node.logger.texts("info")[-1]
+    node._switches.set("eye_gaze", False)
+    node._step()
+    node._step()
+    assert face.releases == 1 and len(face.gazes) == 2
+    assert "eye_gaze=off" in node._switches.state()
 
 
 # ---- following, glances, the slow way home, the looks' frames (gaze_replay: drive 306) ----------

@@ -12,6 +12,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+from pepin.face import EYE_SETS
 from pepin.head_link import (
     IMU,
     PING,
@@ -61,6 +62,10 @@ class FakeHead:
         self._queue: list[tuple[float, bytes]] = []  # (host time it can be read, bytes)
         self.config_id = 0
         self.expression = 0
+        self.version = 4  # firmware 3 drops a 'C' with the eyes' brightness
+        self.eyes_brightness = 64
+        self.eye_sets = True  # False: a firmware 4 built before the sets, dropping a 'C' of 10
+        self.eye_set_choice = 0  # the 'C' config's eye-set byte: 0 follow the style
 
     def esp_us(self, host_s: float) -> int:
         """The ESP32's micros (wrapped) at host time ``host_s``."""
@@ -92,7 +97,13 @@ class FakeHead:
                 )
                 self._queue.append((receipt + self.wire_s(pong) + self.transit_s, pong))
             elif kind == ord("C"):
+                if len(payload) > (8 if self.version < 4 else 10 if self.eye_sets else 9):
+                    continue  # firmware 3 takes 7 or 8 bytes, a 4 without the sets up to 9
                 self.config_id = payload[0]
+                if len(payload) > 8:
+                    self.eyes_brightness = payload[8]
+                if len(payload) > 9:
+                    self.eye_set_choice = payload[9]
             elif kind == ord("E"):
                 self.expression = payload[0]
 
@@ -118,8 +129,15 @@ class FakeHead:
         self._queue.append((ready, frame))
         return samples
 
+    @property
+    def eye_set(self) -> str:
+        """The look set in force: the one the 'C' named, else classic (the fake's every style
+        follows it)."""
+        return EYE_SETS[self.eye_set_choice - 1] if self.eye_set_choice else EYE_SETS[0]
+
     def status(self, **fields: Any) -> None:
-        """An 'S' frame, readable a transit from now."""
+        """An 'S' frame, readable a transit from now: firmware 4's carries the eyes' fields, and
+        the set in force when it has the sets (``fields`` over them)."""
         now = self.clock()
         base = dict(
             esp_us=self.esp_us(now) & 0xFFFFFFFF,
@@ -134,10 +152,13 @@ class FakeHead:
             imu_state="interrupt",
             who_am_i=0x72,
             config_id=self.config_id,
-            version=1,
+            version=self.version,
             free_heap_kb=150,
             gaps=0,
         )
+        if self.version >= 4:
+            base.update(eyes_ma=0, eyes_brightness=self.eyes_brightness, eyes_mode="expression",
+                        eye_layout=0, eye_set=self.eye_set if self.eye_sets else None)  # fmt: skip
         base.update(fields)
         frame = encode_frame(STATUS, encode_status(HeadStatus(**base)))
         self._queue.append((now + self.transit_s, frame))

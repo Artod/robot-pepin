@@ -33,7 +33,14 @@ from pepin.expression.fakes import (
     FakeExecutor,
     FakePlayout,
 )
-from pepin.expression.listeners import MUSIC, SOUND_ENDED, TOLD_LATE, WEAK_PARTS, MusicPulse
+from pepin.expression.listeners import (
+    BEAT_PARTS,
+    MUSIC,
+    SOUND_ENDED,
+    TOLD_LATE,
+    WEAK_PARTS,
+    MusicPulse,
+)
 from pepin.expression.markers import Mark, Marker, Part, read_mark
 from pepin.expression.parts import ArmPart, Planned
 from pepin.expression.render import BookRenderer
@@ -428,7 +435,7 @@ def test_a_beat_told_nearer_than_lead_min_s_is_sat_out_by_every_part() -> None:
     r.pulse.beat(r.clock.now + 1.0, 1.0)
     told = r.beats()
     assert told[0]["parts"] == [] and set(told[0]["skipped"].values()) == {TOLD_LATE}
-    assert told[1]["parts"] and r.pulse.counts[TOLD_LATE] == len(PARTS)
+    assert told[1]["parts"] and r.pulse.counts[TOLD_LATE] == len(BEAT_PARTS)
 
 
 def test_the_arm_at_rest_rises_for_rock_only_with_the_lead_that_covers_its_raise() -> None:
@@ -507,6 +514,7 @@ def test_a_bare_dance_mark_takes_the_style_of_the_sound_playing_else_the_book_s_
     words = vocabulary(book, face_names(CONFIG / "face.json"))
     assert read_mark("dance:sway", words) == Mark("gesture", DANCE, "sway")
     assert read_mark("dance:rock", WORDS) == Mark("gesture", DANCE, "rock")
+    assert read_mark("dance", WORDS) == Mark("gesture", DANCE)  # the book's bare: the parser too
 
 
 def test_the_sound_mark_parses_and_the_engine_logs_no_player_yet() -> None:
@@ -572,7 +580,7 @@ def test_every_dance_variant_is_one_beat_s_step_on_its_style_within_the_arm_s_ca
 
 def test_the_vocabulary_lists_the_dance_s_styles_and_the_reserved_sound_last() -> None:
     lines = mark_lines(BOOK)
-    assert "dance:rock — a dance step on the beat" in lines
+    assert "dance[:rock] — a dance step on the beat" in lines
     assert lines[-1] == SOUND_LINE == "sound:NAME — a registered sound by name"
     assert WORDS.args[SOUND] == ("*",) and WORDS.args[DANCE] == DANCE_STYLES
 

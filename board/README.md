@@ -39,7 +39,7 @@ hour) and loaded here with `ros/build-image.sh --ship`, which also installs
 | 3335 | `pepin.tof_server` | `pepin-tof.service` | JSON lines with the three VL53L1X ranges at 15 Hz; needs `tof-init.service` first |
 | 3336 | `pepin.base_server` | `pepin-base.service` | owns the wheels: reads the encoders and applies twists at 50 Hz over loopback to :3333, deadman 0.5 s, a state line every tick; the neck commands (below) |
 | 3338 | `pepin.audio_server` | `pepin-audio.service` | the microphone array: its voice as 20 ms PCM frames, the voice direction at 10 Hz, with the 6-channel firmware the four raw microphones as `raw` frames beside (`config/audio.json` `raw_mics`), the laptop's speech out through its jack, `status`; the speech's loudness to the head's mouth (lip sync, on by default; `--no-lipsync` off) |
-| 3340 | `pepin.head_server` | `pepin-head.service` | the head ESP32 on `/dev/pepin-head`: the mouth's expressions, speech levels and info screens; the head IMU's samples on the board's clock to subscribers (the base bridge); the brain lease (see "The head" below) |
+| 3340 | `pepin.head_server` | `pepin-head.service` | the head ESP32 on `/dev/pepin-head`: the mouth's expressions, speech levels and info screens, the eyes' overrides, blinks and gaze; the head IMU's samples on the board's clock to subscribers (the base bridge); the brain lease (see "The head" below) |
 | 8080 | ustreamer | `pepin-camera.service` | the head camera as MJPEG and `/snapshot`; which camera is `/etc/default/pepin-camera`, its exposure the active rig's `exposure` block of `config/camera.json`, set before ustreamer starts (`pepin.camera_controls`; `ros/exposure.sh` shows and tries the modes live) |
 
 The lidar belongs to the ROS container; its ser2net port (3334) stays commented out in
@@ -132,7 +132,7 @@ lock, USB FIFO) before and after: `journalctl -u pepin-audio | grep -E "ARRAY|ar
 ## The head
 
 An ESP32 board with a 1.9" screen sits under the stereo camera: the screen is the robot's mouth,
-and an MPU6050 glued to the camera body is the head IMU ([firmware/head_esp32](../firmware/head_esp32/README.md):
+two LED rings round each lens are its eyes, and an MPU6050 glued to the camera body is the head IMU ([firmware/head_esp32](../firmware/head_esp32/README.md):
 wiring, flashing, the protocol). It hangs on the expansion board's free USB port (its own bus,
 beside the WiFi dongle's); udev names its CH340 `/dev/pepin-head`, and `pepin.head_server` is the
 only thing that opens it. Install from the laptop (the ESP32 flashed first, on the laptop):
@@ -150,12 +150,35 @@ uv run python -m pepin.head_link status       # link up, the face's fps, the IMU
 | `{"cmd":"express","source":"voice","name":"thinking","hold_s":null}` | the source's expression (config/face.json's names); `hold_s` null stands until replaced, a number lapses back to what stood before |
 | `{"cmd":"event","source":"goal","name":"arrived","end":true}` | a robot event from config/face.json's table; `end` first clears what the source held |
 | `{"cmd":"clear","source":"voice"}` | the source shows nothing any more |
+| `{"cmd":"style","source":"llm","name":"manga","ms":4000}` | the source's drawing style for the mouth (config/face.json's `styles`, an unknown one refused with them); `ms` null stands until replaced, a number lapses back to the newest standing one, else to the base; one standing and one timed a source, the newest draws; sent in the 'C' only on a change, the IMU's config and id as they stand (the firmware leaves the head IMU running; one built before 2026-10-15 reset it, 100 ms without samples, on every 'C'); `name` null lets the source's styles go |
+| `{"cmd":"style_release","source":"llm"}` | the source asks for no style any more |
 | `{"cmd":"mouth","level":0.4}` | the speech level, 0..1, straight to the ESP32 (the audio server's lip sync) |
 | `{"cmd":"show","text":"Temps\|left: 41/70 C","seconds":8}` | an info screen (`items` for the structured form) |
 | `{"cmd":"lease","name":"goal_server","seconds":6}` | a laptop process is here; once a lease was taken and all have lapsed, the face falls asleep |
-| `{"cmd":"config","imu_rate_hz":500,"dlpf":3,"accel_fs":1,"gyro_fs":1,"brightness":120}` | the head IMU's sampling and the screen's brightness, until a restart (`config/head.json` for good) |
-| `{"cmd":"subscribe","imu":true}` | this client gets `{"type":"imu_config","cfg":1,"rate_hz":200,"dlpf":3,"gyro_fs_dps":500,"accel_fs_g":4,"filter_delay_s":0.0048}` first (and on every config change), then one line per serial frame (every 20 ms): `{"type":"imu","cfg":1,"samples":[[t_mono_s, esp_us, gx, gy, gz, ax, ay, az], ...]}`, `t_mono_s` the sample's data-ready edge on the board's `time.monotonic` (the filter delay NOT taken off), `esp_us` the ESP32's micros unwrapped, rad/s and m/s^2 in the chip's axes |
-| `{"cmd":"status"}` | the link, the ESP32's own status (fps, IMU rate and mode, I2C errors, drops), the clock map (offset, ppm, smallest ping round trip), what shows and who asked; also broadcast once a second |
+| `{"cmd":"config","imu_rate_hz":500,"dlpf":3,"accel_fs":1,"gyro_fs":1,"brightness":120,"eyes_brightness":64}` | the head IMU's sampling, the screen's brightness and the eyes' (0: off), until a restart (`config/head.json`, `config/face.json` `eyes.power.brightness` for good); `"style":"rose"` the base style, under every source's (`config/face.json` `style` for good); `"eye_set":"kawaii"` the eyes' look set, `follow` (the face style's), `classic` or `kawaii`, an unknown one refused with them (`config/face.json` `eyes.eye_set` for good); only a rate, DLPF or range change takes a new IMU config id (the firmware sets the head IMU up again), a style, an eye set or a brightness alone keeps it and the IMU runs on; a refused value applies nothing |
+| `{"cmd":"eyes","source":"llm","brow_raise":-0.6,"lid_top":0.5,"side":"both","ms":1500}` | the source's eyes override, any of `brow_pos`, `brow_raise`, `brow_width`, `lid_top`, `lid_bottom`, `gaze_x`, `gaze_y`, `glow` (config/face.json's eye parameters and units) and `iris` (`#RRGGBB`); `ms` null stands until replaced, a number lapses back |
+| `{"cmd":"eyes_release","source":"llm"}` | the source overrides the eyes no more (its effect ends too) |
+| `{"cmd":"eyes_effect","source":"llm","name":"spin","ms":2000}` | the source's effect on the inner rings (`sparkle`, `flash`, `spin`, `pulse`, `flicker`, `doze`, `tear`: config/face.json `eyes.effects`); `ms` null stands until replaced (a one-shot, sparkle or flash, holds its own length), a number lapses back; `name` null ends it |
+| `{"cmd":"blink"}`, `{"cmd":"wink","side":"left"}` | one blink of both eyes, or a wink of the robot's own left or right eye, at once |
+| `{"cmd":"gaze","x":-0.3,"y":0.1,"tracking":false}` | where the head is sent as the eyes' gaze (-1..1, x + to the robot's right, y + up; the gaze node, flag `eye_gaze`); under every other override; `tracking` (the head on a person) centres the eyes on them |
+| `{"cmd":"subscribe","imu":true}` | this client gets `{"type":"imu_config","cfg":1,"rate_hz":200,"dlpf":3,"gyro_fs_dps":500,"accel_fs_g":4,"filter_delay_s":0.0048}` first (and whenever the IMU's sampling changes), then one line per serial frame (every 20 ms): `{"type":"imu","cfg":1,"samples":[[t_mono_s, esp_us, gx, gy, gz, ax, ay, az], ...]}`, `t_mono_s` the sample's data-ready edge on the board's `time.monotonic` (the filter delay NOT taken off), `esp_us` the ESP32's micros unwrapped, rad/s and m/s^2 in the chip's axes |
+| `{"cmd":"status"}` | the link, the ESP32's own status (firmware, fps, IMU rate and mode, I2C errors, drops; with firmware 4 the eyes' current, brightness, mode and layout id, and from the build of 2026-10-15 the look set in force, `eye_set`), the clock map (offset, ppm, smallest ping round trip), what shows and who asked, the style that draws and who asked (`style`, `style_by`: null the base, `style_sources`), the eyes' override and who holds it, the eye-set setting and the set the head shows (`eyes.set`, `eyes.set_shown`: null from a firmware without the sets); also broadcast once a second |
+
+The eyes, two LED rings round each lens on the same ESP32, show the expression's own look (an
+`express` or an `event` sets it with the mouth's). An override changes some of it: every source
+holds at most one standing and one timed eyes override, each field of each eye shows the newest
+override that sets it, the gaze node's `gaze` lies under every other source's, and a timed one
+lapses back to what stood before it; the inner rings' effect is arbitrated the same way beside
+the look; the server sends the ESP32 the whole override ('Y') only when it changed, the effect
+in its 19-byte form. While the face sleeps for a lost brain no override is shown (the sleepy look's
+own eyes); they come back with a lease. The eyes' brightness rides the 'C' config as its ninth
+byte, sent only to a firmware that reports version 4 (version 3 drops a 'C' of that length), and
+their look set (`config/face.json` `eyes.eye_set`: follow the face style, classic or kawaii) as
+its tenth, sent only to a firmware whose status carries the set in force (a version 4 built
+before 2026-10-15 drops a 'C' of ten bytes; its first status gets one of nine).
+By hand: `uv run python -m pepin.head_link eyes brow=-0.6 lid=0.5 ms=1500`, `eyes release`,
+`blink`, `wink left`, `gaze -0.4`, `eyes brightness 90`, `eyes set kawaii`, `eyes effect spin 2000`,
+`eyes effect none`.
 
 The clock map: every pong and every IMU frame gives (the moment its frame was read here on
 CLOCK_MONOTONIC_RAW, the ESP32's micros in it), less what is known of its way (the frame's own

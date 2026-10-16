@@ -15,6 +15,7 @@
   const px = new Uint16Array(F.W * F.H);
   const model = new F.FaceModel();
   const anime = new Anime.AnimeModel();  // the shape engine, following the model in a shapes style
+  const eyes = new Eyes.EyeModel();      // the rings, following the model and the 'Y' panel
 
   // -- the head server's arbiter: each source one standing and one timed request, newest wins
   class Arbiter {
@@ -183,6 +184,7 @@
       F.toRGBA(px, image.data);
       ctx.putImageData(image, 0, 0);
     }
+    eyesTick(t);
     frames += 1;
     if (t - fpsAt >= 1000) {
       $("st-fps").textContent = String(frames);
@@ -400,6 +402,182 @@
     try { await navigator.clipboard.writeText(text); $("copied").textContent = "copied"; }
     catch (_) { $("copied").textContent = text; }
   };
+
+  // -- the eyes ------------------------------------------------------------------------------
+  const ET = Eyes.T;
+  const eyeScale = 3;  // px per mm
+  let geo = Eyes.geometry(eyeScale);
+  const headCanvas = $("eyes"), rawCanvas = $("eyes-raw");
+  const headCtx = headCanvas.getContext("2d"), rawCtx = rawCanvas.getContext("2d");
+  let headImage = headCtx.createImageData(geo.w, geo.h);
+  let rawImage = rawCtx.createImageData(geo.w, geo.h);
+  const EYE_MODES = ["expression", "override standing", "override timed", "self-test"];
+  let paintMs = 0;
+  $("st-eyes-layout").textContent = `0x${ET.layout_id.toString(16).padStart(2, "0")}`;
+
+  function markChain(ctx) {  // the first LED of each ring ringed, an arrow the chain's way
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 1.5;
+    for (const r of chainRings()) {
+      const p = geo.pos[r.first], q = geo.pos[r.first + 1];
+      ctx.beginPath(); ctx.arc(p.x, p.y, ET.layout.led_mm * eyeScale + 2.5, 0, 2 * Math.PI); ctx.stroke();
+      const dx = q.x - p.x, dy = q.y - p.y, n = Math.hypot(dx, dy) || 1;
+      const ax = p.x + (dx / n) * 10, ay = p.y + (dy / n) * 10;
+      ctx.beginPath(); ctx.moveTo(p.x + (dx / n) * 5, p.y + (dy / n) * 5); ctx.lineTo(ax, ay); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(ax, ay);
+      ctx.lineTo(ax - (dx / n) * 4 - (dy / n) * 3, ay - (dy / n) * 4 + (dx / n) * 3);
+      ctx.moveTo(ax, ay);
+      ctx.lineTo(ax - (dx / n) * 4 + (dy / n) * 3, ay - (dy / n) * 4 - (dx / n) * 3); ctx.stroke();
+    }
+    ctx.fillStyle = "#8495a5"; ctx.font = "11px sans-serif"; ctx.textAlign = "center";
+    ctx.fillText("R", geo.centres[1].x, geo.h - 4);
+    ctx.fillText("L", geo.centres[0].x, geo.h - 4);
+  }
+
+  function eyesTick(t) {
+    eyes.follow(model, t);
+    const t0 = now();
+    const rgb = eyes.frame.rgb;
+    if ($("eyes-film").checked) Eyes.paintFilm(rgb, headImage.data, geo);
+    else Eyes.paintRaw(rgb, headImage.data, geo);
+    headCtx.putImageData(headImage, 0, 0);
+    Eyes.paintRaw(rgb, rawImage.data, geo);
+    rawCtx.putImageData(rawImage, 0, 0);
+    markChain(rawCtx);
+    paintMs = 0.9 * paintMs + 0.1 * (now() - t0);
+    $("st-eyes-ma").textContent = String(eyes.frame.milliamps);
+    $("st-eyes-b").textContent = String(eyes.brightness);
+    $("st-eyes-mode").textContent = EYE_MODES[eyes.mode()];
+    $("st-eyes-fx").textContent = ET.effects[eyes.effect];
+    $("st-eyes-set").textContent = ET.sets[eyes.set].name;
+    $("st-eyes-ms").textContent = paintMs.toFixed(2);
+  }
+
+  $("eyes-brightness").oninput = () => {  // the 'C' config's ninth byte
+    eyes.setBrightness(Number($("eyes-brightness").value));
+    $("eyes-brightness-v").textContent = $("eyes-brightness").value;
+  };
+  $("eyes-selftest").onclick = () => eyes.selfTest(now());
+  $("eyes-set").onchange = () => eyes.setSet(Number($("eyes-set").value));  // the 'C' config's tenth byte
+
+  // -- the layout: four chain positions, each a ring, its first LED's angle and its winding
+  const ringNames = ET.sides.flatMap((s) => ET.ring_kinds.map((k) => `${s} ${k}`));
+  const ringRows = [];
+  ET.rings.forEach((r, k) => {
+    const row = document.createElement("div");
+    row.className = "ring";
+    const pos = document.createElement("span");
+    pos.textContent = `chain ${k}`;
+    const which = document.createElement("select");
+    ringNames.forEach((name, i) => {
+      const o = document.createElement("option");
+      o.value = String(i); o.textContent = name; o.selected = i === r.eye * ET.ring_kinds.length + r.kind;
+      which.appendChild(o);
+    });
+    const deg = document.createElement("input");
+    Object.assign(deg, { type: "range", min: 0, max: 359, step: 1, value: r.first_deg });
+    const out = document.createElement("output");
+    out.textContent = `${r.first_deg} deg`;
+    const cw = document.createElement("label");
+    const cwBox = document.createElement("input");
+    cwBox.type = "checkbox"; cwBox.checked = r.clockwise;
+    cw.append(cwBox, "clockwise");
+    row.append(pos, which, deg, out, cw);
+    $("rings").appendChild(row);
+    ringRows.push({ which, deg, out, cwBox });
+    which.onchange = deg.oninput = cwBox.onchange = relayout;
+  });
+  function chainRings() {
+    let first = 0;
+    return ringRows.map((r) => {
+      const i = Number(r.which.value);
+      const eye = Math.floor(i / ET.ring_kinds.length), kind = i % ET.ring_kinds.length;
+      const n = ET.rings.find((x) => x.kind === kind).n;
+      const ring = { eye, kind, n, first, first_deg: Number(r.deg.value), clockwise: r.cwBox.checked };
+      first += n;
+      return ring;
+    });
+  }
+  function relayout() {
+    ringRows.forEach((r) => { r.out.textContent = `${r.deg.value} deg`; });
+    Eyes.relayout(chainRings());
+    geo = Eyes.geometry(eyeScale);
+  }
+  $("layout-copy").onclick = async () => {
+    const rings = chainRings().map((r) => ({
+      eye: ET.sides[r.eye], ring: ET.ring_kinds[r.kind], first_deg: r.first_deg, clockwise: r.clockwise,
+    }));
+    const text = JSON.stringify(rings);
+    try { await navigator.clipboard.writeText(text); $("layout-copied").textContent = "copied"; }
+    catch (_) { $("layout-copied").textContent = text; }
+  };
+
+  // -- the 'Y' panel: the frame's fields, built as the head server would and decoded as the
+  // firmware does
+  const Y_FIELDS = [  // name, byte, signed
+    ["brow_pos", 3, true], ["brow_raise", 4, true], ["brow_width", 5, false], ["lid_top", 6, false],
+    ["lid_bottom", 7, false], ["gaze_x", 8, true], ["gaze_y", 9, true], ["glow", 13, false],
+  ];
+  const yRows = {};
+  for (const [name, , signed] of Y_FIELDS) {
+    const row = document.createElement("div");
+    row.className = "yfield";
+    const label = document.createElement("span");
+    label.textContent = name;
+    const keep = document.createElement("label");
+    const keepBox = document.createElement("input");
+    keepBox.type = "checkbox"; keepBox.checked = true;
+    keep.append(keepBox, "keep");
+    const input = document.createElement("input");
+    Object.assign(input, { type: "range", min: signed ? -100 : 0, max: signed ? 100 : 254, step: 1, value: 0 });
+    const out = document.createElement("output");
+    out.textContent = "0";
+    input.oninput = () => { out.textContent = input.value; keepBox.checked = false; };
+    row.append(label, keep, input, out);
+    $("y-fields").appendChild(row);
+    yRows[name] = { keepBox, input };
+  }
+  ["keep", ...ET.effects].forEach((name, i) => {  // the effect byte: 0xFF keeps, else an id
+    const o = document.createElement("option");
+    o.value = i === 0 ? "255" : String(i - 1);
+    o.textContent = i === 0 ? "(keep)" : name;
+    $("y-effect").appendChild(o);
+  });
+  function yPayload(blink, modeOverride) {
+    const effect = Number($("y-effect").value);
+    const p = new Uint8Array(effect === 255 ? Eyes.OVERRIDE_BYTES : Eyes.OVERRIDE_BYTES_EFFECT);
+    const mode = modeOverride !== undefined ? modeOverride : Number($("y-mode").value);
+    const ms = Math.min(65535, Math.max(0, Number($("y-ms").value) || 0));
+    p[0] = mode; p[1] = ms & 255; p[2] = ms >> 8;
+    for (const [name, at, signed] of Y_FIELDS) {
+      const r = yRows[name];
+      if (r.keepBox.checked) { p[at] = signed ? Eyes.KEEP_I8 : Eyes.KEEP_U8; continue; }
+      const v = Number(r.input.value);
+      p[at] = signed ? (v & 255) : v;
+    }
+    if (!$("y-iris-keep").checked) {
+      const c = parseInt($("y-iris").value.slice(1), 16);
+      p[10] = (c >> 16) & 255; p[11] = (c >> 8) & 255; p[12] = c & 255;
+    }
+    p[14] = blink;
+    p[15] = Number($("y-side").value);
+    if (effect !== 255) {
+      const fxMs = Math.min(65535, Math.max(0, Number($("y-effect-ms").value) || 0));
+      p[16] = effect; p[17] = fxMs & 255; p[18] = fxMs >> 8;
+    }
+    return p;
+  }
+  function sendY(blink, mode) {
+    if (!hostConnected) return;
+    const p = yPayload(blink, mode);
+    $("y-hex").textContent = Array.from(p, (v) => v.toString(16).padStart(2, "0")).join(" ");
+    eyes.setOverride(Eyes.decodeOverride(p), now());
+  }
+  $("y-send").onclick = () => sendY(0);
+  $("y-blink").onclick = () => sendY(1);
+  $("y-wink-l").onclick = () => sendY(2);
+  $("y-wink-r").onclick = () => sendY(3);
+  $("y-release").onclick = () => sendY(0, 0);
+  $("y-iris").oninput = () => { $("y-iris-keep").checked = false; };
 
   requestAnimationFrame(frame);
 })();

@@ -9,7 +9,13 @@
   plan (:class:`Planned`) says when the stroke lands: the approach plus the stretched stroke. A
   clip outside the limits is refused here with the reason, never clamped (the board would
   refuse it too). Fading the gesture layer is ``arm_rest``. B owns the arm's units here.
-* :class:`FacePart`: a clip's events as timed expressions of the head server's face.
+* :class:`FacePart`: a clip's events as timed expressions of the head server's face, and its
+  drawing style (timed, or standing; a fade leaves it).
+* :class:`EyesPart`: a clip's look as timed eyes overrides of the head server (the eye fields'
+  tracks and the iris events, one override at each change of them, each lapsing at the clip's
+  end), its blinks, winks and releases at their times, its effects for their hold
+  (:func:`eye_calls`); fading a layer lets the eyes go (``eyes_release``: the look and the
+  effect). The firmware blinks by itself: the book's idle layer names no eye atom by default.
 * :class:`HeadPart`: a clip's keyframes as a relative ``clip`` overlay of the gaze arbiter
   (:mod:`pepin.expression.head`, :func:`clip_look`) on top of whatever holds the head (the
   speaker gaze's look on the person, or home), posted through the arbiter's door
@@ -28,13 +34,14 @@ import threading
 import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from functools import partial
+from typing import Any, Protocol
 
 from pepin.arm_driver import ARRIVED_DEG, WIRE_SLACK
 from pepin.arm_motion import ArmMotion
-from pepin.expression.animation import Clip, Layer, PartName, Track
+from pepin.expression.animation import FACE_STYLE, STYLE_DEFAULT, Clip, Layer, PartName, Track
 from pepin.expression.breath import ArmBreath
-from pepin.expression.executors import FaceChannel, Outcome
+from pepin.expression.executors import EyesChannel, FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
 from pepin.expression.mix import (
     PREP_CAPS,
@@ -49,6 +56,7 @@ from pepin.expression.mix import (
     track_value,
 )
 from pepin.expression.trajectory import JOINTS, ArmLink, Knot, Trajectory
+from pepin.head_link import EYE_RANGES
 from pepin.neck import ACC_UNIT_DEG_S2, NeckMotion
 
 logger = logging.getLogger(__name__)
@@ -364,7 +372,10 @@ def refused(
 
 class FacePart:
     """The face through the head server (source ``expression``): each event of a clip is an
-    expression held for its ``hold_s``, then the face lapses to what stood before it."""
+    expression held for its ``hold_s``, then the face lapses to what stood before it, or a
+    drawing style (``style``: for its ``hold_s``, standing without one; :data:`STYLE_DEFAULT`
+    lets the style go). A fade withdraws the expression and leaves the style: a standing one
+    stands, a timed one lapses on the head server."""
 
     part: PartName = "face"
 
@@ -398,11 +409,15 @@ class FacePart:
         """Each event at its time from now."""
         self._cancel()
         for event in clip.events:
-            hold = event.hold_s if event.hold_s is not None else self.hold_s
-
-            def show(name: str = event.name, hold: float = hold) -> None:
-                self.face.express(name, intensity=self.intensity, hold_s=hold)
-
+            show: Callable[[], None]
+            if event.dof == FACE_STYLE:
+                name = None if event.name == STYLE_DEFAULT else event.name
+                ms = None if event.hold_s is None else round(event.hold_s * 1000.0)
+                show = partial(self.face.style, name, ms)
+            else:
+                hold = event.hold_s if event.hold_s is not None else self.hold_s
+                show = partial(self.face.express, event.name, intensity=self.intensity,
+                               hold_s=hold)  # fmt: skip
             if event.t_s <= 0.0:
                 show()
             else:
@@ -424,6 +439,125 @@ class FacePart:
         for cancel in self._pending:
             cancel()
         self._pending = []
+
+
+# A look's override outlives its segment by this when another follows it, so the next one
+# replaces it before it lapses (a timer's jitter and the WiFi hop never show the bare look between)
+EYE_OVERLAP_S = 0.25
+EPS_S = 1e-6
+
+
+class EyesPart:
+    """The eyes through the head server (source ``expression``, :class:`EyesChannel`): a clip's
+    calls (:func:`eye_calls`) each at its time from now; fading a layer lets the eyes go."""
+
+    part: PartName = "eyes"
+
+    def __init__(
+        self,
+        channel: EyesChannel,
+        *,
+        latency_s: float = 0.05,
+        after: Callable[[float, Callable[[], None]], Callable[[], None]] | None = None,
+    ) -> None:
+        """``after(seconds, fn)`` runs ``fn`` later and returns its cancel (a timer thread by
+        default)."""
+        self.channel = channel
+        self._latency_s = latency_s
+        self.after = after or _timer
+        self._pending: list[Callable[[], None]] = []
+
+    @property
+    def latency_s(self) -> float:
+        """The head server's hop (the firmware tweens an override over 160 ms after it)."""
+        return self._latency_s
+
+    def ready(self) -> str | None:
+        """The eyes are always there (a line that does not arrive costs nothing)."""
+        return None
+
+    def play(self, clip: Clip) -> Outcome:
+        """Each call at its time from now."""
+        self._cancel()
+        for t, call in eye_calls(clip, self.channel):
+            if t <= 0.0:
+                call()
+            else:
+                self._pending.append(self.after(t, call))
+        return Outcome(True, seconds=clip.duration_s)
+
+    def fade(self, layer: Layer, seconds: float) -> None:
+        """Nothing more to come, and the eyes let go: the look and the effect."""
+        self._cancel()
+        self.channel.eyes_release()
+
+    def rest(self) -> None:
+        """As a fade."""
+        self.fade("gesture", 0.0)
+
+    def _cancel(self) -> None:
+        for cancel in self._pending:
+            cancel()
+        self._pending = []
+
+
+def eye_calls(clip: Clip, channel: EyesChannel) -> list[tuple[float, Callable[[], None]]]:
+    """An eyes clip as the head server's calls, each at its time (seconds from the clip's
+    start), in order. THE LOOK: at each change of it (a track of an eye field starts or ends, an
+    iris event begins or its hold ends) one override of every field that holds then (a track
+    from its first key to its last, a one-key track to the clip's end, each at its value there;
+    the iris until its hold ends, else to the clip's end), timed to the next change (and
+    :data:`EYE_OVERLAP_S` more when another override follows), the last to the clip's end; a
+    change to nothing sends nothing (the one before lapses there). THE MOMENTS: a ``blink`` key
+    is a blink of both eyes, a ``wink`` key a wink of the robot's left eye for a value above 0
+    and of its right otherwise, a ``release`` key the eyes let go. THE EFFECTS: an ``effect``
+    event for its hold, else to the clip's end."""
+    end = clip.duration_s
+    looks = [tr for tr in clip.tracks if tr.dof in EYE_RANGES]
+    irises = [e for e in clip.events if e.dof == "iris"]
+
+    def until(t_s: float, hold_s: float | None) -> float:
+        return end if hold_s is None else min(end, t_s + hold_s)
+
+    def span(track: Track) -> tuple[float, float]:
+        return track.times[0], track.times[-1] if len(track.times) > 1 else end
+
+    def look_at(t: float) -> dict[str, Any]:
+        fields: dict[str, Any] = {}
+        for track in looks:  # a later step's track of the same field wins (merged in order)
+            lo, hi = span(track)
+            if lo - EPS_S <= t < hi - EPS_S:
+                fields[track.dof] = round(track_value(track, t), 3)
+        shown = [e for e in irises if e.t_s - EPS_S <= t < until(e.t_s, e.hold_s) - EPS_S]
+        if shown:
+            fields["iris"] = shown[-1].name
+        return fields
+
+    edges = {t for track in looks for t in track.times} | {
+        x for e in irises for x in (e.t_s, until(e.t_s, e.hold_s))
+    }
+    changes = [(t, look_at(t)) for t in sorted(edges) if t < end - EPS_S]
+    calls: list[tuple[float, Callable[[], None]]] = []
+    for i, (t, fields) in enumerate(changes):
+        if not fields:
+            continue
+        nxt = changes[i + 1] if i + 1 < len(changes) else None
+        stop = end if nxt is None else nxt[0] + (EYE_OVERLAP_S if nxt[1] else 0.0)
+        ms = round((stop - t) * 1000.0)
+        calls.append((t, partial(channel.eyes, ms=ms, **fields)))
+    for track in clip.tracks:
+        for t, value in zip(track.times, track.values, strict=True):
+            if track.dof == "blink":
+                calls.append((t, partial(channel.blink, "both")))
+            elif track.dof == "wink":
+                calls.append((t, partial(channel.blink, "left" if value > 0.0 else "right")))
+            elif track.dof == "release":
+                calls.append((t, channel.eyes_release))
+    for e in clip.events:
+        if e.dof == "effect":
+            ms = round((until(e.t_s, e.hold_s) - e.t_s) * 1000.0)
+            calls.append((e.t_s, partial(channel.eyes_effect, e.name, ms)))
+    return sorted(calls, key=lambda c: c[0])
 
 
 def _timer(seconds: float, fn: Callable[[], None]) -> Callable[[], None]:

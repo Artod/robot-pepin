@@ -571,10 +571,10 @@ class Alive:
 
     def scene(self, scene: Scene, request: Request) -> Scene:
         """What a rendering may use, for all but a person's ask (it plays whole): in a quiet
-        moment the face only."""
+        moment the face (and its eyes) only."""
         if request.priority <= Priority.ASK or self._quiet is None:
             return scene
-        return replace(scene, ready=scene.ready & {"face"}, quiet=True)
+        return replace(scene, ready=scene.ready & {"face", "eyes"}, quiet=True)
 
     # -- the thread ----------------------------------------------------------------------------
 

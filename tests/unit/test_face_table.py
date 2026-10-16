@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,7 @@ from pepin.face import (
     render_script,
     rgb565,
     stale,
+    style_lines,
 )
 
 REPO = Path(__file__).resolve().parents[2]
@@ -201,6 +203,31 @@ def test_every_expression_has_a_brief_for_the_brains_list() -> None:
     assert len(lines) == len(table.expressions)
     assert "face:kiss_heart — blows a kiss, a heart flies" in lines
     assert main(["--lines"]) == 0
+
+
+def test_every_style_has_a_line_for_the_brains_list() -> None:
+    """The brain's list of styles (style_lines): one line a style of the table, its brief, the
+    default named by config/face.json's ``style``; a style without a brief takes its note's
+    first clause; ids that not every style draws are the line's ``adds`` (none today)."""
+    table = load_face_table(FACE)
+    lines = style_lines(table)
+    assert [line.split(" — ")[0] for line in lines] == [f"style:{s.name}" for s in table.styles]
+    assert lines[[s.name for s in table.styles].index(table.style)].endswith(", the default")
+    assert sum(line.endswith(", the default") for line in lines) == 1
+    assert not any("adds:" in line for line in lines)
+    data = raw()
+    del data["styles"]["rose"]["brief"]
+    data["style"] = "rose"
+    plain = parse_face_table(data)
+    line = "style:rose — the pepin shapes as line art on paper, the default"
+    assert style_lines(plain)[1] == line
+    # an expression the last style lacks: every other style adds it
+    last = table.styles[-1].name
+    cat = table.expressions[-1]
+    short = replace(cat, looks=cat.looks[:-1])
+    fewer = replace(table, expressions=(*table.expressions[:-1], short))
+    added = [line for line in style_lines(fewer) if line.endswith(f"; adds: {cat.name}")]
+    assert len(added) == len(table.styles) - 1 and f"style:{last} " not in "".join(added)
 
 
 def test_the_old_faces_keep_their_monochrome_and_the_new_ones_inherit() -> None:

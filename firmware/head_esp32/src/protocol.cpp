@@ -81,6 +81,11 @@ size_t pack_status(const Status& s, uint8_t* out) {
   *p++ = s.version;
   p = put_u16(p, s.free_heap_kb);
   p = put_u32(p, s.gaps);
+  p = put_u16(p, s.eyes_ma);
+  *p++ = s.eyes_brightness;
+  *p++ = s.eyes_mode;
+  *p++ = s.eye_layout;
+  *p++ = s.eye_set;
   return (size_t)(p - out);
 }
 

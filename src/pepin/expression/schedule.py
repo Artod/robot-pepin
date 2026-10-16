@@ -27,8 +27,9 @@ ON THE WORD (a request anchored on a character of a part):
   wheels); else dropped "no time". The arm's preparation is its plan
   (:meth:`pepin.expression.parts.ArmPart.plan`: the board's approach and the stretched stroke); for
   a WORD or PHRASE mark a plan stretched past the caps is a step down, never a silent late stroke. A
-  head or face clip that cannot make it is left out, the rest keeps its time (one composition, many
-  parts: each anchored on the word). The arm and the wheels play together (one body, each part
+  head, face or eyes clip that cannot make it is left out, the rest keeps its time (one
+  composition, many parts: each anchored on the word; the face and the eyes on the mark's own word
+  when the rest slides to a later one). The arm and the wheels play together (one body, each part
   within its own caps); the wheels never bind to a word. A version whose arm or wheels run longer
   than ``short_s`` plays only when the speech after its stroke covers the motion after it, up to
   ``overrun_s`` past it, every composition alike (the fed audio as it is, 0.7 of the forecast of
@@ -56,10 +57,12 @@ ON THE WORD (a request anchored on a character of a part):
   (``text_ahead``) may send the arm to its home pose, held, when it could not reach its stroke
   from rest otherwise: a preparation only, never a stroke.
 
-Reservations are made when a request is placed (render time): a clip is refused a part promised
-to a request that goes first (a higher place in the table, or an equal one placed earlier),
-and displaces the waiting clips of the ones it goes before; the idle layer never books and
-gives way to everything. Per part one request plays at a time (:meth:`Reservations.refusal`).
+Reservations are made when a request is placed (render time): a clip is refused a part promised to a
+request that goes first (a higher place in the table, or an equal one placed earlier), and displaces
+the waiting clips of the ones it goes before; the idle layer never books and gives way to
+everything; a clip that only draws the face in a style neither books nor holds the face (the head
+server arbitrates the style beside the expression). Per part one request plays at a time
+(:meth:`Reservations.refusal`).
 
 A clip anchored on a stream second goes when the stream has played up to that second + its
 offset + ``audio_lag_s`` - its part's latency, at once when that is past by at most ``late_s``
@@ -140,6 +143,7 @@ POSTURE = "arm_up"  # the listeners' posture: the arm held at HOME while a long 
 AHEAD_S = 0.18  # a marker's sentence reaches the voice this long after it streams in (p50)
 PREPARE = "prepare:"  # a preparation's name: the arm sent home ahead of a marker (no stroke)
 SAME_POSE_DEG = 0.5  # a held pose within this of a book's pose on every joint is that pose
+LEADS: tuple[PartName, ...] = ("face", "eyes")  # the parts that lead, on the mark itself
 _WORD = re.compile(r"\w+")
 _VOWEL = re.compile("[аеёиоуыэюяaeiouy]", re.IGNORECASE)  # noqa: RUF001 -- Cyrillic vowels
 _PAUSE = re.compile("[.,!?;:\u2013\u2014\u2026]")  # a pause between two words
@@ -910,7 +914,7 @@ class Scheduler:
         end = self._speech_end(mark.turn, now) if candidate.late else None
         fitted: list[Waiting] = []
         for clip in clips:
-            cue = mark if clip.part == "face" else candidate.cue  # the face leads, on the mark
+            cue = mark if clip.part in LEADS else candidate.cue  # the face and eyes: on the mark
             forecast = self._forecast(cue, now)
             if forecast is None:
                 continue
@@ -1414,11 +1418,11 @@ class Scheduler:
     # -- bookings --------------------------------------------------------------------------------
 
     def _book(self, waiting: Waiting, now: float) -> bool:
-        """Promise the clip's part to it at render (the idle layer never books): False, logged,
-        when the part is promised to one that goes first; the waiting clips it goes before are
-        let go."""
+        """Promise the clip's part to it at render (the idle layer and a style never book):
+        False, logged, when the part is promised to one that goes first; the waiting clips it
+        goes before are let go."""
         request, clip, fit = waiting.request, waiting.clip, waiting.fit
-        if request.priority == Priority.IDLE:
+        if request.priority == Priority.IDLE or clip.styles_only:
             return True
         start, stroke, end = self._window(waiting, now)
         booking = Booking(clip.part, start, stroke, end, request.priority, request.rank,

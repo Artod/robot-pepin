@@ -1,5 +1,5 @@
 {
-  "_note": "The gesture book (pepin.expression.book): the motion atoms, the compositions the brain names in its text ({laugh}) or through the gesture tool, the arm poses taught by hand, the idle layer and the robot's moments. An atom is ONE cycle of keys at shares (at 0..1) of its period_s; a value is a number, \"$param\" or \"-$param\" of its params (drawn uniformly from [lo, hi] at each performance); period_s is reserved; repeats and hold_s are a STEP's reserved parameters and loop a step's flag (2026-10-14: the atoms carried them; each atom's moved to the steps that used it, the same numbers). Degrees: the head's pan_deg + left, tilt_deg + down (offsets on whatever holds the head); the arm's joints in config/arm.json's convention (additive: offsets on the pose under it; absolute: a pose, starting and ending on rest); the wheels' yaw_deg + left and x_m + forward (pepin.expression.wheels; sized to config/expression.json's wheels caps at speed 1, a clip faster than them is refused). A step's at_s puts the atom's stroke (stroke x its first cycle) that far from the marker's word (negative: before it), p is the chance it plays (1 throughout since 2026-10-13: a variant is one body's ensemble, face, head and arm or wheels together, and the dice are between the variants and in the ranges), params narrow the atom's ranges, a string or a list of strings names a face (name) or a pose (pose). A composition with callable false is the engine's own (the pulse's accents, the listener's nods, the held arm's sway: pepin.expression.listeners asks for it by name, a part it finds busy left out), never a mark of the brain's. A step may name a composition instead of an atom ({\"composition\": NAME} with at_s and p alone, at most three deep, no cycle; 2026-10-14): it draws its own variant and parameters from a seed derived from its parent's, placed from its step's at_s; the caps and the cooldown count the parent. Every atom that renders bare (no name to choose, no place of the gesture space but @from and @via) and has no composition of its name gets an AUTO-WRAPPER (pepin.expression.book.wrapper: one step, its own ranges, callable as the atom is, an arm atom moving more than the gripper needing the arm up); a hand-written composition of the name wins; the idle entries name compositions. A composition's args are the arguments a mark may carry: a list that chooses ({point:you}), or a map (2026-10-14): an argument -> null (it chooses), number -> the parameter a mark's number sets, a word -> parameter -> range ({snap:3,fast}), a parameter being param (every step whose atom takes it) or atom.param; an auto-wrapper reads one number as its repeats, several as its atom's parameters in order, and key=value for any of them; its style_args pick a variant's argument for a bare mark from the part's style words ({laugh} in a {sinister} part is {laugh:evil}: the variants written for evil, needs arg, win the dice). The breath block at the end is the breath LAYER (a filter under the arm's clips, its note explains). Timing and variety from .claude/research/brain/expression/expressive_motion.md (2026-10-11): strokes on the word or up to 0.2 s before it, amplitude ranges of about +-20 %, period ranges of about +-12 %, optional parts with their odds, mirror images, never the same variant twice running. Arm atoms are sized to config/arm.json's caps (240 deg/s, 2232 deg/s^2 since 2026-10-12) at speed 1 by the swing law in arm_wave's note (73 amp / period^2 for a two-way atom): bigger is slower, never both; raise the caps on the bench before raising these.",
+  "_note": "The gesture book (pepin.expression.book): the motion atoms, the compositions the brain names in its text ({laugh}) or through the gesture tool, the arm poses taught by hand, the idle layer and the robot's moments. An atom is ONE cycle of keys at shares (at 0..1) of its period_s; a value is a number, \"$param\" or \"-$param\" of its params (drawn uniformly from [lo, hi] at each performance); period_s is reserved; repeats and hold_s are a STEP's reserved parameters and loop a step's flag (2026-10-14: the atoms carried them; each atom's moved to the steps that used it, the same numbers). Degrees: the head's pan_deg + left, tilt_deg + down (offsets on whatever holds the head); the arm's joints in config/arm.json's convention (additive: offsets on the pose under it; absolute: a pose, starting and ending on rest); the wheels' yaw_deg + left and x_m + forward (pepin.expression.wheels; sized to config/expression.json's wheels caps at speed 1, a clip faster than them is refused). A step's at_s puts the atom's stroke (stroke x its first cycle) that far from the marker's word (negative: before it), p is the chance it plays (1 throughout since 2026-10-13: a variant is one body's ensemble, face, head and arm or wheels together, and the dice are between the variants and in the ranges), params narrow the atom's ranges, a string or a list of strings names a face, an iris colour or an eyes' effect (name) or a pose (pose). The eyes (part eyes, 2026-10-15; pepin.expression.parts.EyesPart through the head server): their look in config/face.json's eye units (brow_pos -1 to the nose .. +1 outward, brow_raise, brow_width, lid_top and lid_bottom 0 open .. 1 shut, gaze_x, gaze_y, glow) held hold_s, their moments (blink; wink, + the robot's own left eye; release) and named changes (iris #RRGGBB, effect of config/face.json eyes.effects); a mark of the eyes alone is never capped, as the face's are not; the idle layer names no eye atom (the firmware blinks by itself). A composition with callable false is the engine's own (the pulse's accents, the listener's nods, the held arm's sway: pepin.expression.listeners asks for it by name, a part it finds busy left out), never a mark of the brain's. A step may name a composition instead of an atom ({\"composition\": NAME} with at_s and p alone, at most three deep, no cycle; 2026-10-14): it draws its own variant and parameters from a seed derived from its parent's, placed from its step's at_s; the caps and the cooldown count the parent. Every atom that renders bare (no name to choose, no place of the gesture space but @from and @via) and has no composition of its name gets an AUTO-WRAPPER (pepin.expression.book.wrapper: one step, its own ranges, callable as the atom is, an arm atom moving more than the gripper needing the arm up); a hand-written composition of the name wins; the idle entries name compositions. A composition's args are the arguments a mark may carry: a list that chooses ({point:you}), or a map (2026-10-14): an argument -> null (it chooses), number -> the parameter a mark's number sets, a word -> parameter -> range ({snap:3,fast}), a parameter being param (every step whose atom takes it) or atom.param; an auto-wrapper reads one number as its repeats, several as its atom's parameters in order, and key=value for any of them; its style_args pick a variant's argument for a bare mark from the part's style words ({laugh} in a {sinister} part is {laugh:evil}: the variants written for evil, needs arg, win the dice). The breath block at the end is the breath LAYER (a filter under the arm's clips, its note explains). Timing and variety from .claude/research/brain/expression/expressive_motion.md (2026-10-11): strokes on the word or up to 0.2 s before it, amplitude ranges of about +-20 %, period ranges of about +-12 %, optional parts with their odds, mirror images, never the same variant twice running. Arm atoms are sized to config/arm.json's caps (240 deg/s, 2232 deg/s^2 since 2026-10-12) at speed 1 by the swing law in arm_wave's note (73 amp / period^2 for a two-way atom): bigger is slower, never both; raise the caps on the bench before raising these.",
   "poses": {
     "note": "Arm poses, one angle per joint of config/arm.json, and a note each: TAUGHT by hand (scripts/gesture.py teach NAME: torque off, the arm placed, its six angles written here), SHAPED BY HAND and copied (scratch/arm_poses/capture.py of 2026-10-14: Artem's thirteen captures, each note naming its id; a capture past a limit is held at the limit less 3 deg and the note says how far the hand moved) or AUTHORED from the URDF (pepin.arm's forward kinematics of the vendored URDF on config/arm.json's mount, the link boxes ungrown against config/body.json's cart and mast, the speaker box, the pan servo and an estimated head box swept over the neck's whole reach; scratch/arm_poses_1012/). rest is not here: it is config/arm.json's motion.rest_deg. A step naming a pose that is not here is left out (the rest of the gesture plays). A step that names a pose sets period_s so the move from rest keeps the caps: the largest joint travel d moves at 1.5 d / period_s at its fastest (90 deg/s: period_s >= d / 60).",
     "raised": {"shoulder_pan": -30.0, "shoulder_lift": -50.8, "elbow_flex": 44.0, "wrist_flex": -35.2, "wrist_roll": -50.0, "gripper": 14.5, "note": "TAUGHT by hand 2026-10-12: the forearm forward, the hand up, ready to wave; from the URDF: the hand 8.7 cm from the body and from the head's whole reach, the upper arm 3.2 cm from the speaker box; the hand in the level view; 112 deg from rest, 1.86 s at the caps"},
@@ -206,6 +206,60 @@
       "params": {"period_s": 0.1},
       "keys": [{"at": 0.0, "expression": "$name"}],
       "note": "one of config/face.json's expressions (name), held hold_s, then the face lapses to what stood before"
+    },
+    "style": {
+      "part": "face", "mode": "absolute", "stroke": 0.0,
+      "params": {"period_s": 0.05},
+      "keys": [{"at": 0.0, "style": "$name"}],
+      "note": "the mouth drawn in one of config/face.json's styles (name; default: back to the standing one) for hold_s, held by the head server, then back to the standing one; no hold_s: it stands. The clip lasts its period alone, so the face stays free for the expressions; never the idle layer's"
+    },
+    "wink": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"side": [-1.0, 1.0], "period_s": 0.4},
+      "keys": [{"at": 0.0, "wink": "$side"}],
+      "note": "one eye shut for a moment (the firmware's wink, config/face.json eyes.timing.wink_hold_ms): the robot's own left eye for a side above 0, its right below (config/face.json's wink), either way unless a step or the mark's word sets it"
+    },
+    "blink": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0, "callable": false,
+      "params": {"period_s": 0.35},
+      "keys": [{"at": 0.0, "blink": 1.0}],
+      "note": "both eyes blink once: the idle layer's, and no idle entry names it (the firmware blinks by itself every 3-6 s, closing in 100 ms and opening in 180, a flutter now and then: an idle blink of the laptop's would double it)"
+    },
+    "frown": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"pos": [-0.9, -0.7], "low": [-0.5, -0.3], "lid": [0.3, 0.4], "period_s": 0.1},
+      "keys": [{"at": 0.0, "brow_pos": "$pos", "brow_raise": "$low", "lid_top": "$lid"}],
+      "note": "the brows slid to the nose and lowered, the lids a little down (the sinister look's brows over whatever mouth shows), held hold_s, then the eyes lapse to the face's own"
+    },
+    "brows_up": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"raise": [0.8, 1.0], "period_s": 0.1},
+      "keys": [{"at": 0.0, "brow_pos": 0.0, "brow_raise": "$raise", "brow_width": 0.8, "lid_top": 0.0}],
+      "note": "the brows high and wide over open lids (the surprised look's eyes), held hold_s"
+    },
+    "squint": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"top": [0.4, 0.5], "bottom": [0.35, 0.45], "period_s": 0.1},
+      "keys": [{"at": 0.0, "lid_top": "$top", "lid_bottom": "$bottom"}],
+      "note": "the lids narrowed from above and below (doubt, a sharp look), held hold_s"
+    },
+    "glow": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"level": [0.8, 0.9], "period_s": 0.1},
+      "keys": [{"at": 0.0, "iris": "$name", "glow": "$level"}],
+      "note": "the iris in a colour (name: #RRGGBB) and brighter than the look's 0.55, held hold_s; the brows and lids stay the face's"
+    },
+    "eye_effect": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0,
+      "params": {"period_s": 0.1},
+      "keys": [{"at": 0.0, "effect": "$name"}],
+      "note": "an effect of the inner rings (name: config/face.json eyes.effects, sparkle, flash, spin, pulse, flicker, doze, tear) for hold_s, over the look's own; sparkle (1.5 s) and flash (0.26 s) end by themselves"
+    },
+    "eyes_release": {
+      "part": "eyes", "mode": "absolute", "stroke": 0.0, "callable": false,
+      "params": {"period_s": 0.1},
+      "keys": [{"at": 0.0, "release": 1.0}],
+      "note": "the eyes back to the face's own look and effect at once (the engine's own; a layer's fade does the same)"
     }
   },
   "compositions": {
@@ -467,18 +521,20 @@
     "evil_click": {
       "cooldown_s": 300.0,
       "bind": "utterance",
-      "note": "the mischievous one (world domination): the hand raised, the gripper SNAPPING shut twice at the top (2026-10-14, Artem: the click must shut, else it is not frightening; gripper_click opened wider and back; the snap shuts raised's 14.5 deg jaw to the limit and opens it again, the same at_s and repeats, the arm 4.5 s at most against the click's 3.9 (4.1 with the afternoon's 0.6-0.7 s snap; 0.75-0.85 s since the evening: the shut at -10): the snap ends reopened, 0.65 of a period after its shut), a clenched or sinister grin (the sharp teeth since 2026-10-13), the head lowered; marker only, once in five minutes; the floor: the grin and the head lowered",
+      "note": "the mischievous one (world domination): the hand raised, the gripper SNAPPING shut twice at the top (2026-10-14, Artem: the click must shut, else it is not frightening; gripper_click opened wider and back; the snap shuts raised's 14.5 deg jaw to the limit and opens it again, the same at_s and repeats, the arm 4.5 s at most against the click's 3.9 (4.1 with the afternoon's 0.6-0.7 s snap; 0.75-0.85 s since the evening: the shut at -10): the snap ends reopened, 0.65 of a period after its shut), a clenched or sinister grin (the sharp teeth since 2026-10-13), the head lowered, a wink of either eye as the hand arrives (2026-10-15: the eyes); marker only, once in five minutes; the floor: the grin, the head lowered and the wink",
       "variants": [
         {"steps": [
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
           {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "sinister"], "hold_s": [3.0, 3.5]}},
           {"atom": "body_rock", "at_s": [-0.6, -0.4]},
           {"atom": "arm_pose", "at_s": [-0.2, 0.0], "params": {"pose": "raised", "hold_s": [0.6, 0.9], "period_s": [0.9, 1.1]}},
-          {"atom": "gripper_snap", "params": {"repeats": 2}, "at_s": [1.4, 1.8]}
+          {"atom": "gripper_snap", "params": {"repeats": 2}, "at_s": [1.4, 1.8]},
+          {"atom": "wink", "at_s": [0.3, 0.5]}
         ]},
         {"floor": true, "steps": [
           {"atom": "head_drop", "at_s": [-0.5, -0.3], "params": {"amp_deg": [3.0, 5.0], "period_s": [2.5, 3.0]}},
-          {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "sinister"], "hold_s": [3.0, 3.5]}}
+          {"atom": "face", "at_s": [-0.5, -0.3], "params": {"name": ["clenched", "sinister"], "hold_s": [3.0, 3.5]}},
+          {"atom": "wink", "at_s": [0.0, 0.2]}
         ]}
       ]
     },
@@ -782,6 +838,7 @@
       "cooldown_s": 0.0,
       "bind": "word",
       "args": ["rock"],
+      "bare": true,
       "note": "a dance step on the beat: the family the beats of a sound playing ask for (pepin.expression.listeners.MusicPulse: one request a beat, the sound's style (config/sounds.json) its argument, the parts free for it; a beat under pulse.strong the head and the face alone) and the brain's {dance:STYLE} on a word (a bare {dance} takes the style of the sound playing, else rock, the first argument); each variant is ONE beat's step with its stroke on the beat, and a part whose step outlasts a beat sits the next beats out (the listener's bookkeeping), so the head nods every beat, the wrist and the cart every other; the variants need the arm where it is (up: a unit holds a pose, the voice's posture or a mark's; rest: the hand raised first and held through the step's hold_s, then the board rests it: the hold is the clip's own last key, no unit, so the beats after find the arm busy, then at rest, and raise it again; with the music alone (no unit: MusicPulse holds no posture) the up variants never play); rock: the headbang (the nod at the arbiter's cap, 4-5.5 deg at 0.44-0.5 s) with the body's SLAM (the cart's 1.5-2 cm rock at 0.8-0.9 s: the wheels' ramp at speed 1 refuses 1.5 cm under 0.7 s and 2 cm under 0.8 s, so the cart rocks every other beat at 120 BPM; the executor's clearance is off: Artem's choice, 2026-10-14), the wrist's beat and the grin, the fist raised first when at rest; the floor: the head alone; a private tree's styles are the variants of its own copy of this composition, which replaces this one whole by name (docs/PRIVATE_OVERLAY.md); cooldown 0: the beats come twice a second; a repeat of {dance:STYLE} in one reply renders nothing (the resolver's rule) unless dance is listed in space.again",
       "variants": [
         {"needs": {"arg": "rock", "arm": "up"}, "steps": [
@@ -799,6 +856,71 @@
         {"floor": true, "needs": {"arg": "rock"}, "steps": [
           {"atom": "head_nod", "params": {"amp_deg": [4.0, 5.5], "period_s": [0.44, 0.5], "repeats": 1}}
         ]}
+      ]
+    },
+    "wink": {
+      "args": {"left": {"side": 1.0}, "right": {"side": -1.0}},
+      "note": "a wink of one eye: the robot's own left or right eye, either when the mark names none (a tease, a shared joke); the eyes only, never capped (the face's marks are not)",
+      "variants": [
+        {"steps": [{"atom": "wink", "at_s": [-0.05, 0.0]}]}
+      ]
+    },
+    "frown": {
+      "args": {"number": "hold_s"},
+      "note": "a frown for N seconds: the brows to the nose and down, the lids a little lower, a tenth of a second before the word (the firmware's 160 ms tween lands it there); the mark's number its seconds, 1.5-2.5 without; a mark reaches it as eyes:frown (aliases), the gesture tool by its name",
+      "variants": [
+        {"steps": [{"atom": "frown", "at_s": -0.1, "params": {"hold_s": [1.5, 2.5]}}]}
+      ]
+    },
+    "brows_up": {
+      "args": {"number": "hold_s"},
+      "note": "brows raised for N seconds: high and wide over open eyes (surprise, interest); the mark's number its seconds, 1-2 without; a mark reaches it as eyes:brows_up",
+      "variants": [
+        {"steps": [{"atom": "brows_up", "at_s": -0.1, "params": {"hold_s": [1.0, 2.0]}}]}
+      ]
+    },
+    "squint": {
+      "args": {"number": "hold_s"},
+      "note": "narrowed eyes for N seconds: the lids from above and below (doubt, a sharp look); the mark's number its seconds, 1.5-2.5 without; a mark reaches it as eyes:squint",
+      "variants": [
+        {"steps": [{"atom": "squint", "at_s": -0.1, "params": {"hold_s": [1.5, 2.5]}}]}
+      ]
+    },
+    "glow": {
+      "args": {"red": null, "orange": null, "green": null, "blue": null, "pink": null, "white": null, "number": "hold_s"},
+      "note": "the eyes' colour for N seconds: the iris in the named colour and brighter (red reads as anger or menace, pink as affection: the eye language of firmware/head_esp32/README.md), the brows and lids the face's; s=N its seconds, 2-3 without",
+      "variants": [
+        {"needs": {"arg": "red"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#FF1E1E", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "orange"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#FF8A1E", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "green"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#3CFF5A", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "blue"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#2E6BFF", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "pink"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#FF6F9A", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "white"}, "steps": [{"atom": "glow", "at_s": -0.1, "params": {"name": "#FFFFFF", "hold_s": [2.0, 3.0]}}]}
+      ]
+    },
+    "eyes": {
+      "args": {"frown": null, "brows_up": null, "squint": null, "sparkle": null, "flash": null, "spin": null, "pulse": null, "flicker": null, "doze": null, "tear": null, "number": "hold_s"},
+      "note": "the eyes for N seconds: the brows and lids (frown, brows_up, squint: as their compositions) or a light over the look's own (config/face.json eyes.effects: sparkle delight, flash an aha, spin working it out, pulse listening, flicker trouble, doze sleepy, tear sad); each name a mark of its own too ({frown:1.5}, {spin}: aliases); s=N its seconds, else as its composition's or 2-3 (sparkle 1.5 and flash 0.3: their own length); one line of the brain's vocabulary for ten marks",
+      "variants": [
+        {"needs": {"arg": "frown"}, "steps": [{"atom": "frown", "at_s": -0.1, "params": {"hold_s": [1.5, 2.5]}}]},
+        {"needs": {"arg": "brows_up"}, "steps": [{"atom": "brows_up", "at_s": -0.1, "params": {"hold_s": [1.0, 2.0]}}]},
+        {"needs": {"arg": "squint"}, "steps": [{"atom": "squint", "at_s": -0.1, "params": {"hold_s": [1.5, 2.5]}}]},
+        {"needs": {"arg": "sparkle"}, "steps": [{"atom": "eye_effect", "params": {"name": "sparkle", "hold_s": 1.5}}]},
+        {"needs": {"arg": "flash"}, "steps": [{"atom": "eye_effect", "params": {"name": "flash", "hold_s": 0.3}}]},
+        {"needs": {"arg": "spin"}, "steps": [{"atom": "eye_effect", "params": {"name": "spin", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "pulse"}, "steps": [{"atom": "eye_effect", "params": {"name": "pulse", "hold_s": [2.0, 3.0]}}]},
+        {"needs": {"arg": "flicker"}, "steps": [{"atom": "eye_effect", "params": {"name": "flicker", "hold_s": [1.5, 2.0]}}]},
+        {"needs": {"arg": "doze"}, "steps": [{"atom": "eye_effect", "params": {"name": "doze", "hold_s": [3.0, 4.0]}}]},
+        {"needs": {"arg": "tear"}, "steps": [{"atom": "eye_effect", "params": {"name": "tear", "hold_s": [3.0, 4.0]}}]}
+      ]
+    },
+    "style": {
+      "args": {"default": null, "number": "hold_s", "hold": {"hold_s": 0.0}},
+      "bare": true,
+      "note": "the mouth's drawing style: another one for a few seconds, a gag (s=N its seconds, 4 without), or from now on (hold, or s=0: the standing choice); the styles are config/face.json's, its arguments beside default at load (pepin.expression.book.with_styles) and its lines in the brain's vocabulary (pepin.face.style_lines); bare or default: the brain's style let go, back to the standing one",
+      "variants": [
+        {"needs": {"arg": "default"}, "steps": [{"atom": "style", "at_s": -0.1, "params": {"name": "default"}}]},
+        {"steps": [{"atom": "style", "at_s": -0.1, "params": {"name": "$arg", "hold_s": 4.0}}]}
       ]
     },
     "pulse_weak": {
@@ -947,7 +1069,10 @@
     "size:large": "size:big", "size:huge": "size:big", "size:wide": "size:big", "size:all": "size:big",
     "size:tiny": "size:small", "size:little": "size:small", "size:narrow": "size:small",
     "draw:circle": "draw:round", "draw:ball": "draw:round", "draw:straight": "draw:line", "draw:waves": "draw:wave",
-    "count:first": "count:1", "count:second": "count:2", "count:third": "count:3"
+    "count:first": "count:1", "count:second": "count:2", "count:third": "count:3",
+    "frown": "eyes:frown", "brows_up": "eyes:brows_up", "squint": "eyes:squint",
+    "sparkle": "eyes:sparkle", "flash": "eyes:flash", "spin": "eyes:spin", "pulse": "eyes:pulse", "flicker": "eyes:flicker", "doze": "eyes:doze", "tear": "eyes:tear",
+    "glow:amber": "glow:orange", "glow:rose": "glow:pink", "glow:cyan": "glow:blue"
   },
   "space": {
     "note": "The gesture space in front of the robot (pepin.expression.render's resolver; DESIGN.md 4.3-4.6; the cells are poses above, AUTHORED by scratch/gesticulation_space/cells.py): the home a way to the middle goes through (via_pan_deg: a target pan inward of it; via: poses always; down_near since 2026-10-14 evening: straight from rest the hand drags along the rim), where a pose's hold ends when not at the pose (home_after), the referents' and the counted items' spots in the order they are taken (the widest pair first), the cells each path-drawing mark goes through, the head's offset (pan + left, tilt + down) for a mark that turns the head its argument's way, the pointing hand (its poses straight ahead, the clear pan range, the arm's and the neck's pan axes in the cart frame, a person's distance when attention gives none), the marks the brain may repeat in a reply",

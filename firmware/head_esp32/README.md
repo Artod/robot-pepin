@@ -1,14 +1,16 @@
-# Head firmware (ESP32): the mouth and the head IMU
+# Head firmware (ESP32): the mouth, the eyes and the head IMU
 
-The robot's head is a stereo camera on a pan/tilt neck. Its two lenses are the eyes; under them
-sits a 1.9" ST7789 screen (320x170, landscape) that is the mouth, driven by an ESP32 board that
-also samples an MPU6050 glued rigidly to the camera body. The ESP32 talks to the robot's board
-over USB serial only; WiFi and Bluetooth are never started.
+The robot's head is a stereo camera on a pan/tilt neck. Its two lenses are the eyes, each lit
+by two rings of addressable LEDs under a diffuser film (the iris, the lids and the brow); under
+them sits a 1.9" ST7789 screen (320x170, landscape) that is the mouth. One ESP32 board drives
+both and samples an MPU6050 glued rigidly to the camera body. The ESP32 talks to the robot's
+board over USB serial only; WiFi and Bluetooth are never started.
 
 ```
 board (Orange Pi)                                    head
 pepin.head_server ── /dev/pepin-head (CH340, 921600) ── ESP32 ── SPI 80 MHz ── ST7789 (mouth)
-  TCP 3340: face commands in, IMU lines out                    └─ I2C 400 kHz ── MPU6050 (head IMU)
+  TCP 3340: face commands in, IMU lines out                    ├─ I2C 400 kHz ── MPU6050 (head IMU)
+                                                               └─ RMT 800 kHz ── 48 x WS2812B (eyes)
 ```
 
 ## Hardware
@@ -35,6 +37,24 @@ Glue the GY-521 flat and rigid to the camera body (not to the screen or the brac
 which way its printed X and Y arrows point relative to the camera: the head IMU's mount is a
 number the visual-inertial side needs.
 
+**Eye rings (WS2812B, 5 V, three wires, chained DIN to DOUT):** per eye an inner 8-LED ring
+(27 mm OD / 11 mm ID, round the lens barrel) and an outer 16-LED ring (48 mm OD / 31 mm ID),
+48 LEDs in one chain, a diffuser film over them.
+
+| ring wire | goes to | note |
+| --- | --- | --- |
+| 5V of the first ring | the head's USB 5 V through a 1N4007 | that ring runs at ~4.3 V, so the ESP32's 3.3 V data reads as high; the other rings take 5 V straight |
+| GND | GND | shared with the ESP32 |
+| DIN of the first ring | GPIO 26 (`pins.h` `kEyesData`) | any free output GPIO: 26 is the default; 25, 33, 13, 14, 19, 5, 16, 17 are the alternatives (27 is the IMU's INT, 32 the backlight) |
+| DOUT -> DIN | ring to ring | the chain's order is `config/face.json` `eyes.layout.rings`: by default left inner, left outer, right inner, right outer (the robot's own left and right) |
+
+The soldering decides the chain's order, each ring's first LED (its DIN pad) and which way it
+winds. At boot the firmware chases one LED round the whole chain for a second: read off where it
+starts and which way it runs, write `first_deg` (degrees from the top, clockwise as seen facing
+the robot) and `clockwise` per ring into `eyes.layout.rings`, and regenerate the tables
+(`uv run python -m pepin.face --write`); the simulator's layout panel draws the same numbers.
+The rings' current is capped in the firmware at 0.8 A (below).
+
 ## Build and flash
 
 PlatformIO needs no install beyond `uv`:
@@ -58,6 +78,7 @@ uv run python -m pepin.head_link --host 127.0.0.1 status        # link, fps, IMU
 uv run python -m pepin.head_link --host 127.0.0.1 express happy 3
 uv run python -m pepin.head_link --host 127.0.0.1 show 'Temps|left: 41/70 C' 6
 uv run python -m pepin.head_link --host 127.0.0.1 style anime   # the face's style, live
+uv run python -m pepin.head_link --host 127.0.0.1 eyes set kawaii   # the eyes' look set, live
 uv run python -m pepin.head_link --host 127.0.0.1 imu 5         # samples in m/s^2 and rad/s
 ```
 
@@ -404,6 +425,227 @@ shape engine's tables (`src/shape_layout.h`, `src/<style>_table.h`, `src/shape_t
 uv run python -m pepin.face --write     # after editing config/face.json or a keyframe
 ```
 
+## The eyes
+
+Each eye is 24 pixels: the outer ring is the brow (it carries the emotion), the inner ring is
+the eye's body: a glow in the eye's colour that the lids cover, with the fast effects on it
+and, as a bonus, a pupil highlight that follows the gaze.
+
+### The eye language
+
+Social robots with LED eyes converge on a small vocabulary, and the eyes speak it:
+
+- **A calm cold colour is the resting state; red is trouble or menace.** Pepper's eyes rest in
+  pale blue or white, iRobot's ring is white when all is well, red is an error on the Roomba
+  and an emergency stop on a Universal Robots arm, and integrators are told never to put red in
+  Pepper's eyes because it reads as anger. Pepin rests in the style's colour (cyan in `pepin`,
+  the pinks in the drawn styles) and goes red only for the villain faces (sinister, vampire,
+  the terminator); sleepy and tired grey out, the affectionate faces (the kiss, the blush, the
+  blushing cat) warm up. Colour is the slowest channel and the one people read first (Johnson,
+  Cuijpers and van der Pol 2013 measured which colours, intensities and pulse rates people pin
+  on each emotion on NAO's eye rings and built 12 patterns from them; Kim et al. 2008 found
+  colour and blink period carry the *intensity* of surprise, happiness, disgust and anger;
+  van der Waal 2016 found lights in NAO's eyes recognised far better than lights on its chest).
+- **Listening pulses, thinking rotates, an acknowledgement flashes.** Alexa listens with a
+  directional blue ring, thinks with an alternating one and speaks with a pulsing one; Google's
+  speakers listen with four quickly pulsing lights, think with lights running left to right,
+  answer with a steady pulse, and flash-then-fade when they heard the wake word but no request;
+  Pepper listens with navy blue rotating in its eyes and turns green while it processes the
+  sentence. Pepin's `listening` pulses the eye at 1.3 Hz, `thinking` spins a bright head with
+  a tail round the eye at 1 Hz over a dimmed body, `surprised` and `o_mouth` flash (a swell of
+  white that fades out).
+- **Trouble flickers; standby breathes slowly.** Alexa's error is a quick purple pulse, iRobot's
+  startup is a swirl, and the Fraunhofer IAO pattern library recommends a slow pulse in a
+  quiet cold colour for standby (the breathing light of the old MacBooks). `struggling`
+  flickers the eye between a floor and full at 50-160 ms; `sleepy` and `tired` doze: one deep
+  breath every eight seconds with the lids sinking on the exhale.
+- **The lids and brows carry the emotion; the colour stays the owner's.** Anki's Cozmo and
+  Vector, animated by a feature-film crew, put everything into the eye shapes (narrowing when
+  thinking, wide when looking at you, slits when asleep) and leave the eye colour to the
+  owner's taste; Lovot's designers tuned its gaze and blink speed with animators. Pepin's
+  brows (the outer ring) slide toward the nose for anger, outward for sadness, rise for
+  surprise, lift one at a time for thinking and teasing; its lids droop, squint and close.
+- **Blink like a person, now and then with a flutter.** People at rest blink about every five
+  seconds (log-normal intervals), closing in about 100 ms and opening in about 200; blinking
+  robots read as friendlier and as making eye contact, and short closures in a run of three
+  read as affection while long closures do not (Ichino and Takahashi 2024). Pepin blinks every
+  3-6 s (close 100 ms, open 180), slower and rarer when sleepy, never as the cat or the
+  terminator, and makes a flutter of three every eighth blink or so.
+
+Sources: [Aldebaran, Interacting with Pepper](https://support.unitedrobotics.group/support/solutions/articles/80000954431)
+(listening, processing and sleeping colours); [RobotLAB, How to create a great experience with Pepper](https://www.robotlab.com/blog/how-to-create-a-great-experience-with-pepper-robot/)
+(no red in the eyes); [Amazon, Alexa light ring guidelines](https://developer.amazon.com/en-US/alexa/branding/alexa-guidelines/brand-guidelines/light-ring);
+[Google, Learn about the lights on your speaker](https://support.google.com/assistant/answer/7073219);
+[iRobot, the light ring](https://homesupport.irobot.com/articles/en_US/Knowledge/19505);
+[Universal Robots, Light Ring](https://www.universal-robots.com/manuals/EN/HTML/SW10_15/Content/prod-usr-man/complianceUR15/lightring_UR20_en.htm);
+[Fraunhofer IAO, Operation Mode Stand By](https://pattern-wiki.iao.fraunhofer.de/?p=483);
+Johnson, Cuijpers and van der Pol, [Imitating Human Emotions with Artificial Facial Expressions](https://link.springer.com/doi/10.1007/s12369-013-0211-1),
+Int J Soc Robotics 5 (2013); Kim, Lee, Park, Jo and Chung, [Determining color and blinking to support facial expression of a robot for conveying emotional intensity](https://scholarworks.unist.ac.kr/handle/201301/34474),
+RO-MAN 2008; van der Waal, [Using simulated body language and colours to express emotions with the NAO robot](https://theses.ubn.ru.nl/items/ba32b1d5-12b6-4672-a2f6-eeded3d1e7ad),
+Radboud 2016; Ichino and Takahashi, [How Different Blink Patterns of Pet Robots Evoke Feelings of Affection in People](https://ichino.w.waseda.jp/papers/Ichino%20-%202024%20-%20How%20Different%20Blink%20Patterns%20of%20Pet%20Robots%20Evoke%20Feelings%20of%20Affection%20in%20People.pdf)
+(2024); [Design News, From Cozmo to Vector](https://www.designnews.com/electronics-test/cozmo-vector-how-anki-designs-robots-emotional-intelligence);
+[Anki, Changing Vector's eye color](https://support.anki.bot/article/413-changing-vectors-eye-color);
+[Gearbrain, Anki Vector review](https://www.gearbrain.com/amp/vector-robot-review-2620530018)
+(the eye shapes); [Bloomberg on Lovot](https://www.bloomberg.com/news/articles/2018-12-18/meet-the-new-japanese-robot-designed-to-hack-your-emotions);
+the blink kinematics from the 2005 Brazilian spontaneous-blink study and the 2011 inter-blink
+interval study summarised at [PMC](https://pmc.ncbi.nlm.nih.gov/articles/PMC3156585).
+
+### The kawaii set
+
+The eyes come in two look SETS over the same parameters (`config/face.json` `eyes.sets`):
+`classic`, the look above, and `kawaii`, which follows the kawaii mouths' drawing language
+(after the common kaomoji conventions: big filled eyes with a shine, short brow ticks, closed
+eyes as arcs). The eyes follow the face style (`eyes.style_sets`: the `kawaii` face style
+takes the kawaii set, every other style the classic one) unless the `'C'` config's tenth byte
+says otherwise (0 follow the style, 1 classic, 2 kawaii; a shorter `'C'` leaves it); the status
+reports the set in force. The head server sends `config/face.json`'s `eyes.eye_set` (`follow`
+by default) in that byte with every `'C'`, and `{"cmd": "config", "eye_set": "kawaii"}` on its
+door (`pepin.head_link eyes set kawaii`) switches it live. A switch tweens over `override_ms`. An expression's eyes block holds
+its classic look and, under `kawaii`, its kawaii look over the set's own defaults (a full body:
+`glow` 0.85, `highlight` 1.0, the lids barely touching); `eyes.by_name` may carry looks for ids
+not in the table yet, applied when an expression of that name exists.
+
+What the kawaii drawings become on the rings:
+
+| drawing | rings | ids |
+| --- | --- | --- |
+| the big filled eye with a white shine | the whole inner ring glowing, the highlight spot at the upper-outer as the pupil's shine | neutral, worried, thinking, focused, listening, surprised, o_mouth, vampire, blush, pout, moustache, angry |
+| the short brow arcs | the outer ring's brow: top for calm, to the nose for angry/sinister/struggling/clenched, outward for sad/pout, high and round for surprised, one up for thinking/tease | all |
+| closed happy eyes ⌒ ⌒ | the inner ring's upper arc alone (`lid_bottom` 0.65), the rest dark | smile, grin, the kiss's and tease's closed eye |
+| ^ ^ | the same, narrower (`lid_bottom` 0.75-0.8) | happy, cat, cat_blush |
+| squeezed > < | the two side segments (both lids 0.42-0.45) | clenched, struggling |
+| sleepy / flat - - | the side segments, dim (both lids 0.5) | sleepy (grey-blue, dozing), flat |
+| narrowed | the sides and the diagonals (both lids 0.35) | sinister, terminator |
+| the tear | a pale blue drop running down the outer ring's lower arc from the nose side (the `tear` effect, every 1.6 s) | sad |
+| hearts | a warm glow with the sparkle | kiss_heart (kiss winks into the arc) |
+| x x | the four diagonal LEDs alone (`cross` 1), no shine, dozing | tired |
+| the hollow ring with cheek stripes | a uniform ring with no shine, a cool blue cheek arc, a flash on entry | shocked |
+| the pink cheek ovals | the cheek glow on the outer ring's bottom | happy, blush, cat_blush, angry |
+
+In this set a blink or a wink closes into the arc (`shut_arc`: the bottom lid rises to
+`shut_lid` 0.72 instead of the top lid coming down), so the blink is the drawing's ⌒ closing
+and the wink is one ⌒; the doze keeps its mechanism (the sleepy - - thins on the exhale); the
+sparkle is already the shine's twinkle; the `tear` effect (id 7) and the `cross` param are
+new. The looks are in `config/face.json` under each expression's `eyes.kawaii`;
+`preview.js --eyes --set kawaii` draws them, and the sheets `eyes_kawaii_all.png`,
+`eyes_classic_vs_kawaii.png` and `eyes_kawaii_with_mouth.png` (`--mouth-sim`: the rings over the
+kawaii mouth panel at the head's real spacing) show them.
+
+### The effects
+
+The inner ring runs one named effect at a time (`config/face.json` `eyes.effects`): the look's
+default (`effect` in an expression's eyes block), or the one the host calls with the `'Y'`
+frame's effect byte (below). `sparkle` and `flash` end on their own; the others run while the
+look shows or the host holds them.
+
+| id | effect | what it does | default on |
+| --- | --- | --- | --- |
+| 0 | none | the plain glow | most looks |
+| 1 | sparkle | white twinkles over the eye, four a second per eye for 1.2 s | kiss_heart |
+| 2 | flash | both rings flare white and fade over 260 ms (the soft start's ramp shapes it into a swell: the cap and the ramp win) | surprised, o_mouth |
+| 3 | spin | a bright head with a tail chases clockwise round the eye once a second over the body dimmed to 35 % | thinking, thinking_flat |
+| 4 | pulse | the glow swells by 35 % at 1.3 Hz | listening |
+| 5 | flicker | the glow drops to a random level above 25 % every 50-160 ms | struggling |
+| 6 | doze | one deep breath every 8 s, the lids sinking on the exhale | sleepy, tired |
+| 7 | tear | a pale blue drop down the outer ring's lower arc every 1.6 s | sad (kawaii) |
+
+The mouth's effects reach the eyes too: the kiss's heart sends a sparkle round the outer rings,
+the sleeper's z sinks the lids as it rises.
+
+### The model
+
+The inner ring is the eye itself, the outer ring its brow and lower lid.
+The looks live in the same table as the mouth (`config/face.json`, the `eyes` block and an
+`eyes` block on every expression), so an `'E'` frame sets mouth and eyes together and the host
+needs nothing new to get a face; `src/eyes.cpp` is the model (pure C++, `sim/eyes.js` its
+line-by-line port, `src/eye_table.h` and `sim/eye_table.js` generated from the JSON).
+
+**The inner ring (the eye).** A thin iris glow in the look's colour (`glow` 0.55 at rest),
+breathing slowly, with the highlight a brighter spot (`highlight_gain`) on it; two lids as
+coverage masks by height (the top lid comes down from above the top LED to below the bottom one
+as `lid_top` goes 0..1: 0.15 relaxed, 0.35 heavy, 0.5 a slit with the bottom lid at 0.5, 0.7
+sleepy, 1 closed; the bottom lid rises the same way: 0.35 a soft crescent, 0.6 a happy one); a
+brighter pupil highlight, a lobe toward the gaze (`gaze_x` -1 the robot's left .. +1 its right,
+`gaze_y` down..up, from the host) plus a resting catchlight up and outward, mixed toward the
+highlight colour; blinks (close 100 ms, open 180 ms, both eyes together every 3-6 s at random,
+one in eight a flutter of three, divided by the look's `blink_rate`: the sleeper blinks rarely
+and slowly, the cat and the terminator never); micro-saccades of the highlight (a jump of up to
+0.08 every 0.8-2.5 s). A wink (the host's, or a look's standing `wink`) closes one eye.
+
+**The outer ring (the brow and the lower lid).** The brow is an arc of three to five LEDs on the
+top half, at full strength (brighter than the eye's body: it carries the emotion), whose centre
+slides along the ring: `brow_pos` -1 toward the nose (angry), 0 the top, +1 outward (sad), the
+arc's tangent giving the tilt; `brow_raise` -1 (low: a little dimmer, sagging outward by
+`brow_sag_deg`) .. +1 (high: pulled to the top); `brow_width`; `brow_asym` lifts the left brow
+and lowers the right (thinking, tease: one brow up, the other sagging). The rest of the outer
+ring stays dark. The bottom half carries a dim arc for the
+lower lid (it grows with `lid_bottom`: squints) and the warm `cheek` glow (happy, blushing).
+The two eyes mirror about the nose. The effects of the mouth reach the eyes: the kiss's heart
+sends a sparkle round the outer rings, the sleeper's z sinks the lids as it rises.
+
+**The looks.** Happy lifts the lower lids into crescents over warm cheeks; sad puts the brows
+outward and lets the lids droop with the gaze down; angry, sinister, vampire and the
+terminator bring the brows to the nose over a red squint (the terminator with no catchlight and
+no blink); surprised is wide with the brows high and bright; thinking lifts one brow and looks
+aside; sleepy and tired are
+grey-blue with the lids sinking; the cat's eyes are closed "^ ^" arcs on the outer rings; the
+kiss winks, tease winks with the other brow up; blush half-closes the lids over a
+strong warm cheek and looks away; focused and listening are steady and wide; flat and clenched
+hold the brows low. Each later style has its own palette (`styles.NAME.eyes.colors`: pepin cyan
+and white, the rose/manga/anime pinks); an expression's `eyes.colors` overrides it in every
+style, a style block's `eyes` for that style alone. The `'E'` intensity blends a look with
+neutral's as it does the mouth; transitions tween every number and colour (smoothstep, the
+expression's `transition_ms`).
+
+**The host's override (`'Y'`).** The host sets any of brow_pos, brow_raise, brow_width, lid_top,
+lid_bottom, gaze_x, gaze_y, glow and the iris colour over the expression's look, standing or
+timed, on both eyes or one (the brows frown while the mouth keeps talking; the gaze follows a
+person), asks for a blink or a wink now, and, in the 19-byte form, calls an effect by id for a
+time (0: a one-shot's own length, a standing one until the next effect byte or a release). A
+field left to the expression carries 0x80 (i8 fields) or 0xFF (u8 fields: their range is
+0..254) or 0 0 0 (the iris); a 16-byte `'Y'` leaves the effect as it is; a `'Y'` replaces the
+override on the eyes it names whole, tweens in and out over `eyes.timing.override_ms` (160 ms),
+and a timed one lapses back to the expression's look. The protocol table below has the bytes.
+
+**Power.** The looks are perceptual values; the power stage turns them into bytes: the gamma
+(2.2, a table), the `'C'` config's eyes brightness as a linear gain on the duty (0 off, 64 the
+default: a quarter of the current), the hard cap (0.8 A over the chain: 20 mA per colour channel
+at full duty plus 1 mA per LED quiescent, summed per frame, the whole frame scaled down
+uniformly when it would pass the cap) and the soft start (any rise of the demand ramps up over
+300 ms; a fall is immediate). The status line carries the frame's current estimate after the
+cap. The cap and the ramp are not optional: the rings share the head's USB 5 V with the ESP32.
+
+**Driver.** NeoPixelBus on the ESP32's RMT peripheral, channel 0, the WS2812x timing
+(`src/eyes_driver.cpp`): `Show()` starts the 1.5 ms transfer and returns, the RMT's own
+interrupt (on core 1, where it was installed) translates the bytes as the channel drains; no
+DMA channel is taken from the panel's SPI, the UART is untouched, and the IMU task on core 0
+never waits. The 48 LEDs are sent once per face frame. The eye model costs 0.6 us a frame on a
+laptop (the tweens, the clocks, 48 LEDs, the power stage), about 50-60 us on the ESP32: the
+mouth's 50 fps holds. RAM +2.0 KB, flash +26 KB over the firmware without the eyes.
+
+**Boot and diagnostics.** On boot the rings run a one-second self-test sweep (one LED chasing
+round the chain at full brightness with a dim tail: the chain's order and the first LED's angle
+after soldering), then the face's look. A `'C'` with eyes brightness 0 blanks the rings. The
+status line reports the current, the brightness, the eyes' mode (0 the expression's look, 1 an
+override standing, 2 timed, 3 the self-test) and the layout id (a byte over the chain's order
+and angles, so the host can tell a head flashed with another table).
+
+**Simulator and sheets.** `sim/index.html` shows the rings above the mouth through the film and,
+in the eyes panel, the raw LEDs on the ring geometry with the first LED and the chain's
+direction marked, the current and the mode, the brightness slider, the self-test, the layout
+controls (chain order, first LED, winding; copy as JSON for `face.json`) and a `'Y'` panel
+whose payload is built as the head server builds it and decoded as the firmware decodes it.
+`preview.js --eyes` writes eye stills and sheets:
+
+```bash
+node firmware/head_esp32/sim/preview.js --eyes --out /tmp/eyes sheets        # every look, by family, the brow's language, the strips, raw vs film
+node firmware/head_esp32/sim/preview.js --eyes --out /tmp/eyes --style anime --brightness 64 happy sinister
+```
+
+`tests/unit/test_face_parity.py` runs the C++ and the JS over every expression in every style at
+rest, talking, in transitions and idle, over the overrides, winks, the sparkle, brightness
+changes and the self-test, and demands the same 48 RGB bytes per frame from both.
+
 ## The simulator
 
 `sim/index.html` runs the same model and renderers (line-by-line ports in `sim/face.js` and
@@ -440,10 +682,17 @@ type, length and payload). `src/protocol.h` and `src/pepin/head_link.py` documen
 | `M` | host -> ESP32 | mouth openness u8 (0..255) |
 | `T` | host -> ESP32 | info screen: duration ms u16, items (text, key/value, bar) |
 | `Q` | host -> ESP32 | ping: id u32 |
-| `C` | host -> ESP32 | config: id u8, IMU rate u16, DLPF u8, accel FS u8, gyro FS u8, brightness u8, face style u8 (`styles`' order: 0 pepin, 1 rose, 2 manga, 3 anime, 4 kawaii, 5 comics; a 7-byte frame leaves the style as it is) |
+| `C` | host -> ESP32 | config: id u8, IMU rate u16, DLPF u8, accel FS u8, gyro FS u8, brightness u8, face style u8 (`styles`' order: 0 pepin, 1 rose, 2 manga, 3 anime, 4 kawaii, 5 comics), eyes brightness u8 (0 off .. 255, 64 the default), eye look set u8 (0 follow the face style, 1 classic, 2 kawaii); a shorter frame leaves the later fields as they are; the IMU is set up again only when its five fields change (`imu.h` `same_sampling`) |
+| `Y` | host -> ESP32 | eyes override, 16 or 19 bytes: mode u8 (0 release, 1 standing, 2 timed), ms u16, brow_pos i8 (-100 nose .. 100 outward), brow_raise i8, brow_width u8, lid_top u8 (0 open .. 254 closed), lid_bottom u8, gaze_x i8 (-100 the robot's left .. 100 its right), gaze_y i8, iris r g b u8, glow u8, blink u8 (0 none, 1 both, 2 wink left, 3 wink right), side u8 (0 both eyes, 1 the robot's left, 2 its right)[, effect u8 (0 none = the look's own, 1 sparkle, 2 flash, 3 spin, 4 pulse, 5 flicker, 6 doze, 7 tear, 0xFF keep), effect_ms u16 (0: a one-shot's own length, a standing one until stopped)]; a field left to the expression is 0x80 (i8), 0xFF (u8) or 0 0 0 (the iris) |
+
+The status (`S`) ends with the eyes' current estimate (mA, u16), their brightness, their mode,
+the layout id and the look set in force (0 classic, 1 kawaii); everything before them is as it
+was. Firmware version 4.
 
 The IMU samples at the output rate the host's 'C' asks for (the head server asks 200 Hz,
-`config/head.json`; the firmware boots at 1000 Hz until then), DLPF_CFG 3, +-4 g, +-500 deg/s,
+`config/head.json`; the firmware boots at 1000 Hz until then; a 'C' whose id, rate, DLPF and
+ranges equal the running ones, a style or a brightness alone, leaves the chip running: setting
+it up resets it and waits 100 ms), DLPF_CFG 3, +-4 g, +-500 deg/s,
 CLKSEL 1 (the gyro's PLL), on its own core-0 task while the display runs on core 1. Each sample
 is stamped with `micros()` in the data-ready interrupt, so the INT wire is required: without
 edges the firmware streams nothing and reports `imu_state` 3 (a polled fallback beats against
@@ -457,4 +706,5 @@ fault) and the gaps longer than 1.5 periods.
 
 - [LovyanGFX](https://github.com/lovyan03/LovyanGFX) (panel driver, DMA, fonts; the info screen's
   IPA Gothic font covers Cyrillic)
+- [NeoPixelBus](https://github.com/Makuna/NeoPixelBus) (the eye rings over the RMT peripheral)
 - the Arduino core for ESP32 2.0.17 (PlatformIO espressif32 6.x)

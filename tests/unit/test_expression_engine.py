@@ -53,8 +53,15 @@ SHAPED = {"salute", "crazy"}  # on the poses Artem shaped by hand (2026-10-14)
 # seen the hand clear the head on the robot (poses.salute)
 WAITING = {"salute", "crazy"}
 SOUND = {"sound"}  # the reserved mark of the brain's sound tool (pepin.sounds), no composition
-# the atoms an auto-wrapper cannot play bare (a pose, a path, a face's name to choose)
-UNWRAPPED = {"arm_pose", "arm_arc", "arm_trace", "face"}
+# the eyes' marks (2026-10-15): the wink, the colour, the brows and lids and the lights in one
+# line (eyes:NAME, each name its own alias), and the brows' and lids' own for the gesture tool
+EYES = {"wink", "glow", "eyes", "frown", "brows_up", "squint"}
+STYLE = {"style"}  # the mouth's drawing style (2026-10-15): config/face.json's styles its arguments
+# the eyes' atoms no mark names (the idle layer's, the engine's)
+EYES_OWN = {"blink", "eyes_release"}
+# the atoms an auto-wrapper cannot play bare (a pose, a path, a face's name, a colour or an
+# effect to choose)
+UNWRAPPED = {"arm_pose", "arm_arc", "arm_trace", "face", "glow", "eye_effect"}
 RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wrist_flex": 30.0,
           "wrist_roll": -54.1, "gripper": -0.4}  # fmt: skip
 
@@ -64,11 +71,15 @@ RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wr
 
 def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     written = {n for n, c in BOOK.compositions.items() if c.wraps is None}
-    assert written == RESEARCH_NAMES | PRIMITIVES | OWN | SNAP | DANCE | SHAPED | {"breath"}
+    assert written == (
+        RESEARCH_NAMES | PRIMITIVES | OWN | SNAP | DANCE | SHAPED | EYES | STYLE | {"breath"}
+    )
     wrapped = {n for n, c in BOOK.compositions.items() if c.wraps is not None}
     assert wrapped == set(BOOK.atoms) - UNWRAPPED - written  # every atom that plays bare
     assert all(BOOK.compositions[n].wraps == n for n in wrapped)
-    assert {n for n, c in BOOK.compositions.items() if not c.callable} == OWN | IDLE | WAITING
+    assert {n for n, c in BOOK.compositions.items() if not c.callable} == (
+        OWN | IDLE | WAITING | EYES_OWN
+    )
     assert len(BOOK.atoms) >= 19
     assert not BOOK.atoms["breath"].callable and not BOOK.atoms["head_drift"].callable
     assert BOOK.moments["slow_tool"] == "thinking"  # the listeners' moments name compositions too
@@ -77,13 +88,12 @@ def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     assert "greeting_due" not in BOOK.moments and "farewell_due" not in BOOK.moments
     assert set(BOOK.moments.values()) <= set(BOOK.compositions)
     words = vocabulary(BOOK, face_names(CONFIG / "face.json"))
-    singles = wrapped - IDLE
-    assert words.intents == frozenset(
-        RESEARCH_NAMES | PRIMITIVES | SNAP | DANCE | SOUND | (SHAPED - WAITING) | singles
-    )
+    singles = wrapped - IDLE - EYES_OWN
+    marks = RESEARCH_NAMES | PRIMITIVES | SNAP | DANCE | SOUND | (SHAPED - WAITING) | singles
+    assert words.intents == frozenset(marks | EYES | STYLE)
     assert "smile" in words.faces
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps
-             for n in s.choices.get("name", ())}  # fmt: skip
+             if s.atom == "face" for n in s.choices.get("name", ())}  # fmt: skip
     assert faces <= words.faces  # every face a composition names exists
 
 
@@ -741,7 +751,7 @@ def test_a_tool_s_perform_is_answered_from_the_engine_s_thread() -> None:
 
 def test_the_config_file_s_knobs_are_read() -> None:
     config = engine_config(json.loads((CONFIG / "expression.json").read_text()))
-    assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35}
+    assert config.fade_s == {"arm": 0.35, "head": 0.35, "face": 0.1, "body": 0.35, "eyes": 0.1}
     assert config.arm_speed_scale == 1.0 and config.caps.intent_per_minute == {"laugh": 1}
     assert (config.caps.per_part, config.caps.per_reply, config.caps.accent_per_part) == (1, 4, 1)
     assert config.caps.accents == ("accent",) and config.caps.series == ("count",)

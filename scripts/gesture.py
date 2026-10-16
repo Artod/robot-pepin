@@ -20,7 +20,8 @@ replayed with them; a mark's argument after a colon, as the brain writes it, a p
 read once from the goal server's places book and the robot's pose, the person straight
 ahead), stretches its arm clip by 1/speed, checks it against config/arm.json's
 limits and caps scaled by the speed, and sends it to the base server, which plays it by itself
-and rests; the face's expressions go to the head server (source ``expression``); the head's
+and rests; the face's expressions and the eyes' looks, blinks and effects go to the head server
+(source ``expression``); the head's
 clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds the head
 (``--no-head`` leaves it out). Ctrl-C during a play sends a halt and releases the overlay.
 ``--dry-run`` prints the plan and sends nothing. ``teach`` reads the arm while its torque is off
@@ -47,14 +48,23 @@ from typing import Any
 
 from pepin.arm_motion import ArmMotion, load_arm_motion
 from pepin.audio_link import board_host
-from pepin.expression.animation import Book, Clip, Scene, Track
+from pepin.expression.animation import FACE_STYLE, STYLE_DEFAULT, Book, Clip, Event, Scene, Track
 from pepin.expression.arm_link import ArmClient
-from pepin.expression.book import book_from, composition_parts, load_book, vocabulary, with_rest
+from pepin.expression.book import (
+    book_from,
+    composition_parts,
+    load_book,
+    style_names,
+    vocabulary,
+    with_rest,
+    with_styles,
+)
 from pepin.expression.door import OverlayDoor
+from pepin.expression.fakes import FakeEyesChannel
 from pepin.expression.head import GESTURE, ClipLook
 from pepin.expression.markers import ANY, mark
 from pepin.expression.mix import stretched
-from pepin.expression.parts import ArmPart, NeckLimits, clip_look
+from pepin.expression.parts import ArmPart, EyesPart, FacePart, NeckLimits, clip_look, eye_calls
 from pepin.expression.places import GoalPlaces, Room
 from pepin.expression.render import BookRenderer, Resolver
 from pepin.expression.trajectory import JOINTS, Trajectory
@@ -155,7 +165,7 @@ def room_for(book: Book, name: str, arg: str | None) -> Room | None:
 
 
 def play(args: argparse.Namespace, motion: ArmMotion) -> int:
-    book = with_rest(load_book(BOOK), motion.rest_deg)
+    book = with_styles(with_rest(load_book(BOOK), motion.rest_deg), style_names())
     found = asked(args.name, book)
     if found is None:
         print(f"no gesture {args.name!r}; the gestures are {', '.join(book.compositions)}"
@@ -166,7 +176,7 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         print("--speed: above 0, at most 1")
         return 2
     seed = args.seed if args.seed is not None else int(time.time()) % 2**31
-    scene = Scene(frozenset({"arm", "face", "head"}))
+    scene = Scene(frozenset({"arm", "face", "head", "eyes"}))
     renderer = BookRenderer(book, resolver=Resolver(room=room_for(book, name, arg)))
     performance = renderer.render(name, scene, seed, variant=args.variant, arg=arg, args=settings)
     spelled = ",".join(x for x in (arg, *settings) if x is not None)
@@ -205,8 +215,16 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
                 f" rest; peak {_peak(planned, motion)}"
             )
         elif clip.part == "face":
-            shown = [f"{e.name} for {e.hold_s or 2.0:.1f} s" for e in clip.events]
+            shown = [_face_event(e) for e in clip.events]
             print(f"  face at +{at:.2f} s: {', '.join(shown)}")
+        elif clip.part == "eyes":
+            heard = FakeEyesChannel()
+            calls = eye_calls(clip, heard)
+            for _, call in calls:
+                call()
+            shown = [f"{t:.2f} s {what}{list(said)}" for (t, _), (what, said) in
+                     zip(calls, heard.calls, strict=True)]  # fmt: skip
+            print(f"  eyes at +{at:.2f} s: {', '.join(shown)}")
         elif clip.part == "head":
             overlay = None if args.no_head else clip_look(clip, GESTURE, limits)
             plan = "left out (--no-head)" if args.no_head else _overlay(overlay)
@@ -217,7 +235,7 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
     if args.dry_run:
         return 0
     face = None
-    if not args.no_face and any(c.part == "face" for c in clips):
+    if not args.no_face and any(c.part in ("face", "eyes") for c in clips):
         from pepin.head_link import HeadClient
 
         face = HeadClient(args.host, source="expression").start()
@@ -235,8 +253,9 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
                 print(f"  board: {answer.status if answer else 'no answer'}"
                       f"{': ' + answer.reason if answer and answer.reason else ''}")  # fmt: skip
             elif clip.part == "face" and face is not None:
-                for event in clip.events:
-                    face.express(event.name, hold_s=event.hold_s or 2.0)
+                FacePart(face).play(clip)  # a later event on a timer: waited for below
+            elif clip.part == "eyes" and face is not None:
+                EyesPart(face).play(clip)  # its later calls on timers: waited for below
             elif clip.part == "head" and door is not None and overlay is not None:
                 refusal = door.look(overlay)
                 print(f"  gaze arbiter: {'playing' if refusal is None else 'refused: ' + refusal}")
@@ -244,6 +263,10 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
             end = client.wait_answer(trajectory.id, DONE, trajectory.knots[-1].t_s + 15.0)
             print(f"  board: {end.status if end else 'no answer'}"
                   f"{': ' + end.reason if end and end.reason else ''}")  # fmt: skip
+        eyes_end = max((c.offset_s - start + c.duration_s for c in clips
+                        if c.part in ("face", "eyes")), default=0.0)  # fmt: skip
+        if face is not None and eyes_end > time.monotonic() - began:
+            time.sleep(eyes_end - (time.monotonic() - began))  # the face's last calls go out
     except KeyboardInterrupt:
         if door is not None:
             door.withdraw(GESTURE, HEAD_FADE_S)
@@ -258,6 +281,16 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         if face is not None:
             face.close()
     return 0
+
+
+def _face_event(event: Event) -> str:
+    """A face clip's event in a few words: an expression and its seconds, or a style."""
+    if event.dof != FACE_STYLE:
+        return f"{event.name} for {event.hold_s or 2.0:.1f} s"
+    if event.name == STYLE_DEFAULT:
+        return "the style let go"
+    held = "standing" if event.hold_s is None else f"for {event.hold_s:.1f} s"
+    return f"style {event.name} {held}"
 
 
 def _overlay(look: ClipLook | None) -> str:
