@@ -205,8 +205,8 @@ def test_mouth_show_and_config_go_straight_down(table: FaceTable) -> None:
     assert head.sent("T")[0][:3] == bytes((0x88, 0x13, 2))
     reply = ask(service, server, {"cmd": "config", "imu_rate_hz": 500, "brightness": 90})
     assert reply["config"]["id"] == 2 and reply["config"]["rate_hz"] == 500
-    assert reply["style"] == table.style == "pepin"
-    assert head.sent("C")[-1] == bytes((2, 0xF4, 0x01, 3, 1, 1, 90, 0, 64, 0))  # eyes 64, follow
+    assert reply["style"] == table.style == "kawaii"  # the file's default since 2026-10-15
+    assert head.sent("C")[-1] == bytes((2, 0xF4, 0x01, 3, 1, 1, 90, 4, 64, 0))  # kawaii, eyes 64
     # the face's style is live: named in a config, sent as the 'C' frame's eighth byte
     reply = ask(service, server, {"cmd": "config", "style": "manga"})
     assert reply["style"] == "manga" and head.sent("C")[-1][7] == 2  # pepin 0, rose 1, manga 2
