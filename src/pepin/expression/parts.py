@@ -20,7 +20,10 @@
   (:mod:`pepin.expression.head`, :func:`clip_look`) on top of whatever holds the head (the
   speaker gaze's look on the person, or home), posted through the arbiter's door
   (:class:`pepin.expression.door.OverlayDoor`) on a thread of its own; fading a layer is that
-  layer's source released over the fade.
+  layer's source released over the fade. A PACED clip (a paced composition's head: the nod and
+  the shake) lands each move :data:`SETTLE_S` before its keyframe at the most its axis gives a
+  clip (the tilt's ramp up to the arbiter's ``clip_acc_max_deg_s2``), and its steps play at
+  the least period that allows (:func:`least_period`, applied by the renderer).
 * :class:`Absent`: a part that cannot play, with the reason.
 """
 
@@ -35,11 +38,21 @@ import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from functools import partial
+from pathlib import Path
 from typing import Any, Protocol
 
 from pepin.arm_driver import ARRIVED_DEG, WIRE_SLACK
 from pepin.arm_motion import ArmMotion
-from pepin.expression.animation import FACE_STYLE, STYLE_DEFAULT, Clip, Layer, PartName, Track
+from pepin.expression.animation import (
+    FACE_STYLE,
+    STYLE_DEFAULT,
+    Atom,
+    Clip,
+    Layer,
+    PartName,
+    Track,
+    Value,
+)
 from pepin.expression.breath import ArmBreath
 from pepin.expression.executors import EyesChannel, FaceChannel, Outcome
 from pepin.expression.head import BAND, GESTURE, IDLE_LOOK, ClipKey, ClipLook, ClipTarget
@@ -589,19 +602,59 @@ class HeadDoor(Protocol):
 @dataclass(frozen=True)
 class NeckLimits:
     """The neck's profile (config/neck.json's ``motion``): the top speed, the pan's ramp and
-    the tilt's own, gentler one (a sharp tilt rocks the mast). A head key's speed ceiling is
-    the one that carries each axis to its keyframe in the time it has, at that axis's ramp."""
+    the tilt's own, gentler one (a sharp tilt rocks the mast); and the gaze arbiter's bounds on
+    a head clip (config/knobs.json's ``gaze``): the most a paced clip's key may ask the tilt's
+    ramp for (``clip_acc_max_deg_s2``) and the rate the tilt may turn back at
+    (``clip_max_hz``). A head key's speed ceiling is the one that carries each axis to its
+    keyframe in the time it has, at that axis's ramp."""
 
     max_speed_deg_s: float = 299.0
     pan_acc_deg_s2: float = 2232.0
     tilt_acc_deg_s2: float = 600.0
+    clip_tilt_acc_deg_s2: float = 600.0
+    clip_max_hz: float = 2.5
 
     @classmethod
-    def of(cls, motion: NeckMotion) -> NeckLimits:
+    def of(
+        cls, motion: NeckMotion, clip_acc_deg_s2: float | None = None, clip_max_hz: float = 2.5
+    ) -> NeckLimits:
         """The limits a :class:`pepin.neck.NeckMotion` puts on every move (the base server's
-        own rule: the tilt's ramp never above the pan's)."""
+        own rule: the tilt's ramp never above the pan's) and a paced clip's tilt ramp (the
+        arbiter's ``clip_acc_max_deg_s2``; None: the tilt's own), never under the tilt's own
+        nor above the neck's top (the base server's cap on a target's own tilt ramp)."""
         acc = motion.max_acc_deg_s2
-        return cls(motion.max_speed_deg_s, acc, min(motion.tilt_max_acc_deg_s2, acc))
+        tilt = min(motion.tilt_max_acc_deg_s2, acc)
+        clip = tilt if clip_acc_deg_s2 is None else min(max(clip_acc_deg_s2, tilt), acc)
+        return cls(motion.max_speed_deg_s, acc, tilt, clip, clip_max_hz)
+
+    @property
+    def turn_s(self) -> float:
+        """The least time between two turns of a clip's tilt: half a period of ``clip_max_hz``
+        (0: no limit)."""
+        return 0.5 / self.clip_max_hz if self.clip_max_hz > 0.0 else 0.0
+
+
+def load_neck_limits(neck: Path | None = None, knobs: Path | None = None) -> NeckLimits:
+    """config/neck.json's ``motion`` and the gaze arbiter's clip bounds as config/knobs.json
+    ships them (``gaze.clip_acc_max_deg_s2`` and ``gaze.clip_max_hz``, their defaults, read
+    once: a live change on the arbiter alone leaves the gestures sized as they were)."""
+    from pepin.deployment import config_file  # lazy: the parts stay import-light
+    from pepin.flags import read_knobs
+    from pepin.neck import NeckConfig
+
+    motion = NeckConfig.from_json(neck if neck is not None else config_file("neck.json")).motion
+    gaze = read_knobs(knobs).get("gaze", {})
+
+    def default(name: str, fallback: float) -> float:
+        spec = gaze.get(name)
+        return float(spec["default"]) if isinstance(spec, dict) and "default" in spec else fallback
+
+    defaults = NeckLimits()
+    return NeckLimits.of(
+        motion,
+        default("clip_acc_max_deg_s2", defaults.clip_tilt_acc_deg_s2),
+        default("clip_max_hz", defaults.clip_max_hz),
+    )
 
 
 class Serial:
@@ -722,6 +775,14 @@ class HeadPart:
 
 
 HEAD_MIN_SPEED_DEG_S = 1.0  # a key's least ceiling (a speed of 0 would be the servo's top)
+# How long before its keyframe a paced clip's move lands, so the arbiter has seen the head
+# settle when the next key falls due: pepin.gaze's Arbiter writes no overlay key while the last
+# one's move is in flight, and the key due when the head settles is the one written, so a key
+# landing late delays the next and a third may be skipped (2026-10-15, the bus tap: two shakes
+# played right, left, right, centre, two of their six keys never written). The servo's lag
+# behind its profile, two still encoder readings and their way back: 0.10-0.11 s a key that
+# night (an agreement nod, a shake: scratch/head_nods/neck_trace.py in the main checkout)
+SETTLE_S = 0.1
 # An idle key's ramp: this times the least that lands it on time (4 d / T^2: speeding up half the
 # way, braking the other half), so a quarter of its time each way is a soft start and stop and the
 # servo glides between keys instead of stepping (a key at the neck's full ramp starts and stops at
@@ -763,6 +824,60 @@ def needed_acc(travel_deg: float, seconds: float) -> float:
     return math.inf if seconds <= 0.0 else 4.0 * abs(travel_deg) / (seconds * seconds)
 
 
+def move_time(travel_deg: float, acc_deg_s2: float, top_deg_s: float) -> float:
+    """The least time (s) a joint takes over ``travel_deg`` from rest to rest at a ramp of
+    ``acc_deg_s2`` and a top speed of ``top_deg_s``: a triangle, or a trapezoid at the top."""
+    d = abs(travel_deg)
+    if d == 0.0:
+        return 0.0
+    if d * acc_deg_s2 <= top_deg_s * top_deg_s:
+        return 2.0 * math.sqrt(d / acc_deg_s2)
+    return d / top_deg_s + top_deg_s / acc_deg_s2
+
+
+def least_period(
+    atom: Atom, params: Mapping[str, float], limits: NeckLimits, lead_s: float = SETTLE_S
+) -> float:
+    """The shortest period a head ``atom`` plays at with these parameters as a paced clip
+    (:func:`clip_look`): each move between its keyframes at its axis's ramp (the tilt's a
+    clip's, ``clip_tilt_acc_deg_s2``) and the top speed, landed ``lead_s`` early, and the tilt
+    turning back no sooner than ``limits.turn_s`` after its last turn (the arbiter's
+    ``clip_max_hz``; with ``repeats`` over 1 the turn at the cycles' seam too). 0 for an
+    atom that moves neither axis."""
+    ramps = {"pan_deg": limits.pan_acc_deg_s2, "tilt_deg": limits.clip_tilt_acc_deg_s2}
+    cycles = 2 if params.get("repeats", 1.0) > 1.5 else 1
+    least = 0.0
+    for dof, ramp in ramps.items():
+        points = [(k.at, _key_value(k.values[dof], params)) for k in atom.keys if dof in k.values]
+        moves = [(a[0], b[0] - a[0], b[1] - a[1]) for a, b in itertools.pairwise(points)
+                 if abs(b[1] - a[1]) >= SAME_DEG]  # fmt: skip
+        for _, share, travel in moves:
+            if share > 0.0:
+                least = max(least, (move_time(travel, ramp, limits.max_speed_deg_s) + lead_s)
+                            / share)  # fmt: skip
+        if dof != "tilt_deg" or limits.turn_s <= 0.0:
+            continue
+        turns: list[float] = []
+        direction = 0.0
+        for cycle in range(cycles):
+            for start, _, travel in moves:
+                if math.copysign(1.0, travel) != direction:
+                    turns.append(cycle + start)
+                    direction = math.copysign(1.0, travel)
+        for a, b in itertools.pairwise(turns):
+            if b > a:
+                least = max(least, limits.turn_s / (b - a))
+    return least
+
+
+def _key_value(raw: Value, params: Mapping[str, float]) -> float:
+    """A head key's value: a number, or a drawn parameter (``"$p"``, ``"-$p"``)."""
+    if isinstance(raw, str):
+        sign = -1.0 if raw.startswith("-") else 1.0
+        return sign * params[raw.lstrip("-").lstrip("$")]
+    return float(raw)
+
+
 def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> ClipLook | None:
     """A head clip as the arbiter's overlay (offsets in radians from the holder's aim, pan +
     left, tilt + down), None when it moves nothing.
@@ -777,7 +892,12 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
     (the arbiter's rule for a loop); the idle layer's clip is marked ``idle`` and GLIDES: each
     key also carries its own ramp, ``GLIDE`` times the least that lands its move on time (never
     under the Acceleration register's unit, never over the axis's ramp), its speed the one that
-    ends the move on time at that ramp: the servo eases between keys instead of stepping."""
+    ends the move on time at that ramp: the servo eases between keys instead of stepping. A
+    PACED clip's key (``Clip.paced``: the nod, the shake) lands its move :data:`SETTLE_S` before
+    its keyframe, as the axis's ramp allows (else as fast as it allows), so the arbiter sees the
+    head settled when the next key falls due; a tilt move that needs more than the tilt's own
+    ramp for that asks the least that does, up to ``limits.clip_tilt_acc_deg_s2``, as the key's
+    ``tilt_acc_deg_s2``."""
     limits = limits if limits is not None else NeckLimits()
     frames = keyframes(clip)
     if not frames:
@@ -791,13 +911,21 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
             continue
         ramps = (limits.pan_acc_deg_s2, limits.tilt_acc_deg_s2)
         glide = clip.layer == "idle"
+        paced = clip.paced and not glide
+        seconds = t - t0 - SETTLE_S if paced else t - t0  # a paced move lands early
+        tilt_ask: float | None = None
         if glide:  # one ramp for both servos: the gentlest that lands the larger move on time
             least = GLIDE * max(needed_acc(pan - pan0, t - t0), needed_acc(tilt - tilt0, t - t0))
             ramp = max(ACC_UNIT_DEG_S2, least)
             ramps = (min(ramp, ramps[0]), min(ramp, ramps[1]))
+        elif paced and limits.clip_tilt_acc_deg_s2 > ramps[1]:
+            need = needed_acc(tilt - tilt0, seconds)
+            if need > ramps[1]:
+                tilt_ask = min(limits.clip_tilt_acc_deg_s2, math.ceil(need * 100.0) / 100.0)
+                ramps = (ramps[0], tilt_ask)
         speed = max(
-            move_speed(pan - pan0, t - t0, ramps[0]),
-            move_speed(tilt - tilt0, t - t0, ramps[1]),
+            move_speed(pan - pan0, seconds, ramps[0]),
+            move_speed(tilt - tilt0, seconds, ramps[1]),
         )
         key: ClipKey = {
             "at_s": round(t0 - start, 4),
@@ -807,6 +935,8 @@ def clip_look(clip: Clip, source: str, limits: NeckLimits | None = None) -> Clip
         }
         if glide:
             key["acc_deg_s2"] = round(max(ramps), 2)
+        if tilt_ask is not None:
+            key["tilt_acc_deg_s2"] = tilt_ask
         keys.append(key)
         t0, pan0, tilt0 = t, pan, tilt
     if not keys:

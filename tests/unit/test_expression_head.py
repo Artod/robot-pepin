@@ -12,13 +12,14 @@ import math
 import threading
 from collections import deque
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from pepin.arm_motion import load_arm_motion
-from pepin.expression.animation import Clip, Scene, Track
+from pepin.expression.animation import Atom, Clip, Scene, Track
 from pepin.expression.animator import EngineConfig, GestureEngine
 from pepin.expression.book import load_book, with_rest
 from pepin.expression.door import AWAY, OverlayDoor
@@ -29,12 +30,14 @@ from pepin.expression.markers import Marker, Part
 from pepin.expression.parts import (
     GLIDE,
     HEAD_MIN_SPEED_DEG_S,
+    SETTLE_S,
     Absent,
     HeadPart,
     NeckLimits,
     Serial,
     clip_look,
     keyframes,
+    least_period,
     move_speed,
     needed_acc,
 )
@@ -239,10 +242,13 @@ def _problems(clip: Clip) -> list[str]:
     return found
 
 
-def _head_boxes() -> list[tuple[str, str, dict[str, Any]]]:
-    """Every head atom's parameter box: its own, and each composition step's over it."""
+def _head_boxes() -> list[tuple[str, str, dict[str, Any], bool]]:
+    """Every head atom's parameter box: its own, and each composition step's over it, and
+    whether the composition is paced (its periods the floor the neck's pace lengthens)."""
     boxes = [
-        (name, name, dict(atom.params)) for name, atom in BOOK.atoms.items() if atom.part == "head"
+        (name, name, dict(atom.params), False)
+        for name, atom in BOOK.atoms.items()
+        if atom.part == "head"
     ]
     for composition in BOOK.compositions.values():
         for v, variant in enumerate(composition.variants):
@@ -250,7 +256,8 @@ def _head_boxes() -> list[tuple[str, str, dict[str, Any]]]:
                 atom = BOOK.atoms[step.atom]
                 if atom.part == "head":
                     where = f"{composition.name}[{v}].steps[{s}]"
-                    boxes.append((where, atom.name, {**atom.params, **step.params}))
+                    box = {**atom.params, **step.params}
+                    boxes.append((where, atom.name, box, composition.paced))
     return boxes
 
 
@@ -266,11 +273,14 @@ def test_every_head_atom_at_the_corners_of_its_ranges_is_within_the_arbiter_and_
         "head_glance",
         "recoil",
         "head_drift",
-    } <= {atom for _, atom, _ in _head_boxes()}
-    for where, atom, box in _head_boxes():
+    } <= {atom for _, atom, _, _ in _head_boxes()}
+    for where, atom, box, paced in _head_boxes():
         names = sorted(box)
         for corner in itertools.product(*[(box[n].lo, box[n].hi) for n in names]):
             params = dict(zip(names, corner, strict=True))
+            if paced:  # as the renderer plays it: at the least period the neck allows
+                least = least_period(BOOK.atoms[atom], params, LIMITS)
+                params["period_s"] = max(params["period_s"], least)
             for mirrored, layer in itertools.product((False, True), ("gesture", "idle")):
                 clip = RENDERER.atom_clip(atom, params, mirrored=mirrored, layer=layer)  # type: ignore[arg-type]
                 assert _problems(clip) == [], f"{where} at {params}"
@@ -708,3 +718,94 @@ def test_a_request_from_the_adapter_is_one_the_arbiter_s_json_reader_takes() -> 
     parsed = look_from_json(dict(look), GazeSettings(), NECK, lambda frame, xyz: "no frames")
     assert isinstance(parsed, Look) and parsed.kind == "clip" and parsed.band == IDLE
     assert parsed.overlay is not None and len(parsed.overlay.keys) == 2
+
+
+# -- the paced nod and shake (2026-10-15) --------------------------------------------------------
+
+RAMPS = (600.0, 1500.0)  # gaze.clip_acc_max_deg_s2 as shipped, and one offered for a quicker nod
+PACED_MARKS = (("nod", "1"), ("nod", "2"), ("nod", "3"), ("nod", "slow"), ("shake", "1"),
+               ("shake", "2"), ("shake", "slow"))  # fmt: skip
+
+
+def _paced_clip(name: str, arg: str, seed: int, limits: NeckLimits) -> Clip:
+    performance = BookRenderer(BOOK, head=limits).render(name, EVERYTHING, seed, arg=arg)
+    (clip,) = performance.clips
+    assert clip.part == "head" and clip.paced, (name, arg)
+    return clip
+
+
+def test_the_nod_and_the_shake_play_whole_through_the_arbiter_at_either_ramp() -> None:
+    """At the clip's tilt ramp as shipped (600) and at 1500: every draw of every argument is an
+    overlay the arbiter at that knob takes whole (clip_max_hz, clip_max_deg, the tilt's ask
+    within clip_acc_max_deg_s2), each move lands SETTLE_S before its keyframe at its axis's
+    ramp (the arbiter sees the head settled when the next key falls due: none skipped), the nod
+    11-18 deg down, the shake 15-24 deg each side; a 1500 nod's keys ask the tilt for its
+    ramp, a 600 one's never."""
+    for ramp in RAMPS:
+        limits = replace(LIMITS, clip_tilt_acc_deg_s2=ramp)
+        bounds = replace(BOUNDS, clip_acc_max_deg_s2=ramp)
+        for (name, arg), seed in itertools.product(PACED_MARKS, range(25)):
+            clip = _paced_clip(name, arg, seed, limits)
+            look = clip_look(clip, GESTURE, limits)
+            assert look is not None
+            overlay = overlay_from_json(dict(look["target"]), bounds)
+            assert not isinstance(overlay, str), (ramp, name, arg, seed, overlay)
+            frames = keyframes(clip)
+            tilts = [t for _, _, t in frames]
+            pans = [p for _, p, _ in frames]
+            if name == "nod":
+                assert 11.0 - 1e-6 <= max(tilts) <= 18.0 + 1e-6 and min(tilts) >= -1e-6
+                assert max(abs(p) for p in pans) < 1e-6
+            else:
+                assert 15.0 - 1e-6 <= max(abs(p) for p in pans) <= 24.0 + 1e-6
+                assert max(abs(t) for t in tilts) < 1e-6
+            for (t0, p0, a0), (t1, p1, a1) in itertools.pairwise(frames):
+                early = t1 - t0 - SETTLE_S
+                assert needed_acc(p1 - p0, early) <= LIMITS.pan_acc_deg_s2 * (1 + 1e-6)
+                assert needed_acc(a1 - a0, early) <= ramp * (1 + 1e-6), (ramp, name, arg)
+            asked = [k["tilt_acc_deg_s2"] for k in look["target"]["keys"] if "tilt_acc_deg_s2" in k]
+            assert all(LIMITS.tilt_acc_deg_s2 < a <= ramp for a in asked)
+            if name == "nod" and arg != "slow":
+                assert bool(asked) == (ramp > LIMITS.tilt_acc_deg_s2), (ramp, arg, seed)
+
+
+def test_a_paced_nod_takes_the_ramp_it_was_sized_for_and_is_refused_past_a_lower_knob() -> None:
+    """The timings Artem picks between (the nod's tilt from the clip's ramp, the shake's pan at
+    the neck's 2232 either way); a nod sized for 1500 offered to an arbiter at 600 is refused
+    whole by the knob, never played small."""
+    nod, shake = BOOK.atoms["head_nod"], BOOK.atoms["head_shake"]
+    floor = {"period_s": 0.4, "repeats": 1.0}
+    at = {ramp: replace(LIMITS, clip_tilt_acc_deg_s2=ramp) for ramp in RAMPS}
+
+    def period(atom: Atom, amp: float, ramp: float, lead_s: float = SETTLE_S) -> float:
+        return least_period(atom, {**floor, "amp_deg": amp}, at[ramp], lead_s)
+
+    assert period(nod, 15.0, 600.0) == pytest.approx(0.832, abs=1e-3)
+    assert period(nod, 15.0, 1500.0) == pytest.approx(0.6, abs=1e-3)
+    assert period(nod, 12.0, 600.0) == pytest.approx(0.766, abs=1e-3)
+    assert period(nod, 12.0, 1500.0) == pytest.approx(0.558, abs=1e-3)
+    assert (
+        period(shake, 20.0, 600.0) == period(shake, 20.0, 1500.0) == pytest.approx(1.157, abs=1e-3)
+    )
+    # with no settle to wait for, the bare physics: 0.63 s a 15 deg nod at 600, the 2.5 Hz floor
+    assert period(nod, 15.0, 600.0, 0.0) == pytest.approx(0.632, abs=1e-3)
+    assert period(nod, 6.0, 1500.0, 0.0) == pytest.approx(0.4)
+    look = clip_look(_paced_clip("nod", "1", 3, at[1500.0]), GESTURE, at[1500.0])
+    assert look is not None
+    refused = overlay_from_json(dict(look["target"]), BOUNDS)
+    assert isinstance(refused, str) and "clip_acc_max_deg_s2 600" in refused
+    # the head part's limits pace the engine's renderer (a head part that is none: the shipped)
+    engine = GestureEngine({"head": HeadPart(FakeHeadDoor(), limits=at[1500.0])}, FakePlayout(),
+                           lambda: (BOOK, EngineConfig()))  # fmt: skip
+    assert engine.renderer.head == at[1500.0]
+
+
+def test_a_gesture_s_clip_is_never_paced_and_keeps_the_neck_s_own_ramps() -> None:
+    """Only a paced composition's head lands early or asks the tilt for more: agreement's nod
+    at a 1500 knob is the one it was (its keys on time, no ask)."""
+    limits = replace(LIMITS, clip_tilt_acc_deg_s2=1500.0)
+    clip = next(c for c in BookRenderer(BOOK, head=limits).render("agreement", EVERYTHING, 4,
+                                                                   variant=2).clips
+                if c.part == "head")  # fmt: skip
+    assert not clip.paced
+    assert clip_look(clip, GESTURE, limits) == clip_look(clip, GESTURE, LIMITS)

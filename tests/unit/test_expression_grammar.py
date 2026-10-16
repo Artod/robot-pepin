@@ -87,7 +87,7 @@ def test_an_argument_in_any_script_is_a_name_lower_case_single_spaced() -> None:
 
 def test_what_names_nothing_is_dropped_and_never_turns_the_voice() -> None:
     for inner in (
-        "nod",  # a bare name of no intent
+        "bow",  # a bare name of no intent
         "wave:hello",  # an x:y whose x is no intent
         "whispering:soft",  # ... even when x is a style word
         "arc:sideways",  # an argument the intent does not take
@@ -96,12 +96,13 @@ def test_what_names_nothing_is_dropped_and_never_turns_the_voice() -> None:
         "point",  # an intent that needs one, without it
         "arc",
         "face:nope",
-        "gesture:nod",
+        "gesture:bow",
+        "nod:fast",  # a bare intent with a word it does not take: dropped, never its first
     ):
         assert named(inner) is None, inner
-    parsed = parse("{nod} Цены {arc:sideways} выросли {whispering:soft} вдвое.", WORDS)
+    parsed = parse("{bow} Цены {arc:sideways} выросли {whispering:soft} вдвое.", WORDS)
     assert parsed.parts == (Part("Цены выросли вдвое."),)  # the voice's manner untouched
-    assert parsed.dropped == ("{nod}", "{arc:sideways}", "{whispering:soft}")
+    assert parsed.dropped == ("{bow}", "{arc:sideways}", "{whispering:soft}")
     assert named("whispering") == ("style", "whispering", None)
     assert named("happy, excited") == ("style", "happy, excited", None)
     assert named("") == ("style", "", None)

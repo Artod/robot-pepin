@@ -150,6 +150,8 @@ class OverlayDoor:
                    "speed_deg_s": k["speed_deg_s"]}  # fmt: skip
             if "acc_deg_s2" in k:  # the key's own ramp (the idle layer's glide)
                 key["acc_deg_s2"] = k["acc_deg_s2"]
+            if "tilt_acc_deg_s2" in k:  # the tilt's own ramp (a paced nod's)
+                key["tilt_acc_deg_s2"] = k["tilt_acc_deg_s2"]
             keys.append(key)
         self.calls += 1
         try:

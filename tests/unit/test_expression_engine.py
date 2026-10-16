@@ -49,6 +49,7 @@ IDLE = {"breath", "head_drift"}  # the idle layer's (the breath's written, the d
 SNAP = {"snap"}  # the gripper that really shuts (2026-10-14)
 DANCE = {"dance"}  # the beats' family (2026-10-14): a style an argument, one step a beat
 SHAPED = {"salute", "crazy"}  # on the poses Artem shaped by hand (2026-10-14)
+PACED = {"nod", "shake"}  # the clear yes and no, as quick as the neck allows (2026-10-15)
 # ... of which the salute and the twirl are the engine's own (callable false) until Artem has
 # seen the hand clear the head on the robot (poses.salute)
 WAITING = {"salute", "crazy"}
@@ -72,7 +73,16 @@ RAISED = {"shoulder_pan": -10.0, "shoulder_lift": -40.0, "elbow_flex": 40.0, "wr
 def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     written = {n for n, c in BOOK.compositions.items() if c.wraps is None}
     assert written == (
-        RESEARCH_NAMES | PRIMITIVES | OWN | SNAP | DANCE | SHAPED | EYES | STYLE | {"breath"}
+        RESEARCH_NAMES
+        | PRIMITIVES
+        | OWN
+        | SNAP
+        | DANCE
+        | SHAPED
+        | EYES
+        | STYLE
+        | PACED
+        | {"breath"}
     )
     wrapped = {n for n, c in BOOK.compositions.items() if c.wraps is not None}
     assert wrapped == set(BOOK.atoms) - UNWRAPPED - written  # every atom that plays bare
@@ -90,7 +100,7 @@ def test_the_book_holds_the_research_s_twelve_intents_and_its_atoms() -> None:
     words = vocabulary(BOOK, face_names(CONFIG / "face.json"))
     singles = wrapped - IDLE - EYES_OWN
     marks = RESEARCH_NAMES | PRIMITIVES | SNAP | DANCE | SOUND | (SHAPED - WAITING) | singles
-    assert words.intents == frozenset(marks | EYES | STYLE)
+    assert words.intents == frozenset(marks | EYES | STYLE | PACED)
     assert "smile" in words.faces
     faces = {n for c in BOOK.compositions.values() for v in c.variants for s in v.steps
              if s.atom == "face" for n in s.choices.get("name", ())}  # fmt: skip

@@ -58,6 +58,7 @@ class TargetHead:
         self.writes: list[tuple[Aim | None, bool, float]] = []
         self.ceilings: list[float | None] = []
         self.ramps: list[float | None] = []
+        self.tilt_ramps: list[float | None] = []
         self.refusal: Refusal | None = None
 
     def blocked(self, now: float) -> Refusal | None:
@@ -72,10 +73,12 @@ class TargetHead:
         now: float,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         self.writes.append((aim, hold, now))
         self.ceilings.append(speed_deg_s)
         self.ramps.append(acc_deg_s2)
+        self.tilt_ramps.append(tilt_acc_deg_s2)
 
     def take_refusal(self) -> Refusal | None:
         refusal, self.refusal = self.refusal, None
@@ -299,18 +302,41 @@ def test_a_drive_s_start_lets_the_overlay_go_with_the_rest() -> None:
     assert head.writes[-1] == (None, False, 1.25), "nothing holds the head: home"
 
 
-def test_a_new_aim_of_the_holder_carries_the_overlay_s_offset() -> None:
-    arb, head, _out = arbiter()
+def test_a_new_aim_of_the_holder_waits_for_a_gesture_and_rides_under_an_idle_overlay() -> None:
+    """2026-10-15: the speaker gaze's follow wrote the head seven times in 0.22 s under a shake
+    and its middle key was never written. A gesture's overlay rides the holder's aim its first
+    key was written on: a newer aim of the holder writes nothing while it plays, its keys stay
+    on the aim they started on, and its end takes the head back to the newer aim; an idle
+    overlay (the breath) carries on over the holder's newest aim."""
+    arb, head, out = arbiter()
     speaker_on(arb)
-    arb.submit(clip(GLANCE), 1.0)
+    arb.submit(clip(GLANCE), 1.0, out.append)
     arb.step(1.0)
+    assert_aim(head.writes[-1][0], plus(LEFT, 15, -6))
     nearer = Aim(math.radians(10), math.radians(20))
     arb.submit(Look(SPEAKER, (nearer,), IDLE, 0, 6.0, 6.0), 1.2)
     writes = len(head.writes)
-    arb.step(1.2)
-    assert len(head.writes) == writes + 1, "one write: the new aim with the offset on top"
-    assert_aim(head.writes[-1][0], plus(nearer, 15, -6))
-    assert arb.state(1.2).target == nearer, "the holder's aim, not the overlay's"
+    still_at(arb, plus(LEFT, 15, -6), 1.25)
+    arb.step(1.3)
+    assert len(head.writes) == writes, "the holder's move waits for the gesture's end"
+    arb.step(3.0)  # the glance's last key: back on the aim it started on, not the newer one
+    assert_aim(head.writes[-1][0], LEFT)
+    still_at(arb, LEFT, 3.1)
+    arb.step(3.2)
+    assert out[-1].status == "done"
+    arb.step(3.25)
+    assert_aim(head.writes[-1][0], nearer)  # the way back: the holder's aim of now
+    assert arb.state(3.25).target == nearer
+    still_at(arb, nearer, 3.4)
+    arb.step(3.5)
+    arb.submit(clip(BREATHE, BREATH, idle=True, loop=True), 3.5)
+    arb.step(3.5)
+    assert_aim(head.writes[-1][0], plus(nearer, 0, -0.6))
+    nearest = Aim(math.radians(5), math.radians(20))
+    arb.submit(Look(SPEAKER, (nearest,), IDLE, 0, 6.0, 6.0), 3.7)
+    still_at(arb, plus(nearer, 0, -0.6), 3.75)
+    arb.step(3.8)
+    assert_aim(head.writes[-1][0], plus(nearest, 0, -0.6))  # an idle overlay follows the holder
 
 
 def test_an_overlay_needs_a_driver_that_takes_targets_while_the_head_moves() -> None:
@@ -436,3 +462,62 @@ def test_an_overlay_key_s_own_ramp_is_read_checked_and_written_with_it() -> None
     assert [k.acc_deg_s2 for k in overlay.keys] == [9.5, None]
     bad = [{**keys[0], "acc_deg_s2": 0.0}, keys[1]]
     assert "ramps at more than 0" in str(overlay_from_json({"keys": bad}, settings))
+
+
+def test_a_key_asks_the_tilt_s_ramp_up_to_clip_acc_max_and_the_neck_hears_it() -> None:
+    """A paced nod's key asks the tilt for a ramp of its own (tilt_acc_deg_s2): refused whole
+    above the knob (600 as shipped: no overlay tilts faster than any other move), passed to the
+    driver beside its speed at or under it, and the way back carries the last key's."""
+    target: dict[str, Any] = {"keys": [
+        {"at_s": 0.0, "pan_rad": 0.0, "tilt_rad": math.radians(15.0), "speed_deg_s": 150.0,
+         "tilt_acc_deg_s2": 1500.0},
+        {"at_s": 0.3, "pan_rad": 0.0, "tilt_rad": 0.0, "speed_deg_s": 150.0,
+         "tilt_acc_deg_s2": 1500.0},
+    ]}  # fmt: skip
+    assert GazeSettings().clip_acc_max_deg_s2 == 600.0
+    refused = overlay_from_json(target, SETTINGS)
+    assert isinstance(refused, str) and "past clip_acc_max_deg_s2 600" in refused
+    bad = {"keys": [{**target["keys"][0], "tilt_acc_deg_s2": 0.0}]}
+    assert overlay_from_json(bad, SETTINGS) == "a clip's key ramps at more than 0 deg/s^2"
+    raised = replace(SETTINGS, clip_acc_max_deg_s2=1500.0)
+    overlay = overlay_from_json(target, raised)
+    assert isinstance(overlay, Overlay) and overlay.keys[0].tilt_acc_deg_s2 == 1500.0
+    arb, head, out = arbiter()
+    arb.settings = raised
+    speaker_on(arb)
+    nod = Look(GESTURE, (), IDLE, 0, 0.0, 5.0, kind="clip", overlay=overlay)
+    assert arb.submit(nod, 1.0, out.append).status == "granted"
+    arb.step(1.0)
+    assert head.tilt_ramps[-1] == 1500.0 and head.ramps[-1] is None
+    still_at(arb, plus(LEFT, 0, 15), 1.2)
+    arb.step(1.3)
+    assert_aim(head.writes[-1][0], LEFT)
+    assert head.tilt_ramps[-1] == 1500.0
+    still_at(arb, LEFT, 1.4)
+    arb.step(1.5)
+    assert out[-1].status == "done"
+
+
+def test_a_followed_point_re_resolved_under_a_gesture_waits_for_its_end() -> None:
+    """The speaker gaze's look on a person's point follows the cart (retarget): under a
+    gesture's overlay the re-resolved aim is kept, not written; the gesture's end takes the
+    head there."""
+    arb, head, out = arbiter()
+    arb.submit(Look(SPEAKER, (LEFT,), IDLE, 0, 6.0, 6.0, follow=True), 0.0)
+    arb.step(0.0)
+    still_at(arb, LEFT, 0.3)
+    arb.step(0.4)
+    arb.submit(clip(NOD), 1.0, out.append)
+    arb.step(1.0)
+    writes = len(head.writes)
+    moved = plus(LEFT, -8, 0)
+    assert arb.retarget(arb.pending()[0].id, moved, 1.1)
+    assert len(head.writes) == writes, "no write under the gesture"
+    still_at(arb, plus(LEFT, 0, 5), 1.15)
+    arb.step(1.25)
+    assert_aim(head.writes[-1][0], LEFT)  # the nod's way up: on the aim it started on
+    still_at(arb, LEFT, 1.3)
+    arb.step(1.4)
+    assert out[-1].status == "done"
+    arb.step(1.45)
+    assert_aim(head.writes[-1][0], moved)

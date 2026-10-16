@@ -41,7 +41,13 @@ depth frames at each, how long to hold, which band, how long the request may liv
   that an ``idle`` overlay (breathing, a fidget) gives way to any other and never replaces one.
   It plays only over a holder of its band or a worse one, needs a driver that takes targets
   while moving (``neck_target``), and is refused whole (never clamped) past the reach, past
-  ``clip_max_deg`` or with a tilt that reverses faster than ``clip_max_hz``; a ``loop`` repeats
+  ``clip_max_deg``, with a tilt that reverses faster than ``clip_max_hz`` or with a key asking
+  the tilt for a ramp of its own (``tilt_acc_deg_s2``: a quick nod) above
+  ``clip_acc_max_deg_s2``. A gesture's overlay (not ``idle``) rides the holder's aim its first
+  key was written on: the holder's moves while it plays (a newer aim of its source, a follow's
+  re-resolved point) wait for its end, where the way back goes to the holder's aim of then
+  (2026-10-15: the speaker gaze's follow wrote the head seven times in 0.22 s under a shake and
+  its middle key was never written); an idle one follows the holder; a ``loop`` repeats
   its keys until withdrawn or its TTL lapses (renewed like any request). An overlay whose
   offsets all stay within ``clip_still_deg`` (a breath) writes without starting a move: the head
   is not blind for it.
@@ -170,7 +176,8 @@ class GazeSettings:
     """The arbiter's numbers (config/knobs.json's ``gaze`` block, live); ``ttl_s`` is the
     default TTL of the operator, navigation, person, sensor, driving and idle bands;
     ``dark_patience_s`` how long a look waits on frames the depth gate drops as dark (0: until
-    its TTL); ``clip_*`` bound an overlay (offset, tilt reversal rate, the still overlay)."""
+    its TTL); ``clip_*`` bound an overlay (offset, tilt reversal rate, the still overlay, the
+    most a key may ask the tilt's ramp for)."""
 
     frames: int = 3
     settle_tol_deg: float = 1.0
@@ -181,6 +188,7 @@ class GazeSettings:
     clip_max_deg: float = 30.0
     clip_max_hz: float = 2.5
     clip_still_deg: float = 1.0
+    clip_acc_max_deg_s2: float = 600.0
 
     def ttl_for(self, band: int) -> float:
         """The default TTL of a band's request."""
@@ -196,13 +204,15 @@ def new_id() -> str:
 class OverlayKey:
     """One key of an overlay: seconds from its start, the pan (+ left) and tilt (+ down) offsets
     in radians added to the holder's aim, the speed ceiling of the move to it and its ramp's
-    (None: the neck's own; the idle layer's keys glide on a gentle one)."""
+    (None: the neck's own; the idle layer's keys glide on a gentle one), and the tilt's own ramp
+    (None: the neck's tilt ceiling; a quick nod asks more, at most ``clip_acc_max_deg_s2``)."""
 
     at_s: float
     pan_rad: float
     tilt_rad: float
     speed_deg_s: float
     acc_deg_s2: float | None = None
+    tilt_acc_deg_s2: float | None = None
 
     @property
     def offset(self) -> Aim:
@@ -269,6 +279,12 @@ class Overlay:
             )
         if self.loop and self.period_s <= 0.0:
             return "a looped overlay needs its last key after 0 s (its period)"
+        asked = max((k.tilt_acc_deg_s2 or 0.0 for k in self.keys), default=0.0)
+        if asked > settings.clip_acc_max_deg_s2 + 1e-9:
+            return (
+                f"an overlay key asks the tilt for {asked:.0f} deg/s^2, past clip_acc_max_deg_s2"
+                f" {settings.clip_acc_max_deg_s2:.0f} (the mast rings after a sharp tilt)"
+            )
         fastest = _tilt_half_period_s(self)
         hz = settings.clip_max_hz
         if hz > 0.0 and fastest is not None and fastest < 0.5 / hz - 1e-9:
@@ -388,10 +404,12 @@ class HeadDriver(Protocol):
         now: float,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """Send the head to ``aim`` (``None``: home); ``hold`` keeps the servos energised;
         ``speed_deg_s`` and ``acc_deg_s2`` ceilings of the move's own (an overlay's key, an
-        eased look) over ``speed``'s."""
+        eased look) over ``speed``'s; ``tilt_acc_deg_s2`` the tilt's own ramp (an overlay's
+        quick nod)."""
         ...
 
     def take_refusal(self) -> Refusal | None:
@@ -577,6 +595,8 @@ class Arbiter:
         self.reach = reach  # an overlay's keys over the holder's aim are refused past it
         self._back_deg_s = 0.0  # the speed the head goes back to its holder at after an overlay
         self._back_acc: float | None = None  # and its ramp (the overlay's last key's own, if any)
+        self._back_tilt_acc: float | None = None  # and the tilt's own (a quick nod's last key's)
+        self._kept_back = False  # a holder's write kept back under a gesture: the way back owes it
         self._back_still = False
         self._lock = threading.RLock()
         self._held: list[_Held] = []
@@ -979,7 +999,12 @@ class Arbiter:
         return spell[-1] - spell[0] if spell else 0.0
 
     def _write(self, held: _Held, aim: Aim, *, home: bool, now: float) -> None:
-        """One write toward ``aim``, or a wait while the driver cannot take it."""
+        """One write toward ``aim``, or a wait while the driver cannot take it or a gesture's
+        overlay plays on the holder's aim of its start (its end writes the head back to the
+        holder's aim of then)."""
+        if self._riding() is not None:
+            self._kept_back = True  # written by the gesture's way back
+            return
         if now < self._retry_at:
             return
         refusal = self._driver.blocked(now)
@@ -1023,6 +1048,7 @@ class Arbiter:
         offset: Aim | None = None,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """One write of the base ``aim`` with an overlay's ``offset`` on top (the playing
         overlay's current one when None): a lifted home is held like any aim."""
@@ -1035,6 +1061,7 @@ class Arbiter:
             now,
             speed_deg_s,
             acc_deg_s2,
+            tilt_acc_deg_s2,
         )
         written = _Write(aim, home and not lifted, now, owner, offset=lift)
         self._before, self._head = self._head, written
@@ -1047,6 +1074,7 @@ class Arbiter:
         now: float,
         speed_deg_s: float | None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """One write to the driver; a ceiling of its own is passed only when there is one."""
         ceilings: dict[str, float] = {}
@@ -1054,6 +1082,8 @@ class Arbiter:
             ceilings["speed_deg_s"] = speed_deg_s
         if acc_deg_s2 is not None:
             ceilings["acc_deg_s2"] = acc_deg_s2
+        if tilt_acc_deg_s2 is not None:
+            ceilings["tilt_acc_deg_s2"] = tilt_acc_deg_s2
         self._driver.write(aim, speed=speed, hold=hold, now=now, **ceilings)
         self.counts["writes"] += 1
 
@@ -1108,6 +1138,14 @@ class Arbiter:
     def _reach_refusal(self, aim: Aim) -> str | None:
         return self.reach.refusal(aim) if self.reach is not None else None
 
+    def _riding(self) -> Aim | None:
+        """The holder's aim a gesture's overlay rides, once its first key is written (None: no
+        overlay, an idle one that follows the holder, or none written yet)."""
+        playing = self._playing
+        if playing is None or playing.overlay.idle:
+            return None
+        return playing.base
+
     def _overlay_offset(self) -> Aim:
         """The playing overlay's offset as last written; none before its first key."""
         playing = self._playing
@@ -1133,7 +1171,8 @@ class Arbiter:
             self._write_back(now)
             return
         index, cycle = overlay.key_at(elapsed)
-        base = self._holder_aim()
+        ridden = self._riding()
+        base = ridden if ridden is not None else self._holder_aim()
         if index < 0 or ((index, cycle) == (playing.key, playing.cycle) and base == playing.base):
             return
         key = overlay.keys[index]
@@ -1156,7 +1195,7 @@ class Arbiter:
             return
         playing.key, playing.cycle, playing.base = index, cycle, base
         self._lift(base, key.offset, playing.still, look.id, key.speed_deg_s, now,
-                   key.acc_deg_s2)  # fmt: skip
+                   key.acc_deg_s2, key.tilt_acc_deg_s2)  # fmt: skip
 
     def _lift(
         self,
@@ -1167,6 +1206,7 @@ class Arbiter:
         speed_deg_s: float,
         now: float,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """The head sent to ``base`` plus ``offset`` at the key's ceilings: a still overlay over a
         settled head moves it without starting a move (no blind interval), anything else is a
@@ -1177,7 +1217,8 @@ class Arbiter:
         if still and head is not None and head.settled is not None and head.aim == base:
             lifted = offset != ZERO
             target = None if home and not lifted else base.plus(offset)
-            self._out(target, "saccade", not home or lifted, now, speed_deg_s, acc_deg_s2)
+            self._out(target, "saccade", not home or lifted, now, speed_deg_s, acc_deg_s2,
+                      tilt_acc_deg_s2)  # fmt: skip
             head.offset, head.home = offset, home and not lifted
             return
         holder = active.look.id if active is not None and offset == ZERO else owner
@@ -1190,20 +1231,28 @@ class Arbiter:
             offset=offset,
             speed_deg_s=speed_deg_s,
             acc_deg_s2=acc_deg_s2,
+            tilt_acc_deg_s2=tilt_acc_deg_s2,
         )
 
     def _write_back(self, now: float) -> None:
-        """No overlay plays and the head still carries an offset: back to the holder's aim, at
-        the ended overlay's return speed."""
+        """No overlay plays and the head still carries an offset, or stands where an answered
+        holder no longer looks (its move kept back under a gesture): back to the holder's aim,
+        at the ended overlay's return speed."""
         head = self._head
-        if head is None or head.offset == ZERO:
+        if head is None:
+            return
+        active = self._active
+        behind = self._kept_back and active is not None and head.aim != self._holder_aim()
+        if head.offset == ZERO and not behind:
+            self._kept_back = False
             return
         if now < self._retry_at or self._driver.blocked(now) is not None:
             return
         if head.settled is None:
             return  # the last key's move still flies: the way back waits for it (its ramp is small)
+        self._kept_back = False
         self._lift(self._holder_aim(), ZERO, self._back_still, "", self._back_deg_s, now,
-                   self._back_acc)  # fmt: skip
+                   self._back_acc, self._back_tilt_acc)  # fmt: skip
 
     def _end_overlay(
         self, playing: _Playing, status: Status, reason: str, now: float, *, fade_s: float = 0.0
@@ -1218,6 +1267,7 @@ class Arbiter:
         last = keys[-1].speed_deg_s if keys else 0.0
         self._back_deg_s = offset_deg / fade_s if fade_s > 0.0 and offset_deg > 0.0 else last
         self._back_acc = keys[-1].acc_deg_s2 if keys and not fade_s > 0.0 else None
+        self._back_tilt_acc = keys[-1].tilt_acc_deg_s2 if keys and not fade_s > 0.0 else None
         self._back_still = playing.still
         reading = self._readings[-1] if self._readings else None
         outcome = Outcome(
@@ -1512,7 +1562,8 @@ def look_from_json(
     base_link), angles ({pan_rad, tilt_rad}; ``speed_deg_s`` and ``acc_deg_s2``, optional, are the
     move's own ceilings: an eased look), scan ({views: [{pan_rad, tilt_rad}, ...]}), home,
     or clip (an overlay, band idle by default: {keys: [{at_s, pan_rad, tilt_rad, speed_deg_s,
-    acc_deg_s2 (optional: the key's own ramp)}, ...], loop, idle}; a loop's last key closes its
+    acc_deg_s2 (optional: the key's own ramp), tilt_acc_deg_s2 (optional: the tilt's own, at
+    most clip_acc_max_deg_s2)}, ...], loop, idle}; a loop's last key closes its
     period and equals its first); ``hold`` true
     keeps the head on the last view for the rest of the TTL (``dwell_s`` = ``ttl_s``);
     ``to_base(frame, xyz)`` puts a point of another frame in base_link (or says why not).
@@ -1615,22 +1666,24 @@ def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay
     keys: list[OverlayKey] = []
     try:
         for item in raw:
-            acc = item.get("acc_deg_s2")
+            acc, tilt_acc = item.get("acc_deg_s2"), item.get("tilt_acc_deg_s2")
             key = OverlayKey(
                 float(item["at_s"]),
                 float(item.get("pan_rad", 0.0)),
                 float(item.get("tilt_rad", 0.0)),
                 float(item["speed_deg_s"]),
                 None if acc is None else float(acc),
+                None if tilt_acc is None else float(tilt_acc),
             )
-            values = (key.at_s, key.pan_rad, key.tilt_rad, key.speed_deg_s, key.acc_deg_s2 or 1.0)
+            values = (key.at_s, key.pan_rad, key.tilt_rad, key.speed_deg_s, key.acc_deg_s2 or 1.0,
+                      key.tilt_acc_deg_s2 or 1.0)  # fmt: skip
             if not all(math.isfinite(v) for v in values):
                 return "a clip's key is a finite number on every field"
             if key.at_s < 0.0 or (keys and key.at_s < keys[-1].at_s):
                 return "a clip's keys are in time order, from 0 s"
             if key.speed_deg_s <= 0.0:
                 return "a clip's key moves at a speed above 0 deg/s"
-            if key.acc_deg_s2 is not None and key.acc_deg_s2 <= 0.0:
+            if any(r is not None and r <= 0.0 for r in (key.acc_deg_s2, key.tilt_acc_deg_s2)):
                 return "a clip's key ramps at more than 0 deg/s^2"
             keys.append(key)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
@@ -1765,6 +1818,7 @@ class BaseServerHead(_BaseLink):
         now: float,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """``neck_home`` or ``neck_goto`` in ticks; the profile speed is the board's own (no
         ceiling of a move's own: overlays are refused on this driver, an eased look moves at
@@ -1848,11 +1902,13 @@ class NeckTargetHead(_BaseLink):
         now: float,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """One ``neck_target``: the board's own top speed for a saccade, ``slow_deg_s`` for a slow
         look, ``return_deg_s`` for the way home after a drive, ``speed_deg_s`` when given (an
         overlay's key, an eased look); ``acc_deg_s2`` the ramp ceiling when given (the board
-        keeps the tilt's own cap under it)."""
+        keeps the tilt's own cap under it), ``tilt_acc_deg_s2`` the tilt's own ramp when given
+        (an overlay's quick nod: the board honours it up to its top ramp)."""
         where = aim if aim is not None else home_aim(self._cfg)
         message: dict[str, Any] = {
             "cmd": "neck_target",
@@ -1867,6 +1923,8 @@ class NeckTargetHead(_BaseLink):
             message["speed_deg_s"] = self._return_deg_s()
         if acc_deg_s2 is not None and acc_deg_s2 > 0.0:
             message["acc_deg_s2"] = acc_deg_s2
+        if tilt_acc_deg_s2 is not None and tilt_acc_deg_s2 > 0.0:
+            message["tilt_acc_deg_s2"] = tilt_acc_deg_s2
         with self._lock:
             self._held = message if hold else None
             self._sent_at = now
@@ -1949,10 +2007,17 @@ class EitherHead:
         now: float,
         speed_deg_s: float | None = None,
         acc_deg_s2: float | None = None,
+        tilt_acc_deg_s2: float | None = None,
     ) -> None:
         """The chosen driver's."""
         self.chosen.write(
-            aim, speed=speed, hold=hold, now=now, speed_deg_s=speed_deg_s, acc_deg_s2=acc_deg_s2
+            aim,
+            speed=speed,
+            hold=hold,
+            now=now,
+            speed_deg_s=speed_deg_s,
+            acc_deg_s2=acc_deg_s2,
+            tilt_acc_deg_s2=tilt_acc_deg_s2,
         )
 
     def take_refusal(self) -> Refusal | None:

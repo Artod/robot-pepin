@@ -302,15 +302,22 @@ class ArmRelease(Protocol):
         ...
 
 
-def head_refusal(view: Attention, now: float, seen_s: float = HEAD_SEEN_S) -> str | None:
+def head_refusal(
+    view: Attention, now: float, seen_s: float = HEAD_SEEN_S, *, asked: bool = False
+) -> str | None:
     """Why a gesture overlay may not take the head now, None when it may: while attention looks
     for the person (a seek, a check), turns the body, or has not seen them within ``seen_s``,
-    a gesture's skipped frames would blind it (the idle layer's still overlays never do). No
+    a gesture's skipped frames would blind it (the idle layer's still overlays never do); an
+    ``asked`` one (the person's ask through the tool, the brain's nod or shake) is never held
+    back for the person unseen: the ask is the conversation's (2026-10-15: three of five asked
+    nods and shakes stayed on the face only, unseen for 2.1-3.1 s after a thinking glance). No
     rule without eyes, a conversation, or during a drive."""
     if not view.eyes or view.phase in ("idle", "paused"):
         return None
     if view.phase != "track":
         return f"attention: {view.phase}"
+    if asked:
+        return None
     if view.seen_s is None or now - view.seen_s > seen_s:
         unseen = "never" if view.seen_s is None else f"{now - view.seen_s:.1f} s"
         return f"attention: the person unseen for {unseen}"

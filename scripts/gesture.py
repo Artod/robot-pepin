@@ -9,6 +9,7 @@ at a chosen speed and seed, teach a pose by hand.
     uv run python scripts/gesture.py play laugh --seed 1234 --variant 0 --dry-run
     uv run python scripts/gesture.py play point:printer --dry-run   # a mark with its argument
     uv run python scripts/gesture.py play snap:2,fast --dry-run      # ... and its settings
+    uv run python scripts/gesture.py play nod:3 --clip-acc 1500 --dry-run  # a paced nod's pace
     uv run python scripts/gesture.py teach raised             # torque off: place the arm, Enter
     uv run python scripts/gesture.py nudge shoulder_pan 5     # one joint +5 deg and back, slowly
     uv run python scripts/gesture.py turn 10                  # the wheels: 10 deg left in place
@@ -23,7 +24,11 @@ limits and caps scaled by the speed, and sends it to the base server, which play
 and rests; the face's expressions and the eyes' looks, blinks and effects go to the head server
 (source ``expression``); the head's
 clip goes to the gaze arbiter's door on this Mac as an overlay on whatever holds the head
-(``--no-head`` leaves it out). Ctrl-C during a play sends a halt and releases the overlay.
+(``--no-head`` leaves it out), a paced one ({nod}, {shake}) paced by config/neck.json and the
+arbiter's clip bounds as config/knobs.json ships them, or by ``--clip-acc`` (the tilt's ramp a
+quick nod may ask: the arbiter refuses more than its live ``gaze.clip_acc_max_deg_s2``, and a
+base server older than ``tilt_acc_deg_s2`` runs the tilt at its own 600). Ctrl-C during a play
+sends a halt and releases the overlay.
 ``--dry-run`` prints the plan and sends nothing. ``teach`` reads the arm while its torque is off
 (move it by hand first) and writes the six angles as ``poses.NAME`` of config/animation.json.
 ``turn`` and ``rock`` are the wheels' expressive motions exactly as the voice cascade makes them
@@ -64,7 +69,15 @@ from pepin.expression.fakes import FakeEyesChannel
 from pepin.expression.head import GESTURE, ClipLook
 from pepin.expression.markers import ANY, mark
 from pepin.expression.mix import stretched
-from pepin.expression.parts import ArmPart, EyesPart, FacePart, NeckLimits, clip_look, eye_calls
+from pepin.expression.parts import (
+    ArmPart,
+    EyesPart,
+    FacePart,
+    NeckLimits,
+    clip_look,
+    eye_calls,
+    load_neck_limits,
+)
 from pepin.expression.places import GoalPlaces, Room
 from pepin.expression.render import BookRenderer, Resolver
 from pepin.expression.trajectory import JOINTS, Trajectory
@@ -177,7 +190,10 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
         return 2
     seed = args.seed if args.seed is not None else int(time.time()) % 2**31
     scene = Scene(frozenset({"arm", "face", "head", "eyes"}))
-    renderer = BookRenderer(book, resolver=Resolver(room=room_for(book, name, arg)))
+    limits = load_neck_limits(NECK)
+    if args.clip_acc is not None:
+        limits = NeckLimits.of(NeckConfig.from_json(NECK).motion, args.clip_acc, limits.clip_max_hz)
+    renderer = BookRenderer(book, resolver=Resolver(room=room_for(book, name, arg)), head=limits)
     performance = renderer.render(name, scene, seed, variant=args.variant, arg=arg, args=settings)
     spelled = ",".join(x for x in (arg, *settings) if x is not None)
     written = name if not spelled else f"{name}:{spelled}"
@@ -189,7 +205,6 @@ def play(args: argparse.Namespace, motion: ArmMotion) -> int:
               " arm's and the head's reach")  # fmt: skip
         return 2
     part = ArmPart(_NoLink(), motion, speed_scale=args.speed, knot_hz=args.knot_hz)
-    limits = NeckLimits.of(NeckConfig.from_json(NECK).motion)
     trajectory: Trajectory | None = None
     overlay: ClipLook | None = None
     clips = [stretched(c, 1.0 / args.speed) if c.part == "arm" else c for c in performance.clips]
@@ -301,9 +316,12 @@ def _overlay(look: ClipLook | None) -> str:
     pan = max(abs(k["pan_rad"]) for k in keys)
     tilt = max(abs(k["tilt_rad"]) for k in keys)
     fastest = max(k["speed_deg_s"] for k in keys)
+    ramp = max((k.get("tilt_acc_deg_s2", 0.0) for k in keys), default=0.0)
+    asked = f", the tilt's ramp {ramp:.0f} deg/s^2" if ramp > 0.0 else ""
     return (
-        f"{len(keys)} keys over the holder's aim, pan up to {math.degrees(pan):.1f} deg, tilt"
-        f" up to {math.degrees(tilt):.1f} deg, fastest key {fastest:.0f} deg/s"
+        f"{len(keys)} keys over the holder's aim, the last at {keys[-1]['at_s']:.2f} s, pan up to"
+        f" {math.degrees(pan):.1f} deg, tilt up to {math.degrees(tilt):.1f} deg, fastest key"
+        f" {fastest:.0f} deg/s{asked}"
     )
 
 
@@ -492,6 +510,12 @@ def main() -> int:
     p.add_argument("--knot-hz", type=float, default=25.0, help="knots a second at speed 1")
     p.add_argument("--no-face", action="store_true", help="leave the face alone")
     p.add_argument("--no-head", action="store_true", help="leave the head alone")
+    p.add_argument(
+        "--clip-acc",
+        type=float,
+        help="the tilt's ramp a paced nod may ask, deg/s^2"
+        " (default: gaze.clip_acc_max_deg_s2 as config/knobs.json ships it)",
+    )
     p.add_argument("--dry-run", action="store_true", help="print the plan, send nothing")
     n = sub.add_parser("nudge", help="one joint some degrees from rest and back, slowly")
     n.add_argument("joint", help=", ".join(JOINTS))

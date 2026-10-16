@@ -882,6 +882,31 @@ def test_the_tilt_ramps_under_its_own_ceiling_the_pan_at_the_full_one() -> None:
     assert (rows["neck"][1], rows["head"][1]) == (acc_units(100.0), acc_units(100.0))
 
 
+def test_a_target_s_own_tilt_ramp_lifts_the_tilt_s_ceiling_up_to_the_neck_s_top() -> None:
+    """A head gesture's quick nod asks the tilt for a ramp of its own (tilt_acc_deg_s2): for
+    that target it replaces tilt_max_acc_deg_s2, at most max_acc_deg_s2 (config/neck.json
+    unchanged); the next target without one is back under the tilt's ceiling, and a target's
+    shared ramp never lifts the tilt."""
+    core, bus = make_neck_core()
+    target(core, 1.0, tilt_acc_deg_s2=1500.0)
+    core.tick(1.0)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (TOP_ACC, acc_units(1500.0)) != (TOP_ACC, 68)
+    target(core, 1.02, tilt_acc_deg_s2=5000.0)
+    core.tick(1.02)
+    assert neck_writes(bus)[-1][1]["head"][1] == TOP_ACC, "never past the neck's top"
+    target(core, 1.04, acc_deg_s2=1000.0)
+    core.tick(1.04)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (acc_units(1000.0), TOP_TILT_ACC)
+    target(core, 1.06, acc_deg_s2=1000.0, tilt_acc_deg_s2=300.0)
+    core.tick(1.06)
+    rows = neck_writes(bus)[-1][1]
+    assert (rows["neck"][1], rows["head"][1]) == (acc_units(1000.0), acc_units(300.0))
+    reply = target(core, 1.08, tilt_acc_deg_s2=0)
+    assert reply is not None and "tilt_acc_deg_s2 must be a positive" in reply["error"]
+
+
 @pytest.mark.parametrize(
     ("message", "words"),
     [
