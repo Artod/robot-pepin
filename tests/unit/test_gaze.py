@@ -6,6 +6,7 @@ passed in, so every rule is a few steps of arithmetic.
 
 from __future__ import annotations
 
+import itertools
 import json
 import math
 from pathlib import Path
@@ -520,6 +521,64 @@ def test_a_point_look_that_follows_is_written_again_as_its_point_moves_under_the
     refused = look_from_json({**data, "kind": "angles", "target": {"pan_rad": 0.1,
                               "tilt_rad": 0.2}}, SETTINGS, CFG, to_base)  # fmt: skip
     assert isinstance(refused, str) and "follow is a point look's" in refused
+
+
+def test_a_bearing_a_turn_carries_past_the_reach_holds_the_end_never_swept_round_the_front() -> (
+    None
+):
+    """2026-10-15, run 140: a 180 deg turn left with Artem at -20 deg carried his bearing past
+    the right end (-167) and through the 29 deg behind the reach to +160, inside the reach on the
+    other side; resolved afresh (by the head's pan or by number) that is a pan the head reaches
+    only through the front, and it swept 288 deg after him. Carried round with the turn, his
+    bearing stays past the right end: the head is written down to -167 and held there, nothing
+    on the left side ever written; the turn coming back brings him in from the right and the
+    follow goes on; a new look starts its own carry from its view."""
+    reach = Reach.of(CFG)
+    lo = reach.pan[0]
+    assert reach.clamp(Aim(math.radians(160.0), 0.3), from_pan=lo).pan_rad == pytest.approx(
+        math.radians(160.0)
+    ), "afresh: inside the reach, the far side of the front"
+    arb = Arbiter(FakeHead(), HOME, SETTINGS, reach)
+    head = arb.driver
+    assert isinstance(head, FakeHead)
+    data: dict[str, Any] = {
+        "source": "voice.speaker", "kind": "point", "band": 5, "frames": 0, "hold": True,
+        "follow": True, "target": {"frame": "base_link", "x": 1.88, "y": -0.68, "z": 1.0},
+    }  # fmt: skip
+    asked = look_from_json(data, SETTINGS, CFG, to_base)
+    assert isinstance(asked, Look)
+    arb.submit(asked, 0.0)
+    arb.step(0.0)
+    view = arb.pending()[0].views[0]
+    arrive(arb, head, view, 0.4)
+    arb.step(0.4)
+    start = math.degrees(view.pan_rad)
+    t, pans = 0.4, []
+    for turned in range(3, 181, 3):  # Nav2's Spin, 3 deg a step, his bearing falls
+        t += 0.09
+        bearing = math.radians(start - turned)
+        arb.follow(asked.id, Aim(math.atan2(math.sin(bearing), math.cos(bearing)), 0.3), t)
+        pans.append(math.degrees(head.writes[-1][0].pan_rad))
+    assert all(b <= a + 1e-9 for a, b in itertools.pairwise(pans)), "never back, never across"
+    assert pans[-1] == pytest.approx(math.degrees(lo), abs=1.0) and max(pans) < start
+    held = arb.state(t).target
+    assert held is not None and math.degrees(held.pan_rad) == pytest.approx(
+        math.degrees(lo), abs=1.0
+    ), "held at the end he went past (within the settle tolerance)"
+    assert arb.counts["follow_past_reach"] >= 10
+    for back in range(3, 61, 3):  # the cart turns back 60: he comes in from the right
+        t += 0.09
+        bearing = math.radians(start - 180.0 + back)
+        arb.follow(asked.id, Aim(math.atan2(math.sin(bearing), math.cos(bearing)), 0.3), t)
+    assert math.degrees(head.writes[-1][0].pan_rad) == pytest.approx(start - 120.0, abs=1.5)
+    again = look_from_json({**data, "id": "next"}, SETTINGS, CFG, to_base,
+                           from_pan=head.writes[-1][0].pan_rad)  # fmt: skip
+    assert isinstance(again, Look)
+    arb.submit(again, t)
+    arb.step(t)
+    assert arb.follow("next", Aim(math.radians(-40.0), 0.3), t + 0.1), "its own carry, afresh"
+    assert arb.pending()[0].views[0].pan_rad == pytest.approx(math.radians(-40.0))
+    assert not arb.follow(asked.id, Aim(0.0, 0.3), t + 0.2), "the old look holds nothing"
 
 
 def to_base(frame: str, xyz: dict[str, float]) -> tuple[float, float, float] | str:

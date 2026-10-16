@@ -27,10 +27,13 @@ depth frames at each, how long to hold, which band, how long the request may liv
 * the head is BLIND from the write that starts a move until it has settled plus one frame period:
   :meth:`Arbiter.state` says so, with the interval's two ends, for every frame consumer to gate on
   (the interval's end against the newest encoder reading's stamp: both on the board's clock);
-* a POINT look that FOLLOWS (``follow``, :meth:`Arbiter.retarget`) keeps the head on its point
+* a POINT look that FOLLOWS (``follow``, :meth:`Arbiter.follow`) keeps the head on its point
   while the cart turns or moves under it: its caller re-resolves the point from the pose of now
   (the node: TF) every step, and a view that moved past ``settle_tol_deg`` is written again, an
-  answered look's too (the speaker gaze's person in the map, 2026-10-15);
+  answered look's too (the speaker gaze's person in the map, 2026-10-15). Its bearing is CARRIED
+  round with the turn (:class:`Carried`, 2026-10-16): one the turn takes past an end of the
+  neck's reach holds the head at that end, never chased round through the front, until the look
+  is replaced or the turn brings the point back in from that side;
 * an OVERLAY (kind ``clip``, :class:`Overlay`) is keyed offsets ADDED to the aim of whatever holds
   the head (home when nothing does), each key written at its time at its own speed ceiling: it
   takes nothing from the holder, which keeps its status, its TTL and its aim, and the head goes
@@ -404,6 +407,35 @@ class HeadDriver(Protocol):
         ...
 
 
+@dataclass(frozen=True)
+class Carried:
+    """A following look's bearing carried round as the cart turns under it: ``raw`` the newest
+    resolved pan (radians, :func:`aim_at_point`'s, within -pi..pi) and ``pan`` the same bearing
+    unwrapped, step by shortest step, so a bearing the turn carries past an end of the reach
+    stays past it (:meth:`Reach.clamp` of it is that end) instead of reading as the other end,
+    or as a pan inside the reach the head reaches only through the front: on 2026-10-15 (run
+    140, a 180 deg turn) the person's bearing crossed the 29 deg behind the reach (+164..-167)
+    and the head swept 288 deg through the front after it."""
+
+    raw: float
+    pan: float
+
+    @classmethod
+    def start(cls, raw: float, view_pan: float) -> Carried:
+        """From the look's own view (its point resolved when it came, clamped toward the head's
+        pan): the turn of the bearing nearest that view."""
+        return cls(raw, view_pan + _wrap(raw - view_pan))
+
+    def on(self, raw: float) -> Carried:
+        """The bearing resolved anew, carried on by the shortest step from the last."""
+        return Carried(raw, self.pan + _wrap(raw - self.raw))
+
+
+def _wrap(rad: float) -> float:
+    """``rad`` wrapped to -pi..pi."""
+    return math.atan2(math.sin(rad), math.cos(rad))
+
+
 @dataclass
 class _Held:
     """A request as the arbiter holds it."""
@@ -421,6 +453,7 @@ class _Held:
     settled_at: float | None = None  # when the arbiter first saw the head settled for it
     still_from: float | None = None  # its frames are fused after this (board clock)
     let_go: bool = False  # released while glancing: dropped once answered
+    carried: Carried | None = None  # a following look's bearing, carried round (follow)
 
 
 @dataclass
@@ -684,6 +717,32 @@ class Arbiter:
             if active is None or not active.look.follow or active.look.point is None:
                 return None
             return active.look
+
+    def follow(self, look_id: str, aim: Aim, now: float) -> bool:
+        """The following look ``look_id``'s point resolved anew from the pose of now to ``aim``
+        (:func:`aim_at_point`'s, unclamped), its bearing carried round with the cart's turn
+        (:class:`Carried`) and clamped into the reach, then :meth:`retarget`: a bearing carried
+        past an end holds the head at that end (counted ``follow_past_reach`` each step), never
+        chased round through the front, until the look is replaced (a new aim: the speaker
+        gaze's next sighting or voice) or the turn brings the point back in from that side.
+        Without a reach, ``aim`` as it is. Whether the head was written."""
+        with self._lock:
+            active = self._active
+            if active is None or active.look.id != look_id or not active.look.follow:
+                return False
+            target, reach = aim, self.reach
+            if reach is not None:
+                views = active.look.views
+                carried = (
+                    Carried.start(aim.pan_rad, views[-1].pan_rad if views else aim.pan_rad)
+                    if active.carried is None
+                    else active.carried.on(aim.pan_rad)
+                )
+                active.carried = carried
+                target = reach.clamp(Aim(carried.pan, aim.tilt_rad))
+                if target.pan_rad != carried.pan:
+                    self.counts["follow_past_reach"] += 1
+        return self.retarget(look_id, target, now)
 
     def retarget(self, look_id: str, aim: Aim, now: float) -> bool:
         """The following look ``look_id``'s point re-resolved to ``aim`` (the cart turned or

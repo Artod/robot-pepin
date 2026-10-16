@@ -22,8 +22,10 @@ speaker gaze asks for a person as a point in the map, ``{"source": "voice.speake
 looked at from the end nearer the head's own pan), and while it holds the head every step resolves
 it again and writes it when it moved past ``settle_tol_deg``: the cart turning or driving under the
 head, whoever turns it, keeps the head on the point by TF alone (a wheel that slips turns no TF, so
-no head). The speaker gaze's lead (a walker's point ahead along their velocity) is its own: it
-sends that point.
+no head). The bearing is carried round with the turn (:meth:`pepin.gaze.Arbiter.follow`, since
+2026-10-16): a person the turn takes past an end of the reach holds the head at that end, never
+chased round through the front. The speaker gaze's lead (a walker's point ahead along their
+velocity) is its own: it sends that point.
 
 THE OVERLAY (``/look`` of kind ``clip``, :class:`pepin.gaze.Overlay`): a head gesture's keyed
 offsets added to whatever holds the head (the speaker gaze's ``voice.speaker`` look, or home),
@@ -1334,8 +1336,9 @@ class Gaze(Node):
 
     def _follow_point(self, now: float) -> None:
         """The look holding the head follows its point (the speaker gaze's person in the map):
-        re-resolved from TF's newest pose, never waited for (a step is 50 ms), and written by
-        the arbiter when it moved past the settle tolerance (the cart turned under it)."""
+        re-resolved from TF's newest pose, never waited for (a step is 50 ms), carried round
+        with the turn into the reach and written by the arbiter when it moved past the settle
+        tolerance (the cart turned under it: :meth:`pepin.gaze.Arbiter.follow`)."""
         look = self._arbiter.following()
         if look is None or look.point is None:
             return
@@ -1343,8 +1346,7 @@ class Gaze(Node):
         point = self._to_base(frame, {"x": x, "y": y, "z": z}, wait_s=0.0)
         if isinstance(point, str):
             return  # TF has no pose now: the head stays where the last one put it
-        aim = self._reach.clamp(aim_at_point(self._cfg, point), self._head_pan())
-        self._arbiter.retarget(look.id, aim, now)
+        self._arbiter.follow(look.id, aim_at_point(self._cfg, point), now)
 
     # ---- the report ----------------------------------------------------------------------------
     def _report(self) -> None:
