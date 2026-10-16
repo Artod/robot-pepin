@@ -45,6 +45,7 @@ from pepin.expression.markers import Mark, Marker, Part, read_mark
 from pepin.expression.parts import ArmPart, Planned
 from pepin.expression.render import BookRenderer
 from pepin.expression.wheels import WheelsSettings, legs_of
+from pepin.sound_player import PlayerKnobs, StreamSoundPlayer
 from pepin.sounds import (
     DANCE,
     DEFAULT_BEAT,
@@ -75,6 +76,7 @@ from pepin.sounds import (
     sound_path,
     write_beats,
 )
+from pepin.voice_cascade.player import Player
 
 REPO = Path(__file__).resolve().parents[2]
 CONFIG = REPO / "config"
@@ -530,6 +532,124 @@ def test_the_sound_mark_parses_and_the_engine_logs_no_player_yet() -> None:
         {"name": "default_beat", "turn": 1, "part": 0, "why": NO_PLAYER}
     ]
     assert not [k for k, f in r.records if k == "performance"]
+
+
+# -- the marks and the player through the voice's stream ---------------------------------------
+
+
+class Speaker:
+    """The board's speaker as the voice's pacer writes it: the blocks, and when each left."""
+
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.blocks: list[tuple[float, bytes]] = []
+
+    def play(self, pcm: bytes) -> None:
+        self.blocks.append((self.clock.now, pcm))
+
+    def play_end(self) -> None:
+        pass
+
+    def flush(self) -> None:
+        pass
+
+
+class StreamRig(Rig):
+    """The engine and the music's pulse of :class:`Rig`, on the real sound player through the
+    voice's player and a fake speaker (the default beat made in a tree of the test's own)."""
+
+    def __init__(self, tree: Path, registry: Registry, book: Book = BOOK) -> None:
+        super().__init__(registry, book=book)  # its fake player stays idle
+        make_synthesized(DEFAULT_BEAT_FILE, tree)
+        self.speaker = Speaker(self.clock)
+        self.voice = Player(self.speaker, rate=DEFAULT_BEAT_RATE, lead_s=0.3, clock=self.clock)
+        self.busy = False
+        self.rows: list[tuple[str, dict[str, Any]]] = []
+        self.sounds = StreamSoundPlayer(
+            self.voice, voice_busy=lambda: self.busy, registry=lambda: registry,
+            knobs=lambda: PlayerKnobs(0.1, 5.0), lag_s=0.15, clock=self.clock,
+            journal=lambda kind, now, **fields: self.rows.append((kind, fields)),
+        )  # fmt: skip
+        self.pulse = MusicPulse(self.engine, knobs=lambda: registry.pulse, clock=self.clock,
+                                journal=self.pulse.journal).attach(self.sounds)  # fmt: skip
+
+    def tick(self, seconds: float) -> None:
+        for _ in range(max(1, round(seconds / 0.01))):
+            self.clock.now += 0.01
+            self.voice.pacer.step()
+            self.sounds.step()
+            self.engine.step()
+
+
+@pytest.fixture
+def tree(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A public tree of the test's own: its sounds/ is where the registry's files are found."""
+    import pepin.overlay
+
+    monkeypatch.setattr(pepin.overlay, "public_tree", lambda: tmp_path)
+    monkeypatch.setenv(pepin.overlay.ENV, ".")
+    return tmp_path
+
+
+def test_the_dance_steps_on_the_stream_player_s_beats(tree: Path) -> None:
+    """The default beat through the voice's stream: its 16 beats, each one step of rock asked
+    pulse.lead_s ahead on the parts free (the first ones told late), the steps let go at its
+    end; the audio the speaker got is the beat's 8 s."""
+    r = StreamRig(tree, registry_from(public()))
+    r.sounds.play(DEFAULT_BEAT)
+    r.tick(8.6)
+    beats = r.beats()
+    assert len(beats) == 16 and all(b["style"] == DEFAULT_STYLE for b in beats)
+    asked = [b for b in beats if b["parts"]]
+    assert len(asked) >= 12 and all(1.0 <= b["lead_s"] <= 1.31 for b in asked[2:])
+    assert any("body" in b["parts"] for b in asked) and any("head" in b["parts"] for b in asked)
+    danced = r.performances(DANCE)
+    assert len(danced) == len(asked) and all(p["source"] == MUSIC for p in danced)
+    assert sum(len(pcm) for _, pcm in r.speaker.blocks) == 2 * 8 * DEFAULT_BEAT_RATE
+    assert [f["stopped_by"] for k, f in r.rows if k == "sound"] == ["end"]
+    assert r.pulse.playing is None and r.sounds.current() is None
+
+
+def test_a_dance_mark_starts_the_default_beat_in_its_style_after_the_reply(tree: Path) -> None:
+    """{dance:sway} mid-reply with nothing playing: the mark's own step on its word as before,
+    and the default beat asked in the mark's style, waiting for the reply; the reply over, it
+    plays and the body dances sway on it. A second dance mark while it plays asks no beat."""
+    r = StreamRig(tree, registry_from(public()), two_styles())
+    r.busy = True  # the reply is in flight
+    marker = Marker("gesture", DANCE, 0, "{dance:sway}", "sway")
+    r.engine.part_queued(1, 0, Part("Вот так танцую", None, (marker,)))
+    r.tick(0.5)
+    waiting = r.sounds.current()
+    assert waiting is not None and waiting.waiting and waiting.sound.name == DEFAULT_BEAT
+    assert waiting.sound.style == "sway" and r.speaker.blocks == []
+    r.busy = False
+    r.tick(3.0)
+    assert r.pulse.style() == "sway"
+    assert [p["arg"] for p in r.performances(DANCE) if p["source"] == MUSIC][:1] == ["sway"]
+    r.engine.part_queued(2, 0, Part("И ещё", None, (Marker("gesture", DANCE, 0),)))
+    r.tick(0.1)
+    current = r.sounds.current()
+    assert current is not None and current.id == waiting.id, "no second beat"
+    marked = [p for p in r.performances(DANCE) if p["source"] == "marker"]
+    assert [p["arg"] for p in marked] == ["sway", "sway"]  # the bare one takes the beat's style
+
+
+def test_a_sound_mark_plays_its_entry_and_a_name_not_there_is_logged(tree: Path) -> None:
+    r = StreamRig(tree, registry_from(public()))
+    sound = Marker("gesture", SOUND, 0, "{sound:default_beat}", "default_beat")
+    r.engine.part_queued(1, 0, Part("Слушай", None, (sound,)))
+    r.tick(0.1)
+    assert [f for k, f in r.records if k == "sound"] == [
+        {"name": "default_beat", "turn": 1, "part": 0, "why": ""}
+    ]
+    current = r.sounds.current()
+    assert current is not None and current.sound.name == DEFAULT_BEAT
+    gone = Marker("gesture", SOUND, 0, "{sound:fireworks}", "fireworks")
+    r.engine.part_queued(2, 0, Part("Салют", None, (gone,)))
+    r.tick(0.1)
+    whys = [f["why"] for k, f in r.records if k == "sound"]
+    assert whys[-1] == "no sound 'fireworks' in the registry"
+    assert any(k == "music" and f.get("why") == whys[-1] for k, f in r.events)
 
 
 # -- the dance family -----------------------------------------------------------------------------

@@ -300,6 +300,11 @@ class GestureEngine:
         # a bare mark's argument from the engine's sources, by intent (the dance's style from
         # the sound playing: pepin.expression.listeners.MusicPulse); None: the book's first
         self.arg_hooks: dict[str, Callable[[], str | None]] = {}
+        # a mark handed to its source by intent, with its argument as the mark is queued: the
+        # {sound:NAME} mark to the sound player (its answer: None when it plays, else why not),
+        # the dance's to the music (the default beat when nothing plays; the mark still plays as
+        # a gesture): pepin.expression.listeners.MusicPulse.attach
+        self.mark_hooks: dict[str, Callable[[str | None], str | None]] = {}
         self.scheduler = Scheduler(
             playout, self._latency, lambda kind, fields: self.record(kind, fields)
         )
@@ -604,9 +609,11 @@ class GestureEngine:
                 request = Request(f"face:{marker.name}", at, Priority.MARK, "marker", clips=(face,))
                 self._request(request, cue)
                 continue
-            if marker.name == SOUND:  # reserved for the brain's sound tool (pepin.sounds)
+            if marker.name == SOUND:  # the sound player's (pepin.sounds, MusicPulse.attach)
+                sound = self.mark_hooks.get(SOUND)
+                why = NO_PLAYER if sound is None else sound(marker.arg)
                 self.record("sound", {"name": marker.arg, "turn": turn, "part": index,
-                                      "why": NO_PLAYER})  # fmt: skip
+                                      "why": why or ""})  # fmt: skip
                 continue
             request = Request(marker.name, at, Priority.MARK, "marker")
             composition = self.book.compositions.get(marker.name)
@@ -618,6 +625,9 @@ class GestureEngine:
                     arg = hook()  # the engine's source chose the bare mark's argument
                 if arg != marker.arg:  # the style or a source chose the bare mark's argument
                     cue = replace(cue, marker=replace(marker, arg=arg))
+                side = self.mark_hooks.get(marker.name)
+                if side is not None:  # the dance's beat (MusicPulse.dance_mark)
+                    side(arg)
             self._request(request, cue)
 
     def _drop_turns(self, turn: int, why: str, only: bool = False) -> None:
