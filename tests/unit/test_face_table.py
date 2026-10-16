@@ -297,12 +297,13 @@ def test_the_styles_are_the_blocks_order_the_same_ids_and_the_old_set_untouched(
     rose, manga, anime. Every expression has a look per style; the pepin look is the
     expression's own numbers (the later styles' parameters at their defaults there); a later
     look starts from them, takes its block's params and that style's palette; `like` carries
-    the blocks; the switch defaults to pepin; the anime style is the shape engine's (its block
-    names the keyframes' directory and the engine's numbers, its looks carry the few numbers
-    the engine reads)."""
+    the blocks; the switch defaults to the file's `style` (kawaii since 2026-10-15), in the
+    header's kStyleDefault and the script's `style` alike; the anime style is the shape
+    engine's (its block names the keyframes' directory and the engine's numbers, its looks
+    carry the few numbers the engine reads)."""
     table = load_face_table(FACE)
     assert table.style_names[:4] == ("pepin", "rose", "manga", "anime")
-    assert table.style == "pepin" and table.style_id == 0
+    assert table.style == "kawaii" and table.style_id == 4  # the default since 2026-10-15
     assert table.style_id_of("manga") == 2 and table.style_id_of("anime") == 3
     with pytest.raises(KeyError, match="no face style 'neon'; the face has pepin, rose"):
         table.style_id_of("neon")
@@ -354,14 +355,14 @@ def test_the_styles_are_the_blocks_order_the_same_ids_and_the_old_set_untouched(
     assert tired[at["bulb"]] == 1.0 and tired[at["tongue"]] == 0.0
     header = render_header(table)
     assert f"constexpr int kStyleCount = {len(table.styles)};" in header
-    assert "kStyleDefault = 0;" in header
+    assert f"kStyleDefault = {table.style_id};" in header  # kawaii, 4
     assert "kStyleAnime = 3," in header and "kEffectZ = 2," in header
     assert "constexpr float kZS = 1.8f;" in header and "kZEveryS = 2.4f;" in header
     assert "kExpressions[kStyleCount][kExpressionCount][kParamCount]" in header
     assert "kExpressionColors[kStyleCount][kExpressionCount][kElementCount]" in header
     assert "  {  // manga" in header and "0xFFBE},  // manga" in header  # the cream card
     script = render_script(table)
-    assert '"looks"' in script and '"style": 0' in script and '"styles"' in script
+    assert '"looks"' in script and f'"style": {table.style_id},' in script and '"styles"' in script
     switched = raw()
     switched["style"] = "manga"
     assert "kStyleDefault = 2;" in render_header(parse_face_table(switched))
