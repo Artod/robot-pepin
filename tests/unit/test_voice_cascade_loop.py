@@ -1724,7 +1724,7 @@ async def opened(rig: Rig) -> None:
 
 def events_of(tmp_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     """The conversation's events and its summary."""
-    day = next(tmp_path.iterdir())
+    day = next(p for p in sorted(tmp_path.iterdir()) if p.is_dir())  # the ledger file sits beside
     (conversation,) = day.glob("cascade_*/")
     events = [json.loads(line) for line in (conversation / "events.jsonl").open()]
     return events, json.loads((conversation / "summary.json").read_text())
