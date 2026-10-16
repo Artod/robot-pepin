@@ -22,6 +22,7 @@ from pepin.people.door import Outcome as Answer
 from pepin.perception.record import RECTIFIED_LEFT
 from pepin.pixel_to_map import Box, Head, Located, LocateError, Pose2D, Stamped
 from pepin.places import heading_residual_deg
+from pepin.sounds import DEFAULT_BEAT, DEFAULT_BEAT_FILE, FakeSoundPlayer, registry_from
 from pepin.tools.clients import (
     CHANNEL_HINT,
     HeadMove,
@@ -736,7 +737,8 @@ class FakeEyes:
 def fake_robot(**replace: Any) -> Robot:
     """A robot made of fakes sharing one :class:`FakeClock`; ``replace`` swaps any part
     (``goals``, ``neck``, ``world``, ``camera``, ``speech``, ``face``, ``body``, ``eyes``,
-    ``sightings``, ``animator``, ``people``) or sets ``drive_timeout_s``."""
+    ``sightings``, ``animator``, ``people``, ``sounds``: the default beat alone) or sets
+    ``drive_timeout_s``."""
     clock = replace.pop("clock", None) or FakeClock()
     neck = replace.pop("neck", None) or FakeNeck(clock)
     goals = replace.pop("goals", None) or FakeGoalServer(clock)
@@ -752,6 +754,9 @@ def fake_robot(**replace: Any) -> Robot:
         "eyes": FakeEyes(goals, neck),
         "sightings": FakeSightings(),
         "people": FakePeople(),
+        "sounds": FakeSoundPlayer(
+            registry_from({"sounds": [{"name": DEFAULT_BEAT, "file": DEFAULT_BEAT_FILE}]}), clock
+        ),
     }
     parts.update(replace)
     return Robot(clock=clock, sleep=clock.sleep, **parts)

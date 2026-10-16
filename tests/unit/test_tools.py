@@ -556,6 +556,7 @@ def test_no_tool_asks_the_goal_server_for_anything_but_its_seven_commands() -> N
         "remember_person": {"name": "Sasha"},
         "forget_person": {"name": "Sasha"},
         "turn": {"target": "left"},
+        "sound": {"name": "default_beat"},
     }
     for t in TOOLS:
         assert call(robot, t.name, **arguments.get(t.name, {}))["ok"], t.name
