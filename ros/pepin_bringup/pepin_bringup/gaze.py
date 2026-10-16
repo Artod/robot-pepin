@@ -557,6 +557,7 @@ class Gaze(Node):
             clip_max_deg=k("clip_max_deg"),
             clip_max_hz=k("clip_max_hz"),
             clip_still_deg=k("clip_still_deg"),
+            clip_acc_max_deg_s2=k("clip_acc_max_deg_s2"),
         )
 
     def _path_law(self) -> PathGazeLaw:

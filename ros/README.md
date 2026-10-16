@@ -672,9 +672,14 @@ to it when the overlay ends — a nod or a thinking glance never loses the perso
 time: a newer one replaces it, an `idle` one (breathing) gives way to any other; a `loop`
 repeats until released or lapsed (the breath: one looped clip, renewed) and is answered at once,
 a finite one when it ends. Refused whole, never clamped: over a better band, during a drive, on
-a `neck_goto` base server, past the reach, past `clip_max_deg` (30) off the holder, or with a
+a `neck_goto` base server, past the reach, past `clip_max_deg` (30) off the holder, with a
 tilt turning back faster than `clip_max_hz` (2.5 Hz; the mast rings at 5.3 Hz, and the board
-caps the tilt's ramp at 600 deg/s² on every move). An overlay within `clip_still_deg` (1°)
+caps the tilt's ramp at 600 deg/s² on every move), or with a key asking the tilt for a ramp of
+its own (`tilt_acc_deg_s2`, a paced nod's, passed to `neck_target`) above `clip_acc_max_deg_s2`
+(600 as shipped: the knob the voice cascade sizes `{nod}` to). A gesture's overlay rides the
+holder's aim its first key went out on: the holder's moves while it plays (the speaker gaze's
+newer aim, a followed point re-resolved) wait for its end, and the way back goes to the
+holder's aim of then; the idle layer's overlays follow the holder. An overlay within `clip_still_deg` (1°)
 writes without starting a move, so the head is not blind for a breath; any larger one blinds it
 while it moves, as any write. `POST /release {"source", "fade_s"}` is a source's word to let go
 of everything it asked: its looks go (the head falls to the next request or home) and its
@@ -769,7 +774,10 @@ that lands it on its time at the neck's ramps (`config/neck.json`: tilt 600 deg/
 the idle layer's keys (the melody, the breath, the drift) GLIDE: each also carries its own ramp,
 1.25 times the least that lands it on time (at least the servo register's 8.8 deg/s²), passed by
 the arbiter to `neck_target` beside its speed, so the servo eases between keys instead of
-stepping (the gaze node in `pepin-macnav` reads `pepin.gaze`: `ros/laptop.sh kick gaze` after an
+stepping; a PACED composition's keys (`{nod}`, `{shake}`) land 0.1 s ahead of their keyframes,
+as quick as the pan's ramp and the tilt's clip ramp (`gaze.clip_acc_max_deg_s2`) allow, so the
+arbiter has seen the head settle when the next key falls due (it writes no key over a head in
+flight, and the key due then is the one written: a late key cost the next one on 2026-10-15) (the gaze node in `pepin-macnav` reads `pepin.gaze`: `ros/laptop.sh kick gaze` after an
 update; an older one ignores the ramp); and every head atom of the book stays within `clip_max_deg` and `clip_max_hz` (a test holds it),
 so a refusal means a better band holds the head, a drive, or the reach; it is logged once and
 the gesture plays without its head. The wheels: below. The person starting to speak fades
@@ -1365,6 +1373,7 @@ the node restarts. Where the code already names the number, a unit test holds th
 | `gaze` | `clip_max_deg` | number 0..90 | 30.0 | a head overlay (kind clip: a gesture's keys added to the holder's aim) with any key further than this off the holder's aim, on either axis, is refused whole (never clamped); 30 lets a glance aside (10-25 deg) through, the gestures themselves keep nearer (a nod 3-10) |
 | `gaze` | `clip_max_hz` | number 0..10 | 2.5 | an overlay whose tilt turns back sooner than half a period of this rate after its last turn is refused: the mast rings at 5.3 Hz after sharp tilts (config/neck.json's tilt_max_acc_deg_s2 note), so tilt oscillations stay under 2.5 Hz; the board's tilt ramp (600 deg/s^2) caps every move's acceleration on its own. 0: no check |
 | `gaze` | `clip_still_deg` | number 0..5 | 2.0 | an overlay whose keys all stay within this of the holder's aim (the breath, +-2.0 deg at 0.25 Hz; the melody, +-0.9 deg) is written without starting a move: the head is not blind for it and the frame gates keep their frames; any larger overlay blinds the head like any move. 2.0 since 2026-10-13 (the breath at 2 deg), the settle tolerance's 1 deg before |
+| `gaze` | `clip_acc_max_deg_s2` | number 0..2232 | 600.0 | the most a head overlay's key may ask the tilt's ramp for (its tilt_acc_deg_s2: a paced nod's, {nod} of the book); a key asking more is refused whole. The voice cascade sizes its paced nods to this number as this file ships it, read at its start (pepin.expression.parts.load_neck_limits): a live change here alone leaves them as they were, and a lower live value refuses them. 600, config/neck.json's tilt_max_acc_deg_s2: no overlay tilts faster than any other move (a 15 deg nod 0.83 s); 1500: 0.60 s. The mast rings at 5.3 Hz after a sharp tilt (neck.json's note: 0.3-0.4 deg peak to peak for 0.5-1.0 s after a 30 deg tilt at 1200-2232, nothing at 600): a 1-2 Hz nod does not drive it, its strokes' ramps do, so above 600 the frames just after a nod may ring. The base server honours the ask up to its max_acc_deg_s2 (2232) once deployed with neck_target's tilt_acc_deg_s2; an older one runs the tilt at its 600 (a smaller nod) |
 | `goal_server` | `park_distance_m` | number 0..10 | 1.0 | under the controller flag's shim_mppi: within this many metres of the goal (straight line from map -> base_link) the drive is handed from the shim to MPPI for the rest of that goal; 0 never hands over |
 | `marks_audit` | `tf_static_wait_s` | number 1..600 | 15.0 | seconds after the start before a WARN names the /tf_static edges still missing, the usual cause (a silent zenoh peer: a publisher cache that never answers the history query) and the debug recipe (pepin.static_facts); repeated every 4x this while one is missing |
 | `marks_audit` | `radius_m` | number 0.2..3 | 2.0 | how far around the cart a lethal cell is judged, metres |
