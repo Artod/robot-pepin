@@ -87,7 +87,11 @@ readings', the head's state its encoder reading's ``head_stamp``) and is placed 
 that stamp; the register ages on the board's clock, whose "now" is the newest of those stamps
 the gaze has seen (:class:`pepin.expression.poses.BoardClock`), never this Mac's; this machine's
 own moments (frames due, renewals, the seek's stops, a lost person's seconds) are the laptop's
-monotonic clock it is driven by.
+monotonic clock it is driven by. The array's readings are stamped on the board's MONOTONIC
+clock (its uptime), which the tags, the windows and the headings go by; TF is asked at their
+``wall_s``, the same moment on the board's wall clock (the audio link's offset, since
+2026-10-16), and a voice's point carries that stamp: on 2026-10-15 the monotonic stamps went to
+TF and every voice was refused as "1792080462 s old", so after a drive the gaze never came back.
 
 The voice comes first: from a reply's first part going to the voice until its first audio chunk
 is with the player (``hold_for_voice``) no frame is taken, and while the robot speaks frames come
@@ -162,6 +166,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from pepin.audio_doa import MicReading
+from pepin.audio_link import DoaReading
 from pepin.expression.conversation import SPEAKER_GAZE, EventSink, Heard
 from pepin.expression.doa import (
     WHEELS_ONSET_S,
@@ -241,6 +246,11 @@ SPOKE_KEPT = 8  # the robot's latest speaking spans kept to judge an utterance b
 TEXT_KEPT = 40  # an utterance's words kept in its event, to pair it with the loop's "heard"
 TILT_EPS_RAD = 1e-4  # a tilt change under this is no move of the tilt
 TURNED_LOGGED_DEG = 0.05  # a reading the cart turned less than this since logs no turn
+# Why a reading is not placed when the link gave it no offset onto the board's wall clock
+NO_WALL = (
+    "the array's readings carry no wall-clock offset (an audio server before 2026-10-16:"
+    " deploy src/pepin to the board and restart pepin-audio)"
+)
 # The gaze_reaim rows' why of the pursuit and the placements (see the module)
 LEAD = "the lead"
 MOVED = "the person moved"
@@ -1026,7 +1036,7 @@ class SpeakerGaze:
             return None
         latest = self.doa.latest_doa() if self.doa is not None else None
         if latest is not None:  # the array's newest reading: the board's clock moves on
-            self.clock.saw(latest.stamp_s)
+            self.clock.saw(latest.wall_s)
         now_ = now + TICK_EPS_S  # a moment due a hair later is due now (clocks add in floats)
         if self.aim is None:  # the door did not answer, or refused: ask again in a while
             if self.next_renew is None or now_ >= self.next_renew:
@@ -1088,6 +1098,30 @@ class SpeakerGaze:
         if not found:
             self.unplaced = next((at.why for at in answer if at.why), "TF had no pose")
         return found
+
+    def _reading_carts(self, readings: Sequence[DoaReading]) -> dict[float, tuple[float, Pose]]:
+        """The cart at each reading's moment, in one request: asked of TF at the reading's
+        ``wall_s`` (the board's wall clock, TF's), keyed by its own stamp (the array's monotonic
+        clock, which the tags, the windows and the headings go by), with that wall stamp; those
+        TF had. A reading without the link's offset is never asked at its monotonic stamp
+        (:data:`NO_WALL` said instead)."""
+        walls: dict[float, float] = {}
+        for reading in readings:
+            wall = reading.wall_s
+            if wall is not None:
+                walls[reading.stamp_s] = wall
+        if not walls:
+            if readings:
+                self.unplaced = NO_WALL
+            return {}
+        stamps = sorted(walls)
+        carts = self._carts([walls[s] for s in stamps])
+        return {s: (walls[s], carts[walls[s]]) for s in stamps if walls[s] in carts}
+
+    @staticmethod
+    def _bases(placed: Mapping[float, tuple[float, Pose]]) -> dict[float, Pose]:
+        """:meth:`_reading_carts`' poses alone, by the readings' own stamps."""
+        return {stamp: base for stamp, (_, base) in placed.items()}
 
     def _refresh(self) -> None:
         """The cart's pose now (TF's newest): after a turn of the body, before a turn asked."""
@@ -1170,10 +1204,10 @@ class SpeakerGaze:
         return self._axis_point(Aim(aim.pan_rad, tilt), range_m, cart.base)
 
     def _voice_ray(self, pan: float, base: Pose, stamp: float) -> VoiceRay:
-        """A voice heard at ``pan`` (the cart's frame) with the cart at ``base``: its direction
-        in the map, and its point along the head's axis at that pan (at a person's range and
-        height when the register knows one there, else ``default_range_m`` at the seek's
-        tilt)."""
+        """A voice heard at ``pan`` (the cart's frame) with the cart at ``base`` at ``stamp`` (the
+        board's wall clock, the register's): its direction in the map, and its point along the
+        head's axis at that pan (at a person's range and height when the register knows one
+        there, else ``default_range_m`` at the seek's tilt)."""
         s = self.settings
         head = self.head
 
@@ -1259,19 +1293,21 @@ class SpeakerGaze:
                                 min_speech=s.min_speech, tagger=self._tagger())  # fmt: skip
         latest = self.doa.latest_doa()
         if latest is not None:
-            self.clock.saw(latest.stamp_s)
+            self.clock.saw(latest.wall_s)
         voice, ray = found.voice, None
-        voiced = sorted({t.reading.stamp_s for t in found.tagged if t.voice})
-        carts = self._carts(voiced) if voice.bearing_rad is not None or self._peaks(found) else {}
+        voiced = [t.reading for t in found.tagged if t.voice]
+        wanted = voice.bearing_rad is not None or self._peaks(found)
+        placed_at = self._reading_carts(voiced) if wanted else {}
+        carts = self._bases(placed_at)
         heading = self._heading(carts)
         if voice.bearing_rad is not None and carts:
             placed = voice_of(found.window, doa_map, s.min_speech, heading)
             if placed.map_rad is not None and placed.ref_s is not None:
                 voice = replace(placed, robot=found.voice.robot)
-                ray = self._voice_ray(placed.bearing_rad or 0.0, carts[placed.ref_s],
-                                      placed.ref_s)  # fmt: skip
+                wall, base = placed_at[placed.ref_s]
+                ray = self._voice_ray(placed.bearing_rad or 0.0, base, wall)
         self._log_readings(heard, found, now, heading, voice.ref_s)
-        self._register(heard, found, now, carts, doa_map)
+        self._register(heard, found, now, placed_at, doa_map)
         return voice, ray
 
     @staticmethod
@@ -1280,23 +1316,24 @@ class SpeakerGaze:
         return any(t.voice and isinstance(t.reading, MicReading) for t in found.tagged)
 
     def _register(
-        self, heard: Heard, found: UtteranceDoa, now: float, carts: Mapping[float, Pose],
-        doa_map: DoaMap | None,
+        self, heard: Heard, found: UtteranceDoa, now: float,
+        placed_at: Mapping[float, tuple[float, Pose]], doa_map: DoaMap | None,
     ) -> None:  # fmt: skip
         """Every source peak of the utterance's voiced Mac readings into the register (each a
-        voice placed by the cart's pose at its reading's stamp), then its voices logged; nobody's
-        engagement changes here."""
-        if doa_map is None or not carts:
+        voice placed by the cart's pose at its reading's moment, :meth:`_reading_carts`), then
+        its voices logged; nobody's engagement changes here."""
+        if doa_map is None or not placed_at:
             return
         fed = 0
         for t in found.tagged:
             reading = t.reading
-            base = carts.get(reading.stamp_s)
-            if not t.voice or not isinstance(reading, MicReading) or base is None:
+            got = placed_at.get(reading.stamp_s)
+            if not t.voice or not isinstance(reading, MicReading) or got is None:
                 continue
+            wall, base = got
             for peak in reading.peaks:
                 pan = math.radians(bearing_deg(peak.deg, doa_map))
-                self.people.peak(self._voice_ray(pan, base, reading.stamp_s), peak.strength)
+                self.people.peak(self._voice_ray(pan, base, wall), peak.strength)
                 fed += 1
         if not fed:
             return
@@ -1380,12 +1417,14 @@ class SpeakerGaze:
         near = abs(wrap(plain.bearing_rad - here)) <= math.radians(s.doa_moved_deg)
         if near and not self._body_turns():
             return False  # the stream stays on them: no pose asked
-        voiced = sorted({t.reading.stamp_s for t in window if t.voice})
-        carts = self._carts(voiced)
-        placed = voice_of(window, doa_map, s.follow_min_speech, self._heading(carts))
+        placed_at = self._reading_carts([t.reading for t in window if t.voice])
+        placed = voice_of(
+            window, doa_map, s.follow_min_speech, self._heading(self._bases(placed_at))
+        )
         if placed.map_rad is None or placed.ref_s is None or placed.bearing_rad is None:
             return False
-        ray = self._voice_ray(placed.bearing_rad, carts[placed.ref_s], placed.ref_s)
+        wall, base = placed_at[placed.ref_s]
+        ray = self._voice_ray(placed.bearing_rad, base, wall)
         moved = abs(wrap(ray.azimuth - azimuth(ray.view, person.point)))
         if moved <= math.radians(s.doa_moved_deg) or moved > math.radians(s.follow_max_deg):
             return False

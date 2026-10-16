@@ -65,6 +65,7 @@ from pepin.expression.speaker import (
 )
 from pepin.expression.tracker import (
     MOVED,
+    NO_WALL,
     SIGHTED,
     VOICED,
     SpeakerGaze,
@@ -83,6 +84,10 @@ REACH = Reach.of(NECK)
 # round trip: test_speaker_gaze_pursuit)
 FLAT = HeadModel(replace(NECK, pivot=NeckPivot()))
 BOARD = 5000.0  # the board's clock runs this far ahead of the laptop's in these tests
+# The array's readings are stamped on the board's MONOTONIC clock (its uptime: 33,450 s on the
+# evening of 2026-10-15), the link's offset carrying them onto its wall clock, TF's (BOARD here)
+UPTIME = 33_450.0
+LINK_OFFSET = BOARD - UPTIME
 MAP = DoaMap(front_deg=180.0, sign=1)  # the array reads 180 straight ahead, growing leftward
 # The shipped knobs, the simple map; the body turned by the wheels' executor (body_turn
 # wheels: these tests are its; the shipped spin's are test_speaker_gaze_spin.py)
@@ -175,7 +180,7 @@ def test_the_robot_s_own_voice_is_cut_out_and_an_overlapping_utterance_keeps_its
     robot = speech(300, 2.0, 6.0)  # the robot's voice reads -120
     him = speech(165, 6.0, 8.0)  # Artem at -15
     doa = FakeDoa(sorted(robot + him, key=lambda r: r.stamp_s))
-    mask = robot_readings(doa.readings, [(2.0, 6.0)], BOARD)
+    mask = robot_readings(doa.readings, [(2.0, 6.0)], UPTIME)  # the readings' own clock
     assert sum(mask) == len(robot) + 4, "the span and its 0.3 s of echo, both ends in"
     heard = Heard(5.0, 8.0, "я тут, слышишь")
     clean = utterance_voice(doa, heard, 8.0, window_s=1.0, doa_map=MAP, min_speech=2,
@@ -219,7 +224,7 @@ def test_a_whine_the_chip_calls_speech_is_no_voice_and_the_person_s_voice_still_
     deaf = utterance_voice(doa, Heard(3.1, 4.0, "я тут"), 4.0, window_s=1.0, doa_map=MAP,
                            min_speech=2, tagger=Tagger(VoiceRule()))  # fmt: skip
     assert deaf.voice.bearing_rad is None, "no speech model: the silero rule hears nobody"
-    assert Tagger(CHIP).tag(him, BOARD)[0].voice, "the chip needs none"
+    assert Tagger(CHIP).tag(him, UPTIME)[0].voice, "the chip needs none"
 
 
 def test_the_wheels_first_jerk_is_no_voice_however_much_silero_likes_it() -> None:
@@ -229,10 +234,10 @@ def test_the_wheels_first_jerk_is_no_voice_however_much_silero_likes_it() -> Non
     takes them as before; the person speaking later in the turn is heard."""
     jerk = speech(array(70.0), 1.0, 1.6)  # the wheels, flagged speech
     tagger = Tagger(VoiceRule(), FakeSeries(p=0.95), motions=[(1.0, 1.0 + WHEELS_ONSET_S)])
-    tagged = tagger.tag(jerk, BOARD)
+    tagged = tagger.tag(jerk, UPTIME)  # the readings' own clock less the laptop's
     assert [t.tags.moving for t in tagged] == [True] * 6 + [False], "the turn's first 0.5 s"
     assert [t.voice for t in tagged] == [False] * 6 + [True]
-    assert all(t.voice for t in replace(tagger, rule=CHIP).tag(jerk, BOARD))
+    assert all(t.voice for t in replace(tagger, rule=CHIP).tag(jerk, UPTIME))
     assert tagged[0].tags.utterance is None and tagged[0].tags.who is None, "reserved, unset"
     r = rig(wheels=FakeWheels(), arc_deg=60.0)
     r.wake(120.0)  # past the arc: the wheels start at the wake's read
@@ -700,11 +705,17 @@ class Door(FakeGazeDoor):
         return sum(1 for c in self.calls if c[0] == name)
 
 
+def read_at(t: float, deg_: int, flagged: bool) -> DoaReading:
+    """The array's reading at laptop second ``t``: stamped on the board's monotonic clock, with
+    the link's offset onto its wall clock (``wall_s``: BOARD + t, TF's)."""
+    return DoaReading(UPTIME + t, deg_, flagged, LINK_OFFSET)
+
+
 def speech(deg_: int, start: float, end: float, *, flagged: bool = True) -> list[DoaReading]:
     """The array's readings of a voice at array angle ``deg_`` from ``start`` to ``end`` (laptop
     seconds), on the board's clock, ten a second."""
     steps = round((end - start) * 10)
-    return [DoaReading(BOARD + start + k / 10, deg_, flagged) for k in range(steps + 1)]
+    return [read_at(start + k / 10, deg_, flagged) for k in range(steps + 1)]
 
 
 def array(bearing: float) -> int:
@@ -791,11 +802,10 @@ class Rig:
             now = round(start + k * 0.05, 6)
             if k % 2 == 0 and voice is not None:
                 bearing = voice(now)
-                stamp = BOARD + now
                 if bearing is None:
-                    self.doa.readings.append(DoaReading(stamp, 30, False))
+                    self.doa.readings.append(read_at(now, 30, False))
                 else:
-                    self.doa.readings.append(DoaReading(stamp, array(bearing), True))
+                    self.doa.readings.append(read_at(now, array(bearing), True))
             if move is not None:
                 move(now)
             if due is not None and now >= due - 1e-9:
@@ -840,6 +850,7 @@ def rig(
         now=lambda: BOARD + holder[0].machine.now_s,
         cart_at=lambda t: (0.0, 0.0, holder[0].cart_deg(t)),
         head_at=lambda t: door.view.head if door.view is not None else None,
+        history_s=10.0,  # the goal server's TF_HISTORY_S: an older stamp is refused, too_old
     )
     door.tf = tf
     scene = FakeScene(door, tf)
@@ -973,7 +984,7 @@ def test_the_head_follows_a_person_walking_while_he_speaks_and_arrives_where_he_
     def where(t: float) -> float:
         return min(10.0 + 15.0 * t, 70.0)
 
-    r.doa.readings += [DoaReading(BOARD + k / 10, array(where(k / 10)), True) for k in range(13)]
+    r.doa.readings += [read_at(k / 10, array(where(k / 10)), True) for k in range(13)]
     read = 1.3
     r.machine.opened(Heard(0.0, 1.2, "Пепин, иди сюда", named=True), read)
     first = r.aimed()[0][0]
@@ -1330,8 +1341,8 @@ def test_an_utterance_spoken_across_a_turn_gives_the_bearing_the_person_has_now(
     r.tf.cart_at = lambda t: (0.0, 0.0, yaw(t))  # TF's heading history
     for k in range(round((end - start) * 10) + 1):
         t = start + k / 10
-        r.doa.readings.append(DoaReading(BOARD + t, array(100.0 - yaw(BOARD + t)), True))
-    r.doa.readings.append(DoaReading(BOARD + end + 0.1, 30, False))
+        r.doa.readings.append(read_at(t, array(100.0 - yaw(BOARD + t)), True))
+    r.doa.readings.append(read_at(end + 0.1, 30, False))
     r.machine.heard(Heard(start, end, "я здесь", False, -12.0), end + 0.1)
     (voice,) = [f for k, _, f in r.events if k == "gaze_voice"]
     assert voice["bearing_deg"] == pytest.approx(70.0, abs=1.0), voice
@@ -1347,6 +1358,50 @@ def test_an_utterance_spoken_across_a_turn_gives_the_bearing_the_person_has_now(
     window = utterance_readings(r.doa, Heard(start, end, "я здесь"), end + 0.1, 1.0)
     unturned = voice_of(chip(window), MAP)
     assert unturned.bearing_rad is not None and deg(unturned.bearing_rad) > 75.0, "uncorrected"
+
+
+def test_a_voice_stamped_on_the_board_s_uptime_is_asked_of_tf_at_its_wall_clock_moment() -> None:
+    """2026-10-15 evening, 19 of 19 utterances: "no place (base_link: too_old: the stamp is
+    1792080462 s old)": the array's stamps are the board's uptime (33,450 s) and TF keeps its
+    wall clock. Every reading carries the audio link's offset, so the gaze asks TF (here as the
+    goal server answers, 10 s of history) at each reading's ``wall_s``: Artem behind on the
+    right (-120 deg, run 143's) is placed and engaged, and the board's "now" is the wall
+    clock's. A reading without the offset (an audio server before 2026-10-16) is never asked at
+    its monotonic stamp, the verdict says why; one truly 20 s old is still refused as too old."""
+    wall = 1_792_113_912.0  # the board's wall clock (TF's) at the machine's 0
+    offset = wall - UPTIME
+    r = rig(finder=False, arc_deg=360.0)
+    r.tf.now = lambda: wall + r.machine.now_s
+
+    def said(bearing: float, start: float, end: float, link: float | None) -> list[DoaReading]:
+        steps = round((end - start) * 10)
+        voice = [DoaReading(UPTIME + start + k / 10, array(bearing), True, link)
+                 for k in range(steps + 1)]  # fmt: skip
+        return [*voice, DoaReading(UPTIME + end + 0.1, 30, False, link)]
+
+    r.doa.readings += said(-120.0, 0.0, 1.2, offset)
+    r.machine.opened(Heard(0.0, 1.2, "Пепин", named=True), 1.3)
+    (wake,) = [f for k, _, f in r.events if k == "gaze_wake"]
+    assert wake["azimuth_deg"] == pytest.approx(-120.0, abs=1.0), wake
+    assert r.machine.person is not None and r.machine.person.source == "voice"
+    assert r.aimed()[-1][0] == pytest.approx(-120.0, abs=1.0), "the head on him"
+    asked = [s for stamps, _ in r.tf.asked for s in stamps if s is not None]
+    assert asked and all(wall <= s <= wall + 1.3 for s in asked), "TF's clock, never the uptime"
+    assert r.machine.person.stamp == pytest.approx(wall + 1.2), "the voice's place, its stamp"
+    board = r.machine.clock.now()
+    assert board is not None and wall + 1.2 <= board <= wall + 1.3, "the board's now: wall"
+    r.doa.readings += said(-100.0, 2.0, 3.0, None)  # an old audio server: no offset
+    before = len(r.tf.asked)
+    r.machine.heard(Heard(2.0, 3.0, "я тут", False, -12.0), 3.1)
+    verdict = [f for k, _, f in r.events if k == "gaze_voice"][-1]["verdict"]
+    assert verdict == f"no place ({NO_WALL})" and len(r.tf.asked) == before, "nothing asked"
+    r.doa.readings += said(-100.0, 4.0, 5.0, offset - 20.0)  # their moments 20 s ago
+    r.machine.heard(Heard(4.0, 5.0, "я тут", False, -12.0), 5.1)
+    verdict = [f for k, _, f in r.events if k == "gaze_voice"][-1]["verdict"]
+    assert (
+        verdict == "no place (base_link: too_old: the stamp is 21.1 s old and TF keeps 10 s of"
+        " history)"
+    ), verdict
 
 
 def test_a_person_far_behind_turns_the_body_again_until_they_are_inside_the_arc() -> None:

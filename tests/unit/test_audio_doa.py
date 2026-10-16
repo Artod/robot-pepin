@@ -7,7 +7,7 @@ utterance."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -157,6 +157,26 @@ def test_readings_come_per_0_1_s_with_the_strongest_peak_and_quiet_chunks_yield_
     assert deaf.voiced == 0 and math.isinf(MicDoa(srp).raw_age_s(5.0))
 
 
+def test_a_reading_carries_its_raw_frame_s_offset_onto_the_board_s_wall_clock(
+    srp: SrpPhat,
+) -> None:
+    """The raw frames' stamps are the board's uptime (33,450 s on 2026-10-15) and TF's are its
+    wall clock: each Mac reading keeps the link's offset of its frames, so its ``wall_s`` is
+    the moment TF is asked at; frames from a server that tells no offset give readings without
+    one (never their monotonic stamp passed off as the wall clock)."""
+    signal = plane_wave(GEOMETRY, voice(RATE // 2, 5), 60)
+    offset = 1_792_046_998.5
+    mic = MicDoa(srp, Series([(0.0, 1e9, 0.9)]), reading_s=0.1)
+    closed: list[MicReading] = []
+    for k, frame in enumerate(raw_frames(signal, stamp0=33_450.0)):
+        closed += mic.feed(replace(frame, clock_offset_s=offset), 1.0 + 0.02 * k)
+    assert closed and all(r.clock_offset_s == offset for r in closed)
+    assert closed[0].wall_s == pytest.approx(33_450.0 + offset), "the board's wall clock"
+    bare = MicDoa(srp, Series([(0.0, 1e9, 0.9)]), reading_s=0.1)
+    plain = [r for k, f in enumerate(raw_frames(signal)) for r in bare.feed(f, 1.0 + 0.02 * k)]
+    assert plain and all(r.wall_s is None for r in plain)
+
+
 def test_a_seq_gap_restarts_the_buffer_on_the_new_frame_s_stamp(srp: SrpPhat) -> None:
     signal = plane_wave(GEOMETRY, voice(RATE // 2, 5), 60)
     mic = MicDoa(srp, Series([(0.0, 1e9, 0.9)]), reading_s=0.032)
@@ -210,7 +230,7 @@ def mac_readings(start: float, deg: int, p: float = 0.9, n: int = 10) -> list[Mi
     """``n`` Mac readings every 0.1 s from ``start`` (board clock): the strongest peak at
     ``deg``, a second at 200, both of a voice Silero gives ``p``."""
     peaks = (Peak(float(deg), 0.8), Peak(200.0, 0.5))
-    return [MicReading(start + 0.1 * k, deg, p >= 0.5, voice_p=p, peaks=peaks, chunks=3,
+    return [MicReading(start + 0.1 * k, deg, p >= 0.5, 0.0, voice_p=p, peaks=peaks, chunks=3,
                        voiced=3 if p >= 0.5 else 0) for k in range(n)]  # fmt: skip
 
 

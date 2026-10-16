@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from test_speaker_gaze import MAP, FakeSeries, array
+from test_speaker_gaze import MAP, UPTIME, FakeSeries, array
 from test_speaker_gaze_spin import FakeSpins
 
 from pepin.audio_link import DoaReading
@@ -374,8 +374,9 @@ class Sim:
         """The array's readings of a voice at ``bearing`` (the cart's frame) on the board's
         clock, ten a second."""
         steps = round((end - start) * 10)
-        b0 = self.neck.board0
-        return [DoaReading(b0 + start + k / 10, array(bearing), True) for k in range(steps + 1)]
+        offset = self.neck.board0 - UPTIME  # the link's: the board's monotonic clock onto its wall
+        return [DoaReading(UPTIME + start + k / 10, array(bearing), True, offset)
+                for k in range(steps + 1)]  # fmt: skip
 
     def wake(self, bearing: float) -> None:
         """The robot's name from ``bearing`` over 0..1.2 s, read at 1.3: the conversation
@@ -423,6 +424,7 @@ def sim(
         now=lambda: neck.board0 + holder[0].t,
         cart_at=lambda stamp: (0.0, 0.0, neck.cart.heading(stamp - neck.board0)),
         head_at=head_at,
+        history_s=10.0,  # the goal server's TF_HISTORY_S
     )
     machine = SpeakerGaze(
         settings, door=neck, doa=doa, finder=channel, wheels=wheels or NoWheels(), face=None,

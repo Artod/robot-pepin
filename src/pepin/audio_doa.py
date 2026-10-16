@@ -28,19 +28,19 @@ a fraction of a sample (a clean synthetic wave lands on its grid degree; one 32 
 most 5; at -6 dB it breaks down, p90 20, max 112). Above c / 2d = 2.6 kHz the 66 mm pairs
 alias; summing six pairs over a wide band keeps the alias lobes below the true peak.
 
-THE SOURCE (:class:`MicDoa`): raw frames in (:meth:`MicDoa.feed`, on the link's raw pump),
-readings out as a :class:`pepin.expression.speaker.DoaSource` on the board's clock, the same
-contract the chip's readings keep. A chunk's speech probability is the ears' Silero series'
+THE SOURCE (:class:`MicDoa`): raw frames in (:meth:`MicDoa.feed`, on the link's raw pump), readings
+out as a :class:`pepin.expression.speaker.DoaSource` on the board's clock, the same contract the
+chip's readings keep (each with its raw frame's offset onto the board's wall clock, ``wall_s``:
+:mod:`pepin.audio_link`'s THE TWO CLOCKS). A chunk's speech probability is the ears' Silero series'
 (the processed channel, the ears' own model, no second instance) over the chunk's span on the
-laptop's clock; a chunk at ``voice_p_min`` or more gets its peaks computed, any other chunk
-costs nothing. Readings are made per ``reading_s`` (0.1 s, the chip's cadence, so that the
-gaze's counts of readings keep their meaning): the span's strongest peak is the reading's angle
-(``deg``, -1 when no chunk of the span was voice), ``speech`` whether any chunk was, ``voice_p``
-the span's highest probability, ``peaks`` every peak of its voiced chunks (merged within
-``MERGE_DEG``, strongest first). The angle is in the geometry's frame (0 along +x, growing
-toward +y); its calibration into the cart's frame is the speaker gaze's
-(config/expression.json ``speaker.doa.mac_readings``, measured by
-``ros/tools/doa_calibrate.py --source mac``).
+laptop's clock; a chunk at ``voice_p_min`` or more gets its peaks computed, any other chunk costs
+nothing. Readings are made per ``reading_s`` (0.1 s, the chip's cadence, so that the gaze's counts
+of readings keep their meaning): the span's strongest peak is the reading's angle (``deg``, -1 when
+no chunk of the span was voice), ``speech`` whether any chunk was, ``voice_p`` the span's highest
+probability, ``peaks`` every peak of its voiced chunks (merged within ``MERGE_DEG``, strongest
+first). The angle is in the geometry's frame (0 along +x, growing toward +y); its calibration into
+the cart's frame is the speaker gaze's (config/expression.json ``speaker.doa.mac_readings``,
+measured by ``ros/tools/doa_calibrate.py --source mac``).
 
 Laptop only (numpy); the board never imports this module.
 """
@@ -242,6 +242,7 @@ class _Chunk:
     stamp_s: float  # board clock, first sample
     p: float | None
     peaks: tuple[Peak, ...]
+    clock_offset_s: float | None = None  # its raw frame's (the link's): onto the wall clock
 
 
 def merge_peaks(peaks: Sequence[Peak], within_deg: float = MERGE_DEG) -> tuple[Peak, ...]:
@@ -286,6 +287,7 @@ class MicDoa:
         self._readings: deque[MicReading] = deque()
         self._buffer: npt.NDArray[np.float32] = np.zeros((srp.geometry.count, 0), np.float32)
         self._buffer_stamp = 0.0  # board stamp of the buffer's first sample
+        self._clock_offset: float | None = None  # the newest raw frame's (the link's)
         self._next_seq: int | None = None
         self._span: list[_Chunk] = []
         self._span_index: int | None = None
@@ -352,6 +354,7 @@ class MicDoa:
                 closed.append(self._close())
         if self._buffer.shape[1] == 0:
             self._buffer_stamp = frame.stamp_s
+        self._clock_offset = frame.clock_offset_s
         self._next_seq = frame.seq + 1
         self._buffer = np.concatenate([self._buffer, samples.astype(np.float32) / 32768.0], axis=1)
         rate = self._srp.rate
@@ -370,7 +373,7 @@ class MicDoa:
                 self.cost.add(time.perf_counter() - started)
                 self.voiced += 1
             self.chunks += 1
-            reading = self._take(_Chunk(stamp, p, peaks))
+            reading = self._take(_Chunk(stamp, p, peaks, self._clock_offset))
             if reading is not None:
                 closed.append(reading)
         return closed
@@ -398,6 +401,7 @@ class MicDoa:
             round(peaks[0].deg) % 360 if peaks else -1,
             bool(voiced),
             voice_p=max(known) if known else 0.0,
+            clock_offset_s=span[0].clock_offset_s,
             peaks=peaks,
             chunks=len(span),
             voiced=len(voiced),

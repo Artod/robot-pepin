@@ -1,23 +1,29 @@
 """The audio link's framing and the laptop's paced playback, without sockets."""
 
 import json
+import socket
 
 import pytest
 
 from pepin.audio_link import (
     MAX_LINE,
     MAX_PAYLOAD,
+    AudioClient,
     AudioFrame,
     DoaReading,
     FrameDecoder,
     ProtocolError,
     RawFrame,
     encode,
+    offset_of,
     parse_doa,
     parse_frame,
     parse_raw,
     play_paced,
 )
+
+UPTIME = 33_450.25  # the board's monotonic clock on the evening of 2026-10-15: the stamps' clock
+OFFSET = 1_792_046_998.5  # its wall clock (TF's, chrony's) less that one
 
 
 def test_a_payload_rides_behind_its_header_and_survives_any_cut() -> None:
@@ -93,6 +99,67 @@ def test_a_raw_microphone_frame_rides_the_wire_beside_the_processed_one() -> Non
         parse_raw({"type": "raw", "seq": 0, "t": 0.0, "ch": 4}, b"\x00" * 6)  # not whole samples
     with pytest.raises(ValueError):
         parse_raw({"type": "raw", "seq": 0, "t": 0.0, "ch": 0}, b"")
+
+
+def test_a_reading_is_placed_on_the_board_s_wall_clock_by_the_link_s_offset_alone() -> None:
+    """``t`` stays the board's monotonic clock on the wire (zero bytes more a frame); the
+    offset the link holds turns a reading, a frame and a raw frame into the wall clock's
+    moment (``wall_s``); without one, none (an old server: never the monotonic stamp)."""
+    doa = parse_doa({"type": "doa", "t": UPTIME, "deg": 90, "speech": True}, OFFSET)
+    assert doa.stamp_s == UPTIME and doa.wall_s == pytest.approx(UPTIME + OFFSET)
+    assert parse_doa({"type": "doa", "t": UPTIME, "deg": 90, "speech": True}).wall_s is None
+    pcm = parse_frame({"type": "pcm", "seq": 3, "t": UPTIME}, b"\x00\x00" * 320, 16000, OFFSET)
+    raw = parse_raw({"type": "raw", "seq": 3, "t": UPTIME, "ch": 4}, b"\x00" * 2560, 16000, OFFSET)
+    assert pcm.wall_s == raw.wall_s == pytest.approx(UPTIME + OFFSET)
+    assert DoaReading(UPTIME, 90, True, OFFSET).encode() == DoaReading(UPTIME, 90, True).encode()
+    assert offset_of({"clock_offset_s": OFFSET}) == OFFSET
+    for absent in ({}, {"clock_offset_s": None}, {"clock_offset_s": True},
+                   {"clock_offset_s": float("nan")}, {"clock_offset_s": "1"}):  # fmt: skip
+        assert offset_of(absent) is None, absent
+
+
+@pytest.mark.slow
+def test_the_client_takes_the_offset_from_the_hello_and_each_status_after_a_step() -> None:
+    """The hello's offset stamps every frame and direction that follows; a status after the
+    board's wall clock was stepped (chrony's first sync after a boot) replaces it; a server
+    that tells none (a build before 2026-10-16) leaves ``wall_s`` None."""
+    board, laptop = socket.socketpair()
+    client = AudioClient("board", connector=lambda address: laptop)
+    try:
+        board.sendall(encode({"type": "hello", "rate": 16000, "clock_offset_s": OFFSET}))
+        client.start(listen=False)
+        assert client.clock_offset_s == OFFSET
+        board.sendall(DoaReading(UPTIME, 90, True).encode())
+        board.sendall(AudioFrame(1, UPTIME, b"\x00\x00" * 320).encode())
+        board.sendall(RawFrame(1, UPTIME, b"\x00" * 2560).encode())
+        frame, raw = client.next_frame(2.0), client.next_raw(2.0)
+        doa = client.latest_doa()  # read before the frame on the same reader thread
+        assert frame is not None and frame.wall_s == pytest.approx(UPTIME + OFFSET)
+        assert raw is not None and raw.wall_s == pytest.approx(UPTIME + OFFSET)
+        assert doa is not None and doa.wall_s == pytest.approx(UPTIME + OFFSET)
+        board.sendall(encode({"type": "status", "clock_offset_s": OFFSET + 2.5}))
+        board.sendall(AudioFrame(2, UPTIME + 0.02, b"\x00\x00" * 320).encode())
+        stepped = client.next_frame(2.0)
+        assert stepped is not None and stepped.wall_s == pytest.approx(UPTIME + 0.02 + OFFSET + 2.5)
+        assert client.clock_offset_s == OFFSET + 2.5
+        board.sendall(encode({"type": "status", "capture_alive": True}))  # an older status
+        board.sendall(AudioFrame(3, UPTIME + 0.04, b"\x00\x00" * 320).encode())
+        kept = client.next_frame(2.0)
+        assert kept is not None and kept.clock_offset_s == OFFSET + 2.5, "kept, not dropped"
+    finally:
+        client.close()
+        board.close()
+    board, laptop = socket.socketpair()
+    old = AudioClient("board", connector=lambda address: laptop)
+    try:
+        board.sendall(encode({"type": "hello", "rate": 16000}))
+        old.start(listen=False)
+        board.sendall(AudioFrame(1, UPTIME, b"\x00\x00" * 320).encode())
+        frame = old.next_frame(2.0)
+        assert old.clock_offset_s is None and frame is not None and frame.wall_s is None
+    finally:
+        old.close()
+        board.close()
 
 
 class FakeSpeaker:
