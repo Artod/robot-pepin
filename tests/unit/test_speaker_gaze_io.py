@@ -20,7 +20,7 @@ from pepin.expression.finder import (
     head_yaw_deg,
     snapshot_url,
 )
-from pepin.expression.speaker import Ease
+from pepin.expression.speaker import Ease, Point
 from pepin.face_sensor.geometry import Lens
 from pepin.face_sensor.models import Detection
 from pepin.gaze import Aim
@@ -57,16 +57,20 @@ def door(client: Client) -> SpeakerDoor:
     return SpeakerDoor(client=client, aim_wait_s=2.0)  # type: ignore[arg-type]
 
 
-def test_an_aim_is_a_held_angles_look_of_the_idle_band_without_depth_frames() -> None:
+def test_an_aim_is_a_held_point_look_in_the_map_that_follows_of_the_idle_band() -> None:
+    """The person is a point in the map: the arbiter resolves it from TF's pose of now and keeps
+    the head on it as the cart turns (``follow``), held for its TTL, no depth frames; the
+    answer carries where the head settled."""
     client = Client({"status": "done", "pan_rad": 0.5, "tilt_rad": -0.1})
-    answer = door(client).aim(Aim(0.5, -0.1), speed="slow", ttl_s=6.0)
+    answer = door(client).aim(Point(1.8, 0.6, 1.1), speed="slow", ttl_s=6.0)
     assert answer.status == "done" and answer.head == Aim(0.5, -0.1)
     ((name, (request, wait)),) = client.calls
     assert name == "look" and wait == 2.0
     assert request == {
-        "kind": "angles",
+        "kind": "point",
         "band": 5,
-        "target": {"pan_rad": 0.5, "tilt_rad": -0.1},
+        "target": {"frame": "map", "x": 1.8, "y": 0.6, "z": 1.1},
+        "follow": True,
         "frames": 0,
         "hold": True,
         "ttl_s": 6.0,
@@ -75,10 +79,11 @@ def test_an_aim_is_a_held_angles_look_of_the_idle_band_without_depth_frames() ->
 
 
 def test_a_door_that_keeps_an_aim_waiting_or_is_away_answers_in_words() -> None:
-    waiting = door(Client(error=TimeoutError("timed out"))).aim(Aim(0, 0), speed="saccade", ttl_s=6)
+    here = Point(1.0, 0.0, 1.0)
+    waiting = door(Client(error=TimeoutError("timed out"))).aim(here, speed="saccade", ttl_s=6)
     assert waiting.status == "queued" and "held behind" in waiting.reason
     away = door(Client(error=ConnectionRefusedError(61, "refused")))
-    assert away.aim(Aim(0, 0), speed="saccade", ttl_s=6).status == "denied"
+    assert away.aim(here, speed="saccade", ttl_s=6).status == "denied"
     assert away.renew() == 0 and away.state() is None
     away.release()
     assert away.calls == 4
@@ -169,7 +174,8 @@ def test_the_head_s_yaw_from_the_five_points_and_the_snapshot_beside_the_stream(
 
 def test_an_eased_aim_carries_its_speed_and_ramp_to_the_arbiter() -> None:
     client = Client({"status": "done", "pan_rad": 0.5, "tilt_rad": 0.05})
-    door(client).aim(Aim(0.5, 0.05), speed="saccade", ttl_s=6.0, ease=Ease(200.0, 650.0, "turn"))
+    ease = Ease(200.0, 650.0, "turn")
+    door(client).aim(Point(1.0, 0.5, 1.0), speed="saccade", ttl_s=6.0, ease=ease)
     ((_, (request, _)),) = client.calls
     assert (request["speed_deg_s"], request["acc_deg_s2"]) == (200.0, 650.0)
     assert request["speed"] == "saccade", "an arbiter that predates the ease moves at this"

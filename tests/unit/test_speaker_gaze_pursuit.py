@@ -1,51 +1,61 @@
-"""The speaker gaze's PURSUIT (pepin.expression.pursuit; the tracker since 2026-10-14, Artem:
-"вижу непрерывно"): a person walking is followed on every record of the camera channel, the head
-moving or not, each box placed with the head's pose at its frame's exposure stamp, the head
-gliding toward where they will be; and while the BODY TURNS the camera keeps them the same way,
-whatever the wheels' odometry says (Artem: "колёса буксуют и проскальзывают, одометрия врёт,
-голове на колёса плевать"). The engine runs on a simulated arbiter and neck (each aim driven
-along its own ease, the state read at the pose of 20 ms before, as the arbiter's newest encoder
-reading, stamped with that reading's own moment on the board's clock), a simulated perception
-service (a frame exposed every 0.1 s, its record readable 0.15
-s later, a face at the person's bearing from the head's pose AT THE EXPOSURE, with the detector's
-jitter) and, for the turns, a simulated cart whose wheels slip (the odometry reads three times
-the turn the cart makes)."""
+"""The speaker gaze's PURSUIT in the map (pepin.expression.pursuit, people_map; since 2026-10-15
+every sighting and every voice is a point in the map placed by TF's poses at its own stamp, and
+the head is asked for a point the arbiter keeps it on as the cart turns): a person walking is
+followed on every record of the camera channel, the head moving or not, each box placed with the
+camera's pose at its frame's exposure, the head gliding toward where they will be; and while the
+BODY TURNS the arbiter keeps the head on the person's point by TF alone, whatever the wheels'
+odometry would say (2026-10-15: the front wheels on the stand spun at -35 deg/s, the cart did
+not turn, and the head was re-aimed off the person 143 times "by the odometry").
+
+The engine runs on a simulated arbiter and neck (each point resolved to pan and tilt from the
+cart's true pose, followed every 0.05 s as the node's step does and written again past its
+settle tolerance, driven along its aim's own ease; the state read at the pose of 20 ms before,
+as the arbiter's newest encoder reading, stamped with that reading's own moment on the board's
+clock), a simulated TF (the cart's true heading and the neck's pose at any stamp, through the
+real neck's lever arms and the real eye), a simulated perception service (a frame exposed every
+0.1 s, its record readable 0.15 s later, a face where the camera's pose AT THE EXPOSURE sees the
+person's point, with the detector's jitter) and, for the turns, a cart whose true heading is
+TF's: Nav2 may claim any turn it likes, only TF's counts."""
 
 from __future__ import annotations
 
 import itertools
-import logging
 import math
 import random
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
+from pathlib import Path
 from typing import Any
 
 import pytest
-from test_speaker_gaze import BOARD, MAP, REACH, FakeSeries, array, speech
+from test_speaker_gaze import MAP, FakeSeries, array
 from test_speaker_gaze_spin import FakeSpins
 
+from pepin.audio_link import DoaReading
 from pepin.expression.conversation import Heard
 from pepin.expression.executors import NoWheels, Wheels
-from pepin.expression.fakes import FakeDoa, FakeWheels
+from pepin.expression.fakes import FakeDoa, FakeTf, FakeWheels
 from pepin.expression.head import SPEAKER
-from pepin.expression.pursuit import HeadPoses, Pursuit
-from pepin.expression.speaker import Ease, FaceFrame, FaceSighting, GazeAnswer, HeadView
-from pepin.expression.tracker import (
-    BY_FRAMES,
-    BY_ODOMETRY,
-    TILT_TURN_S,
-    TURN_FRAMES_S,
-    SpeakerGaze,
-    SpeakerSettings,
-)
-from pepin.gaze import HOME, Aim, Speed
+from pepin.expression.people_map import FACE_PX_M
+from pepin.expression.poses import BoardClock, HeadModel, Pose
+from pepin.expression.pursuit import Pursuit
+from pepin.expression.speaker import Ease, FaceFrame, FaceSighting, GazeAnswer, HeadView, Point
+from pepin.expression.tracker import LEAD, MOVED, TILT_TURN_S, SpeakerGaze, SpeakerSettings
+from pepin.gaze import HOME, Aim, Reach, Speed
+from pepin.mounts import load_camera_mounts
+from pepin.neck import NeckConfig
 
+REPO = Path(__file__).resolve().parents[2]
+NECK = NeckConfig.from_json(REPO / "config/neck.json")
+MODEL = HeadModel(NECK, load_camera_mounts(REPO / "config").optical)  # the real arms and eye
+REACH = Reach.of(NECK)
 WALL = 1_760_000_000.0  # this Mac's wall clock at the simulation's 0 (the board's too, unskewed)
 STEP_S = 0.005  # the neck's simulation step
 TICK_S = 0.01  # the simulation's clock step
+FOLLOW_S = 0.05  # the arbiter's step: a held point resolved again this often (STEP_HZ 20)
+SETTLE_DEG = 1.0  # ...and written again past this (gaze settle_tol_deg)
 EYE_PAN_DEG, EYE_TILT_DEG = 41.0, 33.0  # the rectified eye's half view (800x600 at fx 454.5)
-FACE_2M_PX = 40.0  # a face 2 m away in the rectified eye (tracks.FACE_PX_M 80 / 2 m)
+RANGE_M = 2.0  # people stand 2 m from the lens (a 40 px face: tracks' FACE_PX_M 80 / 2 m)
 HOME_POSE = (0.0, 23.8)
 FRAME_PERIOD_S = 0.105  # the arbiter's blind tail after the head settles
 
@@ -71,24 +81,60 @@ def axis(
     return x + v * dt, v
 
 
+Where = Callable[[float], tuple[float, float]]  # a person's (pan, tilt) degrees at a moment
+
+
+def person_at(where: Where, t: float) -> Point:
+    """A person's head in the map at ``t``: where the head would look to see them with the cart
+    at the origin facing +x, ``RANGE_M`` from the lens."""
+    pan, tilt = where(t)
+    x, y, z = MODEL.axis_point(Aim(rad(pan), rad(tilt)), RANGE_M)
+    return Point(x, y, z)
+
+
+@dataclass
+class Cart:
+    """The cart's TRUE heading (TF's, + left): ``true_deg`` turned evenly from ``t0`` to ``t1``
+    (whatever Nav2 or the wheels claim)."""
+
+    t0: float = 0.0
+    t1: float = 1.0
+    true_deg: float = 0.0
+
+    def heading(self, t: float) -> float:
+        """The cart's heading (deg) at ``t`` (simulation seconds)."""
+        span = self.t1 - self.t0
+        return self.true_deg * min(max(t - self.t0, 0.0), span) / span if span > 0 else 0.0
+
+    def pose(self, t: float) -> Pose:
+        """``map <- base_link`` at ``t``."""
+        return Pose.planar(0.0, 0.0, rad(self.heading(t)))
+
+
 @dataclass
 class Neck:
-    """The arbiter's door and the neck under it: an aim moves the head toward it on the aim's
-    own ease (both axes, a newer aim taken in flight) and is answered done at once (the answer is
-    not what is measured here); the state is the pose ``reading_age_s`` ago (the arbiter's
-    newest encoder reading; up to ``reading_spread_s`` more, a read's own), stamped with that
-    reading's moment unless the arbiter is an older one (``stamped`` False: no ``head_stamp``),
-    blind while the head moves and one frame period after it settles, ``blind_until`` on the
-    wall clock."""
+    """The arbiter's door and the neck under it: an aim asks for a point, resolved to pan and
+    tilt from the cart's true pose and kept on it (resolved again every ``FOLLOW_S``, written
+    past ``SETTLE_DEG``: the arbiter's follow); the head moves toward the written target on the
+    aim's own ease (both axes, a newer target taken in flight) and is answered done at once (the
+    answer is not what is measured here); the state is the pose ``reading_age_s`` ago (up to
+    ``reading_spread_s`` more, a read's own), stamped with that reading's moment unless the
+    arbiter is an older one (``stamped`` False: no ``head_stamp``), blind while the head moves
+    and one frame period after it settles, ``blind_until`` on the board's clock."""
 
+    cart: Cart
     pan: float = HOME_POSE[0]
     tilt: float = HOME_POSE[1]
     t: float = 0.0
     goal: tuple[float, float] | None = None
+    target: tuple[float, float] = HOME_POSE
     limits: tuple[float, float] = (200.0, 650.0)
     v: list[float] = field(default_factory=lambda: [0.0, 0.0])
     poses: list[tuple[float, float, float]] = field(default_factory=lambda: [(0.0, *HOME_POSE)])
-    aims: list[tuple[float, Aim, Ease | None]] = field(default_factory=list)
+    aims: list[tuple[float, Point, Aim, Ease | None]] = field(default_factory=list)
+    writes: list[tuple[float, float, float, str]] = field(default_factory=list)  # t, pan, tilt
+    held: Point | None = None
+    next_follow: float = 0.0
     holder: str = ""
     settled_s: float | None = 0.0
     reading_age_s: float = 0.02
@@ -97,11 +143,26 @@ class Neck:
     board0: float = WALL  # the board's clock at the simulation's 0 (chrony's skew: board0 - WALL)
     rng: random.Random = field(default_factory=lambda: random.Random(1015))
 
+    def resolve(self, point: Point, t: float) -> tuple[float, float]:
+        """The pan and tilt (degrees) that look at ``point`` with the cart where it truly is at
+        ``t``: the arbiter's geometry and its clamp toward the head's own pan."""
+        aim = MODEL.aim_at(self.cart.pose(t).to_frame(point))
+        held = REACH.clamp(Aim(math.remainder(aim.pan_rad, math.tau), aim.tilt_rad),
+                           from_pan=rad(self.pan))  # fmt: skip
+        return deg(held.pan_rad), deg(held.tilt_rad)
+
     def advance(self, t: float) -> None:
-        """The neck driven up to ``t``."""
+        """The neck driven up to ``t``; the held point followed on the arbiter's step."""
         while self.t + 1e-9 < t:
             dt = min(STEP_S, t - self.t)
             self.t += dt
+            if self.held is not None and self.t >= self.next_follow - 1e-9:
+                self.next_follow = self.t + FOLLOW_S
+                there = self.resolve(self.held, self.t)
+                if max(abs(there[0] - self.target[0]), abs(there[1] - self.target[1])) > (
+                    SETTLE_DEG
+                ):
+                    self.write(there, "follow")
             if self.goal is not None:
                 speed, acc = self.limits
                 self.pan, self.v[0] = axis(self.pan, self.v[0], self.goal[0], speed, acc, dt)
@@ -109,6 +170,12 @@ class Neck:
                 if (self.pan, self.tilt) == self.goal and self.v == [0.0, 0.0]:
                     self.goal, self.settled_s = None, self.t
             self.poses.append((self.t, self.pan, self.tilt))
+
+    def write(self, there: tuple[float, float], why: str) -> None:
+        """One write of the target (the head moves toward it from where it is)."""
+        self.goal = self.target = there
+        self.settled_s = None
+        self.writes.append((self.t, there[0], there[1], why))
 
     def pose_at(self, t: float) -> tuple[float, float]:
         """The head's (pan, tilt) in degrees at ``t``, the nearest step before."""
@@ -130,18 +197,22 @@ class Neck:
         """The head's pan speed (deg/s) about ``t``."""
         return abs(self.pose_at(t + 0.01)[0] - self.pose_at(t - 0.01)[0]) / 0.02
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
-        self.aims.append((self.t, aim, ease))
-        self.goal = (deg(aim.pan_rad), deg(aim.tilt_rad))
+    def aim(
+        self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None
+    ) -> GazeAnswer:
+        there = self.resolve(point, self.t)
+        self.aims.append((self.t, point, Aim(rad(there[0]), rad(there[1])), ease))
         self.limits = (ease.speed_deg_s, ease.acc_deg_s2) if ease is not None else (200.0, 650.0)
-        self.settled_s, self.holder = None, SPEAKER
-        return GazeAnswer("done", head=aim)
+        self.held, self.next_follow = point, self.t + FOLLOW_S
+        self.write(there, "aim")
+        self.holder = SPEAKER
+        return GazeAnswer("done", head=Aim(rad(there[0]), rad(there[1])))
 
     def renew(self) -> int:
         return 1
 
     def release(self) -> None:
-        self.holder = ""
+        self.holder, self.held = "", None
 
     def state(self) -> HeadView:
         age = self.reading_age_s + self.rng.uniform(0.0, self.reading_spread_s)
@@ -154,19 +225,17 @@ class Neck:
                         head_stamp=stamp)  # fmt: skip
 
 
-Where = Callable[[float], tuple[float, float]]  # the person's (pan, tilt) degrees at a moment
-
-
 @dataclass
 class Channel:
     """The perception service: a frame exposed every ``period_s``, its record readable
     ``latency_s`` after the exposure; a look is the newest record past the last one given and
     exposed at ``not_before`` or later, or the next one waited for (the long poll: the clock
     moves on meanwhile, :attr:`wait`; up to ``wait_s``, then None), None while the service
-    gives none (``down``); the person's face is where the head's pose AT THE EXPOSURE puts it
-    in the eye's view, with the detector's jitter, unless it is turned ``away`` (records without
-    it, by their exposure); ``others``' faces the same way (never turned away). Its stamps are
-    on the board's clock (the neck's ``board0``)."""
+    gives none (``down``); the person's face is where the camera's pose AT THE EXPOSURE (the
+    cart's true heading, the head's pose) sees their point, with the detector's jitter, its
+    width by its distance, unless it is turned ``away`` (records without it, by their
+    exposure); ``others``' faces the same way (never turned away). Its stamps are on the board's
+    clock (the neck's ``board0``)."""
 
     neck: Neck
     where: Where
@@ -175,7 +244,7 @@ class Channel:
     latency_s: float = 0.15
     wait_s: float = 0.4
     jitter_deg: float = 0.3
-    face_px: float = FACE_2M_PX
+    shown: bool = True
     down: tuple[float, float] | None = None
     away: tuple[float, float] | None = None
     others: tuple[Where, ...] = ()
@@ -204,154 +273,172 @@ class Channel:
         faces: list[FaceSighting] = []
         for n, where in enumerate((self.where, *self.others)):
             face = self._face(where, exposed)
-            if n == 0 and self.away is not None and self.away[0] <= exposed < self.away[1]:
+            if n == 0 and (
+                not self.shown or (self.away is not None and self.away[0] <= exposed < self.away[1])
+            ):
                 face = None
             if face is not None:
                 faces.append(face)
         return FaceFrame(self.neck.board0 + exposed, tuple(faces), seq=k)
 
+    def camera(self, exposed: float) -> Pose:
+        """``map <- camera_link`` at the exposure: the cart's true pose, the head's then."""
+        pan, tilt = self.neck.pose_at(exposed)
+        return self.neck.cart.pose(exposed).then(MODEL.camera(Aim(rad(pan), rad(tilt))))
+
     def _face(self, where: Where, exposed: float) -> FaceSighting | None:
         """A person's face in the frame exposed at ``exposed``, None when out of the view."""
-        pan, tilt = self.neck.pose_at(exposed)
-        person_pan, person_tilt = where(exposed)
-        off_pan = person_pan - pan + self.rng.gauss(0.0, self.jitter_deg)
-        off_tilt = person_tilt - tilt + self.rng.gauss(0.0, self.jitter_deg)
-        seen = abs(off_pan) <= EYE_PAN_DEG and abs(off_tilt) <= EYE_TILT_DEG and self.face_px > 0
-        return FaceSighting(off_pan, off_tilt, self.face_px, 0.8) if seen else None
+        camera = self.camera(exposed)
+        point = person_at(where, exposed)
+        pan, tilt = MODEL.angles(camera, point)
+        pan += self.rng.gauss(0.0, self.jitter_deg)
+        tilt += self.rng.gauss(0.0, self.jitter_deg)
+        seen = abs(pan) <= EYE_PAN_DEG and abs(tilt) <= EYE_TILT_DEG
+        eye = camera.to_map(MODEL.ray(0.0, 0.0)[0])
+        width = FACE_PX_M / eye.distance(point)
+        return FaceSighting(pan, tilt, width, 0.8) if seen else None
 
 
 @dataclass
 class Placed:
-    """One record the person engaged was seen in: its exposure, the bearing the gaze placed
-    them at, their true bearing then, and the head's pan at the exposure and at the read."""
+    """One record the person engaged was seen in: its exposure, how far (pan, degrees, as the
+    cart saw it then) the point the gaze placed is from their true point, and the head's pan at
+    the exposure and at the read."""
 
     exposed: float
-    placed: float
-    true: float
+    error_deg: float
     head_then: float
     head_read: float
 
 
-@dataclass
-class Cart:
-    """The cart under the head: its true heading turns ``true_deg`` (+ left) evenly from ``t0``
-    to ``t1``, and the wheels' odometry reads ``slip`` times as much (they spin and slide on the
-    floor: 30 deg of odometry for a turn of 10), a state line every ``line_s`` on the board's
-    clock."""
-
-    wheels: FakeWheels
-    t0: float
-    t1: float
-    true_deg: float
-    slip: float = 3.0
-    line_s: float = 0.02
-
-    def true_at(self, t: float) -> float:
-        """The cart's true heading (deg) at ``t``."""
-        return self.true_deg * min(max(t - self.t0, 0.0), self.t1 - self.t0) / (self.t1 - self.t0)
-
-    def odometry_at(self, t: float) -> float:
-        """The heading the wheels' odometry reads at ``t``."""
-        return self.slip * self.true_at(t)
-
-    def tell(self, t: float) -> None:
-        """The base server's state line at ``t``, when one is due."""
-        latest = self.wheels.log.latest()
-        if latest is None or BOARD + t >= latest[0] + self.line_s - 1e-9:
-            self.wheels.turn_to(self.odometry_at(t), BOARD + t)
+def bearing_of(cart: Cart, point: Point, t: float) -> float:
+    """The pan that looks at ``point`` with the cart where it truly is at ``t`` (degrees)."""
+    aim = MODEL.aim_at(cart.pose(t).to_frame(point))
+    return deg(math.remainder(aim.pan_rad, math.tau))
 
 
 @dataclass
 class Sim:
-    """The engine, the neck, the channel, the array and the cart on one simulated clock."""
+    """The engine, the neck, the channel, the array, TF and the cart on one simulated clock."""
 
     machine: SpeakerGaze
     neck: Neck
     channel: Channel
     doa: FakeDoa
+    tf: FakeTf
     events: list[tuple[str, float, dict[str, Any]]]
-    cart: Cart | None = None
     t: float = 0.0
     due: float | None = None
     trace: list[tuple[float, float, float, str]] = field(default_factory=list)  # head, person
     placed: list[Placed] = field(default_factory=list)
 
+    @property
+    def cart(self) -> Cart:
+        return self.neck.cart
+
     def run(self, until: float) -> None:
         """The clock to ``until``: the neck driven, the machine ticked whenever due, the head's
-        and the person's pan traced, each record the person was placed by kept."""
+        pan and the pan that looks at the person traced, each record they were placed by kept."""
         while self.t < until - 1e-9:
             self.t = round(self.t + TICK_S, 6)
             self.neck.advance(self.t)
-            if self.cart is not None:
-                self.cart.tell(self.t)
             self.channel.now = self.t
             if self.due is None or self.t >= self.due - 1e-9:
                 seq, at = self.channel.seq, self.t
                 self.due = self.machine.tick(at)
                 self._placed(seq, at)
-            person = self.channel.where(self.t)[0]
+            person = bearing_of(self.cart, person_at(self.channel.where, self.t), self.t)
             self.trace.append((self.t, self.neck.pan, person, self.machine.phase))
 
     def moved_to(self, t: float) -> None:
         """The clock moved on to ``t`` while the machine waited on a long poll (the neck too)."""
         if t > self.t:
             self.neck.advance(t)
-            if self.cart is not None:
-                self.cart.tell(t)
             self.t = self.channel.now = t
 
     def _placed(self, before: int, at: float) -> None:
-        track = self.machine.track
+        person = self.machine.person
         seq = self.channel.seq
-        if seq == before or track is None or track.seen_s != at or track.source != "face":
+        if seq == before or person is None or person.source != "face":
+            return
+        if self.machine.seen_at.get(person.id) != at:
             return
         exposed = self.channel.exposed[seq]
+        true = person_at(self.channel.where, exposed)
+        error = bearing_of(self.cart, person.point, exposed) - bearing_of(self.cart, true, exposed)
         self.placed.append(
-            Placed(exposed, deg(track.head.pan_rad), self.channel.where(exposed)[0],
-                   self.neck.pose_at(exposed)[0], self.neck.pose_at(self.t)[0])
-        )  # fmt: skip
+            Placed(exposed, error, self.neck.pose_at(exposed)[0], self.neck.pose_at(self.t)[0])
+        )
+
+    def speech(self, bearing: float, start: float, end: float) -> list[DoaReading]:
+        """The array's readings of a voice at ``bearing`` (the cart's frame) on the board's
+        clock, ten a second."""
+        steps = round((end - start) * 10)
+        b0 = self.neck.board0
+        return [DoaReading(b0 + start + k / 10, array(bearing), True) for k in range(steps + 1)]
 
     def wake(self, bearing: float) -> None:
         """The robot's name from ``bearing`` over 0..1.2 s, read at 1.3: the conversation
         opens on it."""
         self.run(1.3)
-        self.doa.readings += speech(array(bearing), 0.0, 1.2) + speech(30, 1.3, 1.3)
-        self.doa.readings[-1] = replace(self.doa.readings[-1], speech=False)
+        room = replace(self.speech(30, 1.3, 1.3)[0], speech=False)
+        self.doa.readings += [*self.speech(bearing, 0.0, 1.2), room]
         self.machine.opened(Heard(0.0, 1.2, "Пепин", named=True), self.t)
         self.due = self.t
 
     def rows(self, kind: str) -> list[dict[str, Any]]:
         return [f for k, _, f in self.events if k == kind]
 
-    def aims_between(self, t0: float, t1: float, why: str) -> list[dict[str, Any]]:
+    def aims_between(self, t0: float, t1: float, why: str | None = None) -> list[dict[str, Any]]:
         return [f for k, t, f in self.events
-                if k == "gaze_reaim" and t0 <= t <= t1 and f["why"] == why]  # fmt: skip
+                if k == "gaze_reaim" and t0 <= t <= t1
+                and (why is None or f["why"] == why)]  # fmt: skip
 
 
-def sim(where: Where, *, wheels: Wheels | None = None, skew_s: float = 0.0, **knobs: Any) -> Sim:
+def sim(
+    where: Where,
+    *,
+    wheels: Wheels | None = None,
+    skew_s: float = 0.0,
+    cart: Cart | None = None,
+    **knobs: Any,
+) -> Sim:
     """The shipped knobs over the simple map, the head alone (arc 360: no body turn), ``knobs``
     pinned over them; ``wheels`` the cart's (none by default); ``skew_s`` how far the board's
-    clock (the frames' and the encoders' stamps) runs ahead of this Mac's (chrony's error)."""
-    neck = Neck(board0=WALL + skew_s)
+    clock (the frames', the encoders', the array's and TF's stamps) runs ahead of this Mac's
+    (chrony's error); ``cart`` its true turn (none by default)."""
+    neck = Neck(cart if cart is not None else Cart(), board0=WALL + skew_s)
     channel = Channel(neck, where)
     doa = FakeDoa()
     events: list[tuple[str, float, dict[str, Any]]] = []
     settings = replace(SpeakerSettings(doa_map=MAP), **{"arc_deg": 360.0, **knobs})
-    wheels = wheels if wheels is not None else NoWheels()
+    holder: list[Sim] = []
+
+    def head_at(stamp: float) -> Aim:
+        pan, tilt = neck.pose_at(stamp - neck.board0)
+        return Aim(rad(pan), rad(tilt))
+
+    tf = FakeTf(
+        MODEL,
+        now=lambda: neck.board0 + holder[0].t,
+        cart_at=lambda stamp: (0.0, 0.0, neck.cart.heading(stamp - neck.board0)),
+        head_at=head_at,
+    )
     machine = SpeakerGaze(
-        settings, door=neck, doa=doa, finder=channel, wheels=wheels, face=None, reach=REACH,
-        report=lambda line: None, events=lambda kind, now, **f: events.append((kind, now, f)),
-        series=FakeSeries(),
+        settings, door=neck, doa=doa, finder=channel, wheels=wheels or NoWheels(), face=None,
+        reach=REACH, head=MODEL, poses=tf, report=lambda line: None,
+        events=lambda kind, now, **f: events.append((kind, now, f)), series=FakeSeries(),
     )  # fmt: skip
     machine.spawn = lambda call: call()
-    s = Sim(machine, neck, channel, doa, events)
-    machine.wall = lambda: WALL + s.t
+    s = Sim(machine, neck, channel, doa, tf, events)
+    holder.append(s)
     channel.wait = s.moved_to
     return s
 
 
 def walk(start: float, speed: float, t0: float, t1: float, tilt: float = 5.0) -> Where:
-    """A person at ``start`` deg who walks at ``speed`` deg/s from ``t0`` to ``t1``."""
+    """A person at ``start`` deg who walks round the cart at ``speed`` deg/s from ``t0`` to
+    ``t1`` (the map's degrees)."""
 
     def where(t: float) -> tuple[float, float]:
         return start + speed * min(max(t - t0, 0.0), t1 - t0), tilt
@@ -364,12 +451,13 @@ def walk(start: float, speed: float, t0: float, t1: float, tilt: float = 5.0) ->
 def test_a_person_walking_at_30_deg_s_at_2_m_is_followed_within_the_lead_cap_never_lost(
     latency_s: float,
 ) -> None:
-    """Artem 2 m away (a 40 px face) walks 120 deg at 30 deg/s while the robot speaks, each
-    record reaching the gaze ``latency_s`` after its exposure. Every record is taken (ten a
-    second while it speaks too), most of them exposed while the head moves, each placed with
-    the head's pose at its exposure; from a second into the walk the head stays within
-    lead_max_deg (10) of him, he is never lost, the aims go out without waiting at most one a
-    record, the pan always forward; he stops and the head settles on him."""
+    """Artem 2 m away walks 120 deg round the robot at 30 deg/s while it speaks, each record
+    reaching the gaze ``latency_s`` after its exposure. Every record is taken (ten a second
+    while it speaks too), most of them exposed while the head moves, each placed in the map
+    with the camera's pose at its exposure (TF's); from a second into the walk the head stays
+    within lead_max_deg (10) of him, he is never lost, the aims (his point ahead along his
+    velocity) go out without waiting at most one a record, the pan always forward; he stops and
+    the head settles on him. One pose request a record."""
     s = sim(walk(-40.0, 30.0, 2.5, 6.5))
     s.channel.latency_s = latency_s
     s.wake(-40.0)
@@ -377,9 +465,10 @@ def test_a_person_walking_at_30_deg_s_at_2_m_is_followed_within_the_lead_cap_nev
     assert s.machine.phase == "track" and abs(s.neck.pan + 40.0) < 3.0
     s.machine.speaking(True, s.t)
     s.machine.voiced(s.t + 0.2)
-    frames = s.machine.counts["frames"]
+    frames, asked = s.machine.counts["frames"], len(s.tf.asked)
     s.run(5.5)
     assert s.machine.counts["frames"] - frames >= 28, "ten a second while the robot speaks"
+    assert len(s.tf.asked) - asked == s.machine.counts["frames"] - frames, "a request a record"
     s.machine.speaking(False, s.t)
     s.run(8.0)
     assert {phase for t, _, _, phase in s.trace if t >= 2.5} == {"track"}, "never lost"
@@ -387,7 +476,7 @@ def test_a_person_walking_at_30_deg_s_at_2_m_is_followed_within_the_lead_cap_nev
     off = [abs(head - person) for t, head, person, _ in s.trace if 3.5 <= t <= 6.5]
     assert max(off) <= 10.0, max(off)
     assert abs(s.neck.pan - 80.0) <= 6.0, "he stopped: the head settles on him"
-    pursuit = s.aims_between(2.5, 6.6, "the person moves")
+    pursuit = s.aims_between(2.5, 6.6, LEAD)
     records = len([p for p in s.placed if 2.5 <= p.exposed <= 6.6])
     assert 25 <= len(pursuit) <= records, (len(pursuit), records)
     assert {f["status"] for f in pursuit} == {"sent"} and {f["speed"] for f in pursuit} == {"glide"}
@@ -395,23 +484,24 @@ def test_a_person_walking_at_30_deg_s_at_2_m_is_followed_within_the_lead_cap_nev
     assert all(b >= a for a, b in itertools.pairwise(pans)), "the pan never steps back"
     assert max(f["lead_deg"] for f in pursuit) <= 10.0
     assert 27.0 <= max(f["speed_deg_s"] for f in pursuit) <= 33.0, "his speed, fitted"
+    assert all(len(f["point"]) == 3 and f["source"] == "face" for f in pursuit)
     moving = [p for p in s.placed if 3.0 <= p.exposed <= 6.5 and s.neck.speed_at(p.exposed) > 5.0]
     assert len(moving) >= 25, "most frames of the walk exposed while the head moved, all kept"
-    assert s.machine.counts["frames_unposed"] == 0
+    assert s.machine.counts["frames_unposed"] == 0 and s.machine.counts["frames_unplaced"] == 0
 
 
-def test_each_box_is_placed_with_the_head_s_pose_at_its_exposure_not_at_its_read() -> None:
-    """The record reaches the gaze 0.15-0.25 s after its exposure: placed with the pose the
-    head had then (the poses of the state reads, interpolated), the person's bearing is right
-    within the detector's jitter and the reading's 20 ms; the head's pose at the read would put
-    him 3-7 deg off while the head glides."""
+def test_each_box_is_placed_with_the_camera_s_pose_at_its_exposure_not_at_its_read() -> None:
+    """The record reaches the gaze 0.15-0.25 s after its exposure: placed with the camera's
+    pose then (TF's, the neck's encoders and the cart), the person's point is right within the
+    detector's jitter (a walker at 30 deg/s placed within a degree, 0.3 on average); the head's
+    pose at the read would put him 3-7 deg off while the head glides."""
     s = sim(walk(-40.0, 30.0, 2.5, 6.5))
     s.wake(-40.0)
     s.run(7.0)
     walking = [p for p in s.placed if 3.0 <= p.exposed <= 6.5]
     assert len(walking) >= 30
-    errors = [abs(p.placed - p.true) for p in walking]
-    assert max(errors) <= 2.0 and sum(errors) / len(errors) <= 0.8, errors
+    errors = [abs(p.error_deg) for p in walking]
+    assert max(errors) <= 1.0 and sum(errors) / len(errors) <= 0.4, errors
     at_read = [abs(p.head_read - p.head_then) for p in walking]
     assert sum(at_read) / len(at_read) >= 3.0, "the pose at the read: degrees off"
 
@@ -433,7 +523,7 @@ def test_a_person_walking_back_and_forth_and_bobbing_keeps_the_tilt_within_the_c
     s.wake(-30.0)
     s.run(12.5)
     assert {phase for t, _, _, phase in s.trace if t >= 2.5} == {"track"}, "never lost"
-    aims = [(t, aim) for t, aim, _ in s.neck.aims if t >= 2.5]
+    aims = [(t, aim) for t, _, aim, _ in s.neck.aims if t >= 2.5]
     turns: list[float] = []
     way = 0
     for (_, a), (t, b) in itertools.pairwise(aims):
@@ -464,7 +554,7 @@ def test_looks_the_service_gave_no_record_for_are_no_misses_and_records_without_
     assert s.machine.counts["frames_none"] >= 6, "each look waited 0.4 s for nothing"
     s.run(6.0)
     assert s.machine.phase == "track" and s.machine.misses == 0, "the records are back"
-    s.channel.face_px = 0.0  # he turns away
+    s.channel.shown = False  # he turns away
     s.run(7.9)
     assert s.machine.phase == "track" and s.machine.misses >= 15
     s.run(8.3)
@@ -494,9 +584,9 @@ def test_a_walker_hidden_for_a_moment_is_matched_on_his_line_not_where_he_was_la
 ) -> None:
     """Artem walks 120 deg at 45 or 60 deg/s and his face is turned away for half a second or
     a third: he comes back 20-25 deg past his last sighting, beyond the match (20 deg) of where
-    he was, so he used to become a stranger and the head lost him and went back to his voice.
-    He is matched where the line over his sightings puts him at that frame's stamp (THE MATCH:
-    at most the fit's own window past the newest sighting): never lost, the head on him."""
+    he was, so he used to become a stranger and the head lost him. He is matched where the line
+    over his sightings in the map puts him at that frame's stamp (THE MATCH: at most the fit's
+    own window past the newest sighting): never lost, the head on him."""
     s = sim(walk(-60.0, speed, 2.5, 2.5 + 120.0 / speed))
     s.channel.away = (3.5, 3.5 + gap)
     s.wake(-60.0)
@@ -507,22 +597,9 @@ def test_a_walker_hidden_for_a_moment_is_matched_on_his_line_not_where_he_was_la
     assert max(rest) <= 6.0, max(rest)
 
 
-# ---- the body turns: the camera keeps him, whatever the wheels' odometry says --------------------
+# ---- the body turns: TF keeps the head on him, whatever the wheels claim ------------------------
 TURN = (2.5, 4.0)  # the cart turns over this span...
-TRUE_DEG, ODOMETRY_DEG = 10.0, 30.0  # ...by 10 deg, while its slipping wheels' odometry reads 30
-
-
-def slipping_turn(
-    who: str, away: tuple[float, float] | None = None, turn: tuple[float, float] = TURN
-) -> Sim:
-    """Artem stands at +30 deg (2 m away, a 40 px face) and the cart turns 10 deg toward him
-    over ``turn`` while its wheels' odometry reads 30 (they slip): ``who`` turns it, the gaze's
-    own spin (the arc's rule, +-25 deg: one spin of his +30 asked of the goal server at the
-    wake, accepted at once, its end told 0.1 s after the turn) or the turn tool's (the arc never
-    turns the body: the loop's drive notice and keep_person 0.1 s before the turn, the drive's
-    end 0.1 s after it). His face is turned ``away`` over that span of exposures. Woken by his
-    name, run to 2 s after the turn."""
-    return crowd_turn(who, away=away, turn=turn)
+TRUE_DEG = 10.0  # ...by 10 deg in TF, while Nav2's count (its wheels slipping) claims 30
 
 
 def crowd_turn(
@@ -530,39 +607,43 @@ def crowd_turn(
     *,
     start: float = 30.0,
     true_deg: float = TRUE_DEG,
-    slip: float = ODOMETRY_DEG / TRUE_DEG,
+    claimed_deg: float = 30.0,
     turn: tuple[float, float] = TURN,
     away: tuple[float, float] | None = None,
     others: tuple[float, ...] = (),
     told_s: float = 0.1,
+    status: int = 4,
 ) -> Sim:
-    """:func:`slipping_turn` with its numbers free: Artem at ``start`` deg, the cart turning
-    ``true_deg`` toward him over ``turn`` while the odometry reads ``slip`` times that, the
-    turn's end told ``told_s`` after the cart stopped, and ``others`` standing at their bearings
-    (2 m away, faces never turned away), turned with the cart like him."""
-    wheels = FakeWheels()
+    """Artem stands at ``start`` deg (2 m away, a 40 px face) and the cart turns ``true_deg``
+    toward him in TF over ``turn`` while Nav2 counts ``claimed_deg`` (the wheels slip): ``who``
+    turns it, the gaze's own spin (the arc's rule, +-25 deg: one spin of his bearing asked of the
+    goal server at the wake, accepted at once, its end told ``told_s`` after the turn) or the
+    turn tool's (the arc never turns the body: the loop's drive notice and keep_person 0.1 s
+    before the turn, the drive's end ``told_s`` after it). His face is turned ``away`` over that
+    span of exposures; ``others`` stand at their bearings (2 m away, faces never turned away).
+    Nav2's end carries ``status`` (4 succeeded, 6 aborted) and TF's turn. Woken by his name, run
+    to 2 s after the turn."""
     t0, t1 = turn
-    cart = Cart(wheels, t0, t1, true_deg, slip=slip)
-    cart.tell(0.0)  # the wheels' link open: the odometry's heading
     own = who == "own"
-    s = sim(lambda t: (start - cart.true_at(t), 5.0), wheels=wheels, body_turn="spin",
-            arc_deg=50.0 if own else 360.0)  # fmt: skip
-    s.cart, s.channel.away = cart, away
-    s.channel.others = tuple(
-        (lambda at: lambda t: (at - cart.true_at(t), 5.0))(other) for other in others
-    )
+    s = sim(lambda t: (start, 5.0), wheels=FakeWheels(), body_turn="spin",
+            arc_deg=50.0 if own else 360.0, cart=Cart(t0, t1, true_deg))  # fmt: skip
+    s.channel.away = away
+    s.channel.others = tuple((lambda at: lambda t: (at, 5.0))(other) for other in others)
     spins = FakeSpins()
     s.machine.spins = spins
     s.wake(start)
     if own:
         assert spins.asked == [pytest.approx(start)], "past the arc: one spin of his bearing"
         spins.tell("accepted", run=1, deg=start)
+        s.run(t0 + 0.5 * (t1 - t0))
+        spins.tell("feedback", spun_deg=0.5 * claimed_deg)
         s.run(t1 + told_s)
-        spins.tell("done", run=1, status=4, seconds=t1 - t0, turned_deg=slip * true_deg)
+        spins.tell("done", run=1, status=status, seconds=t1 - t0, turned_deg=true_deg,
+                   spun_deg=claimed_deg)  # fmt: skip
     else:
         s.run(t0 - 0.1)
         s.machine.drive(True, s.t)
-        assert s.machine.keep_person(s.t, f"turn: {true_deg:g}") is None
+        assert s.machine.keep_person(s.t, f"turn: {claimed_deg:g}") is None
         s.run(t1 + told_s)
         s.machine.drive(False, s.t)
     s.run(t1 + 2.0)
@@ -571,118 +652,109 @@ def crowd_turn(
 
 
 @pytest.mark.parametrize("who", ["own", "tool"])
-def test_while_the_body_turns_on_slipping_wheels_the_frames_keep_the_head_on_him(who: str) -> None:
-    """The cart turns 10 deg toward Artem while its odometry reads 30 (the wheels slip), by
-    the gaze's own spin or the turn tool's: every record is taken while it turns, each placed by
-    the head's pose at its exposure and his face's angle through the lens (no odometry), and
-    the head stays within 3 deg of him throughout, aimed by the frames alone (the rows say so,
-    the camera's speed of his bearing beside the odometry's rate: -6.7 against 20 deg/s; none
-    by the odometry, whose glide would have put him 20 deg off). He is never lost, and the head
-    rests on him at +20, the turned nose 10 deg nearer."""
-    s = slipping_turn(who)
+def test_while_the_body_turns_on_slipping_wheels_tf_keeps_the_head_on_him(who: str) -> None:
+    """The cart turns 10 deg toward Artem in TF while Nav2 counts 30 (the wheels slip), by the
+    gaze's own spin or the turn tool's: every record is taken while it turns, each placed in the
+    map, and the arbiter keeps the head on his point from TF's pose: within 2 deg of him
+    throughout, the head written by the follow (no aim of the gaze's: he stands; nothing read of
+    any odometry, whose 30 would have put him 20 deg off). He is never lost, and the head rests
+    on him at +20, the turned nose 10 deg nearer."""
+    s = crowd_turn(who)
     t0, t1 = TURN
     off = [abs(head - person) for t, head, person, _ in s.trace if t >= t0]
-    assert max(off) <= 3.0, max(off)
-    rows = s.aims_between(t0, t1 + 0.1, BY_FRAMES)
-    assert len(rows) >= 5 and {f["status"] for f in rows} == {"sent"}, rows
-    assert {f["speed"] for f in rows} == {"glide"}
-    assert not [f for f in s.rows("gaze_reaim") if f["why"] == BY_ODOMETRY]
-    middle = s.aims_between(t0 + 0.6, t1, BY_FRAMES)
-    assert middle and all(abs(f["rate_deg_s"] - 20.0) <= 1.0 for f in middle), "the odometry"
-    assert all(abs(f["speed_deg_s"] + 6.7) <= 2.0 for f in middle), "the camera's"
+    assert max(off) <= 2.0, max(off)
+    assert s.aims_between(t0, t1) == [], "he stands: the gaze asks nothing while the body turns"
+    follows = [w for w in s.neck.writes if w[3] == "follow" and t0 <= w[0] <= t1 + 0.1]
+    assert len(follows) >= 5, "the arbiter writes the head as TF turns"
     assert s.machine.counts["frames_turning"] >= 10 * (t1 - t0), "every record while it turns"
-    assert s.machine.counts["frames_unposed"] <= 2, "the wake's, exposed before a state read"
+    assert s.machine.counts["frames_unposed"] == 0
     assert {phase for t, _, _, phase in s.trace if t >= 2.0} == {"track"}, "never lost"
-    assert abs(s.neck.pan - 20.0) <= 3.0
+    assert abs(s.neck.pan - 20.0) <= 1.5
 
 
 @pytest.mark.parametrize("who", ["own", "tool"])
-def test_while_the_frames_show_nobody_the_odometry_glides_the_head_until_a_frame_shows_him(
-    who: str,
-) -> None:
-    """The same 10 deg turn read as 30 by the odometry, over 2.5 s, his face turned away for
-    a second of it: TURN_FRAMES_S after his last sighting the odometry moves the head (rows: by
-    the odometry, no frame), a prior that slips with the wheels, so the head goes off him; his
-    face back, the nearest person to that prior is him, the frames take the head again (rows:
-    by the frames) and it is within 3 deg of him while the cart still turns. The odometry moves
-    the head in the gap only; at the stop the pursuit's lead overshoots within its cap and the
-    first frame after the turn's end re-centres the residue past refine_deg. He is never lost
-    (a second without him, under face_lost_s)."""
+def test_wheels_on_the_stand_spinning_turn_no_tf_and_move_no_head(who: str) -> None:
+    """2026-10-15, the front wheels on the stand: Nav2's Spin was taken and its count ran to 30
+    deg while the cart did not turn at all (TF: 0), and the gaze re-aimed the head off him 143
+    times by the odometry. Now nothing moves the head: no aim of the gaze's, no write of the
+    arbiter's, the head within the detector's jitter of where it stood on him; the gaze's own
+    spin, which Nav2 aborts (it reads TF), ends at TF's 0 deg (nothing moved: asked again at
+    his next words, never again before them)."""
+    s = crowd_turn(who, true_deg=0.0, claimed_deg=30.0, status=6)
+    t0, t1 = TURN
+    pans = [head for t, head, _, _ in s.trace if t >= t0]
+    assert max(pans) - min(pans) <= 0.5, (min(pans), max(pans))
+    assert s.aims_between(t0, t1 + 2.0) == [], "no aim"
+    assert [w for w in s.neck.writes if w[0] >= t0] == [], "no write"
+    if who == "own":
+        end = [f for f in s.rows("gaze_spin") if f.get("end")][-1]
+        assert end["turned_deg"] == 0.0 and s.machine.body_waits, "TF's 0: nothing moved"
+
+
+@pytest.mark.parametrize("who", ["own", "tool"])
+def test_while_the_frames_show_nobody_tf_keeps_the_head_on_his_point(who: str) -> None:
+    """The same 10 deg turn over 2.5 s, his face turned away for a second of it: no frame
+    places him, and none has to: the arbiter keeps the head on his point by TF throughout
+    (within 2 deg), no glide, no seek; his face back, the frames find him where the head
+    already looks. He is never lost (a second without him, under face_lost_s)."""
     turn = (2.5, 5.0)
-    t1, away = turn[1], (2.8, 3.8)
-    s = slipping_turn(who, away=away, turn=turn)
-    glides = s.aims_between(away[0], away[1] + 0.3, BY_ODOMETRY)
-    assert len(glides) >= 3 and {f["speed"] for f in glides} == {"glide"}, glides
-    assert all(abs(f["rate_deg_s"] - 12.0) <= 1.0 for f in glides), "the odometry's 30 in 2.5 s"
-    rows = s.rows("gaze_reaim")
-    assert len([f for f in rows if f["why"] == BY_ODOMETRY]) == len(glides), "in the gap only"
-    first = min(t for k, t, f in s.events if k == "gaze_reaim" and f["why"] == BY_ODOMETRY)
-    assert first >= away[0] + TURN_FRAMES_S, "a frame without him or two loses nothing"
-    gap = [abs(head - person) for t, head, person, _ in s.trace if away[0] <= t <= away[1] + 0.2]
-    assert max(gap) >= 6.0, "the odometry's prior slips with the wheels"
-    assert s.aims_between(away[1], t1, BY_FRAMES), "his face back: the frames"
-    back = [abs(head - person) for t, head, person, _ in s.trace if away[1] + 0.5 <= t <= t1]
-    assert max(back) <= 3.0, max(back)
-    stop = [abs(head - person) for t, head, person, _ in s.trace if t >= t1]
-    assert max(stop) <= 10.0, "the lead's cap"
-    rest = [abs(head - person) for t, head, person, _ in s.trace if t >= t1 + 0.6]
-    assert max(rest) <= 3.0, max(rest)
+    away = (2.8, 3.8)
+    s = crowd_turn(who, away=away, turn=turn)
+    gap = [abs(head - person) for t, head, person, _ in s.trace if t >= turn[0]]
+    assert max(gap) <= 2.0, max(gap)
+    assert s.aims_between(turn[0], turn[1] + 0.5) == []
     assert {phase for t, _, _, phase in s.trace if t >= 2.0} == {"track"}, "never lost"
 
 
 @pytest.mark.parametrize("who", ["own", "tool"])
-def test_at_the_stop_the_lead_ends_with_the_wheels_not_with_the_turn_s_end_notice(who: str) -> None:
-    """The cart turns 30 deg toward Artem in 1.5 s (his bearing 20 deg/s in the camera) on
-    wheels whose odometry reads 60, and the turn's end is told 0.3 s after it stopped (the goal
-    server's word, or the tool's drive ending). The camera's fit lags the stop by half its
-    window, so the lead used to carry the head 9-10 deg past him and keep it over 2 deg past for
-    1.6 s; the odometry's rate falls to nothing within its 0.1 s when the wheels stop, and the
-    lead with it: at most 7 deg past him, under half a second over 2 deg (the rows' lead 0
-    once the wheels stand, while the turn is not yet told over)."""
+def test_at_the_stop_the_head_lands_on_him_with_no_lead_of_the_turn_s(who: str) -> None:
+    """The cart turns 30 deg toward Artem in 1.5 s (his bearing 20 deg/s from the cart) and the
+    turn's end is told 0.3 s after it stopped. The lead is his own motion's (none: he stands),
+    never the cart's turn, so nothing carries the head past him at the stop: at most a degree
+    and a half past (the arbiter's follow, a step behind the turn), at rest on him within a
+    second."""
     t1 = 4.0
-    s = crowd_turn(who, start=40.0, true_deg=30.0, slip=2.0, turn=(2.5, t1), told_s=0.3)
-    past = [(t, person - head) for t, head, person, _ in s.trace if t >= t1]
-    assert max(d for _, d in past) <= 7.0, max(d for _, d in past)
-    assert sum(TICK_S for _, d in past if d > 2.0) <= 0.5
-    stood = s.aims_between(t1 + 0.12, t1 + 0.3, BY_FRAMES)
-    assert all(f["lead_deg"] == 0.0 for f in stood), stood
+    s = crowd_turn(who, start=40.0, true_deg=30.0, claimed_deg=60.0, turn=(2.5, t1), told_s=0.3)
+    past = [person - head for t, head, person, _ in s.trace if t >= t1]
+    assert max(past) <= 1.5, max(past)
     rest = [abs(head - person) for t, head, person, _ in s.trace if t >= t1 + 1.0]
-    assert max(rest) <= 3.0, max(rest)
+    assert max(rest) <= 1.0, max(rest)
 
 
-def test_a_bystander_the_frames_show_as_himself_is_never_sought_for_him_in_a_turn() -> None:
+def test_a_bystander_the_frames_show_as_himself_is_never_taken_for_him_in_a_turn() -> None:
     """A friend stands 35 deg right of Artem, both seen from the wake on. Artem looks away
-    just before the turn tool turns the cart 45 deg toward him on wheels whose odometry reads
-    90, so no frame of the turn has placed him (no camera's fit): the gaze seeks him where the
-    odometry puts him, with a seek's reach (50 deg) for its slip. The friend is within it but
-    the frames show him as himself (his own track, there when Artem was last seen): never
-    taken for Artem, who is found again when he looks back and kept to the end."""
-    s = crowd_turn("tool", start=45.0, true_deg=45.0, slip=2.0, turn=(2.5, 5.5),
+    just before the turn tool turns the cart 45 deg toward him (Nav2 counting 90), so no frame
+    of the first part of the turn places him: his point stays where the map has it, the friend
+    keeps his own record, and Artem is found again where he is when he looks back, and kept
+    to the end."""
+    s = crowd_turn("tool", start=45.0, true_deg=45.0, claimed_deg=90.0, turn=(2.5, 5.5),
                    away=(2.2, 3.0), others=(10.0,))  # fmt: skip
-    track = s.machine.track
-    assert track is not None and abs(deg(track.pan)) <= 3.0, "Artem, where the turn put him"
-    rest = [abs(head - person) for t, head, person, _ in s.trace if t >= 6.5]
-    assert max(rest) <= 3.0, max(rest)
-    friend = [t for t in s.machine.tracks.tracks if t is not track and abs(deg(t.pan) + 35.0) < 3]
-    assert friend, "the friend keeps his own track"
-
-
-def test_after_a_gap_the_camera_s_line_places_him_not_the_slipping_odometry() -> None:
-    """The turn tool turns the cart 60 deg toward Artem at 30 deg/s on wheels whose odometry
-    reads 120; his face is turned away for a second of it. The odometry puts him 30 deg past
-    where he is, right where a man 45 deg beyond him has just come into view; the camera's line
-    over his sightings before the gap puts him where he is: he is matched there when he looks
-    back (the seek's 50 deg reach is the odometry's slip, not the camera's), the newcomer
-    gets a track of his own, and the head ends on Artem: back from the odometry's 38 deg
-    excursion at the glide's pace by 6 s, within 2 deg of him (with undated state reads a
-    phantom re-aim stopped it 2.8 deg short at 5.5 s)."""
-    s = crowd_turn("tool", start=60.0, true_deg=60.0, slip=2.0, turn=(2.5, 4.5),
-                   away=(3.3, 4.3), others=(15.0,))  # fmt: skip
-    track = s.machine.track
-    assert track is not None and abs(deg(track.pan)) <= 3.0, "Artem, where the turn put him"
-    rest = [abs(head - person) for t, head, person, _ in s.trace if t >= 6.0]
+    person = s.machine.person
+    assert person is not None and s.machine.bearing is not None
+    assert abs(deg(s.machine.bearing)) <= 2.0, "Artem, where the turn put him"
+    rest = [abs(head - person_) for t, head, person_, _ in s.trace if t >= 6.5]
     assert max(rest) <= 2.0, max(rest)
+    friend = [
+        p for p in s.machine.people.people
+        if p is not person and abs(bearing_of(s.cart, p.point, s.t) + 35.0) < 3.0
+    ]  # fmt: skip
+    assert friend, "the friend keeps his own record"
+
+
+def test_after_a_gap_in_a_turn_his_point_is_where_he_is_and_the_head_never_strays() -> None:
+    """The turn tool turns the cart 60 deg toward Artem at 30 deg/s (Nav2 counting 120); his
+    face is turned away for a second of it, a man standing 45 deg beyond him. The odometry put
+    him 30 deg past where he was, the head followed it, and the man came into view right there
+    (2026-10-14); his point is the map's now (TF's), so the head never leaves him, the man never
+    comes into view (45 deg off the axis: past the eye's 41), and Artem is matched where he is
+    when he looks back; the head ends on him within a degree; never lost."""
+    s = crowd_turn("tool", start=60.0, true_deg=60.0, claimed_deg=120.0, turn=(2.5, 4.5),
+                   away=(3.3, 4.3), others=(15.0,))  # fmt: skip
+    assert s.machine.bearing is not None and abs(deg(s.machine.bearing)) <= 2.0
+    rest = [abs(head - person) for t, head, person, _ in s.trace if t >= 6.0]
+    assert max(rest) <= 1.0, max(rest)
     assert {phase for t, _, _, phase in s.trace if t >= 2.5} == {"track"}, "never lost"
+    assert len(s.machine.people.people) == 1, "the man beyond him: never in view"
 
 
 def test_at_the_wake_on_its_own_spin_no_frame_before_the_head_looks_his_way_places_him() -> None:
@@ -691,164 +763,158 @@ def test_at_the_wake_on_its_own_spin_no_frame_before_the_head_looks_his_way_plac
     while the head still points home and shows only the friend, 16 deg off Artem's voice
     (within the match): those place nobody on Artem (frames_away); the first frame that looks
     his way finds him, and he is kept through the turn."""
-    s = crowd_turn("own", start=45.0, true_deg=45.0, slip=2.0, turn=(2.5, 5.5), others=(29.0,))
+    s = crowd_turn("own", start=45.0, true_deg=45.0, claimed_deg=90.0, turn=(2.5, 5.5),
+                   others=(29.0,))  # fmt: skip
     first = s.rows("gaze_face")[0]
     assert abs(first["pan_deg"] - 45.0) <= 3.0, first
     assert s.machine.counts["frames_away"] >= 1
-    track = s.machine.track
-    assert track is not None and abs(deg(track.pan)) <= 3.0, "Artem, where the turn put him"
+    assert s.machine.bearing is not None and abs(deg(s.machine.bearing)) <= 2.0
 
 
-# ---- the head's poses on the board's clock -------------------------------------------------------
+# ---- one clock, the board's ----------------------------------------------------------------------
 READS = [(0.02, 0.0), (0.05, 0.0), (0.02, 0.03)]  # how old a reading is when read: 20, 50, 20-50 ms
 
 
 @pytest.mark.parametrize("skew_s", [-0.5, 0.0, 0.5])
 @pytest.mark.parametrize(("age_s", "spread_s"), READS)
-def test_a_box_is_placed_with_the_encoder_reading_at_its_stamp_whatever_its_age_or_chrony(
+def test_a_box_is_placed_by_tf_at_its_stamp_whatever_the_reads_age_or_chrony(
     skew_s: float, age_s: float, spread_s: float
 ) -> None:
-    """The arbiter's state carries its encoder reading's own stamp (``head_stamp``: the board's
-    clock, the frames' too), so each box of a walk at 30 deg/s is placed within the detector's
-    jitter of him (0.2 deg on average) however old the reading was when read (20 or 50 ms, or
-    anything between: the reads' own jitter) and whether the board's clock runs half a second
-    behind or ahead of this Mac's (chrony's error): no frame unposed, never lost. Dated at
-    their read by this Mac's clock, the same boxes were 0.6-4.8 deg off on average; a board
-    0.5 s behind lost him, 0.5 s ahead left 54 frames unposed."""
+    """Every stamp the gaze places by is the board's (the frame's exposure, the array's
+    readings, TF's), so each box of a walk at 30 deg/s is placed within the detector's jitter
+    of him (0.3 deg on average) however old the arbiter's reading is when read and whether the
+    board's clock runs half a second behind or ahead of this Mac's (chrony's error): no frame
+    unposed, never lost."""
     s = sim(walk(-40.0, 30.0, 2.5, 6.5), skew_s=skew_s)
     s.neck.reading_age_s, s.neck.reading_spread_s = age_s, spread_s
     s.wake(-40.0)
     s.run(7.5)
     walking = [p for p in s.placed if 3.0 <= p.exposed <= 6.5]
     assert len(walking) >= 30
-    errors = [abs(p.placed - p.true) for p in walking]
-    assert max(errors) <= 1.0 and sum(errors) / len(errors) <= 0.3, errors
+    errors = [abs(p.error_deg) for p in walking]
+    assert max(errors) <= 1.0 and sum(errors) / len(errors) <= 0.4, errors
     assert s.machine.counts["frames_unposed"] == 0
     assert {phase for t, _, _, phase in s.trace if t >= 2.5} == {"track"}, "never lost"
 
 
 def test_a_re_centre_on_a_person_standing_still_reads_no_walk() -> None:
     """Artem stands 10-25 deg from where his voice put him, so the head turns onto his face
-    while he stands (a re-centre), its readings read 20-50 ms after the encoders saw them.
-    Dated at their read, the boxes exposed during the move were placed up to 6 deg off: a walk
-    of 5-16 deg/s the head chased with up to 24 re-aims (the 2026-10-14 review: a -6 deg/s
-    phantom, the head resting 3 deg off). Dated by their own stamps: at most 3 re-aims a case,
-    none in most, every box within 1.5 deg of him (what is left: the 10 Hz readings' straight
-    line across the move's start), the head resting within half a degree of him in most cases
-    (in the others, within the dead band where an early aim's lead, fitted on three jittered
-    sightings, left it), and a tenth of the re-aims the reads' dates cost."""
+    while he stands (a re-centre). Placed by TF's poses at each exposure, every box of the move
+    is within a degree of him, so no walk is read: at most two re-aims a case (none in most),
+    the head resting within the dead band of him (the 2026-10-14 review: dated by the reads,
+    a -6 deg/s phantom the head chased with up to 24 re-aims)."""
     people = ((20.0, 10.0), (30.0, 5.0), (-20.0, 0.0), (15.0, -5.0), (-35.0, -10.0))
-    reads = [(0.02, 0.0), (0.035, 0.0), (0.05, 0.0), (0.02, 0.03)]
-    reaims = {True: 0, False: 0}
     rests: list[float] = []
-    for stamped in (True, False):
-        for (person, voice), (age_s, spread_s) in itertools.product(people, reads):
-            s = sim(walk(person, 0.0, 0.0, 0.0))
-            s.neck.stamped, s.neck.reading_age_s, s.neck.reading_spread_s = stamped, age_s, spread_s
-            s.wake(voice)
-            s.run(6.0)
-            rows = [f for f in s.rows("gaze_reaim") if f["why"].startswith("the person mov")]
-            reaims[stamped] += len(rows)
-            if stamped:
-                case = (person, voice, age_s, spread_s)
-                assert len(rows) <= 3, (case, [f["speed_deg_s"] for f in rows])
-                assert max(abs(p.placed - p.true) for p in s.placed) <= 1.5, case
-                rests.append(abs(s.neck.pan - person))
-    assert sum(rest <= 0.5 for rest in rests) >= len(rests) // 2, rests
+    for (person, voice), (age_s, spread_s) in itertools.product(people, READS):
+        s = sim(walk(person, 0.0, 0.0, 0.0))
+        s.neck.reading_age_s, s.neck.reading_spread_s = age_s, spread_s
+        s.wake(voice)
+        s.run(6.0)
+        rows = [f for f in s.rows("gaze_reaim") if f["why"] in (LEAD, MOVED)]
+        case = (person, voice, age_s, spread_s)
+        assert len(rows) <= 2, (case, [f["speed_deg_s"] for f in rows])
+        assert max(abs(p.error_deg) for p in s.placed) <= 1.0, case
+        rests.append(abs(s.neck.pan - person))
     assert max(rests) <= 6.0, "within the dead band"
-    assert reaims[False] >= 10 * reaims[True], reaims
+    assert sum(rest <= 1.5 for rest in rests) >= len(rests) // 2, rests
 
 
-def test_an_arbiter_without_the_reading_s_stamp_dates_the_poses_at_the_read_said_once(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """A gaze node started before ``head_stamp`` sends none: the head's poses are dated at
-    their read by this Mac's clock, as before, said once (a warning naming the kick); every
-    frame is still posed and he is followed, the boxes 20 ms of a 30 deg/s glide behind (0.6
-    deg on average against 0.2 stamped)."""
+def test_an_arbiter_without_the_reading_s_stamp_places_every_frame_all_the_same() -> None:
+    """A gaze node started before ``head_stamp`` sends none: nothing of the placement reads the
+    arbiter's state any more (TF's poses at the frames' stamps place them), so every frame is
+    posed and he is followed as closely as with it."""
     s = sim(walk(-40.0, 30.0, 2.5, 6.5))
     s.neck.stamped = False
-    with caplog.at_level(logging.WARNING, logger="pepin.expression.tracker"):
-        s.wake(-40.0)
-        s.run(7.5)
-    said = [r.getMessage() for r in caplog.records if "head_stamp" in r.getMessage()]
-    assert len(said) == 1 and "ros/laptop.sh kick gaze" in said[0], said
+    s.wake(-40.0)
+    s.run(7.5)
     walking = [p for p in s.placed if 3.0 <= p.exposed <= 6.5]
-    errors = [abs(p.placed - p.true) for p in walking]
+    errors = [abs(p.error_deg) for p in walking]
     assert len(walking) >= 30 and s.machine.counts["frames_unposed"] == 0
-    assert 0.4 <= sum(errors) / len(errors) <= 1.0 and max(errors) <= 1.5, errors
+    assert max(errors) <= 1.0 and sum(errors) / len(errors) <= 0.4, errors
     assert {phase for t, _, _, phase in s.trace if t >= 2.5} == {"track"}, "never lost"
 
 
-def test_the_state_reads_key_the_head_s_poses_on_the_reading_s_own_stamp() -> None:
-    """A state read keeps the head's pose at its reading's ``head_stamp`` (here 40 ms before
-    the read, on a board clock 0.3 s ahead of this Mac's), not at this Mac's clock of the read;
-    the same reading read twice is kept once."""
-    s = sim(walk(0.0, 0.0, 0.0, 0.0), skew_s=0.3)
-    s.neck.reading_age_s = 0.04
-    s.run(1.0)
-    s.machine._state()
-    s.machine._state()
-    assert s.machine.poses.newest_s() == pytest.approx(WALL + 0.3 + 0.96)
-    assert s.machine.poses.at(WALL + 0.3 + 0.96) == Aim(rad(HOME_POSE[0]), rad(HOME_POSE[1]))
-    old = sim(walk(0.0, 0.0, 0.0, 0.0), skew_s=0.3)
-    old.neck.stamped = False
-    old.run(1.0)
-    old.machine._state()
-    assert old.machine.poses.newest_s() == pytest.approx(WALL + 1.0), "this Mac's, at the read"
+def test_the_board_s_now_is_the_newest_stamp_seen_never_this_mac_s() -> None:
+    """The gaze ages its people on the board's clock: its "now" is the newest of the stamps it
+    has seen (the arbiter's reading, a frame's exposure, the array's reading, TF's answer),
+    here half a second ahead of this Mac's, never this Mac's clock."""
+    clock = BoardClock()
+    assert clock.now() is None
+    for stamp in (100.0, None, 0.0, 99.0, 100.5):
+        clock.saw(stamp)
+    assert clock.now() == 100.5, "the newest; none, 0 and older ones change nothing"
+    s = sim(walk(0.0, 0.0, 0.0, 0.0), skew_s=0.5)
+    s.wake(0.0)
+    s.run(3.0)
+    board = s.machine.clock.now()
+    assert board is not None and s.t - 0.3 <= board - (WALL + 0.5) <= s.t + 1e-9
+
+
+def test_a_second_of_conversation_asks_the_poses_once_a_record_and_once_an_utterance() -> None:
+    """The cost on the goal server: one ``pose_at`` request a record that shows someone (the
+    camera and the cart at its exposure), one an utterance (the cart at each of its voiced
+    readings), none for a record of nobody: ten a second while someone is tracked."""
+    s = sim(walk(20.0, 0.0, 0.0, 0.0))
+    s.wake(20.0)
+    assert len(s.tf.asked) == 1 and len(s.tf.asked[0][0]) == 13, "the wake's voiced readings"
+    s.run(2.0)
+    asked = len(s.tf.asked)
+    s.run(12.0)
+    per_s = (len(s.tf.asked) - asked) / 10.0
+    assert 9.0 <= per_s <= 10.5, per_s
+    s.channel.shown = False  # nobody in the records: nothing to place
+    s.run(13.0)
+    asked = len(s.tf.asked)
+    s.run(13.6)
+    assert len(s.tf.asked) == asked, "a record of nobody asks nothing"
 
 
 # ---- the parts -----------------------------------------------------------------------------------
-def test_the_head_s_poses_are_read_at_any_stamp_between_two_reads() -> None:
-    poses = HeadPoses(kept_s=1.0)
-    assert poses.at(10.0) is None and poses.newest_s() is None
-    poses.add(10.0, Aim(0.0, 0.1))
-    poses.add(10.1, Aim(0.2, 0.3))
-    poses.add(10.1, Aim(9.0, 9.0))  # the same stamp again: ignored
-    mid = poses.at(10.05)
-    assert (
-        mid is not None and mid.pan_rad == pytest.approx(0.1) and mid.tilt_rad == pytest.approx(0.2)
-    )
-    assert poses.at(10.1) == Aim(0.2, 0.3) and poses.at(10.0) == Aim(0.0, 0.1)
-    assert poses.at(9.99) is None and poses.at(10.11) is None, "outside the reads: unknown"
-    for k in range(2, 30):
-        poses.add(10.0 + 0.1 * k, Aim(0.0, 0.0))
-    assert poses.at(11.0) is None and poses.at(11.85) is not None, "a second kept"
-
-
-def test_a_pursuit_fits_the_speed_on_the_frames_stamps_and_caps_the_lead() -> None:
-    p = Pursuit(1, "face")
-    p.add(100.0, rad(10.0))
-    p.add(100.1, rad(13.0))
-    assert p.speed() == 0.0 and p.ahead(100.5, rad(10.0)) == 0.0, "two sightings: no speed yet"
-    p.add(100.1, rad(50.0))  # the same frame again
-    p.add(100.2, rad(16.0))
-    assert deg(p.speed()) == pytest.approx(30.0)
-    assert deg(p.ahead(100.4, rad(10.0))) == pytest.approx(6.0)
-    assert deg(p.ahead(101.0, rad(10.0))) == pytest.approx(10.0), "at most the cap"
-    p.turned(rad(5.0))
-    assert deg(p.sightings[-1][1]) == pytest.approx(11.0) and deg(p.speed()) == pytest.approx(30.0)
+def test_a_pursuit_fits_the_velocity_in_the_map_on_the_frames_stamps() -> None:
+    p = Pursuit()
+    p.add(100.0, Point(1.0, 0.0, 1.0), "face")
+    p.add(100.1, Point(1.0, 0.05, 1.0), "face")
+    assert p.velocity() == (0.0, 0.0, 0.0) and p.ahead(100.5) == (0.0, 0.0, 0.0), "two: none"
+    p.add(100.1, Point(9.0, 9.0, 9.0), "face")  # the same frame again
+    p.add(100.2, Point(1.0, 0.1, 1.0), "face")
+    vx, vy, vz = p.velocity()
+    assert (vx, vy, vz) == pytest.approx((0.0, 0.5, 0.0))
+    assert p.ahead(100.4) == pytest.approx((0.0, 0.1, 0.0))
     for k in range(3, 12):
-        p.add(100.0 + 0.1 * k, rad(16.0 - 5.0))
-    assert deg(p.speed()) == pytest.approx(0.0, abs=1e-9) and len(p.sightings) == 6, "0.5 s kept"
-    across = Pursuit(2, "face")
-    for k, d in enumerate((170.0, 175.0, -180.0)):
-        across.add(100.0 + 0.1 * k, rad(d))
-    assert deg(across.speed()) == pytest.approx(50.0), "across the back: unwrapped"
+        p.add(100.0 + 0.1 * k, Point(1.0, 0.1, 1.0), "face")
+    assert p.velocity() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9) and len(p.sightings) == 6
+    p.add(101.2, Point(1.0, 0.2, 1.2), "body")
+    assert p.source == "body" and len(p.sightings) == 1, "another source: a new fit"
+    p.reset()
+    assert p.sightings == [] and p.last_s is None
 
 
-def test_a_pursuit_expects_the_bearing_on_its_line_as_far_as_the_horizon_given() -> None:
+def test_a_pursuit_expects_the_point_on_its_line_as_far_as_the_horizon_given() -> None:
     """THE MATCH's place: the fitted line at a frame's stamp, extrapolated at most the horizon
-    past the newest sighting (the fit's own window outside a body turn, the whole gap in one),
-    nothing before a speed is fitted."""
-    p = Pursuit(1, "face")
-    p.add(100.0, rad(10.0))
-    p.add(100.1, rad(13.0))
+    past the newest sighting, nothing before a velocity is fitted."""
+    p = Pursuit()
+    p.add(100.0, Point(2.0, 0.0, 1.0), "face")
+    p.add(100.1, Point(2.0, 0.1, 1.0), "face")
     assert p.expected(100.3, 0.5) is None, "two sightings: no line yet"
-    p.add(100.2, rad(16.0))
+    p.add(100.2, Point(2.0, 0.2, 1.0), "face")
     there = p.expected(100.3, 0.5)
-    assert there is not None and deg(there) == pytest.approx(19.0)
+    assert there is not None and there.y == pytest.approx(0.3)
     held = p.expected(101.5, 0.5)
-    assert held is not None and deg(held) == pytest.approx(31.0), "0.5 s past the newest"
-    gap = p.expected(101.0, math.inf)
-    assert gap is not None and deg(gap) == pytest.approx(40.0), "through a turn's gap"
+    assert held is not None and held.y == pytest.approx(0.7), "0.5 s past the newest"
+
+
+def test_the_head_model_places_a_face_and_the_arbiter_s_geometry_finds_it_again() -> None:
+    """The real neck's lever arms and the real eye: a face the camera sees at some angles,
+    placed along the ray they name at its range, is seen at the same angles again (the ray's
+    inverse), and the aim the arbiter resolves for the point puts it on the link's axis."""
+    camera = Pose.planar(1.0, -0.5, rad(30.0)).then(MODEL.camera(Aim(rad(20.0), rad(10.0))))
+    origin, direction = MODEL.ray(12.0, -7.0)
+    eye = camera.to_map(origin)
+    d = camera.direction(direction)
+    point = eye.plus(d[0] * 2.0, d[1] * 2.0, d[2] * 2.0)
+    assert MODEL.angles(camera, point) == pytest.approx((12.0, -7.0))
+    base = Pose.planar(1.0, -0.5, rad(30.0))
+    aim = MODEL.aim_at(base.to_frame(point))
+    looked = base.then(MODEL.camera(aim))
+    pan, tilt = MODEL.angles(looked, point)
+    assert abs(pan) < 1.0 and abs(tilt) < 1.5, "the eye sits 3 cm off the link's axis"

@@ -16,6 +16,8 @@ It speaks JSON lines on a TCP port (like the base and ToF servers), one connecti
     {"cmd": "spin", "deg": -90}            (a turn in place, + left: the behaviour server's Spin)
     {"cmd": "pose_at", "stamp": 1760470123.456, "frame": "camera_link"}
                                            (map -> frame at a stamp, out of TF's history)
+    {"cmd": "pose_at", "stamps": [1760470123.456, null], "frames": ["camera_link", "base_link"]}
+                                           (every frame at every stamp: ``poses``)
 
 and answers with one JSON line per event: accepted, feedback, arrival (the moment Nav2 reports
 the goal reached; the end-of-drive pivot and the tape's close come after it), done. A ``plan``
@@ -1011,17 +1013,60 @@ class GoalServer(Node):
         (camera_stream's board capture stamp). ``ok`` False names ``kind`` and ``reason``:
         ``frame``, ``parent``, ``too_old`` (past :data:`TF_HISTORY_S`, not looked up),
         ``ahead`` (the clocks disagree), or tf2's own (``Lookup``, ``Extrapolation``,
-        ``Connectivity``, ``Timeout``) after waiting :data:`POSE_AT_WAIT_S`."""
-        frame = str(request.get("frame", BASE_FRAME))
+        ``Connectivity``, ``Timeout``) after waiting :data:`POSE_AT_WAIT_S`.
+
+        SEVERAL AT ONCE (2026-10-15: the speaker gaze places every sighting and every voice in
+        the map, a request an observation): ``frames`` (a list) and ``stamps`` (a list, null
+        for the newest) ask every frame at every stamp in one request, answered as ``poses``,
+        stamp by stamp and within one the frames in their order, each exactly the single answer
+        above without its ``event``; the whole batch waits :data:`POSE_AT_WAIT_S` at most."""
+        frames, stamps = request.get("frames"), request.get("stamps")
+        if frames is None and stamps is None:
+            single = self._poses(request, [request.get("frame", BASE_FRAME)],
+                                 [request.get("stamp")])  # fmt: skip
+            if "detail" in single:
+                return single
+            return {"event": "pose_at", **single["poses"][0]}
+        frames = [request.get("frame", BASE_FRAME)] if frames is None else frames
+        stamps = [request.get("stamp")] if stamps is None else stamps
+        if not isinstance(frames, list) or not isinstance(stamps, list):
+            return {"event": "error", "detail": "pose_at's frames and stamps are lists"}
+        answer = self._poses(request, frames, stamps)
+        if "detail" in answer:
+            return answer
+        return {"event": "pose_at", "parent": answer["parent"], "now": answer["now"],
+                "poses": answer["poses"]}  # fmt: skip
+
+    def _poses(
+        self, request: dict[str, Any], frames: list[Any], stamps: list[Any]
+    ) -> dict[str, Any]:
+        """Every frame at every stamp (:meth:`pose_at`), within one wait: ``{"parent", "now",
+        "poses"}``, or an ``error`` event for a stamp that is no number."""
         parent = str(request.get("parent", MAP_FRAME))
-        asked = request.get("stamp")
-        try:
-            stamp = None if asked is None else float(asked)
-        except (TypeError, ValueError):
-            return {"event": "error", "detail": f"pose_at's stamp is seconds, not {asked!r}"}
+        asked: list[float | None] = []
+        for value in stamps:
+            try:
+                asked.append(None if value is None else float(value))
+            except (TypeError, ValueError):
+                return {"event": "error", "detail": f"pose_at's stamp is seconds, not {value!r}"}
         now = self.get_clock().now().nanoseconds * 1e-9
-        answer: dict[str, Any] = {"event": "pose_at", "frame": frame, "parent": parent,
-                                  "stamp": stamp, "now": now}  # fmt: skip
+        wait = POSE_AT_WAIT_S
+        if self._tf is None:
+            self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
+        deadline = time.monotonic() + wait
+        poses = [
+            self._pose_one(str(frame), parent, stamp, now, deadline)
+            for stamp in asked
+            for frame in frames
+        ]
+        return {"parent": parent, "now": now, "poses": poses}
+
+    def _pose_one(
+        self, frame: str, parent: str, stamp: float | None, now: float, deadline: float
+    ) -> dict[str, Any]:
+        """One ``parent -> frame`` at ``stamp`` (:meth:`pose_at`), the lookup waiting until
+        ``deadline`` (this node's monotonic clock) at most."""
+        answer: dict[str, Any] = {"frame": frame, "parent": parent, "stamp": stamp, "now": now}
         if stamp is not None:
             answer["age_s"] = round(now - stamp, 3)
         if frame not in POSE_AT_FRAMES:
@@ -1044,12 +1089,12 @@ class GoalServer(Node):
                 "reason": f"the stamp is {stamp - now:.1f} s past this node's clock: the"
                 " board's and this Mac's clocks disagree (ros/time.sh offset)",
             }
-        wait = POSE_AT_WAIT_S
-        if self._tf is None:
-            self._tf, wait = TfLookup(self), TF_FIRST_WAIT_S
         when = RosTime() if stamp is None else RosTime.from_msg(stamp_from_seconds(stamp))
+        wait = max(0.0, deadline - time.monotonic())
+        tf = self._tf
+        assert tf is not None  # made by _poses before the first lookup
         try:
-            transform = self._tf.buffer.lookup_transform(
+            transform = tf.buffer.lookup_transform(
                 parent, frame, when, timeout=RosDuration(seconds=wait)
             )
         except Exception as error:  # tf2's Lookup / Extrapolation / Connectivity / Timeout

@@ -1,13 +1,14 @@
 """The speaker gaze's body turn as Nav2's Spin (``speaker.body_turn`` spin, as shipped since
 2026-10-14): one request of the whole turn to the goal server's ``spin``, the head kept on the
-person by the frames meanwhile (the odometry's glide only while they show nobody), the server's
-end (or refusal) ending it by the wheels' rule. The engine on a fake clock against the fakes of
+person's point by the arbiter (TF) meanwhile, the server's end (or refusal) ending it by the
+wheels' rule and the cart's pose read again. The engine on a fake clock against the fakes of
 test_speaker_gaze; the goal server is a fake that the test speaks for. The wheels' executor's own
 turn keeps its tests in test_speaker_gaze; the turns on slipping wheels, test_speaker_gaze_pursuit.
 """
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -15,26 +16,12 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 import pytest
-from test_speaker_gaze import BOARD, Arm, Rig, array, rad, rig, speech
+from test_speaker_gaze import REACH, Arm, Rig, array, rad, rig, speech
 
 from pepin.expression.conversation import Heard
 from pepin.expression.fakes import FakeWheels
 from pepin.expression.speaker import FaceFrame
-from pepin.expression.tracker import BY_FRAMES, SETTLED, GoalSpins, SpeakerGazeWorker, SpinWord
-
-
-@dataclass
-class ListeningWheels(FakeWheels):
-    """The wheels' executor as a spin finds it: :meth:`listen` opens its base link, whose
-    first state line gives the odometry's heading."""
-
-    listened: int = 0
-
-    def listen(self) -> None:
-        """Counted; the link's first line (the heading as it stands) when it was not open."""
-        self.listened += 1
-        if self.log.latest() is None:
-            self.turn_to(self.yaw_deg)
+from pepin.expression.tracker import VOICED, GoalSpins, SpeakerGazeWorker, SpinWord
 
 
 @dataclass
@@ -53,9 +40,9 @@ class FakeSpins:
         self.words[-1]({"event": event, **fields})
 
 
-def spin_rig(*, listen: bool = True, **knobs: Any) -> tuple[Rig, FakeSpins]:
-    """The engine with the body turned by Nav2's Spin, the wheels' link able to open."""
-    r = rig(wheels=ListeningWheels() if listen else FakeWheels(), body_turn="spin", **knobs)
+def spin_rig(**knobs: Any) -> tuple[Rig, FakeSpins]:
+    """The engine with the body turned by Nav2's Spin (the wheels' executor never asked)."""
+    r = rig(wheels=FakeWheels(), body_turn="spin", **knobs)
     spins = FakeSpins()
     r.machine.spins = spins
     return r, spins
@@ -66,20 +53,19 @@ def spin_rows(r: Rig) -> list[dict[str, Any]]:
     return [f for k, _, f in r.events if k == "gaze_spin"]
 
 
-def test_past_the_arc_one_spin_of_the_whole_bearing_and_the_frames_keep_the_head_on_him() -> None:
+def test_past_the_arc_one_spin_of_the_whole_bearing_and_tf_keeps_the_head_on_him() -> None:
     """Artem calls from 120 deg left, past the forward arc (+-30): ONE request to the goal
-    server's spin of +120 (the whole bearing, within max_turn_deg), the wheels' link opened
-    first for the odometry's heading, the wheels' own executor never asked, the head's aim out
-    with it. Nav2's acceptance logs the start (run, asked); every record is taken while the
-    body turns, and as the room comes round at 30 deg/s the head is aimed at him BY THE FRAMES
-    (sent without waiting, the odometry's rate and Nav2's count beside each). Nav2's done ends
-    it with the turn measured on the map; the cart went 3 deg further than its odometry says,
-    and the first frame after the end re-centres him where the camera sees him; no second
-    spin."""
+    server's spin of +120 (the whole bearing, within max_turn_deg), the wheels' own executor
+    never asked, the head's aim (his point in the map) out with it. Nav2's acceptance logs the
+    start (run, asked); every record is taken while the body turns, and as TF turns the cart at
+    30 deg/s the arbiter keeps the head on his point (the pan comes round 117, 114, 111): no
+    aim of the gaze's while he stands, nothing read from any wheel. Nav2's done ends it with the
+    turn measured on the map; the cart's pose is read again, and he is straight ahead: no
+    second spin."""
     r, spins = spin_rig()
-    artem = r.person(120.0)
+    r.person(120.0)
     read = r.wake(120.0)
-    assert spins.asked == [pytest.approx(120.0)] and r.wheels.listened == 1
+    assert spins.asked == [pytest.approx(120.0)]
     assert r.wheels.calls == [], "the wheels' own executor is never asked"
     assert r.aimed()[0] == (120.0, 3.0) and r.reaims()[0]["status"] == "sent"
     assert r.machine.attention(read).phase == "turning"
@@ -87,45 +73,41 @@ def test_past_the_arc_one_spin_of_the_whole_bearing_and_the_frames_keep_the_head
     r.machine.tick(read)
     track = r.machine.engaged
     assert spin_rows(r) == [{"own": True, "run": 41, "asked_deg": 120.0, "track": track,
-                             "glides": True, "waited_s": 0.0, "sent_in_ms": 35}]  # fmt: skip
+                             "waited_s": 0.0, "sent_in_ms": 35}]  # fmt: skip
     assert "the body turns +120 deg: Nav2's Spin, run 41" in r.said
     assert r.machine.phase == "track", "the record taken as the body turns found him"
-    looks = r.scene.looks
+    looks, aims = r.scene.looks, len(r.door.aims())
+    heads = []
     t = read
-    for k in range(1, 4):  # Nav2's Spin at 30 deg/s, its heading on the board's clock
+    for k in range(1, 4):  # Nav2's Spin at 30 deg/s: TF turns
         t = read + 0.1 * k
-        r.wheels.turn_to(3.0 * k, BOARD + t)
-        artem.pan_deg = 120.0 - 3.0 * k  # the room turns the other way in the cart's frame
-        assert r.machine.tick(t) == pytest.approx(t + 0.1), "a record and the heading every 0.1 s"
-    assert [p for p, _ in r.aimed()] == [120.0, 117.0, 114.0, 111.0], "on him by the frames"
-    frames = r.reaims()[1:]
-    assert {f["speed"] for f in frames} == {"glide"} and {f["status"] for f in frames} == {"sent"}
-    assert {f["why"] for f in frames} == {BY_FRAMES}
-    assert all(f["rate_deg_s"] == pytest.approx(30.0, abs=0.5) for f in frames), "the odometry's"
+        r.turn_to(3.0 * k)
+        assert r.machine.tick(t) == pytest.approx(t + 0.1), "a record every 0.1 s"
+        heads.append(r.head()[0])
+    assert heads == [117.0, 114.0, 111.0], "on him: the arbiter keeps his point"
+    assert len(r.door.aims()) == aims, "he stands: no aim of the gaze's"
     assert r.scene.looks == looks + 3, "every record while the body turns"
-    assert r.machine.voice == pytest.approx(rad(111.0)), "the person turned with the cart"
+    assert r.machine.bearing == pytest.approx(rad(111.0)), "from the cart as it turns"
     spins.tell("feedback", t=1.0, spun_deg=12.0)
     for k in range(4, 40):  # on round, a record each tenth
         t = read + 0.1 * k
-        r.wheels.turn_to(3.0 * k, BOARD + t)
-        artem.pan_deg = 120.0 - 3.0 * k
+        r.turn_to(3.0 * k)
         r.machine.tick(t)
         if k == 4:
-            assert r.reaims()[-1]["turned_deg"] == 12.0, "Nav2's count beside each aim"
-    assert r.aimed()[-1] == (3.0, 3.0) and r.machine.counts["glides"] == 0, "no odometry's"
-    r.wheels.turn_to(118.6, BOARD + read + 4.0)
-    artem.pan_deg = -3.0  # the cart went 121.6 by the room's, 118.6 by its odometry
-    spins.tell("done", run=41, status=4, seconds=4.1, turned_deg=118.6, short_deg=1.4,
-               spun_deg=119.8, arrival={"x": 0.0, "y": 0.0, "yaw_deg": 118.6})  # fmt: skip
+            assert r.machine.turning is not None and r.machine.turning.turned_deg == 12.0
+    assert r.head() == (3.0, 3.0) and len(r.door.aims()) == aims, "no aim of the gaze's"
+    r.turn_to(121.6)  # the cart went 121.6 by the room's
+    spins.tell("done", run=41, status=4, seconds=4.1, turned_deg=121.6, short_deg=1.6,
+               spun_deg=119.8, arrival={"x": 0.0, "y": 0.0, "yaw_deg": 121.6})  # fmt: skip
     r.machine.tick(read + 4.0)
     assert spin_rows(r)[-1] == {
-        "own": True, "end": True, "run": 41, "asked_deg": 120.0, "turned_deg": 118.6,
-        "short_deg": 1.4, "spun_deg": 119.8, "done": True, "why": "", "status": 4,
+        "own": True, "end": True, "run": 41, "asked_deg": 120.0, "turned_deg": 121.6,
+        "short_deg": 1.6, "spun_deg": 119.8, "done": True, "why": "", "status": 4,
         "seconds": 4.1,
     }  # fmt: skip
-    assert "the spin turned +119 of +120 deg" in r.said and r.machine.turning is None
-    assert r.reaims()[-1]["why"] == SETTLED and r.aimed()[-1] == (-3.0, 3.0), "the frame after"
-    assert r.machine.voice == pytest.approx(rad(-3.0), abs=rad(0.1)), "where the camera sees him"
+    assert "the spin turned +122 of +120 deg" in r.said and r.machine.turning is None
+    assert r.head() == (-1.6, 3.0), "on him, the cart 1.6 past"
+    assert r.machine.bearing == pytest.approx(rad(-1.6), abs=rad(0.1)), "the cart's pose read"
     r.machine.tick(read + 4.2)
     assert len(spins.asked) == 1 and r.wheels.calls == [], "within the arc: no second turn"
 
@@ -144,7 +126,7 @@ def test_its_own_spin_is_no_drive_to_pause_for_and_a_person_on_the_right_is_turn
     r.machine.tick(read)
     r.door.view = replace(r.door.view, driving=True)
     r.say(-115.0, read + 1.0, read + 2.0, "я тут")
-    assert r.machine.phase != "paused" and r.reaims()[-1]["why"] == "the voice moved"
+    assert r.machine.phase != "paused" and r.reaims()[-1]["why"] == VOICED
     assert r.aimed()[-1][0] == pytest.approx(-115.0, abs=1.0) and len(spins.asked) == 1
     assert r.machine.turning is not None, "the spin goes on"
     wheels = rig(wheels=FakeWheels())  # body_turn wheels
@@ -191,7 +173,7 @@ def test_a_spin_that_moved_and_fell_short_is_not_asked_again_for_him() -> None:
     read = r.wake(120.0)
     spins.tell("accepted", run=8, deg=120.0)
     r.machine.tick(read)
-    r.wheels.turn_to(40.0, BOARD + read + 1.5)
+    r.turn_to(40.0)
     spins.tell("done", run=8, status=6, seconds=1.6, turned_deg=40.2, short_deg=79.8,
                spun_deg=41.0)  # fmt: skip
     r.machine.tick(read + 1.6)
@@ -245,27 +227,20 @@ def test_a_drive_s_start_never_stops_nav2_s_spin_and_its_end_is_still_taken() ->
     assert spins.asked == [] and waits.machine.turning is None
 
 
-def test_no_goal_server_or_no_odometry_heading_refuses_the_spin() -> None:
-    """Without a goal server there is no spin; without any odometry heading to come (no wheels'
-    link to open, none there yet) the people's bearings could not follow the turn: refused,
-    said why, the head alone on the person. A heading already there is enough."""
+def test_no_goal_server_refuses_the_spin_and_no_wheel_s_heading_is_needed() -> None:
+    """Without a goal server there is no spin: refused, said why, the head alone on the person.
+    No odometry is asked for (2026-10-15): the people are points in the map and TF is the
+    cart's pose, so a spin goes with no wheels' link open."""
     alone, _ = spin_rig()
     alone.machine.spins = None
     alone.person(120.0)
     alone.machine.tick(alone.wake(120.0))
     assert spin_rows(alone)[-1]["why"] == "no goal server to ask for a spin here"
     assert alone.machine.body_waits
-    blind, spins = spin_rig(listen=False)  # the wheels' fake: no link to open, no heading
-    blind.person(120.0)
-    blind.machine.tick(blind.wake(120.0))
-    assert spins.asked == []
-    why = "no odometry heading here to keep the people's bearings through a turn"
-    assert spin_rows(blind)[-1]["why"] == why
-    seen, spins = spin_rig(listen=False)
-    seen.wheels.turn_to(0.0, BOARD)  # the link opened by an earlier motion
-    seen.person(120.0)
-    seen.wake(120.0)
-    assert spins.asked == [pytest.approx(120.0)]
+    fresh, spins = spin_rig()
+    fresh.person(120.0)
+    fresh.wake(120.0)
+    assert spins.asked == [pytest.approx(120.0)] and fresh.wheels.calls == []
 
 
 def test_goal_spins_sends_one_request_and_relays_the_server_s_events_to_their_end(
@@ -333,7 +308,7 @@ def test_a_spin_the_goal_server_cancelled_for_a_person_s_request_gives_way_and_w
     r.machine.tick(read)
     r.machine.drive(True, read + 1.0)
     assert r.machine.phase == "paused" and r.machine.turning is not None
-    r.wheels.turn_to(50.0, BOARD + read + 1.5)
+    r.turn_to(50.0)
     spins.tell("done", run=52, status=5, seconds=1.6, turned_deg=50.2, short_deg=69.8,
                spun_deg=51.0, cancelled_for="go home (tool)")  # fmt: skip
     r.machine.tick(read + 1.6)
@@ -366,26 +341,24 @@ def test_a_tool_s_turn_holds_the_gaze_s_body_turn_until_his_next_words() -> None
     it reaches, no spin is asked however long; words he began during the turn and a sound
     without words do not free it; his next words do (a row), and the body turns to him."""
     r, spins = spin_rig()
-    artem = r.person(10.0)
+    r.person(10.0)
     read = r.wake(10.0)
     r.machine.tick(read)
     assert r.machine.phase == "track" and spins.asked == []
-    r.wheels.turn_to(0.0, BOARD + read)
     r.machine.drive(True, read + 0.1)
     assert r.machine.keep_person(read + 0.15, "turn: 180") is None
     assert hold_rows(r) == [{"held": True, "why": "a tool's drive"}]
     assert "the body's own turn waits for the person's next words (a tool's drive)" in r.said
     t = read + 0.15
-    for k in range(1, 19):  # the tool's Nav2 Spin, 10 deg a tenth of a second
+    for k in range(1, 19):  # the tool's Nav2 Spin, 10 deg a tenth of a second: TF turns
         t = read + 0.15 + 0.1 * k
-        r.wheels.turn_to(10.0 * k, BOARD + t)
-        artem.pan_deg = 10.0 - 10.0 * k  # the room turns the other way in the cart's frame
+        r.turn_to(10.0 * k)
         r.machine.tick(t)
     r.machine.drive(False, t + 0.1)
-    assert r.machine.voice == pytest.approx(rad(-170.0), abs=rad(1.0)), "behind, past the arc"
+    assert r.machine.bearing == pytest.approx(rad(-170.0), abs=rad(1.0)), "behind, past the arc"
     now = r.run(t + 3.0, t + 0.1)
     assert spins.asked == [] and r.machine.phase == "track", "the head alone, three seconds"
-    assert r.aimed()[-1][0] <= -160.0, "the head on him as far as it reaches"
+    assert r.head()[0] == pytest.approx(math.degrees(REACH.pan[0]), abs=0.1), "as far as it reaches"
     r.say(-170.0, t - 0.5, now, "вот так")  # begun while the cart still turned
     r.say(-170.0, now + 0.2, now + 0.6, "", noise=True)
     r.machine.tick(now + 0.8)

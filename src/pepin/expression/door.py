@@ -1,6 +1,6 @@
 """The arbiter's door as expression uses it: the speaker gaze's (:class:`SpeakerDoor`, its
-:class:`pepin.expression.speaker.GazeDoor`) and the head gestures' (:class:`OverlayDoor`, the
-:class:`pepin.expression.parts.HeadDoor`).
+:class:`pepin.expression.speaker.GazeDoor`: points in the map) and the head gestures'
+(:class:`OverlayDoor`, the :class:`pepin.expression.parts.HeadDoor`).
 
 Every call is one HTTP exchange on :mod:`pepin.gaze_link` from its owner's worker thread. An aim
 is answered when the head has settled there; one queued behind a better look (a ``look`` the
@@ -18,16 +18,19 @@ from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Protocol
 
 from pepin.expression.head import BAND, SPEAKER, ClipLook
-from pepin.expression.speaker import Ease, GazeAnswer, HeadView
+from pepin.expression.speaker import Ease, GazeAnswer, HeadView, Point
 from pepin.gaze import HOME, Aim, Speed
 from pepin.gaze_link import GAZE_URL, GazeClient
 
 AWAY = "the arbiter's door does not answer"
+MAP_FRAME = "map"  # the frame the speaker gaze's points are in
 
 
 class SpeakerDoor:
     """:class:`pepin.expression.speaker.GazeDoor` for one source (``voice.speaker``) over the
-    door's JSON, in the expression band."""
+    door's JSON, in the expression band: every aim a point in the map that the arbiter keeps the
+    head on as the cart moves (a ``point`` look that follows, pepin_bringup.gaze's "THE POINT
+    THAT FOLLOWS")."""
 
     def __init__(
         self,
@@ -43,13 +46,16 @@ class SpeakerDoor:
         self.aim_wait_s = aim_wait_s
         self.calls = 0  # every exchange, for the report line's calls per minute
 
-    def aim(self, aim: Aim, *, speed: Speed, ttl_s: float, ease: Ease | None = None) -> GazeAnswer:
-        """Hold the head at ``aim`` (an ``angles`` look held for its TTL, no depth frames), on
-        ``ease``'s speed and ramp when given (an arbiter that predates them moves at ``speed``)."""
+    def aim(
+        self, point: Point, *, speed: Speed, ttl_s: float, ease: Ease | None = None
+    ) -> GazeAnswer:
+        """Hold the head on ``point`` (a ``point`` look in ``map`` that follows, held for its
+        TTL, no depth frames), on ``ease``'s speed and ramp when given."""
         request: dict[str, Any] = {
-            "kind": "angles",
+            "kind": "point",
             "band": BAND,
-            "target": {"pan_rad": aim.pan_rad, "tilt_rad": aim.tilt_rad},
+            "target": {"frame": MAP_FRAME, "x": point.x, "y": point.y, "z": point.z},
+            "follow": True,
             "frames": 0,
             "hold": True,
             "ttl_s": ttl_s,

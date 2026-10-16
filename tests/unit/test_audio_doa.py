@@ -1,7 +1,8 @@
 """The Mac's own voice direction (pepin.audio_doa) on synthetic plane waves: the azimuth, two
 voices at once, quiet chunks, the readings' cadence and anchor; the choice between it and the
-chip (pepin.expression.doa.DoaChoice), the tagger on its readings, the register of voices
-(pepin.expression.tracks.VoiceSources) and its event after each utterance."""
+chip (pepin.expression.doa.DoaChoice), the tagger on its readings, the people's register its
+source peaks fold into (pepin.expression.people_map.Register.peak) and its event after each
+utterance."""
 
 from __future__ import annotations
 
@@ -12,6 +13,7 @@ from typing import Any
 
 import numpy as np
 import pytest
+from test_speaker_gaze import FLAT, azimuth_deg, voice_at
 
 from pepin.audio_doa import (
     CHUNK,
@@ -28,10 +30,10 @@ from pepin.audio_link import FRAME_SAMPLES, RATE, DoaReading, RawFrame
 from pepin.expression.conversation import Heard
 from pepin.expression.doa import CHIP, DoaChoice, Tagger, VoiceRule, utterance_voice, wrap_deg
 from pepin.expression.executors import NoWheels
-from pepin.expression.fakes import FakeDoa, FakeGazeDoor
+from pepin.expression.fakes import FakeDoa, FakeGazeDoor, FakeTf
+from pepin.expression.people_map import VOICES_KEPT, Register
 from pepin.expression.speaker import DoaMap, HeadView
 from pepin.expression.tracker import SpeakerGaze, SpeakerSettings
-from pepin.expression.tracks import VoiceSources
 from pepin.gaze import HOME, Aim, Reach
 from pepin.neck import NeckConfig
 
@@ -230,34 +232,36 @@ def test_a_mac_reading_tags_itself_and_the_silero_rule_takes_it_unchanged() -> N
 
 
 def test_the_register_keeps_two_voices_apart_and_forgets_after_track_forget_s() -> None:
-    register = VoiceSources(match_deg=25.0, forget_s=300.0)
-    a = register.heard(math.radians(20.0), 0.0, 0.8)
-    b = register.heard(math.radians(-60.0), 0.0, 0.5)
-    again = register.heard(math.radians(30.0), 1.0, 0.7)
-    assert again is a and a.id != b.id and len(register.sources) == 2
-    assert a.bearing == math.radians(30.0) and a.peaks == 2 and a.strength == 0.7 and a.who is None
-    register.turned(math.radians(10.0))
-    assert a.bearing == pytest.approx(math.radians(20.0))
-    assert (
-        register.nearest(math.radians(25.0)) is a and register.nearest(math.radians(120.0)) is None
-    )
-    assert register.forget(301.0) == [b] and register.sources == [a], "unheard for over 300 s"
-    small = VoiceSources(max_sources=2)
-    for k in range(3):
-        small.heard(math.radians(60.0 * k), float(k), 0.5)
-    assert [s.heard_s for s in small.sources] == [1.0, 2.0], "the stalest goes past the cap"
+    """The array's source peaks fold into the people's register: a peak joins the nearest
+    record within voice_match_deg (a record the peaks alone placed moves with them), else
+    starts one; a record unheard for track_forget_s is forgotten, and past VOICES_KEPT the
+    stalest of the peaks' own goes."""
+    register = Register(voice_match_deg=25.0, forget_s=300.0)
+    a = register.peak(voice_at(20.0, 0.0), 0.8)
+    b = register.peak(voice_at(-60.0, 0.0), 0.5)
+    again = register.peak(voice_at(30.0, 1.0), 0.7)
+    assert again is a and a.id != b.id and register.voices() == [a, b]
+    assert azimuth_deg(a.point) == pytest.approx(30.0), "the peaks alone place it: it moves"
+    assert a.peaks == 2 and a.strength == 0.7 and a.who is None and a.origin == "peaks"
+    assert register.forget(300.5) == [b] and register.voices() == [a], "unheard for over 300 s"
+    small = Register()
+    for k in range(VOICES_KEPT + 1):
+        small.peak(voice_at(-160.0 + 40.0 * k, float(k)), 0.5)
+    assert [p.peak_s for p in small.voices()] == [float(k) for k in range(1, VOICES_KEPT + 1)]
     small.clear()
-    assert small.sources == []
+    assert small.people == []
 
 
 def test_each_utterance_feeds_the_register_and_logs_gaze_sources_without_engaging_anyone() -> None:
     """A wake with Mac readings whose peaks sit at 150 (= -30 deg in the cart's frame) and 200
-    (+20): the register holds both voices, the event lists them, the tracks hold the one person
-    the wake engaged; the next utterance marks the engaged person's source."""
+    (+20): the register holds both voices, placed in the map by TF's cart at each reading, the
+    event lists them before anyone is engaged; the wake engages the one at -30 (the record its
+    peaks began), and the next utterance's event marks him engaged, the other voice nobody's."""
     doa = FakeDoa(mac_readings(2.0, 150))  # the newest reading stands for now on the board
     events: list[tuple[str, float, dict[str, Any]]] = []
     said: list[str] = []
     door = FakeGazeDoor(view=HeadView(Aim(0.0, 0.4), "", HOME, False, None, False))
+    holder: list[SpeakerGaze] = []
     machine = SpeakerGaze(
         SpeakerSettings(doa_map=MAP),
         door=door,
@@ -266,21 +270,25 @@ def test_each_utterance_feeds_the_register_and_logs_gaze_sources_without_engagin
         wheels=NoWheels(),
         face=None,
         reach=Reach.of(NeckConfig.from_json(REPO / "config/neck.json")),
+        head=FLAT,
+        poses=FakeTf(FLAT, now=lambda: holder[0].now_s),
         report=said.append,
         events=lambda kind, now, **f: events.append((kind, now, f)),
     )
+    holder.append(machine)
     machine.opened(Heard(2.0, 3.0, "эй"), 3.0)
     logged = [e for e in events if e[0] == "gaze_sources"]
     assert len(logged) == 1 and logged[0][2]["fed"] == 20, "ten readings, two peaks each"
     rows = logged[0][2]["sources"]
     assert sorted(r["bearing_deg"] for r in rows) == [-30.0, 20.0]
     assert all(r["who"] is None and r["peaks"] == 10 and not r["engaged"] for r in rows)
-    assert {r["strength"] for r in rows} == {0.8, 0.5}
-    assert len(machine.tracks.tracks) == 1 and machine.track is not None
-    assert machine.track.pan == pytest.approx(math.radians(-30.0)), "the wake engaged the voice"
+    assert {r["strength"] for r in rows} == {0.8, 0.5} and all(len(r["point"]) == 3 for r in rows)
+    assert len(machine.people.people) == 2 and machine.person is not None
+    assert machine.bearing == pytest.approx(math.radians(-30.0)), "the wake engaged the voice"
+    assert machine.person.origin == "utterance" and machine.person.peaks == 10
     doa.readings.extend(mac_readings(3.5, 150, n=12))
     machine.heard(Heard(3.5, 4.6, "и ещё"), 4.6)
     rows = [e for e in events if e[0] == "gaze_sources"][-1][2]["sources"]
     assert [r["engaged"] for r in sorted(rows, key=lambda r: r["bearing_deg"])] == [True, False]
-    assert len(machine.sources.sources) == 2 and len(machine.tracks.tracks) == 1
+    assert len(machine.people.people) == 2 and len(machine.people.voices()) == 2
     assert not any("gaze_sources" in line for line in said), "an event, no line"

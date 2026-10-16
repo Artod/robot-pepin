@@ -13,6 +13,18 @@ the controller has failed; the LLM tools and the voice's expression POST request
 :data:`pepin.gaze_link.GAZE_PORT` on this Mac's loopback (``/look``, ``/renew``, ``/release``,
 ``/state``). Path gaze and reverse gaze are this node's own requests while a drive runs.
 
+THE POINT THAT FOLLOWS (``/look`` of kind ``point`` with ``follow``, since 2026-10-15): the
+speaker gaze asks for a person as a point in the map, ``{"source": "voice.speaker", "kind":
+"point", "band": 5, "target": {"frame": "map", "x": 1.8, "y": 0.6, "z": 1.1}, "follow": true,
+"hold": true, "frames": 0, "ttl_s": 6.0, "speed": "slow", "speed_deg_s": 60.0, "acc_deg_s2":
+400.0}``: resolved to pan and tilt from TF's newest ``base_link <- map`` and the neck's lever arms
+(:func:`pepin.gaze.aim_at_point`; the tilt follows the point's height, a point past the reach is
+looked at from the end nearer the head's own pan), and while it holds the head every step resolves
+it again and writes it when it moved past ``settle_tol_deg``: the cart turning or driving under the
+head, whoever turns it, keeps the head on the point by TF alone (a wheel that slips turns no TF, so
+no head). The speaker gaze's lead (a walker's point ahead along their velocity) is its own: it
+sends that point.
+
 THE OVERLAY (``/look`` of kind ``clip``, :class:`pepin.gaze.Overlay`): a head gesture's keyed
 offsets added to whatever holds the head (the speaker gaze's ``voice.speaker`` look, or home),
 each key written at its time with its own speed ceiling (``neck_target``'s ``speed_deg_s``); the
@@ -735,6 +747,7 @@ class Gaze(Node):
         now = self._now()
         self._arbiter.settings = self._settings()
         self._drive_gaze(now)
+        self._follow_point(now)
         self._arbiter.step(now)
         state = self._arbiter.state(now)
         key = (state.phase, state.blind, state.request_id)
@@ -1242,8 +1255,11 @@ class Gaze(Node):
 
     def _door_look(self, body: dict[str, Any]) -> dict[str, Any]:
         """``POST /look``: a request, answered when it ends; a looped overlay (it ends only when
-        released or lapsed) is answered at once, granted or denied."""
-        look = look_from_json(body, self._arbiter.settings, self._cfg, self._to_base)
+        released or lapsed) is answered at once, granted or denied. A point past the reach is
+        looked at from the end nearer the head's own pan."""
+        look = look_from_json(
+            body, self._arbiter.settings, self._cfg, self._to_base, self._head_pan()
+        )
         if isinstance(look, str):
             return {"status": "denied", "reason": look, "source": body.get("source", "")}
         why = self._driving_refusal(look)
@@ -1298,16 +1314,37 @@ class Gaze(Node):
         }
         return state
 
-    def _to_base(self, frame: str, xyz: dict[str, float]) -> tuple[float, float, float] | str:
-        """A point of ``frame`` in base_link, now."""
+    def _to_base(
+        self, frame: str, xyz: dict[str, float], wait_s: float = TF_WAIT_S
+    ) -> tuple[float, float, float] | str:
+        """A point of ``frame`` in base_link, now (TF's newest, waited for up to ``wait_s``)."""
         point = (xyz["x"], xyz["y"], xyz["z"])
         if frame == BASE_FRAME:
             return point
-        pose = self._tf.pose(BASE_FRAME, frame, None, TF_WAIT_S)
+        pose = self._tf.pose(BASE_FRAME, frame, None, wait_s)
         if pose is None:
             return f"no {BASE_FRAME} <- {frame} in TF"
         placed = pose.rotation @ np.asarray(point, dtype=float) + pose.translation
         return float(placed[0]), float(placed[1]), float(placed[2])
+
+    def _head_pan(self) -> float | None:
+        """The head's pan by its newest encoder reading (None before one)."""
+        head = self._arbiter.state(self._now()).head
+        return None if head is None else head.pan_rad
+
+    def _follow_point(self, now: float) -> None:
+        """The look holding the head follows its point (the speaker gaze's person in the map):
+        re-resolved from TF's newest pose, never waited for (a step is 50 ms), and written by
+        the arbiter when it moved past the settle tolerance (the cart turned under it)."""
+        look = self._arbiter.following()
+        if look is None or look.point is None:
+            return
+        frame, x, y, z = look.point
+        point = self._to_base(frame, {"x": x, "y": y, "z": z}, wait_s=0.0)
+        if isinstance(point, str):
+            return  # TF has no pose now: the head stays where the last one put it
+        aim = self._reach.clamp(aim_at_point(self._cfg, point), self._head_pan())
+        self._arbiter.retarget(look.id, aim, now)
 
     # ---- the report ----------------------------------------------------------------------------
     def _report(self) -> None:

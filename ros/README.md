@@ -719,15 +719,24 @@ asked again for that person in the conversation. The person speaking does not st
 toward them; a drive or the close does. Nothing on the voice's path waits for any of it: the
 wake's turn is a request answered by a callback.
 
-**The frame.** The people's bearings are kept in the cart's frame at the newest heading of the
-wheels' odometry (the base server's 50 Hz state lines, stamped on the board's clock, whoever
-turned the cart: the gaze, a gesture). While the body turns, the head re-centres on the person
-as the heading comes round (read ten times a second; a seek's stop keeps its place in the room)
-and no frame is taken. The microphone array turns with the cart, so each of its readings is
-turned by how far the cart has turned since its own stamp (one clock, the board's) before an
-utterance's readings are averaged: a person who speaks across a turn is heard where they are
-now, not at the average of a sweep. `gaze_doa` rows then carry the degrees taken off each
-reading.
+**The map.** Every person is a point in the `map` frame (`pepin.expression.people_map`, since
+2026-10-15): a face is placed along the ray its angles name from the camera's pose at the frame's
+exposure (TF's `map -> camera_link` at the record's X-Stamp, through the goal server's `pose_at`),
+at its range (the stereo depth when the record carries one, else the face's size); a voice is
+placed by the cart's heading at each of its readings' stamps (the array's clock is the board's,
+TF's too), along the head's axis at the voice's pan, at the range and height of the person known
+there, else `speaker.default_range_m` and `seek_tilt_deg`. One `pose_at` request an observation:
+about ten a second while someone is tracked, one an utterance, none for a frame of nobody. The
+head is asked for the point (a `point` look that follows, gaze node "THE POINT THAT FOLLOWS"):
+the arbiter turns it into pan and tilt from TF's pose of now and keeps the head on it while the
+cart turns or drives under it, whoever turns it; wheels that slip turn no TF, so they move no head
+(on 2026-10-15 the front wheels on the stand spun at -35 deg/s, the cart did not turn, and the
+gaze of before, which kept the people by the wheels' odometry, re-aimed the head off the person
+143 times). `gaze_doa` rows carry the degrees TF turned the cart between each reading and the
+utterance's newest; `gaze_reaim` rows the point and its source. Restart the goal server and the
+gaze node with the speaker gaze of this build (`ros/laptop.sh kick goal_server`, `kick gaze`):
+an older goal server answers no batched `pose_at` (the gaze says so once and places nothing), an
+older gaze node keeps no point.
 
 **The tilt's source.** A face gives the head's aim, a body box an estimate of it; the tilt
 changes from one source to the other only when the two differ by more than

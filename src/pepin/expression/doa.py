@@ -42,16 +42,17 @@ on the chunks Silero calls voice, a list of source peaks per chunk, one reading 
 the chip's), read while raw frames come from the board and the chip's otherwise. A Mac reading
 tags itself: its flag is Silero's at the chunk, its ``voice_p`` the chunks' highest, so the
 ``silero`` rule applies to it unchanged; its peaks beyond the strongest ride beside it
-(:attr:`pepin.audio_doa.MicReading.peaks`) for the register of voices
-(:class:`pepin.expression.tracks.VoiceSources`). The Mac's angles are in the array's own
+(:attr:`pepin.audio_doa.MicReading.peaks`) for the people's register
+(:meth:`pepin.expression.people_map.Register.peak`). The Mac's angles are in the array's own
 geometry frame, the chip's in its firmware's: each has its own four calibration readings
 (``speaker.doa.readings`` and ``mac_readings``).
 
-The array turns with the cart. While the wheels turn the body, a voice that stays where it is
-reads at a bearing that sweeps the other way, so each reading is brought into the cart's frame of
-now by how far the cart has turned since its stamp (``turned``: the wheels' odometry on the
-board's clock, the array's own) before the readings are averaged: an utterance spoken across a
-turn, or before it, gives the bearing the person has now.
+The array turns with the cart. While the body turns, a voice that stays where it is reads at a
+bearing that sweeps the other way, so each reading is taken into the MAP by the cart's heading at
+its own stamp (``heading``: TF's, through the goal server's ``pose_at``, on the board's clock, the
+array's own; since 2026-10-15, before it the wheels' odometry, which turned while slipping wheels
+did not turn the cart) before the readings are averaged (:attr:`VoiceBearing.map_rad`): an
+utterance spoken across a turn, or before it, gives the direction the person is in, in the room.
 
 :func:`fit_doa_map` is the calibration: the readings of a voice in front of, left of, behind and
 right of the cart give ``front_deg``, ``sign`` and the three other quarters. The array sits off the
@@ -88,7 +89,8 @@ WHEELS_ONSET_S = 0.5
 DoaTags = Literal["silero", "chip"]  # speaker.doa.doa_tags: the rule's two arms
 Direction = Literal["chip", "mac"]  # speaker.doa.direction: whose readings the gaze reads
 RAW_STALE_S = 2.0  # no raw frame for this long: the Mac's source has nothing, the chip's is read
-Turned = Callable[[float], float]  # how far the cart has turned since a board stamp (rad, + left)
+# The cart's heading in the map at a board stamp (rad, + left; TF's), None where TF had none
+Heading = Callable[[float], float | None]
 QUARTER_TOL_DEG = 45.0  # a calibration reading further than this off its quarter is nearer the next
 QUARTERS_DEG = (0.0, 90.0, 180.0, 270.0, 360.0)  # front, left, behind, right, front again
 
@@ -302,7 +304,10 @@ class VoiceBearing:
     """An utterance's direction: the array's mean angle of its readings of the person's voice
     (the rule's), the bearing in the cart's frame (radians, + left; None while the map is
     unmeasured), the readings judged, how many the rule took (``speech``), how many the chip
-    flagged, and how many of the chip's were cut as the robot's own voice."""
+    flagged, and how many of the chip's were cut as the robot's own voice. Read with the cart's
+    heading (:data:`Heading`): ``map_rad`` the direction in the map (each reading by the heading
+    at its own stamp), ``ref_s`` the newest voiced reading's stamp, whose heading turns it into
+    ``bearing_rad`` (the cart's frame then); None without a heading for them."""
 
     doa_deg: float | None
     bearing_rad: float | None
@@ -310,6 +315,8 @@ class VoiceBearing:
     speech: int
     robot: int = 0  # the chip's speech readings dropped as the robot's own voice
     chip: int = 0  # the chip's speech readings among those judged
+    map_rad: float | None = None
+    ref_s: float | None = None
 
     def text(self) -> str:
         """``voice at 135 deg = +42 deg (8 readings, 6 speech)`` for a log line."""
@@ -330,25 +337,37 @@ def voice_of(
     tagged: Sequence[Tagged],
     doa_map: DoaMap | None,
     min_speech: int = 1,
-    turned: Turned | None = None,
+    heading: Heading | None = None,
 ) -> VoiceBearing:
     """The bearing of the ``tagged`` readings the rule takes for the person's voice (fewer than
-    ``min_speech``: unknown); with ``turned``, each reading's bearing less how far the cart has
-    turned since it was read."""
+    ``min_speech``: unknown); with ``heading``, each reading taken into the map by the cart's
+    heading at its own stamp (a reading without one is left out), their mean the direction in
+    the map (``map_rad``) and, by the heading at the newest of them, the bearing in the cart's
+    frame then."""
     speech = [t.reading for t in tagged if t.voice]
     mean = None
     if len(speech) >= max(min_speech, 1):
         mean = circular_mean_deg([float(r.deg) for r in speech])
-    bearing = None
-    if mean is not None and doa_map is not None:
-        if turned is None:
-            bearing = math.radians(bearing_deg(mean, doa_map))
-        else:
-            now = [bearing_deg(r.deg, doa_map) - math.degrees(turned(r.stamp_s)) for r in speech]
-            centre = circular_mean_deg(now)
-            bearing = None if centre is None else math.radians(wrap_deg(centre))
     chip = sum(1 for t in tagged if t.tags.chip)
-    return VoiceBearing(mean, bearing, len(tagged), len(speech), chip=chip)
+    if mean is None or doa_map is None:
+        return VoiceBearing(mean, None, len(tagged), len(speech), chip=chip)
+    if heading is None:
+        bearing = math.radians(bearing_deg(mean, doa_map))
+        return VoiceBearing(mean, bearing, len(tagged), len(speech), chip=chip)
+    placed = [(r, heading(r.stamp_s)) for r in speech]
+    known = [(r, h) for r, h in placed if h is not None]
+    if len(known) < max(min_speech, 1):
+        bearing = math.radians(bearing_deg(mean, doa_map))
+        return VoiceBearing(mean, bearing, len(tagged), len(speech), chip=chip)
+    room = [bearing_deg(r.deg, doa_map) + math.degrees(h) for r, h in known]
+    centre = circular_mean_deg(room)
+    newest, at = max(known, key=lambda pair: pair[0].stamp_s)
+    if centre is None:
+        return VoiceBearing(mean, None, len(tagged), len(speech), chip=chip)
+    map_rad = math.radians(wrap_deg(centre))
+    bearing = math.radians(wrap_deg(centre - math.degrees(at)))
+    return VoiceBearing(mean, bearing, len(tagged), len(speech), chip=chip, map_rad=map_rad,
+                        ref_s=newest.stamp_s)  # fmt: skip
 
 
 def board_offset(doa: DoaSource, now: float) -> float | None:
@@ -371,10 +390,13 @@ def robot_readings(
 @dataclass(frozen=True)
 class UtteranceDoa:
     """An utterance's readings as the gaze logs them: every reading from its start to its end
-    (board clock) with its tags and the rule's verdict, and its bearing from the clean ones."""
+    (board clock) with its tags and the rule's verdict, its bearing from the clean ones, and
+    those (``window``: the last ``window_s`` the bearing is read from, again with the cart's
+    heading by :func:`voice_of`)."""
 
     tagged: tuple[Tagged, ...]
     voice: VoiceBearing
+    window: tuple[Tagged, ...] = ()
 
     @property
     def readings(self) -> tuple[DoaReading, ...]:
@@ -396,12 +418,12 @@ def utterance_voice(
     doa_map: DoaMap | None,
     min_speech: int,
     tagger: Tagger,
-    turned: Turned | None = None,
+    heading: Heading | None = None,
 ) -> UtteranceDoa:
     """``heard``'s bearing from its clean readings: the robot's own voice cut out, the last
     ``window_s`` of what is left (the last ``window_s`` of the utterance when nothing was cut),
-    the person's voice in it by ``tagger``'s rule, each turned with the cart (``turned``), with
-    every reading of the utterance for the log."""
+    the person's voice in it by ``tagger``'s rule, each into the map by the cart's ``heading``
+    when given, with every reading of the utterance for the log."""
     offset = board_offset(doa, now)
     if offset is None:
         return UtteranceDoa((), VoiceBearing(None, None, 0, 0))
@@ -414,9 +436,18 @@ def utterance_voice(
     else:
         last = clean[-1].reading.stamp_s if clean else end
         window = [t for t in clean if t.reading.stamp_s >= last - window_s]
-    voice = voice_of(window, doa_map, min_speech, turned)
+    voice = voice_of(window, doa_map, min_speech, heading)
     dropped = sum(1 for t in every if t.tags.own and t.tags.chip)
-    return UtteranceDoa(tuple(every), replace(voice, robot=dropped))
+    return UtteranceDoa(tuple(every), replace(voice, robot=dropped), tuple(window))
+
+
+def recent_window(doa: DoaSource, now: float, *, window_s: float, tagger: Tagger) -> list[Tagged]:
+    """The clean readings of the last ``window_s`` up to the newest, tagged by ``tagger``."""
+    latest = doa.latest_doa()
+    if latest is None:
+        return []
+    every = doa.doa_between(latest.stamp_s - window_s, latest.stamp_s)
+    return [t for t in tagger.tag(every, latest.stamp_s - now) if not t.tags.own]
 
 
 def recent_voice(
@@ -427,16 +458,12 @@ def recent_voice(
     doa_map: DoaMap | None,
     min_speech: int,
     tagger: Tagger,
-    turned: Turned | None = None,
+    heading: Heading | None = None,
 ) -> VoiceBearing:
     """The live voice: the clean readings of the last ``window_s`` up to the newest, the
-    person's voice in them by ``tagger``'s rule, each turned with the cart (``turned``)."""
-    latest = doa.latest_doa()
-    if latest is None:
-        return VoiceBearing(None, None, 0, 0)
-    every = doa.doa_between(latest.stamp_s - window_s, latest.stamp_s)
-    clean = [t for t in tagger.tag(every, latest.stamp_s - now) if not t.tags.own]
-    return voice_of(clean, doa_map, min_speech, turned)
+    person's voice in them by ``tagger``'s rule, into the map by the cart's ``heading``."""
+    window = recent_window(doa, now, window_s=window_s, tagger=tagger)
+    return voice_of(window, doa_map, min_speech, heading)
 
 
 def utterance_readings(

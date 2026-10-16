@@ -7,7 +7,7 @@ while the head moved (2026-10-14). This module computes the direction itself, fr
 microphones before any processing (the 6-channel firmware's capture channels 3-6, sent by the
 board as :class:`pepin.audio_link.RawFrame`), only on the chunks the ears' Silero calls voice,
 and as a LIST of source peaks per chunk rather than one angle: the seed of tracking several
-people by voice (:class:`pepin.expression.tracks.VoiceSources`).
+people by voice (the register's peaks, :meth:`pepin.expression.people_map.Register.peak`).
 
 THE METHOD (:class:`SrpPhat`): steered-response power with PHAT weighting. Each 512-sample chunk
 (Silero's, 32 ms) is windowed and FFT'd per microphone; the six pairs' cross-spectra are
