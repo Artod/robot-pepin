@@ -18,6 +18,7 @@ import pytest
 import pepin.overlay
 from pepin.expression.fakes import FakeClock
 from pepin.sound_player import (
+    BARGE_IN,
     END,
     NEWER,
     STOP,
@@ -278,6 +279,21 @@ def test_a_sound_asked_during_a_reply_waits_for_it_and_starts_after(tree: Path) 
     assert r.row()[1]["waited_s"] == pytest.approx(1.0, abs=0.011)
 
 
+def test_a_barge_in_drops_a_sound_still_waiting_for_the_reply_it_cut(tree: Path) -> None:
+    """ "Включаю гимн..." and the person cuts in: the flush drops the sound the cut reply asked
+    for, never fed, so it does not play after the next reply."""
+    r = Rig(tree)
+    r.player.on_flush = r.sounds.flushed
+    r.busy = True
+    r.sounds.play("drum")
+    r.tick(0.3)
+    r.player.flush()
+    r.busy = False
+    r.tick(0.5)
+    assert r.client.blocks == [] and r.listener.calls == [] and r.sounds.current() is None
+    assert r.row()[1]["stopped_by"] == BARGE_IN
+
+
 def test_a_sound_waits_at_most_wait_s_for_the_voice(tree: Path) -> None:
     r = Rig(tree, wait_s=1.0)
     r.busy = True
@@ -323,7 +339,7 @@ def test_a_barge_in_s_flush_ends_the_sound_and_a_stop_fades_it(tree: Path) -> No
     r.tick(0.5)
     r.player.flush()  # the barge-in, on the mic's thread
     r.tick(0.02)
-    assert r.row()[1]["stopped_by"] == "barge-in" and r.listener.calls[-1][0] == "ended"
+    assert r.row()[1]["stopped_by"] == BARGE_IN and r.listener.calls[-1][0] == "ended"
     r.rows.clear()
     playing = r.sounds.play("drum")
     r.tick(0.5)

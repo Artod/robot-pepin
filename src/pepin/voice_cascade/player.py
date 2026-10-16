@@ -200,6 +200,8 @@ class Player:
         self.flushed_at: float | None = None
         self.on_fade: FadeSink | None = None  # told on the feeding thread, after the reply's chunk
         self.words: WordLaw | None = None  # the word clock :meth:`heard` reads, when lent
+        # told after every flush (the sound player drops a sound still waiting for the voice)
+        self.on_flush: Callable[[], None] | None = None
 
     def start(self) -> threading.Event:
         """Run the pacer on its thread; set the returned event to stop it."""
@@ -313,6 +315,8 @@ class Player:
             self.flushed_at = self.clock()
         if sound is not None and played < sound.end - 1e-6:
             sound.ended("barge-in")
+        if self.on_flush is not None:
+            self.on_flush()
         return played
 
     def queued_audio(self) -> QueuedAudio:

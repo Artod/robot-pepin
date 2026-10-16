@@ -777,6 +777,7 @@ def main() -> int:
         journal=loop.record,
         say=lambda line: print(line, flush=True),
     ).start()
+    player.on_flush = sounds.flushed  # a barge-in drops a sound still waiting for the voice
     MusicPulse(body.engine, journal=loop.record).attach(sounds)
     robot.sounds = sounds
     alive.start()

@@ -19,8 +19,9 @@ takes the speaker as a reply takes over a filler: its part not sent yet ramps to
 ``player.fade_s`` and the rest is dropped (stopped by ``speech``). The board's one stream cannot
 mix: a tune ducked under the voice would need a mix on this Mac before the pacer, which would
 move the speech's own stream clock (the marks the gestures and a barge-in's heard words are
-read on), so it is not done. A barge-in's flush drops it (``barge-in``), a newer sound replaces
-it (``a newer sound``), ``stop`` ends it with the fade.
+read on), so it is not done. A barge-in's flush drops it (``barge-in``), and drops a sound still
+waiting for the reply it cut (:meth:`StreamSoundPlayer.flushed`, the player's ``on_flush``); a
+newer sound replaces it (``a newer sound``), ``stop`` ends it with the fade.
 
 THE CLOCK. ``t0``, when the cut's first sample is heard, on the engine's clock (laptop
 monotonic): the player's own play-out clock for its first block (:meth:`SoundChannel.started_at`,
@@ -71,6 +72,7 @@ FIRST_BLOCK_S = 0.5  # the first block not sent by then: t0 is the feed's moment
 END = "end"
 STOP = "stop"  # also the tool's word for stopping
 NEWER = "a newer sound"
+BARGE_IN = "barge-in"  # the voice's flush: the person cut in (or a silent reply was dropped)
 WAITED = "the voice kept the speaker"
 
 
@@ -262,6 +264,15 @@ class StreamSoundPlayer:
     def subscribe(self, listener: BeatListener) -> None:
         """``listener`` hears every play from now."""
         self.listeners.append(listener)
+
+    def flushed(self) -> None:
+        """The voice's speaker was flushed (a barge-in; a reply dropped before a word): a sound
+        still waiting for the voice goes with the reply that asked it (one in the stream hears
+        its own cut)."""
+        with self._lock:
+            play = self._play
+            if play is not None and play.offset is None and play.cut is None:
+                play.cut = BARGE_IN
 
     # -- the thread ---------------------------------------------------------------------------
 
