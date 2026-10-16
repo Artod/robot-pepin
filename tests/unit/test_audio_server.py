@@ -27,8 +27,10 @@ from pepin.audio_server import (
     XvfHost,
     arguments,
     capture_channels,
+    clock_offset_s,
     detect_channels,
     find_array,
+    greeting,
     load_audio_config,
     reboot_array,
     resolve_device,
@@ -765,6 +767,29 @@ def test_a_listener_that_sends_nothing_outlives_the_send_timeout() -> None:
         assert received.startswith(b'{"type":"hello"}\n{"type":"pcm","seq":7')
     finally:
         server.close()
+
+
+def test_the_hello_and_every_status_tell_the_wall_clock_less_the_stamps_clock() -> None:
+    """2026-10-15: the stamps are the board's monotonic clock (33,450 s of uptime) and TF's its
+    wall clock, and the voices were asked of TF 1792080462 s in the past. The hello and each
+    status carry the offset between the two read at that moment (a step of the wall clock,
+    chrony's first sync after a boot, shows in the next status); the frames carry nothing
+    more."""
+    wall = {"now": 1_792_113_912.25}
+    assert clock_offset_s(lambda: wall["now"], lambda: 33_450.125) == 1_792_080_462.125
+    hello = greeting(arguments([]), None, None, 1_792_080_462.125)
+    assert hello["type"] == "hello" and hello["clock_offset_s"] == 1_792_080_462.125
+    assert hello["frame_samples"] == 320 and hello["raw_channels"] == 0
+    loop, _source, clock, _frames = make_loop()
+    clock.now = 33_450.125
+    player, *_ = make_player()
+    service = AudioService(AudioServer(0, lambda: hello), loop, player, None,
+                           capture_xruns=XrunCounter(), play_xruns=XrunCounter(), clock=clock,
+                           wall=lambda: wall["now"])  # fmt: skip
+    assert service.status(clock.now)["clock_offset_s"] == 1_792_080_462.125
+    wall["now"] += 2.5  # chrony stepped the wall clock
+    assert service.status(clock.now)["clock_offset_s"] == 1_792_080_464.625
+    assert AudioFrame(0, 33_450.125, b"\x00\x00" * 320).encode().count(b"clock") == 0
 
 
 def test_lip_sync_is_on_by_default_and_the_old_flag_still_parses() -> None:

@@ -10,12 +10,13 @@ raw bytes. A status probe with ``nc`` therefore reads plain JSON, and the audio 
 header per 20 ms frame::
 
     board -> laptop  {"type":"hello","rate":16000,"format":"s16le","channels":1,
-                      "frame_samples":320,"play_rate":16000,"raw_channels":4,...}   on connect
+                      "frame_samples":320,"play_rate":16000,"raw_channels":4,
+                      "clock_offset_s":<board wall - board monotonic>,...}       on connect
                      {"type":"pcm","seq":N,"t":<board s>,"bytes":640} + 640 bytes    listeners
                      {"type":"raw","seq":N,"t":<board s>,"ch":4,"bytes":2560} + 2560 bytes
                                                                             listeners
                      {"type":"doa","t":<board s>,"deg":0..359,"speech":true}         listeners
-                     {"type":"status",...}                                  to the asker
+                     {"type":"status","clock_offset_s":...,...}             to the asker
                      {"type":"error","error":"..."}                         to the asker
     laptop -> board  {"cmd":"listen"}                     start receiving pcm and doa
                      {"cmd":"status"}                     one status line back
@@ -27,6 +28,18 @@ header per 20 ms frame::
 read), so a frame and a direction compare directly. ``seq`` counts frames since the server
 started; a gap in it is audio that never reached this client. An unreadable header line ends
 the connection: once framing is lost, the bytes after it cannot be trusted.
+
+THE TWO CLOCKS (since 2026-10-16). ``t`` is the board's monotonic clock (its uptime: 33,450 s on
+the evening of 2026-10-15), right for ordering and latency and never stepped; TF and the camera's
+frames are on the board's wall clock, which chrony keeps within a millisecond of this Mac's. The
+hello and every status reply carry ``clock_offset_s``, the board's wall clock less its monotonic
+clock as the server reads both at that moment. The two advance together (chrony slews both
+alike) and part only when the wall clock is stepped (chrony's first sync after a boot), so one
+number per connection carries the mapping, and a status (the voice loop's keepalive asks one
+every 2 s) refreshes it after a step. :class:`AudioClient` gives every frame and reading the
+offset it holds when they arrive (``clock_offset_s``; None from a server that sends none), and
+their ``wall_s`` is the moment on the wall clock, what TF is asked a pose at: on 2026-10-15 the
+speaker gaze asked TF at the monotonic stamps and every voice was refused as "1792080462 s old".
 
 A ``raw`` frame (since 2026-10-14, the 6-channel firmware with ``raw_mics`` on, config/audio.json)
 is the same 20 ms as the ``pcm`` frame of the same ``seq`` and ``t``, but the array's four
@@ -40,6 +53,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import math
 import os
 import socket
 import threading
@@ -119,6 +133,20 @@ class FrameDecoder:
                 out.append((header, b""))
 
 
+def wall_of(stamp_s: float, clock_offset_s: float | None) -> float | None:
+    """A board monotonic stamp on the board's wall clock; None without the offset."""
+    return None if clock_offset_s is None else stamp_s + clock_offset_s
+
+
+def offset_of(header: dict[str, Any]) -> float | None:
+    """A hello's or a status's ``clock_offset_s``; None when absent (an older server) or no
+    finite number."""
+    value = header.get("clock_offset_s")
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return float(value) if math.isfinite(value) else None
+
+
 def _header(line: bytes) -> dict[str, Any]:
     """One header line as a JSON object; raises :class:`ProtocolError` for anything else."""
     try:
@@ -138,6 +166,12 @@ class AudioFrame:
     stamp_s: float  # board monotonic clock at the first sample
     pcm: bytes
     rate: int = RATE
+    clock_offset_s: float | None = None  # the board's wall clock less stamp_s's clock (the link's)
+
+    @property
+    def wall_s(self) -> float | None:
+        """The first sample on the board's wall clock (TF's); None without the offset."""
+        return wall_of(self.stamp_s, self.clock_offset_s)
 
     @property
     def samples(self) -> int:
@@ -165,6 +199,12 @@ class RawFrame:
     pcm: bytes  # interleaved: sample 0 of mic 0, sample 0 of mic 1, ...
     channels: int = 4
     rate: int = RATE
+    clock_offset_s: float | None = None  # the board's wall clock less stamp_s's clock (the link's)
+
+    @property
+    def wall_s(self) -> float | None:
+        """The first sample on the board's wall clock (TF's); None without the offset."""
+        return wall_of(self.stamp_s, self.clock_offset_s)
 
     @property
     def samples(self) -> int:
@@ -185,11 +225,19 @@ class RawFrame:
 @dataclass(frozen=True)
 class DoaReading:
     """Where the array hears the voice: degrees in the array's own frame (Seeed's diagram:
-    0 toward the USB-C connector), whether it calls it speech, and when it was read."""
+    0 toward the USB-C connector), whether it calls it speech, and when it was read (the
+    board's monotonic clock, and the link's offset onto its wall clock: ``wall_s``)."""
 
     stamp_s: float  # board monotonic clock at the read
     deg: int  # 0..359
     speech: bool
+    clock_offset_s: float | None = None  # the board's wall clock less stamp_s's clock (the link's)
+
+    @property
+    def wall_s(self) -> float | None:
+        """The read on the board's wall clock (TF's): the moment a pose is asked at; None
+        without the offset."""
+        return wall_of(self.stamp_s, self.clock_offset_s)
 
     def encode(self) -> bytes:
         """The reading on the wire."""
@@ -198,27 +246,34 @@ class DoaReading:
         )
 
 
-def parse_frame(header: dict[str, Any], payload: bytes, rate: int = RATE) -> AudioFrame:
-    """A ``pcm`` message back into a frame; raises ValueError when it is malformed."""
+def parse_frame(
+    header: dict[str, Any], payload: bytes, rate: int = RATE, clock_offset_s: float | None = None
+) -> AudioFrame:
+    """A ``pcm`` message back into a frame (``clock_offset_s``: the link's, the hello's or the
+    newest status's); raises ValueError when it is malformed."""
     if len(payload) % SAMPLE_BYTES:
         raise ValueError(f"pcm payload of {len(payload)} bytes is not whole samples")
-    return AudioFrame(int(header["seq"]), float(header["t"]), payload, rate)
+    return AudioFrame(int(header["seq"]), float(header["t"]), payload, rate, clock_offset_s)
 
 
-def parse_raw(header: dict[str, Any], payload: bytes, rate: int = RATE) -> RawFrame:
-    """A ``raw`` message back into a frame; raises ValueError when it is malformed."""
+def parse_raw(
+    header: dict[str, Any], payload: bytes, rate: int = RATE, clock_offset_s: float | None = None
+) -> RawFrame:
+    """A ``raw`` message back into a frame (``clock_offset_s``: the link's); raises ValueError
+    when it is malformed."""
     channels = int(header["ch"])
     if channels < 1 or len(payload) % (SAMPLE_BYTES * channels):
         raise ValueError(f"raw payload of {len(payload)} bytes is not whole {channels}-ch samples")
-    return RawFrame(int(header["seq"]), float(header["t"]), payload, channels, rate)
+    return RawFrame(int(header["seq"]), float(header["t"]), payload, channels, rate, clock_offset_s)
 
 
-def parse_doa(header: dict[str, Any]) -> DoaReading:
-    """A ``doa`` message back into a reading; raises ValueError when it is malformed."""
+def parse_doa(header: dict[str, Any], clock_offset_s: float | None = None) -> DoaReading:
+    """A ``doa`` message back into a reading (``clock_offset_s``: the link's); raises ValueError
+    when it is malformed."""
     deg = int(header["deg"])
     if not 0 <= deg < 360:
         raise ValueError(f"doa angle {deg} outside 0..359")
-    return DoaReading(float(header["t"]), deg, bool(header["speech"]))
+    return DoaReading(float(header["t"]), deg, bool(header["speech"]), clock_offset_s)
 
 
 class Speaker(Protocol):
@@ -290,8 +345,10 @@ class AudioClient:
     the raw microphone frames into their own (:meth:`next_raw`; dropped and counted in
     ``raw_overflowed`` while nobody reads them: a client that wants the processed voice alone
     pays nothing for them), keeps the last few seconds of directions, and answers
-    :meth:`status`. Sends are blocking and serialised; the board never stops reading, so they
-    only wait on the network.
+    :meth:`status`. Every frame and direction carries the board's clock offset the client
+    holds when it arrives (the hello's, then each status's: the module's THE TWO CLOCKS).
+    Sends are blocking and serialised; the board never stops reading, so they only wait on the
+    network.
     """
 
     def __init__(
@@ -316,6 +373,7 @@ class AudioClient:
         self._doa_arrived = 0.0
         self._hello: dict[str, Any] | None = None
         self._rate = RATE
+        self._clock_offset: float | None = None  # the board's wall less monotonic clock
         self._status: dict[str, Any] | None = None
         self._status_count = 0
         self._last_seq: int | None = None
@@ -358,6 +416,12 @@ class AudioClient:
     def raw_channels(self) -> int:
         """Microphones the board streams raw (0: none, the 2-channel firmware or the switch off)."""
         return int(self.hello.get("raw_channels", 0))
+
+    @property
+    def clock_offset_s(self) -> float | None:
+        """The board's wall clock less its monotonic clock, as the hello or the newest status
+        told it; None from a server that tells none (a build before 2026-10-16)."""
+        return self._clock_offset
 
     def next_frame(self, timeout_s: float = 1.0) -> AudioFrame | None:
         """The oldest unread frame, waiting up to ``timeout_s``; None on timeout or when closed."""
@@ -459,9 +523,9 @@ class AudioClient:
         kind = header.get("type")
         try:
             if kind == "pcm":
-                self._take_frame(parse_frame(header, payload, self._rate))
+                self._take_frame(parse_frame(header, payload, self._rate, self._clock_offset))
             elif kind == "raw":
-                raw = parse_raw(header, payload, self._rate)
+                raw = parse_raw(header, payload, self._rate, self._clock_offset)
                 with self._cond:
                     if len(self._raw) == self._raw.maxlen:
                         self.raw_overflowed += 1
@@ -469,7 +533,7 @@ class AudioClient:
                     self.raw_received += 1
                     self._cond.notify_all()
             elif kind == "doa":
-                reading = parse_doa(header)
+                reading = parse_doa(header, self._clock_offset)
                 with self._cond:
                     self._doa.append(reading)
                     while (
@@ -480,10 +544,14 @@ class AudioClient:
             elif kind == "hello":
                 with self._cond:
                     self._rate = int(header.get("rate", RATE))
+                    self._clock_offset = offset_of(header)
                     self._hello = header
                     self._cond.notify_all()
             elif kind == "status":
+                offset = offset_of(header)
                 with self._cond:
+                    if offset is not None:  # a step of the board's wall clock since the hello
+                        self._clock_offset = offset
                     self._status = header
                     self._status_count += 1
                     self._cond.notify_all()

@@ -24,6 +24,12 @@ Three jobs, one TCP port (3338, framing in :mod:`pepin.audio_link`):
 A ``status`` command reports whether capture is alive, frames per second, dropouts, the age of
 the last direction and the playback's state; the same numbers go to the journal once a minute.
 
+**The clocks.** Every stamp is the board's monotonic clock; the hello and every status reply
+carry ``clock_offset_s``, the wall clock less the monotonic one read here at that moment
+(:func:`clock_offset_s`), so the laptop asks TF for a reading's moment on the wall clock
+(:mod:`pepin.audio_link`, THE TWO CLOCKS). Zero bytes a frame: the offset only moves when the
+wall clock is stepped.
+
 Run on the board (see ``board/pepin-audio.service``)::
 
     python -m pepin.audio_server --port 3338
@@ -81,6 +87,14 @@ FPS_WINDOW_S = 5.0
 DEFAULT_CHANNELS = 2  # the 2-channel firmware, and what an unreadable stream file falls back to
 RAW_CHANNELS = (2, 3, 4, 5)  # the four microphones in the 6-channel firmware's capture (0-based)
 AUDIO_CONFIG = "audio.json"  # config/audio.json: the switch and the capture's channel count
+
+
+def clock_offset_s(
+    wall: Callable[[], float] = time.time, monotonic: Callable[[], float] = time.monotonic
+) -> float:
+    """The board's wall clock less its monotonic clock now (the stamps' clock), to the
+    microsecond: what turns a stamp into a moment on the wall clock TF and the camera use."""
+    return round(wall() - monotonic(), 6)
 
 
 # -- the sound card ----------------------------------------------------------------------------
@@ -1452,10 +1466,12 @@ class AudioService:
         capture_xruns: XrunCounter,
         play_xruns: XrunCounter,
         clock: Callable[[], float] = time.monotonic,
+        wall: Callable[[], float] = time.time,
         lipsync: LipSync | None = None,
     ) -> None:
         """``doa`` None: no direction (``--doa-hz 0``); the xrun counters are arecord's
-        overruns (audio lost) and aplay's underruns (the speaker ran dry); ``lipsync`` the
+        overruns (audio lost) and aplay's underruns (the speaker ran dry); ``clock`` the stamps'
+        monotonic clock and ``wall`` the wall clock its offset is told against; ``lipsync`` the
         player's (``--lipsync``), stepped on a thread of its own."""
         self._server = server
         self._capture = capture
@@ -1465,6 +1481,7 @@ class AudioService:
         self._capture_xruns = capture_xruns
         self._play_xruns = play_xruns
         self._clock = clock
+        self._wall = wall
         self._started = clock()
 
     def handle(self, header: dict[str, Any], payload: bytes) -> dict[str, Any] | None:
@@ -1483,7 +1500,8 @@ class AudioService:
         return None
 
     def status(self, now: float) -> dict[str, Any]:
-        """Whether capture is alive, frames/s, dropouts, the direction's age, the playback."""
+        """Whether capture is alive, frames/s, dropouts, the direction's age, the playback, and
+        the clocks' offset (``clock_offset_s``: the wall clock less the stamps' clock now)."""
         cap = self._capture
         last = cap.last_frame_at
         doa = self._doa
@@ -1493,6 +1511,7 @@ class AudioService:
         return {
             "type": "status",
             "t": round(now, 6),
+            "clock_offset_s": clock_offset_s(self._wall, self._clock),
             "uptime_s": round(now - self._started, 1),
             "capture_alive": cap.alive(now),
             "device": cap.where,
@@ -1575,6 +1594,29 @@ class AudioService:
             self._server.close()
 
 
+def greeting(
+    args: argparse.Namespace,
+    capture: CaptureLoop | None,
+    doa: DoaPoller | None,
+    clock_offset: float,
+) -> dict[str, Any]:
+    """The hello a client gets on connect: what the frames are, where they come from, and the
+    clocks' offset at that moment (:func:`clock_offset_s`)."""
+    return {
+        "type": "hello",
+        "rate": args.rate,
+        "format": "s16le",
+        "channels": 1,
+        "frame_samples": FRAME_SAMPLES,
+        "channel": args.channel,
+        "raw_channels": capture.raw_channels if capture else 0,
+        "play_rate": args.play_rate,
+        "device": capture.where if capture else "",
+        "firmware": doa.firmware if doa else None,
+        "clock_offset_s": clock_offset,
+    }
+
+
 def stop_on_sigterm() -> threading.Event:
     """An event SIGTERM sets: systemd's stop then kills arecord and aplay on the way out."""
     stop = threading.Event()
@@ -1644,20 +1686,9 @@ def main() -> None:
     doa_ref: list[DoaPoller] = []
 
     def hello() -> dict[str, Any]:
-        """The greeting: what the frames are and where they come from."""
+        """The greeting (:func:`greeting`), the clocks' offset read at each connect."""
         capture = capture_ref[0] if capture_ref else None
-        return {
-            "type": "hello",
-            "rate": args.rate,
-            "format": "s16le",
-            "channels": 1,
-            "frame_samples": FRAME_SAMPLES,
-            "channel": args.channel,
-            "raw_channels": capture.raw_channels if capture else 0,
-            "play_rate": args.play_rate,
-            "device": capture.where if capture else "",
-            "firmware": doa_ref[0].firmware if doa_ref else None,
-        }
+        return greeting(args, capture, doa_ref[0] if doa_ref else None, clock_offset_s())
 
     server = AudioServer(args.port, hello)
     xvf = XvfHost(args.xvf_host)

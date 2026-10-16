@@ -50,7 +50,7 @@ from dataclasses import dataclass, field
 from typing import Literal
 
 from pepin.expression.poses import HeadModel, PosesAt, Vec
-from pepin.expression.pursuit import Pursuit
+from pepin.expression.pursuit import FIT_SLACK_S, LEAD_FIT_S, Pursuit
 from pepin.expression.speaker import FaceFrame, FaceSighting, Point
 
 Source = Literal["face", "body", "voice", "told"]
@@ -237,14 +237,17 @@ class Register:
         min_new_px: float = 40.0,
         tilt_hold_deg: float = 0.0,
         half_life_s: float = 60.0,
+        lead_fit_s: float = LEAD_FIT_S,
     ) -> None:
-        """The association's angles in degrees, the times in seconds."""
+        """The association's angles in degrees, the times in seconds (``lead_fit_s``: the span
+        a person's velocity is fitted over, :class:`pepin.expression.pursuit.Pursuit`)."""
         self.match_rad = math.radians(match_deg)
         self.voice_match_rad = math.radians(voice_match_deg)
         self.tilt_hold_rad = math.radians(tilt_hold_deg)
         self.seen_fresh_s, self.forget_s = seen_fresh_s, forget_s
         self.max_people, self.min_new_px = max_people, min_new_px
         self.half_life_s = half_life_s
+        self.lead_fit_s = lead_fit_s
         self.people: list[Person] = []
         self._ids = itertools.count(1)
 
@@ -423,8 +426,10 @@ class Register:
         person.range_m, person.range_from, person.height_from = range_m, how, s_source
         if person.origin == "peaks":  # the camera found a voice the array alone placed
             person.origin = "camera"
-        if s.exposed:  # a velocity is fitted on exposures' stamps alone
-            person.motion.add(s.stamp, point, s.source)
+        if s.exposed:  # a velocity is fitted on exposures' stamps alone, across the ray
+            person.motion.fit_s = self.lead_fit_s
+            person.motion.window_s = self.lead_fit_s + FIT_SLACK_S
+            person.motion.add(s.stamp, point, s.source, s.direction)
         if s.face is not None:
             person.face_s, person.face = s.stamp, s.face
             person.who = s.face.who or person.who

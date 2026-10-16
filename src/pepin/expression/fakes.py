@@ -391,7 +391,9 @@ class FakeTf:
     pose in the map at a board stamp (``cart_at``: x, y and heading in degrees; at the origin
     facing +x by default) and the head's angles then (``head_at``; None: no camera pose),
     composed through ``model``'s neck; ``now`` the board's clock (a stamp of None is TF's
-    newest, at it). Every request is kept; ``refuse`` fails each with that reason."""
+    newest, at it). Every request is kept; ``refuse`` fails each with that reason. With
+    ``history_s`` a stamp is refused as the goal server refuses it: older than that, ``too_old``
+    (its TF_HISTORY_S), or more than ``ahead_s`` past ``now``, ``ahead``."""
 
     model: HeadModel
     now: Callable[[], float]
@@ -399,6 +401,22 @@ class FakeTf:
     head_at: Callable[[float], Aim | None] = lambda t: None
     refuse: str | None = None
     asked: list[tuple[tuple[float | None, ...], bool]] = field(default_factory=list)
+    history_s: float | None = None
+    ahead_s: float = 1.0
+
+    def refusal(self, stamp: float | None) -> str:
+        """Why the goal server would not look ``stamp`` up (its words), "" when it would."""
+        if stamp is None or self.history_s is None:
+            return ""
+        age = self.now() - stamp
+        if age > self.history_s:
+            return (
+                f"base_link: too_old: the stamp is {age:.1f} s old and TF keeps"
+                f" {self.history_s:g} s of history"
+            )
+        if -age > self.ahead_s:
+            return f"base_link: ahead: the stamp is {-age:.1f} s past this node's clock"
+        return ""
 
     def base(self, stamp: float) -> Pose:
         """``map <- base_link`` at ``stamp``."""
@@ -418,6 +436,10 @@ class FakeTf:
         found: list[PosesAt] = []
         for stamp in stamps:
             at = self.now() if stamp is None else stamp
+            refused = self.refusal(stamp)
+            if refused:
+                found.append(PosesAt(at, None, None, refused))
+                continue
             cam = self.camera(at) if camera else None
             why = "camera_link: Extrapolation: no head" if camera and cam is None else ""
             found.append(PosesAt(at, cam, self.base(at), why))
