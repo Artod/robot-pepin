@@ -67,6 +67,7 @@ from pepin.expression.tracker import (
     MOVED,
     NO_WALL,
     SIGHTED,
+    TURNING,
     VOICED,
     SpeakerGaze,
     SpeakerGazeWorker,
@@ -589,10 +590,13 @@ def test_the_register_keeps_its_records_explicit_and_their_confidence_halves_wit
     known.named(a, "Саша")
     known.named(b, "Саша")
     assert (a.who, b.who) == (None, "Саша"), "one person a name"
-    for k in range(4):  # walking left at 0.5 m/s, 2 m ahead
+    for k in range(6):  # walking left round the lens at 0.5 m/s, 1.33 m from it, for 0.5 s
         known.seen([seen_at(math.degrees(math.atan2(0.05 * k, 1.333)), 0.0, stamp=1.0 + 0.1 * k)],
                    1.0 + 0.1 * k)  # fmt: skip
-    assert a.velocity[1] == pytest.approx(0.5, abs=0.05) and abs(a.velocity[0]) < 0.05
+    vx, vy, vz = a.velocity
+    ray = axis_dir(math.degrees(math.atan2(0.25, 1.333)), 0.0)  # his newest sighting's
+    assert math.hypot(vx, vy) == pytest.approx(0.5, abs=0.05) and vy > 0.45, "his walk"
+    assert vx * ray[0] + vy * ray[1] + vz * ray[2] == pytest.approx(0.0, abs=1e-9), "across it"
     assert a.confidence(a.stamp, 10.0) == pytest.approx(1.0)
     assert a.confidence(a.stamp + 10.0, 10.0) == pytest.approx(0.5)
     assert b.confidence(b.stamp + 20.0, 10.0) == pytest.approx(0.5 / 4), "a voice's: half"
@@ -1176,7 +1180,9 @@ def test_a_face_lost_for_good_fades_to_where_the_voice_was_heard_since() -> None
     now = r.run(4.0, max(read, now))
     assert r.machine.phase == "voice", r.said[-3:]
     assert r.aimed()[-1] == (78.0, 3.0) and r.reaims()[-1]["why"] == "to the voice"
-    assert r.reaims()[-1]["speed"] == "adjust"
+    # +78 is past the arc: the body's turn is asked first (NoWheels refuses it a tick later),
+    # so the adjustment goes at the turn's profile, the arbiter's follow to keep up with it
+    assert r.reaims()[-1]["speed"] == TURNING
 
 
 def test_past_the_arc_the_wheels_start_with_the_head_and_tf_keeps_the_head_on_his_point() -> None:

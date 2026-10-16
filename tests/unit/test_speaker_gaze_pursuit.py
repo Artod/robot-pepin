@@ -8,8 +8,9 @@ odometry would say (2026-10-15: the front wheels on the stand spun at -35 deg/s,
 not turn, and the head was re-aimed off the person 143 times "by the odometry").
 
 The engine runs on a simulated arbiter and neck (each point resolved to pan and tilt from the
-cart's true pose, followed every 0.05 s as the node's step does and written again past its
-settle tolerance, driven along its aim's own ease; the state read at the pose of 20 ms before,
+cart's true pose, followed every 0.05 s as the node's step does, its bearing carried round with
+the turn into the reach, and written again past its settle tolerance, driven along its aim's
+own ease; the state read at the pose of 20 ms before,
 as the arbiter's newest encoder reading, stamped with that reading's own moment on the board's
 clock), a simulated TF (the cart's true heading and the neck's pose at any stamp, through the
 real neck's lever arms and the real eye), a simulated perception service (a frame exposed every
@@ -41,7 +42,7 @@ from pepin.expression.poses import BoardClock, HeadModel, Pose
 from pepin.expression.pursuit import Pursuit
 from pepin.expression.speaker import Ease, FaceFrame, FaceSighting, GazeAnswer, HeadView, Point
 from pepin.expression.tracker import LEAD, MOVED, TILT_TURN_S, SpeakerGaze, SpeakerSettings
-from pepin.gaze import HOME, Aim, Reach, Speed
+from pepin.gaze import HOME, Aim, Carried, Reach, Speed
 from pepin.mounts import load_camera_mounts
 from pepin.neck import NeckConfig
 
@@ -84,11 +85,11 @@ def axis(
 Where = Callable[[float], tuple[float, float]]  # a person's (pan, tilt) degrees at a moment
 
 
-def person_at(where: Where, t: float) -> Point:
+def person_at(where: Where, t: float, range_m: float = RANGE_M) -> Point:
     """A person's head in the map at ``t``: where the head would look to see them with the cart
-    at the origin facing +x, ``RANGE_M`` from the lens."""
+    at the origin facing +x, ``range_m`` from the lens."""
     pan, tilt = where(t)
-    x, y, z = MODEL.axis_point(Aim(rad(pan), rad(tilt)), RANGE_M)
+    x, y, z = MODEL.axis_point(Aim(rad(pan), rad(tilt)), range_m)
     return Point(x, y, z)
 
 
@@ -134,6 +135,7 @@ class Neck:
     aims: list[tuple[float, Point, Aim, Ease | None]] = field(default_factory=list)
     writes: list[tuple[float, float, float, str]] = field(default_factory=list)  # t, pan, tilt
     held: Point | None = None
+    carried: Carried | None = None  # the follow's bearing, carried round (pepin.gaze.Carried)
     next_follow: float = 0.0
     holder: str = ""
     settled_s: float | None = 0.0
@@ -158,7 +160,7 @@ class Neck:
             self.t += dt
             if self.held is not None and self.t >= self.next_follow - 1e-9:
                 self.next_follow = self.t + FOLLOW_S
-                there = self.resolve(self.held, self.t)
+                there = self.follow_view(self.held, self.t)
                 if max(abs(there[0] - self.target[0]), abs(there[1] - self.target[1])) > (
                     SETTLE_DEG
                 ):
@@ -170,6 +172,18 @@ class Neck:
                 if (self.pan, self.tilt) == self.goal and self.v == [0.0, 0.0]:
                     self.goal, self.settled_s = None, self.t
             self.poses.append((self.t, self.pan, self.tilt))
+
+    def follow_view(self, point: Point, t: float) -> tuple[float, float]:
+        """The arbiter's follow (:meth:`pepin.gaze.Arbiter.follow`): ``point`` resolved anew
+        with the cart where it truly is at ``t``, its bearing carried round from the last and
+        clamped into the reach (an end the turn carried it past is held)."""
+        aim = MODEL.aim_at(self.cart.pose(t).to_frame(point))
+        raw = math.remainder(aim.pan_rad, math.tau)
+        last = self.carried
+        carried = Carried.start(raw, rad(self.target[0])) if last is None else last.on(raw)
+        self.carried = carried
+        held = REACH.clamp(Aim(carried.pan, aim.tilt_rad))
+        return deg(held.pan_rad), deg(held.tilt_rad)
 
     def write(self, there: tuple[float, float], why: str) -> None:
         """One write of the target (the head moves toward it from where it is)."""
@@ -203,7 +217,7 @@ class Neck:
         there = self.resolve(point, self.t)
         self.aims.append((self.t, point, Aim(rad(there[0]), rad(there[1])), ease))
         self.limits = (ease.speed_deg_s, ease.acc_deg_s2) if ease is not None else (200.0, 650.0)
-        self.held, self.next_follow = point, self.t + FOLLOW_S
+        self.held, self.next_follow, self.carried = point, self.t + FOLLOW_S, None
         self.write(there, "aim")
         self.holder = SPEAKER
         return GazeAnswer("done", head=Aim(rad(there[0]), rad(there[1])))
@@ -227,15 +241,15 @@ class Neck:
 
 @dataclass
 class Channel:
-    """The perception service: a frame exposed every ``period_s``, its record readable
-    ``latency_s`` after the exposure; a look is the newest record past the last one given and
-    exposed at ``not_before`` or later, or the next one waited for (the long poll: the clock
-    moves on meanwhile, :attr:`wait`; up to ``wait_s``, then None), None while the service
-    gives none (``down``); the person's face is where the camera's pose AT THE EXPOSURE (the
-    cart's true heading, the head's pose) sees their point, with the detector's jitter, its
-    width by its distance, unless it is turned ``away`` (records without it, by their
-    exposure); ``others``' faces the same way (never turned away). Its stamps are on the board's
-    clock (the neck's ``board0``)."""
+    """The perception service: a frame exposed every ``period_s``, its record readable ``latency_s``
+    after the exposure; a look is the newest record past the last one given and exposed at
+    ``not_before`` or later, or the next one waited for (the long poll: the clock moves on
+    meanwhile, :attr:`wait`; up to ``wait_s``, then None), None while the service gives none
+    (``down``); the person's face is where the camera's pose AT THE EXPOSURE (the cart's true
+    heading, the head's pose) sees their point, with the detector's jitter, its width by its
+    distance (its size saying up to ``range_jitter_m`` off), unless it is turned ``away``
+    (records without it, by their exposure); ``others``' faces the same way (never turned away).
+    Its stamps are on the board's clock (the neck's ``board0``)."""
 
     neck: Neck
     where: Where
@@ -244,6 +258,8 @@ class Channel:
     latency_s: float = 0.15
     wait_s: float = 0.4
     jitter_deg: float = 0.3
+    range_m: float = RANGE_M  # the people stand this far from the lens
+    range_jitter_m: float = 0.0  # the face's size says its range this much off either way
     shown: bool = True
     down: tuple[float, float] | None = None
     away: tuple[float, float] | None = None
@@ -289,13 +305,16 @@ class Channel:
     def _face(self, where: Where, exposed: float) -> FaceSighting | None:
         """A person's face in the frame exposed at ``exposed``, None when out of the view."""
         camera = self.camera(exposed)
-        point = person_at(where, exposed)
+        point = person_at(where, exposed, self.range_m)
         pan, tilt = MODEL.angles(camera, point)
         pan += self.rng.gauss(0.0, self.jitter_deg)
         tilt += self.rng.gauss(0.0, self.jitter_deg)
         seen = abs(pan) <= EYE_PAN_DEG and abs(tilt) <= EYE_TILT_DEG
         eye = camera.to_map(MODEL.ray(0.0, 0.0)[0])
-        width = FACE_PX_M / eye.distance(point)
+        sized = eye.distance(point)
+        if self.range_jitter_m > 0.0:
+            sized += self.rng.uniform(-self.range_jitter_m, self.range_jitter_m)
+        width = FACE_PX_M / sized
         return FaceSighting(pan, tilt, width, 0.8) if seen else None
 
 
@@ -347,7 +366,8 @@ class Sim:
                 seq, at = self.channel.seq, self.t
                 self.due = self.machine.tick(at)
                 self._placed(seq, at)
-            person = bearing_of(self.cart, person_at(self.channel.where, self.t), self.t)
+            there = person_at(self.channel.where, self.t, self.channel.range_m)
+            person = bearing_of(self.cart, there, self.t)
             self.trace.append((self.t, self.neck.pan, person, self.machine.phase))
 
     def moved_to(self, t: float) -> None:
@@ -364,7 +384,7 @@ class Sim:
         if self.machine.seen_at.get(person.id) != at:
             return
         exposed = self.channel.exposed[seq]
-        true = person_at(self.channel.where, exposed)
+        true = person_at(self.channel.where, exposed, self.channel.range_m)
         error = bearing_of(self.cart, person.point, exposed) - bearing_of(self.cart, true, exposed)
         self.placed.append(
             Placed(exposed, error, self.neck.pose_at(exposed)[0], self.neck.pose_at(self.t)[0])
@@ -773,6 +793,119 @@ def test_at_the_wake_on_its_own_spin_no_frame_before_the_head_looks_his_way_plac
     assert s.machine.bearing is not None and abs(deg(s.machine.bearing)) <= 2.0
 
 
+# ---- the spins of 2026-10-15 evening (runs 139-141): Nav2 at 34 deg/s ----------------------------
+SPIN_DEG_S = 34.0  # Nav2's Spin as the cart turned that evening
+
+
+def stepped(start: float, step: float, t0: float, speed: float = 8.0) -> Where:
+    """A person at ``start`` deg who steps ``step`` deg aside at ``speed`` deg/s from ``t0``,
+    then stands (the map's degrees): the pursuit glides after him at its 20 deg/s floor."""
+    return walk(start, math.copysign(speed, step), t0, t0 + abs(step) / speed)
+
+
+def held_at(s: Sim, t: float) -> Point:
+    """The point the head was held on at ``t`` (the newest aim's by then)."""
+    return [point for at, point, _, _ in s.neck.aims if at <= t + 1e-9][-1]
+
+
+def spun(s: Sim, deg_: float) -> tuple[float, float]:
+    """The cart turns ``deg_`` (+ left) in TF from now at Nav2's 34 deg/s: the turn's span."""
+    t0 = s.t
+    s.neck.cart = Cart(t0, t0 + abs(deg_) / SPIN_DEG_S, deg_)
+    return t0, s.neck.cart.t1
+
+
+@pytest.mark.parametrize("who", ["own", "tool"])
+def test_a_spin_at_34_deg_s_keeps_the_head_within_3_deg_of_him_after_a_glide(who: str) -> None:
+    """Runs 139-141: the look the head was held by when the body began to turn was the
+    pursuit's glide at its 20 deg/s floor, the arbiter's follow wrote the head at that look's
+    ceilings while Nav2 spun at 34, and the head fell 65 deg behind Artem standing still,
+    catching up 3.3 s after the wheels stopped. Now the look is asked again at the TURN's
+    profile as the body begins to turn (the gaze's own spin, the arc's rule; the turn tool's,
+    kept through): the head stays within 3 deg of the point it holds (him, a glide's lead past
+    him) throughout, and rests on him."""
+    own = who == "own"
+    start = 40.0 if own else 60.0
+    s = sim(stepped(start, 6.0, 3.0), wheels=FakeWheels(), body_turn="spin",
+            arc_deg=100.0 if own else 360.0)  # fmt: skip
+    spins = FakeSpins()
+    s.machine.spins = spins
+    s.wake(start)
+    s.run(5.5)
+    glides = s.aims_between(3.0, 5.5, LEAD)
+    assert glides and s.neck.limits == (20.0, 400.0), "held by a glide at its floor"
+    if own:  # the arc narrows (a knob): he is past it, the gaze's own spin of his bearing
+        s.machine.configure(replace(s.machine.settings, arc_deg=50.0))
+        s.run(5.6)
+        assert len(spins.asked) == 1
+        spins.tell("accepted", run=1, deg=spins.asked[0])
+        t0, t1 = spun(s, spins.asked[0])
+    else:  # the turn tool turns the cart 100 deg left: his bearing sweeps 66 -> -34
+        s.machine.drive(True, s.t)
+        assert s.machine.keep_person(s.t, "turn: 100") is None
+        t0, t1 = spun(s, 100.0)
+    turning = [f for f in s.rows("gaze_reaim") if f["why"] == "the body turns"]
+    assert len(turning) == 1 and turning[0]["speed"] == "turn" and s.neck.limits == (200.0, 650.0)
+    s.run(t1 + 0.1)
+    if own:
+        spins.tell("done", run=1, status=4, seconds=t1 - t0, turned_deg=spins.asked[0])
+    else:
+        s.machine.drive(False, s.t)
+    s.run(t1 + 1.5)
+    off = [abs(head - bearing_of(s.cart, held_at(s, t), t))
+           for t, head, _, _ in s.trace if t0 <= t <= t1 + 1.5]  # fmt: skip
+    assert max(off) <= 3.0, max(off)
+    assert abs(s.neck.pan - s.trace[-1][2]) <= 4.0, "at rest on him (a glide's lead past him)"
+    assert {phase for t, _, _, phase in s.trace if t >= t0} == {"track"}, "never lost"
+
+
+def test_a_180_deg_spin_that_leaves_him_behind_holds_the_head_at_the_end_never_across() -> None:
+    """Run 140: a 180 deg turn left with Artem at -20 deg carried his bearing past the right
+    end of the neck (-167) and through the 29 deg behind it to +160, inside the reach on the
+    other side; the arbiter took that afresh and the head swept 288 deg through the front after
+    him. Carried round with the turn, his bearing stays past the right end: the head comes down
+    to -167 with him and holds there, never a degree back toward the front, nothing written
+    or aimed on the left; he is still seen at the eye's edge, and kept."""
+    s = sim(walk(-20.0, 0.0, 0.0, 0.0), wheels=FakeWheels(), body_turn="spin", arc_deg=360.0)
+    s.wake(-20.0)
+    s.run(3.0)
+    s.machine.drive(True, s.t)
+    assert s.machine.keep_person(s.t, "turn: 180") is None
+    t0, t1 = spun(s, 180.0)
+    s.run(t1 + 0.1)
+    s.machine.drive(False, s.t)
+    s.run(t1 + 2.0)
+    lo = deg(REACH.pan[0])
+    pans = [head for t, head, _, _ in s.trace if t >= t0]
+    assert all(b <= a + 0.5 for a, b in itertools.pairwise(pans)), "never back toward the front"
+    assert max(pans) <= -15.0 and s.neck.pan == pytest.approx(lo, abs=1.5), "held at the end"
+    assert not [w for w in s.neck.writes if w[0] >= t0 and w[1] > 0.0], "nothing on the left"
+    assert not [f for f in s.rows("gaze_reaim") if f["pan_deg"] is not None
+                and f["pan_deg"] > 0.0 and f["status"] == "sent"], "no aim across"  # fmt: skip
+    assert bearing_of(s.cart, person_at(s.channel.where, s.t), s.t) == pytest.approx(160.0, abs=2.0)
+
+
+@pytest.mark.parametrize(("range_m", "jitter_m"), [(1.2, 0.45), (0.8, 0.3)])
+def test_a_seated_person_whose_face_size_jumps_gets_no_lead_and_no_walk(
+    range_m: float, jitter_m: float
+) -> None:
+    """2026-10-15: a seated person's point jumped up to 0.45 m (a face's range is its size) and
+    the pursuit read 31-38 deg/s and led the head 10 deg, the cap, 18 times. Artem sits still
+    at +30, 1.2 m away with his face's size saying 0.75-1.65 m frame by frame, or 0.8 m away
+    saying 0.5-1.1 m (the fit of three sightings over the whole motion read 5-7 leads of up to
+    6 deg, and 10-12 at the 10 deg cap): the jumps lie along the ray from the eye and are no
+    velocity, so no lead and no glide; the head rests on him."""
+    s = sim(walk(30.0, 0.0, 0.0, 0.0))
+    s.channel.range_m, s.channel.range_jitter_m = range_m, jitter_m
+    s.wake(30.0)
+    s.run(12.0)
+    assert s.machine.phase == "track" and s.aims_between(2.5, 12.0, LEAD) == []
+    rows = [f for f in s.rows("gaze_reaim") if f.get("lead_deg") is not None]
+    assert all(abs(f["lead_deg"]) <= 0.5 for f in rows), [f["lead_deg"] for f in rows]
+    assert len(s.aims_between(2.5, 12.0)) <= 2, "at rest: at most a re-centre"
+    assert abs(s.neck.pan - 30.0) <= 3.0
+
+
 # ---- one clock, the board's ----------------------------------------------------------------------
 READS = [(0.02, 0.0), (0.05, 0.0), (0.02, 0.03)]  # how old a reading is when read: 20, 50, 20-50 ms
 
@@ -873,36 +1006,59 @@ def test_a_second_of_conversation_asks_the_poses_once_a_record_and_once_an_utter
 
 # ---- the parts -----------------------------------------------------------------------------------
 def test_a_pursuit_fits_the_velocity_in_the_map_on_the_frames_stamps() -> None:
+    """The velocity is fitted once the sightings span lead_fit_s (0.5 s; three over 0.2 s read
+    the frames' jitter as walking), on the frames' stamps; standing, none; another source starts
+    a new fit."""
     p = Pursuit()
-    p.add(100.0, Point(1.0, 0.0, 1.0), "face")
-    p.add(100.1, Point(1.0, 0.05, 1.0), "face")
-    assert p.velocity() == (0.0, 0.0, 0.0) and p.ahead(100.5) == (0.0, 0.0, 0.0), "two: none"
-    p.add(100.1, Point(9.0, 9.0, 9.0), "face")  # the same frame again
-    p.add(100.2, Point(1.0, 0.1, 1.0), "face")
+    for k in range(3):
+        p.add(100.0 + 0.1 * k, Point(1.0, 0.05 * k, 1.0), "face")
+    assert p.velocity() == (0.0, 0.0, 0.0) and p.ahead(100.5) == (0.0, 0.0, 0.0), "0.2 s: none"
+    p.add(100.2, Point(9.0, 9.0, 9.0), "face")  # the same frame again
+    for k in range(3, 6):
+        p.add(100.0 + 0.1 * k, Point(1.0, 0.05 * k, 1.0), "face")
     vx, vy, vz = p.velocity()
-    assert (vx, vy, vz) == pytest.approx((0.0, 0.5, 0.0))
-    assert p.ahead(100.4) == pytest.approx((0.0, 0.1, 0.0))
-    for k in range(3, 12):
-        p.add(100.0 + 0.1 * k, Point(1.0, 0.1, 1.0), "face")
-    assert p.velocity() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9) and len(p.sightings) == 6
-    p.add(101.2, Point(1.0, 0.2, 1.2), "body")
+    assert (vx, vy, vz) == pytest.approx((0.0, 0.5, 0.0)), "0.5 s: his walk"
+    assert p.ahead(100.7) == pytest.approx((0.0, 0.1, 0.0))
+    for k in range(6, 15):
+        p.add(100.0 + 0.1 * k, Point(1.0, 0.25, 1.0), "face")
+    assert p.velocity() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9) and len(p.sightings) == 7
+    p.add(101.5, Point(1.0, 0.2, 1.2), "body")
     assert p.source == "body" and len(p.sightings) == 1, "another source: a new fit"
     p.reset()
-    assert p.sightings == [] and p.last_s is None
+    assert p.sightings == [] and p.last_s is None and p.ray is None
+
+
+def test_a_face_s_range_jumping_along_its_ray_is_no_velocity_and_no_lead() -> None:
+    """2026-10-15: a seated person's point jumped up to 0.45 m (a face's range is its size: 80 /
+    width, a pixel off is 11 cm at 3 m) and the pursuit read 31-38 deg/s and led the head 10
+    deg 18 times. The jumps lie along the ray from the eye: only the motion across the newest
+    sighting's ray is a velocity, so they are none, nor is a range that drifts (the face
+    turning aside narrows its box); the same points without the ray (the whole motion, as
+    before) read the drift as 1.5 m/s."""
+    ray = (0.6, 0.8, 0.0)
+    for ranges in ([2.0, 2.45, 1.55, 2.4, 1.6, 2.3, 1.7, 2.45], [1.6 + 0.15 * k for k in range(7)]):
+        seated, before = Pursuit(), Pursuit()
+        for k, r in enumerate(ranges):
+            point = Point(r * ray[0], r * ray[1], 1.0)
+            seated.add(100.0 + 0.1 * k, point, "face", ray)
+            before.add(100.0 + 0.1 * k, point, "face")
+        assert seated.velocity() == pytest.approx((0.0, 0.0, 0.0), abs=1e-9)
+        assert seated.ahead(101.0) == pytest.approx((0.0, 0.0, 0.0), abs=1e-9), "no lead"
+    assert math.hypot(*before.velocity()) == pytest.approx(1.5), "the whole motion: a walk"
 
 
 def test_a_pursuit_expects_the_point_on_its_line_as_far_as_the_horizon_given() -> None:
     """THE MATCH's place: the fitted line at a frame's stamp, extrapolated at most the horizon
     past the newest sighting, nothing before a velocity is fitted."""
     p = Pursuit()
-    p.add(100.0, Point(2.0, 0.0, 1.0), "face")
-    p.add(100.1, Point(2.0, 0.1, 1.0), "face")
-    assert p.expected(100.3, 0.5) is None, "two sightings: no line yet"
-    p.add(100.2, Point(2.0, 0.2, 1.0), "face")
-    there = p.expected(100.3, 0.5)
-    assert there is not None and there.y == pytest.approx(0.3)
-    held = p.expected(101.5, 0.5)
-    assert held is not None and held.y == pytest.approx(0.7), "0.5 s past the newest"
+    for k in range(5):
+        p.add(100.0 + 0.1 * k, Point(2.0, 0.1 * k, 1.0), "face")
+    assert p.expected(100.5, 0.5) is None, "0.4 s of sightings: no line yet"
+    p.add(100.5, Point(2.0, 0.5, 1.0), "face")
+    there = p.expected(100.6, 0.5)
+    assert there is not None and there.y == pytest.approx(0.6)
+    held = p.expected(102.0, 0.5)
+    assert held is not None and held.y == pytest.approx(1.0), "0.5 s past the newest"
 
 
 def test_the_head_model_places_a_face_and_the_arbiter_s_geometry_finds_it_again() -> None:

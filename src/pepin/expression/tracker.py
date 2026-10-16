@@ -32,44 +32,48 @@ before):
    seen before is switched to at once; an unknown voice while someone is engaged is a check (one
    frame there, back when nobody); a sound, a quiet or a thin utterance moves nothing.
 4. HOW: the head is asked to look at a POINT (:meth:`pepin.expression.speaker.GazeDoor.aim`, a
-   ``point`` look that follows): the arbiter turns it into pan and tilt from TF's pose of now
-   (the tilt follows the point's height: a person lying on the couch is a low point) and KEEPS
-   the head on it as the cart turns or drives under it, whoever turns it (a wheel that slips turns
-   no TF, so no head). Each aim is eased on the servo's own trapezoid
+   ``point`` look that follows): the arbiter turns it into pan and tilt from TF's pose of now (the
+   tilt follows the point's height: a person lying on the couch is a low point) and KEEPS the head
+   on it as the cart turns or drives under it, whoever turns it (a wheel that slips turns no TF, so
+   no head). Each aim is eased on the servo's own trapezoid
    (:class:`pepin.expression.speaker.Ease`): a TURN (``turn_acc_deg_s2``: 20 deg in 0.35 s, 60 in
-   0.61 s) to a new person, an ADJUST (``adjust_acc_deg_s2``) for a sighting placed, a voice
-   placed and the seek's stops. Tracking is a PURSUIT (:mod:`pepin.expression.pursuit`, since
-   2026-10-14, Artem: "вижу непрерывно"): every record of the camera channel is taken whether the
-   head stands or moves, each placed with the camera's pose at its own exposure; the person's
-   velocity in the map is fitted over their sightings, and the head is aimed at their point
-   ``lead_s`` ahead along it (at most ``lead_max_deg`` past the last sighting as the cart sees
-   it), every aim sent without waiting so the frames go on while it moves, a walker's at a glide
-   of ``glide_gain`` times their angular speed; a person standing still moves the head past the
-   dead band only. A SEEK runs only when the person engaged has a point and nobody is seen there:
-   the last ``doa_follow_s`` of the voice first, then ``seek_pan_deg`` outward and inward of the
-   point at its tilt, one frame a stop, then back to the voice. While the person speaks and
-   nothing has seen them for ``seen_fresh_s``, the head FOLLOWS the voice's stream.
-5. THE BODY: one rule. The head serves any person within the forward arc (``arc_deg``) of the
-   cart's newest pose; the person engaged past it turns the body toward them
-   (:mod:`pepin.expression.plan`, at most ``wheels.max_turn_deg`` a request, again while they are
-   still past it), off this machine's thread, alongside the head's own turn, neither waiting for
-   the other. Who turns it is ``body_turn``: ``spin`` (since 2026-10-14) one request of the whole
-   turn to the goal server's ``spin``, Nav2's Spin with its own collision check
-   (:class:`GoalSpins`); ``wheels`` the expressive wheels executor's twists
-   (:mod:`pepin.expression.wheels`). Nothing of the head waits on the turn: the arbiter keeps it on
-   the person's point by TF meanwhile, and the turn's end reads the cart's pose again. A turn that
-   cannot (refused, aborted, a blocked arc, the caps) leaves the head alone on the person, as far
-   as it reaches. A person's ask outranks the gaze's own turn, and the goal server alone decides
-   it (its one rule: the spin goes with the source ``gaze``): a tool's drive that comes while the
-   gaze's spin runs cancels it there, and the spin's end says what it gave way to
-   (``cancelled_for``); the gaze's spin asked while a tool's drive runs is refused, "a drive
-   runs", and waits for the person's next words. A TOOL'S DRIVE OR TURN HOLDS THE BODY (Artem,
-   2026-10-14: "если повернулся по команде, доворот ждёт первую фразу"): from the drive's notice
-   (or the turn tool's :meth:`SpeakerGaze.keep_person`) the gaze's own body turn waits for the
-   person's next utterance with words begun after the drive ended; the head tracks them
-   meanwhile, as far as it reaches (``gaze_body_hold`` rows: held, and given back). A drive that
-   never ran (the loop's word at its end: every call refused, or the turn already facing its
-   target) holds nothing: the hold is lifted at once and the pause's people come back.
+   0.61 s) to a new person, an ADJUST (``adjust_acc_deg_s2``) for a sighting placed, a voice placed
+   and the seek's stops. Tracking is a PURSUIT (:mod:`pepin.expression.pursuit`, since 2026-10-14,
+   Artem: "вижу непрерывно"): every record of the camera channel is taken whether the head stands or
+   moves, each placed with the camera's pose at its own exposure; the person's velocity in the map
+   is fitted over their sightings once they span ``lead_fit_s``, across the eye's ray alone (a
+   face's range is its size: a range that jumps is no walk), and the head is aimed at their point
+   ``lead_s`` ahead along it (at most ``lead_max_deg`` past the last sighting as the cart sees it),
+   every aim sent without waiting so the frames go on while it moves, a walker's at a glide of
+   ``glide_gain`` times their angular speed; a person standing still moves the head past the dead
+   band only. A SEEK runs only when the person engaged has a point and nobody is seen there: the
+   last ``doa_follow_s`` of the voice first, then ``seek_pan_deg`` outward and inward of the point
+   at its tilt, one frame a stop, then back to the voice. While the person speaks and nothing has
+   seen them for ``seen_fresh_s``, the head FOLLOWS the voice's stream.
+5. THE BODY: one rule. The head serves any person within the forward arc (``arc_deg``) of the cart's
+   newest pose; the person engaged past it turns the body toward them (:mod:`pepin.expression.plan`,
+   at most ``wheels.max_turn_deg`` a request, again while they are still past it), off this
+   machine's thread, alongside the head's own turn, neither waiting for the other. Who turns it is
+   ``body_turn``: ``spin`` (since 2026-10-14) one request of the whole turn to the goal server's
+   ``spin``, Nav2's Spin with its own collision check (:class:`GoalSpins`); ``wheels`` the
+   expressive wheels executor's twists (:mod:`pepin.expression.wheels`). Nothing of the head waits
+   on the turn: the arbiter keeps it on the person's point by TF meanwhile, at the ceilings of the
+   look it holds, so the look is asked again at the TURN's profile as the turn begins and every aim
+   during it goes at that profile (2026-10-15: a glide's 20 deg/s floor fell 65 deg behind Nav2's 34
+   deg/s spin); a person the turn carries past the neck's reach holds the head at that end
+   (:meth:`pepin.gaze.Arbiter.follow`), never swept round through the front. The turn's end reads
+   the cart's pose again. A turn that cannot (refused, aborted, a blocked arc, the caps) leaves the
+   head alone on the person, as far as it reaches. A person's ask outranks the gaze's own turn, and
+   the goal server alone decides it (its one rule: the spin goes with the source ``gaze``): a tool's
+   drive that comes while the gaze's spin runs cancels it there, and the spin's end says what it
+   gave way to (``cancelled_for``); the gaze's spin asked while a tool's drive runs is refused, "a
+   drive runs", and waits for the person's next words. A TOOL'S DRIVE OR TURN HOLDS THE BODY (Artem,
+   2026-10-14: "если повернулся по команде, доворот ждёт первую фразу"): from the drive's notice (or
+   the turn tool's :meth:`SpeakerGaze.keep_person`) the gaze's own body turn waits for the person's
+   next utterance with words begun after the drive ended; the head tracks them meanwhile, as far as
+   it reaches (``gaze_body_hold`` rows: held, and given back). A drive that never ran (the loop's
+   word at its end: every call refused, or the turn already facing its target) holds nothing: the
+   hold is lifted at once and the pause's people come back.
 6. A TURN IN PLACE the gaze did not start (the turn tool's Nav2 Spin, which the cascade tells as
    a drive) keeps the person: the tool asks (:meth:`SpeakerGaze.keep_person`), the drive's pause
    is given back, the head stays on the person's point (the arbiter's, by TF) and the frames go
@@ -256,6 +260,8 @@ LEAD = "the lead"
 MOVED = "the person moved"
 SIGHTED = "a sighting placed"
 VOICED = "a voice placed"
+BODY_TURNS = "the body turns"  # the look asked again at the TURN's profile as the body turns
+TURNING = "turning"  # the rows' name of an adjustment or a glide sent at the TURN's profile
 # The tilt of a pursuit never turns back sooner than this after its last turn: the arbiter's rule
 # for overlays (gaze.clip_max_hz 2.5 as shipped, config/knobs.json; the mast rings at 5.3 Hz)
 TILT_TURN_S = tilt_turn_s(GazeSettings.clip_max_hz)
@@ -350,6 +356,7 @@ class SpeakerSettings:
     hold_for_voice: bool = True
     lead_s: float = 0.3
     lead_max_deg: float = 10.0
+    lead_fit_s: float = 0.5
     match_deg: float = 20.0
     voice_match_deg: float = 25.0
     tilt_hysteresis_deg: float = 12.0
@@ -455,6 +462,8 @@ class SpeakerSettings:
             raise ValueError("speaker: max_tracks and face_lost_frames >= 1, verify_s >= 0")
         if self.lead_max_deg < 0 or self.face_lost_s < 0 or self.seek_pan_deg < 0:
             raise ValueError("speaker: lead_max_deg, face_lost_s and seek_pan_deg >= 0")
+        if self.lead_fit_s <= 0:
+            raise ValueError("speaker: lead_fit_s > 0")
         if self.track_speaking_hz <= 0 or self.lead_s < 0 or self.aim_min_deg < 0:
             raise ValueError("speaker: track_speaking_hz > 0, lead_s and aim_min_deg >= 0")
         if self.turn_speed_deg_s <= 0 or self.turn_acc_deg_s2 < 0 or self.adjust_acc_deg_s2 < 0:
@@ -626,6 +635,7 @@ class SpeakerGaze:
         self.fallback: int | None = None  # the person a check returns to
         self.centre: Point | None = None  # the point the look (and a seek's stops) centre on
         self.aim: Point | None = None  # the point last asked of the arbiter
+        self.aim_fast = False  # ...at the TURN's profile (the follow keeps up with a body turn)
         self.stops: list[Point] | None = None  # a seek's stops still to look at (None: not begun)
         self.seek_left = 0  # frames left at this stop of a seek
         self.verifying = False  # the seek is a check that returns to ``fallback``
@@ -708,6 +718,7 @@ class SpeakerGaze:
             min_new_px=s.track_min_face_px,
             tilt_hold_deg=s.tilt_hysteresis_deg,
             half_life_s=s.people_half_life_s,
+            lead_fit_s=s.lead_fit_s,
         )
 
     @property
@@ -949,6 +960,7 @@ class SpeakerGaze:
         self.counts["spins"] += 1
         line = f"the body turns in place ({why}): the head keeps the person's point"
         self._note("gaze_spin", now, line, why=why, track=person.id, point=person.point.rounded())
+        self._turning_look(now)
         return None
 
     def closed(self, reason: str, now: float) -> None:
@@ -1052,7 +1064,8 @@ class SpeakerGaze:
         if following and self.next_follow is not None and now_ >= self.next_follow:
             self.next_follow = now + FOLLOW_EVERY_S
             self._follow(now)
-        self._arc(now, free=self.ours)
+        if self._arc(now, free=self.ours):
+            self._turning_look(now)
         turn = self.turning
         if turn is not None and turn.starts_s is not None and now_ >= turn.starts_s:
             self._go(turn, now)
@@ -1472,7 +1485,8 @@ class SpeakerGaze:
             return
         if self.turning is not None and self.turning.track != person.id:
             self._let_wheels_go("another person is engaged")
-        # The wheels first: their own checks take longer than the head's turn takes.
+        # The wheels first: their own checks take longer than the head's turn takes (the aim
+        # below goes at the turn's profile: no look asked again for it).
         self._arc(now, free=view.holder in ("", SPEAKER))
         if not self._hold(person.point, now, why, move, start=view.head, track=person.id,
                           source=person.source):  # fmt: skip
@@ -1487,7 +1501,7 @@ class SpeakerGaze:
             self._unseen(now)
 
     # ---- the body ----------------------------------------------------------------------------
-    def _arc(self, now: float, *, free: bool) -> None:
+    def _arc(self, now: float, *, free: bool) -> bool:
         """THE BODY'S ONE RULE: the head serves any person within the forward arc of the cart's
         newest pose; the person engaged past it turns the body toward them (``free``: the head
         is this source's, or nobody's). Not during a check, nor while a turn runs (a turn in
@@ -1495,7 +1509,7 @@ class SpeakerGaze:
         utterance, or for good (this conversation) when it moved the cart and still fell short
         (stalled, blocked, the back-offs spent); nor after a tool's drive or turn until the
         person's next words (:meth:`_hold_body`): the head alone stays on them meanwhile, as far
-        as it reaches."""
+        as it reaches. Whether a turn began."""
         person = self.person
         if (
             person is None
@@ -1507,13 +1521,29 @@ class SpeakerGaze:
             or self.body_hold is not None
             or person.id in self.gave_up
         ):
-            return
+            return False
         bearing = self._bearing(person.point)
         if bearing is None:
-            return
+            return False
         deg = self._body_share(bearing)
-        if deg != 0.0:
-            self._start_wheels(deg, person.id, now)
+        if deg == 0.0:
+            return False
+        self._start_wheels(deg, person.id, now)
+        return True
+
+    def _turning_look(self, now: float) -> None:
+        """The body begins to turn under the head (the gaze's own turn, or a tool's kept
+        through): the look holding the head is asked again at the TURN's profile (``turn_speed_
+        deg_s`` and ``turn_acc_deg_s2``, the gaze's fastest), which the arbiter's follow then
+        writes at as TF turns the cart. 2026-10-15, runs 139-141: the look held from the
+        pursuit was a glide at its 20 deg/s floor, Nav2 spun at 34, the head fell 65 deg behind
+        a person standing still and caught up 3.3 s after the wheels stopped."""
+        point, person = self.aim, self.person
+        if point is None or not self.ours or self.aim_fast:
+            return
+        self._hold(point, now, BODY_TURNS, "turn", flow=True,
+                   track=None if person is None else person.id,
+                   source=None if person is None else person.source)  # fmt: skip
 
     def _hold_body(self, now: float, why: str) -> None:
         """A tool's drive or turn begins: the gaze's own body turn (the arc's rule) is off until
@@ -1570,6 +1600,7 @@ class SpeakerGaze:
         self.body_waits = False
         self.gave_up.discard(person.id)
         self._start_wheels(deg, person.id, now)
+        self._turning_look(now)
         return None
 
     def _body_share(self, bearing: float) -> float:
@@ -1790,9 +1821,15 @@ class SpeakerGaze:
         given: on that profile); whether the request lives (done, or queued behind a better
         look). WHILE THE BODY TURNS, and for a person tracked (``flow``: the pursuit), the aim
         is sent without waiting (:meth:`_send`): the head is taken as ours, the answer comes
-        through the inbox. Its row carries the pan and tilt the point is from the cart's
-        newest pose, and the point."""
+        through the inbox. While the body turns every aim is at the TURN's profile (an
+        adjustment's or a glide's named ``turning`` in its row): the arbiter's follow writes the
+        head at the look's own ceilings as the cart turns under it, and a glide's 20 deg/s floor
+        fell 65 deg behind Nav2's 34 deg/s spin (2026-10-15). Its row carries the pan and tilt
+        the point is from the cart's newest pose, and the point."""
         s = self.settings
+        if self._body_turns() and move != "turn":
+            move, turning = "turn", s.ease("turn")
+            ease = None if turning is None else replace(turning, name=TURNING)
         ease = s.ease(move) if ease is None else ease
         speed: Speed = "saccade" if move == "turn" else "slow"
         target = self._aim_of(point)
@@ -1813,13 +1850,13 @@ class SpeakerGaze:
             self._note("gaze_reaim", now, None, **row, status=status, **fields)
             if status == "sent":
                 self._tilt_moved(before, target, now)
-                self.aim, self.ours = point, True
+                self.aim, self.ours, self.aim_fast = point, True, move == "turn"
             return status == "sent"
         answer = self.door.aim(point, speed=speed, ttl_s=s.ttl_s, ease=ease)
         self._note("gaze_reaim", now, None, **row, status=answer.status, **fields)
         if answer.status in ("done", "queued"):
             self._tilt_moved(before, target, now)
-            self.aim = point
+            self.aim, self.aim_fast = point, move == "turn"
             self.ours = answer.status == "done"
             if not self.ours:
                 self.report(f"the head waits: {answer.status} {answer.reason}".rstrip())
