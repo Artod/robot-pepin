@@ -20,6 +20,15 @@ speaker only that far ahead instead of the pacer's lead, since the board plays w
 sent; the reply's first chunk then turns the part of it not sent yet into a linear ramp to
 silence over ``fade_s``, on the stream's own samples, and follows it at once. The reply waits
 for what was already sent and the ramp, never for the rest of the filler.
+
+A SOUND (:mod:`pepin.sound_player`: a registry sound, a dance's beat) goes through the same
+stream (:meth:`Player.play_sound`): the board plays one stream and two writers would interleave,
+and the barge-in detector's echo model and the ears' gate see it as the robot's own sound
+(:meth:`Player.playback` says ``sound``). SPEECH WINS: speech fed while a sound has audio not yet
+sent takes the speaker as a reply takes a filler over (the sound's unsent part ramps to silence
+over its ``fade_s`` and the rest is dropped; its ``ended("speech")`` is told), a flush drops it
+(``ended("barge-in")``), :meth:`Player.stop_sound` ends it the same way. Its blocks' levels move
+no mouth (``on_level`` is the voice's).
 """
 
 from __future__ import annotations
@@ -36,8 +45,8 @@ from pepin.expression.forecast import CHAR_S, QueuedAudio
 from pepin.voice_cascade.stages import Played
 from pepin.voice_live.wake import rms_db
 
-Kind = Literal["reply", "backchannel"]
-Playback = Literal["silent", "reply", "backchannel"]
+Kind = Literal["reply", "backchannel", "sound"]
+Playback = Literal["silent", "reply", "backchannel", "sound"]
 HISTORY_BLOCKS = 3000  # ~2 min of 40 ms blocks: enough to time any turn's end
 NOTHING_DB = -120.0  # the level of no block
 
@@ -55,6 +64,18 @@ class FillerFade:
 
 
 FadeSink = Callable[[FillerFade], None]
+SoundEnded = Callable[[str], None]  # why a sound was cut: speech, barge-in, or a stop's word
+
+
+@dataclass
+class _Sound:
+    """A sound in the stream: its first and last stream second, the ramp speech fades it out
+    with, and who hears its cut."""
+
+    start: float
+    end: float
+    fade_s: float
+    ended: SoundEnded
 
 
 class WordLaw(Protocol):
@@ -161,14 +182,21 @@ class Player:
         self.rate = rate
         self.clock = clock
         self.playout = PlayoutClock(speaker, rate, clock)
+        self._on_level = on_level
         self.pacer = Pacer(
-            self.playout, rate=rate, lead_s=lead_s, block_s=block_s, on_level=on_level, clock=clock
+            self.playout,
+            rate=rate,
+            lead_s=lead_s,
+            block_s=block_s,
+            on_level=self._level if on_level is not None else None,
+            clock=clock,
         )
         self._lock = threading.Lock()
         self._fed = 0.0  # stream seconds fed (aligned to the played clock at every flush)
         self._kind: Kind = "reply"
         self._marks: dict[tuple[int, int], list[float]] = {}  # (turn, part) -> [start, end]
         self._fadeable: tuple[int, float] | None = None  # the queued filler's (turn, fade_s)
+        self._sound: _Sound | None = None  # the sound in the stream, until speech or a stop
         self.flushed_at: float | None = None
         self.on_fade: FadeSink | None = None  # told on the feeding thread, after the reply's chunk
         self.words: WordLaw | None = None  # the word clock :meth:`heard` reads, when lent
@@ -187,6 +215,7 @@ class Player:
         duration = len(pcm) / SAMPLE_BYTES / self.rate
         fade: FillerFade | None = None
         with self._lock:
+            taken = self._take_sound()  # speech wins
             if kind == "reply" and self._fadeable is not None:
                 fade = self._fade_filler(*self._fadeable)
             elif kind == "backchannel":
@@ -199,8 +228,60 @@ class Player:
                 mark = self._marks.setdefault((turn, index), [start, start])
                 mark[1] = self._fed
             self.pacer.feed(pcm)
+        if taken is not None:
+            taken.ended("speech")
         if fade is not None and self.on_fade is not None:
             self.on_fade(fade)
+
+    def play_sound(self, pcm: bytes, fade_s: float, ended: SoundEnded) -> float:
+        """Queue a sound's PCM (at the player's rate) behind whatever is queued, as one
+        utterance: the stream second its first sample is at. Speech fed after it, a flush or
+        :meth:`stop_sound` cut it and tell ``ended`` why (the module's notes); a sound already
+        in the stream is cut first (``ended("a newer sound")``)."""
+        duration = len(pcm) // SAMPLE_BYTES / self.rate
+        with self._lock:
+            older = self._take_sound()
+            start = self._fed
+            self._fed += duration
+            self._kind = "sound"
+            self._sound = _Sound(start, self._fed, fade_s, ended)
+            self._fadeable = None  # the voice let go: no filler's hold sends it short of the lead
+            self.pacer.hold(None)
+            self.pacer.feed(pcm[: len(pcm) - len(pcm) % SAMPLE_BYTES])
+            self.pacer.end()  # the board closes its device after it
+        if older is not None:
+            older.ended("a newer sound")
+        return start
+
+    def stop_sound(self, why: str = "stop") -> bool:
+        """The sound in the stream ends: its part not yet sent ramps to silence over its
+        ``fade_s`` and the rest is dropped (what was sent plays out); its ``ended(why)`` is
+        told. False when no sound had audio left to send."""
+        with self._lock:
+            taken = self._take_sound()
+        if taken is not None:
+            taken.ended(why)
+        return taken is not None
+
+    def started_at(self, offset: float) -> float | None:
+        """When stream second ``offset`` starts playing (:meth:`PlayoutClock.when`): None until
+        its block is sent."""
+        return self.playout.when(offset)
+
+    def _take_sound(self) -> _Sound | None:
+        """The sound in the stream, its part not yet sent faded and dropped (under the lock);
+        None without one, or once all of it was sent (it ends by itself, within the lead)."""
+        sound, self._sound = self._sound, None
+        if sound is None or self.playout.sent_s >= sound.end - 1e-6:
+            return None
+        _, cut = self.pacer.fade(sound.fade_s)
+        self._fed -= cut
+        return sound
+
+    def _level(self, value: float) -> None:
+        """A block's level as it plays: the voice's moves the mouth, a sound's does not."""
+        if self._kind != "sound" and self._on_level is not None:
+            self._on_level(value)
 
     def _fade_filler(self, turn: int, fade_s: float) -> FillerFade | None:
         """The reply's first chunk is here: the queued filler ramps out (under the lock)."""
@@ -221,13 +302,17 @@ class Player:
         self.pacer.end()
 
     def flush(self) -> float:
-        """Barge-in: silence the speaker now; the stream seconds that had played."""
+        """Barge-in: silence the speaker now (a sound playing too: ``ended("barge-in")``); the
+        stream seconds that had played."""
         with self._lock:
             played = self.playout.played()
+            sound, self._sound = self._sound, None
             self.pacer.flush()
             self._fed = self.playout.sent_s
             self._fadeable = None
             self.flushed_at = self.clock()
+        if sound is not None and played < sound.end - 1e-6:
+            sound.ended("barge-in")
         return played
 
     def queued_audio(self) -> QueuedAudio:
@@ -239,10 +324,13 @@ class Player:
             fed = max(0.0, self._fed - played)
             sent = max(0.0, self.playout.sent_s - played)
             fade = self._fadeable[1] if self._fadeable is not None else 0.0
+            sound = self._sound
+            if sound is not None and self.playout.sent_s < sound.end - 1e-6:
+                fade = sound.fade_s  # the reply takes the speaker from it as from a filler
         return QueuedAudio(fed, min(sent, fed), fade)
 
     def playback(self) -> Playback:
-        """What the speaker is doing: nothing, a reply, or a backchannel."""
+        """What the speaker is doing: nothing, a reply, a backchannel, or a sound."""
         return self._kind if self.pacer.speaking() else "silent"
 
     def speaking(self) -> bool:

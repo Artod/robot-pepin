@@ -51,18 +51,18 @@ prior; a dance on every other beat); the strength does NOT mark the bar's first 
 0.6-0.8, so at ``pulse.strong`` 0.6 every beat is strong); a minute of audio in 0.04-0.14 s on
 this Mac.
 
-THE CONTRACT (the board's player and the brain's tool land after the 2026-10-14 merge; their
-shape is fixed here so the listener side is written against it, and :class:`FakeSoundPlayer`
-plays it on a fake clock for tests):
+THE CONTRACT (:class:`FakeSoundPlayer` plays it on a fake clock for tests):
 
-* :class:`SoundPlayer` (the laptop's handle of the board's audio server): ``play(name)`` has the
-  board mix the cut into its one output over the TTS, from ``start_s`` for ``seconds`` (the
-  array's AEC cancels it from the mic as it cancels the voice: one output), and answers a
-  :class:`Playing` once the board has scheduled it (``t0`` the engine-clock second, laptop
-  monotonic, the cut's first sample reaches the speaker, the link's lag included; ``beats`` the
-  cut's grid as seconds from ``t0`` with strengths: :meth:`Sound.cut_beats`, the one conversion
-  from the file's seconds); ``stop(playing)`` cuts it; ``subscribe(listener)`` adds a
-  :class:`BeatListener`.
+* :class:`SoundPlayer` (:class:`pepin.sound_player.StreamSoundPlayer`: the cut through the
+  voice's own stream to the board's speaker, speech winning over it): ``play(name, seconds,
+  style)`` plays the cut from ``start_s`` for ``seconds`` (at most the entry's; the array's AEC
+  cancels it from the mic as it cancels the voice: one output) in ``style`` (None: the entry's),
+  from now or once the voice lets go of the speaker (``waiting``), and answers a
+  :class:`Playing` (``t0`` the engine-clock second, laptop monotonic, the cut's first sample
+  reaches the speaker, the link's lag included; ``beats`` the cut's grid as seconds from ``t0``
+  with strengths: :meth:`Sound.cut_beats`, the one conversion from the file's seconds);
+  ``stop(playing)`` cuts it; ``current()`` is the play asked or playing; ``subscribe(listener)``
+  adds a :class:`BeatListener`.
 * :class:`BeatListener`: ``sound_started(playing)`` as ``play`` answers; ``beat(t_beat,
   strength)`` for each beat of the cut, emitted ``pulse.lead_s`` before it sounds (``t_beat`` on
   the engine's clock; the lead covers the dance's slowest preparation, the raise to ``raised``,
@@ -73,10 +73,13 @@ plays it on a fake clock for tests):
   free for it (a beat at ``pulse.strong`` or over every part, a weaker one the head and the
   face), the way the voice's accents become ``pulse_weak`` and its kin; a bare ``{dance}`` of
   the brain's takes the style of the sound playing
-  (:attr:`pepin.expression.animator.GestureEngine.arg_hooks`), else the family's first (rock).
-* The brain's tool: ``sound(name)`` plays an entry (:meth:`Registry.lines` is its list); the
-  mark ``{sound:NAME}`` is reserved for it: the vocabulary parses it, the engine logs it
-  :data:`NO_PLAYER` until the tool lands.
+  (:attr:`pepin.expression.animator.GestureEngine.arg_hooks`), else the family's first (rock);
+  a ``{dance}`` mark with no sound asked or playing starts :data:`DEFAULT_BEAT` in the mark's
+  style, and ``{sound:NAME}`` plays the entry (:meth:`MusicPulse.attach
+  <pepin.expression.listeners.MusicPulse.attach>`; without a player the engine logs
+  :data:`NO_PLAYER`).
+* The brain's tool: ``sound(name, seconds)`` (:mod:`pepin.tools.sound`) plays an entry whose
+  file is here, its description naming them; ``sound("stop")`` stops it.
 """
 
 from __future__ import annotations
@@ -85,7 +88,7 @@ import itertools
 import json
 import math
 from collections.abc import Callable, Iterable, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -98,9 +101,9 @@ DEFAULT_BEAT_BPM = 120.0
 DEFAULT_BEAT_BARS = 4  # of four beats: 8 s at 120 BPM
 DEFAULT_BEAT_ACCENTS = (1.0, 0.7, 0.85, 0.7)  # each beat's strength in its bar
 DEFAULT_BEAT_METHOD = "synthesized: a beat every 0.5 s from 0 (pepin.sounds.default_beat)"
-SOUND = "sound"  # the reserved mark: {sound:NAME}, the brain's tool to come
+SOUND = "sound"  # the reserved mark: {sound:NAME}, the sound player's (pepin.sound_player)
 SOUND_LINE = f"{SOUND}:NAME — a registered sound by name"  # its line in the brain's vocabulary
-NO_PLAYER = "no player yet"  # what the engine logs for a {sound:NAME} until the tool lands
+NO_PLAYER = "no player yet"  # what the engine logs for a {sound:NAME} with no player attached
 REGISTRY_FILE = "sounds.json"  # in config/
 SOUNDS_DIR = "sounds"  # a file's root in any tree (pepin.overlay.SOUNDS)
 HOP_S = 0.01  # the onset envelope's frame step
@@ -606,13 +609,16 @@ def write_wav(path: str | Path, samples: Any, rate: int) -> None:
 
 @dataclass(frozen=True)
 class Playing:
-    """One play of a sound: the entry, the play's id, when its first sample reaches the speaker
-    (engine clock) and the cut's beats as (seconds from then, strength)."""
+    """One play of a sound: the entry as it plays (its cut and style), the play's id, when its
+    first sample reaches the speaker (engine clock) and the cut's beats as (seconds from then,
+    strength); ``waiting``: it waits for the voice to let go of the speaker, ``t0`` the moment
+    it was asked (the listeners' ``sound_started`` carries the real one)."""
 
     sound: Sound
     id: int
     t0: float
     beats: tuple[tuple[float, float], ...] = ()
+    waiting: bool = False
 
     @property
     def end(self) -> float:
@@ -637,15 +643,20 @@ class BeatListener(Protocol):
 
 
 class SoundPlayer(Protocol):
-    """The laptop's handle of the board's player (the module's notes)."""
+    """The laptop's sound player (the module's notes)."""
 
-    def play(self, name: str) -> Playing:
-        """The cut mixed into the board's output from now; ``KeyError`` for a name not in the
-        registry, ``RuntimeError`` for one without a file."""
+    def play(self, name: str, seconds: float | None = None, style: str | None = None) -> Playing:
+        """The cut (``seconds`` of it at most; None: all) to the speaker, danced in ``style``
+        (None: the entry's); ``KeyError`` for a name not in the registry, ``RuntimeError`` for
+        one without a file."""
         ...
 
     def stop(self, playing: Playing) -> None:
         """The cut cut short (nothing when it is over)."""
+        ...
+
+    def current(self) -> Playing | None:
+        """The play asked or playing, or None."""
         ...
 
     def subscribe(self, listener: BeatListener) -> None:
@@ -677,13 +688,15 @@ class FakeSoundPlayer:
         self._ids = itertools.count(1)
         self._emitted = 0
 
-    def play(self, name: str) -> Playing:
-        """As the contract says; a sound playing already is stopped first."""
+    def play(self, name: str, seconds: float | None = None, style: str | None = None) -> Playing:
+        """As the contract says (never waiting); a sound playing already is stopped first."""
         sound = self.registry.sounds[name]
         if sound.file is None and not sound.external:
             raise RuntimeError(f"sound {name!r} has no file yet")
         if self.playing is not None:
             self.stop(self.playing)
+        cut = sound.seconds if seconds is None else min(seconds, sound.seconds)
+        sound = replace(sound, seconds=cut, style=style or sound.style)
         playing = Playing(sound, next(self._ids), self.clock() + self.lag_s, sound.cut_beats())
         self.playing, self._emitted = playing, 0
         self.calls.append(("play", name))
@@ -697,6 +710,10 @@ class FakeSoundPlayer:
             return
         self.calls.append(("stop", playing.sound.name))
         self._end(playing)
+
+    def current(self) -> Playing | None:
+        """As the contract says."""
+        return self.playing
 
     def subscribe(self, listener: BeatListener) -> None:
         """As the contract says."""

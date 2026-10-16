@@ -529,6 +529,7 @@ class CascadeLoop:
         self.hearing = 0  # utterances being read
         self.last_call_s = 0.0
         self.last_reply_end_s = 0.0
+        self.last_sound_s = 0.0  # the last tick a sound played (the quiet counts from its end)
         self.last_closed_s = -1e9  # when the ears last closed an utterance
         self.held: Input | None = None  # an utterance waiting for the rest of the sentence
         self.held_s = 0.0
@@ -1974,7 +1975,10 @@ class CascadeLoop:
                 continue
             self._filler_thinking(now)
             self._filler_again(now)
-            speaking = self.player.playback() == "reply"
+            playback = self.player.playback()
+            speaking = playback == "reply"
+            if playback == "sound":  # a dance's tune is the robot's turn: no idle close under it
+                self.last_sound_s = now
             current = self.current
             answering = current is not None and not self._unsettled(current)  # not still asked
             busy = answering or not self.inputs.empty() or self.hearing > 0
@@ -1995,7 +1999,7 @@ class CascadeLoop:
                 conversation.sid, conversation.usd
             ):
                 conversation.closing = conversation.closing or "daily budget"
-            quiet_since = max(conversation.last_heard_s, self.last_reply_end_s)
+            quiet_since = max(conversation.last_heard_s, self.last_reply_end_s, self.last_sound_s)
             if self.ears.gate.talking:
                 continue
             if conversation.closing is not None:
