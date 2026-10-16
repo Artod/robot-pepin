@@ -38,6 +38,7 @@ STYLES = TABLE.style_names
 PARAMETRIC = [i for i, s in enumerate(TABLE.styles) if s.engine == "params"]
 SHAPES = [TABLE.style_id_of(s) for s in TABLE.shape_styles]  # the shape engine's styles
 ANIME = TABLE.style_id_of("anime")
+PEPIN = TABLE.style_id_of("pepin")  # a known start where a test needs one (not the default)
 
 pytestmark = pytest.mark.slow
 
@@ -192,12 +193,12 @@ def test_a_shapes_style_draws_the_same_pixels_on_the_head_and_in_the_simulator(
 def test_variants_colours_and_the_heart_come_alike_on_the_head_and_in_the_simulator(
     native: Path, node: str
 ) -> None:
-    """Thinking asked for 60 times shows itself and both variants (the same draws on both), the
-    status names thinking throughout; the kiss's colours tween in; its heart flies once, a
-    resend in flight does not restart it, one after it lands does."""
+    """In the pepin style: thinking asked for 60 times shows itself and both variants (the same
+    draws on both), the status names thinking throughout; the kiss's colours tween in; its
+    heart flies once, a resend in flight does not restart it, one after it lands does."""
     table = load_face_table(REPO / "config" / "face.json")
     thinking, kiss_heart = table.id_of("thinking"), table.id_of("kiss_heart")
-    script = []
+    script = [f"C {PEPIN} 0"]
     for i in range(60):
         script += [f"E {thinking} 1.0 0 {100 * i}", f"S {100 * i}"]
     start = 6000
@@ -233,15 +234,16 @@ def test_variants_colours_and_the_heart_come_alike_on_the_head_and_in_the_simula
 def test_the_style_switches_live_and_alike_on_the_head_and_in_the_simulator(
     native: Path, node: str
 ) -> None:
-    """A 'C' frame's style byte: the face shown tweens into its manga look (the manga palette's
-    lip colour arrives over the default transition), the variant drawn and a heart in flight
-    stay, the status names the style; back to pepin the same way; an unknown style is ignored;
-    the cat's standing wave sits at its home phase after a crawl."""
+    """A 'C' frame's style byte, from pepin: the face shown tweens into its manga look (the
+    manga palette's lip colour arrives over the default transition), the variant drawn and a
+    heart in flight stay, the status names the style; back to pepin the same way; an unknown
+    style is ignored; the cat's standing wave sits at its home phase after a crawl."""
     table = load_face_table(REPO / "config" / "face.json")
     thinking, kiss_heart, cat = (table.id_of(n) for n in ("thinking", "kiss_heart", "cat"))
     struggling = table.id_of("struggling")
     manga = TABLE.style_id_of("manga")
-    script = [f"E {thinking} 1.0 0 0", "S 0", f"C {manga} 100", "S 100", "S 240", "S 400"]
+    script = [f"C {PEPIN} 0", f"E {thinking} 1.0 0 0", "S 0", f"C {manga} 100", "S 100"]
+    script += ["S 240", "S 400"]
     script += [f"E {kiss_heart} 1.0 0 1000", "S 1000", "S 1500", "C 0 1600", "S 1600", "S 1900"]
     script += ["C 7 2000", "S 2000", f"C {manga} 2100", "S 2500"]
     script += [f"E {struggling} 1.0 0 3000", *(f"S {t}" for t in range(3000, 3701, 100))]
@@ -404,9 +406,11 @@ def test_the_idle_gestures_come_alike_on_the_head_and_in_the_simulator(
 def test_the_resting_face_comes_alive_and_never_while_speaking_or_on_an_event(
     native: Path,
 ) -> None:
+    """In the pepin style, where every gesture moves IDLE_PARAMS (the shape styles' eps and
+    breath move none of them)."""
     table = load_face_table(REPO / "config" / "face.json")
     lo, hi = table.idle.every_s
-    rest = shapes([str(native)], ["E 1 1.0 280 0", *every(50, 180_000)])
+    rest = shapes([str(native)], [f"C {PEPIN} 0", "E 1 1.0 280 0", *every(50, 180_000)])
     base = rest[100]  # 5 s in: the smile, still (breath and drift leave these four alone)
     moving = [gesturing(table, base, s) for s in rest]
     starts = [i for i in range(1, len(moving)) if moving[i] and not moving[i - 1]]
@@ -416,13 +420,13 @@ def test_the_resting_face_comes_alive_and_never_while_speaking_or_on_an_event(
         assert (start - end) * 0.05 >= lo - 0.1  # never sooner than every_s after the last
     assert not any(moving[8 : int(table.idle.settle_s / 0.05)])  # after the tween: settling
     # speech all along: the level opens the mouth, no gesture comes
-    speech = ["E 1 1.0 280 0"]
+    speech = [f"C {PEPIN} 0", "E 1 1.0 280 0"]
     for t in range(0, 120_000, 50):
         speech += [f"M 0.4 {t}", f"S {t}"]
     talking = shapes([str(native)], speech)
     assert not any(gesturing(table, base, s) for s in talking[20:])
     # an event's expression (focused) gets none either
-    focused = shapes([str(native)], ["E 12 1.0 280 0", *every(100, 120_000)])
+    focused = shapes([str(native)], [f"C {PEPIN} 0", "E 12 1.0 280 0", *every(100, 120_000)])
     assert not any(gesturing(table, focused[10], s) for s in focused[10:])
 
 
@@ -489,15 +493,15 @@ def test_the_sleepers_z_floats_up_again_and_again_in_the_manga_style(
     native: Path, node: str
 ) -> None:
     """In the manga style sleepy sends a "z" up at once and another every z_every_s while it
-    shows, none in the pepin style; a switch to manga starts them, a switch back or another
-    expression ends the one in flight at once; both models alike."""
+    shows, none in the pepin style (the start); a switch to manga starts them, a switch back
+    or another expression ends the one in flight at once; both models alike."""
     table = load_face_table(REPO / "config" / "face.json")
     sleepy, smile = table.id_of("sleepy"), table.id_of("smile")
     manga = TABLE.style_id_of("manga")
     life, every = (round(1000 * table.timing[k]) for k in ("z_s", "z_every_s"))
-    script = [f"E {sleepy} 1.0 0 0", "S 0", f"S {life // 2}", f"S {life + 1}", f"S {every - 1}",
-              f"S {every}", f"S {every + 10}", f"C {manga} 5000", "S 5000", "S 5100",
-              "C 0 6000", "S 6000", f"S {6000 + life + 1}", "S 8500",
+    script = [f"C {PEPIN} 0", f"E {sleepy} 1.0 0 0", "S 0", f"S {life // 2}", f"S {life + 1}",
+              f"S {every - 1}", f"S {every}", f"S {every + 10}", f"C {manga} 5000", "S 5000",
+              "S 5100", "C 0 6000", "S 6000", f"S {6000 + life + 1}", "S 8500",
               f"C {manga} 9000", "S 9000", f"E {smile} 1.0 0 9100", "S 9100",
               f"S {9100 + life + 1}", f"S {9100 + 2 * every}"]  # fmt: skip
     a = shapes([str(native)], script)
