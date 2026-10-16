@@ -238,11 +238,19 @@ def test_an_idle_entry_plays_through_the_states_it_allows_and_fades_at_those_it_
 def test_attention_keeps_the_head_and_the_arm_clear() -> None:
     rig = Rig(floor_only(BOOK, "agreement"), seed=2)
     rig.view.be(phase="seek", eyes=True)
-    rig.engine.perform("agreement", source="tool")
+    sought = rig.engine.perform("agreement", source="tool")
     assert rig.cues("head", ok=False)[-1]["why"] == "attention: seek"
+    # the tool's answer says so: the face played, the head did not (2026-10-15: "ok" sent the
+    # brain to say it had shaken its head)
+    assert not sought.ok and sought.why == "the head did not move (attention: seek); face played"
     rig.view.be(phase="track", seen_s=rig.now - 1.5)
-    rig.engine.perform("agreement", source="tool")
+    rig.engine.perform("agreement", source="moment")  # the engine's own: held back
     assert "unseen for 1.5 s" in rig.cues("head", ok=False)[-1]["why"]
+    rig.tick(3.0)
+    rig.view.be(seen_s=rig.now - 1.5)
+    assert rig.engine.perform("agreement", source="tool").ok  # the person's ask: never
+    assert rig.cues("head", ok=True)
+    rig.tick(3.0)
     rig.view.be(seen_s=rig.now)
     assert rig.engine.perform("agreement", source="tool").ok and rig.cues("head", ok=True)
     rig.tick(0.05)

@@ -35,7 +35,9 @@ lets an overlay lapse a second after its period); the other idle entries of that
 
 Attention comes first (:class:`pepin.expression.speaker.AttentionView`, the speaker gaze's):
 a gesture overlay takes the head only while attention tracks a person seen within
-``head_seen_s`` (1.2 s: frames come at 1 Hz while the robot speaks), and is withdrawn when
+``head_seen_s`` (1.2 s: frames come at 1 Hz while the robot speaks; a person's ask through the
+tool and the brain's paced nod or shake whoever was seen when, the tool told when the head was
+held back all the same), and is withdrawn when
 attention starts a seek, a check or a body turn; no arm motion starts while the person stands
 past the forward arc or the body turns, and the gaze's turn asks for the arm first
 (:meth:`release_arm`).
@@ -750,13 +752,18 @@ class GestureEngine:
             performance = self._render(name, source, None, request, arg=arg, args=args)
             if performance is None:
                 return Outcome(False, "no part can play it now")
-            outcomes = self._place(request, performance, None, rendered=True)
+            placed = self._placed(request, performance, None, rendered=True)
+        outcomes = [o for _, o in placed]
         played = [o for o in outcomes if o.ok]
         if not played:
             return Outcome(False, "; ".join(o.why for o in outcomes) or "nothing played")
         seconds = max(c.offset_s + c.duration_s for c in performance.clips) - min(
             c.offset_s for c in performance.clips
         )
+        head = next((o for part, o in placed if part == "head" and not o.ok), None)
+        if head is not None:  # the head is the gesture's message: never "done" without it
+            others = ", ".join(part for part, o in placed if o.ok)
+            return Outcome(False, f"the head did not move ({head.why}); {others} played", seconds)
         return Outcome(True, f"seed {performance.seed}, variant {performance.variant}", seconds)
 
     def _asked(self, intent: str) -> tuple[str, str | None, tuple[str, ...]] | None:
@@ -840,10 +847,16 @@ class GestureEngine:
     def _place(
         self, request: Request, performance: Performance, cue: Cue | None, *, rendered: bool
     ) -> list[Outcome]:
+        """:meth:`_placed`'s outcomes alone."""
+        return [o for _, o in self._placed(request, performance, cue, rendered=rendered)]
+
+    def _placed(
+        self, request: Request, performance: Performance, cue: Cue | None, *, rendered: bool
+    ) -> list[tuple[PartName, Outcome]]:
         """The performance's clips to the scheduler (a word's fitted by its ladder); the ones
-        due now sent at once. A ``rendered`` one counts under ``arm_per_minute`` as its final
-        version (the ladder's, the bookings'): with the arm only when an arm clip was placed;
-        it is the latest performance (:meth:`last`) as placed."""
+        due now sent at once; each clip's part and how it went. A ``rendered`` one counts under
+        ``arm_per_minute`` as its final version (the ladder's, the bookings'): with the arm only
+        when an arm clip was placed; it is the latest performance (:meth:`last`) as placed."""
         now = self.clock()
         at_once = self.scheduler.place(performance, request, cue, now)
         placed = at_once + [w for w in self.scheduler.waiting if w.request is request]
@@ -854,8 +867,8 @@ class GestureEngine:
                 self._started[-1] = (started[0], started[1], arm, started[3])  # rendered just now
             if placed:
                 self._last = replace(placed[0].performance, clips=tuple(w.clip for w in placed))
-        outcomes = [self._send(waiting, now, None) for waiting in at_once]
-        return outcomes + [Outcome(True, "waiting")] * (len(placed) - len(at_once))
+        sent = [(waiting.clip.part, self._send(waiting, now, None)) for waiting in at_once]
+        return sent + [(w.clip.part, Outcome(True, "waiting")) for w in placed[len(at_once) :]]
 
     def _render(
         self,
@@ -1022,7 +1035,8 @@ class GestureEngine:
         if request.priority > Priority.STATE:
             view = self._view()
             if clip.part == "head" and clip.layer == "gesture":
-                refusal = head_refusal(view, now, self.config.head_seen_s)
+                asked = self._asked_by_name(request)
+                refusal = head_refusal(view, now, self.config.head_seen_s, asked=asked)
                 if refusal is not None:
                     return refusal
             if clip.part == "arm":
@@ -1034,6 +1048,15 @@ class GestureEngine:
         if clip.styles_only:  # the head server arbitrates a style beside the expression
             return None
         return self.scheduler.reservations.refusal(clip.part, request.priority, request.rank, now)
+
+    def _asked_by_name(self, request: Request) -> bool:
+        """Whether ``request`` is an ask its head must not be held back from for a person
+        unseen: a person's (the tool's), or the brain's mark of a paced composition (the nod,
+        the shake: the head is the whole of it); the engine's own beats are not."""
+        if request.source == "tool":
+            return True
+        composition = self.book.compositions.get(request.intent)
+        return request.source == "marker" and composition is not None and composition.paced
 
     def _view(self) -> Attention:
         """Attention now (:data:`pepin.expression.speaker.NO_ATTENTION` without a gaze)."""

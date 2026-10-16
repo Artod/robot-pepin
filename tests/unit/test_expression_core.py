@@ -287,11 +287,18 @@ def test_the_scheduler_gets_the_file_s_timing_and_units_and_the_head_seen_knob()
 
 
 def test_a_gesture_takes_the_head_of_a_person_seen_within_head_seen_s() -> None:
-    def nod(rig: Rig) -> dict[str, Any]:
+    """The engine's own beats; a person's ask (the tool) and the brain's nod or shake (a
+    paced composition's mark) take it whoever was seen when (2026-10-15)."""
+
+    def nod(rig: Rig, source: str = "moment", intent: str = "beat") -> dict[str, Any]:
         rig.view.be(phase="track", eyes=True, seen_s=rig.now - 1.1)  # one 1 Hz frame and more
-        rig.engine.request(Request("nod", None, Priority.ASK, "tool", clips=(NOD,)))
+        rig.engine.request(Request(intent, None, Priority.ASK, source, clips=(NOD,)))
         rig.engine.step()
         return rig.rows("cue", part="head")[-1]
 
     assert nod(Rig())["ok"]
     assert "unseen for 1.1 s" in nod(Rig(head_seen_s=1.0))["why"]
+    assert "unseen for 1.1 s" in nod(Rig(head_seen_s=1.0), "marker", "agreement")["why"]
+    assert nod(Rig(head_seen_s=1.0), "tool")["ok"]
+    assert nod(Rig(head_seen_s=1.0), "marker", "nod")["ok"]
+    assert nod(Rig(head_seen_s=1.0), "marker", "shake")["ok"]
