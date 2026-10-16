@@ -43,12 +43,17 @@ depth frames at each, how long to hold, which band, how long the request may liv
   while moving (``neck_target``), and is refused whole (never clamped) past the reach, past
   ``clip_max_deg``, with a tilt that reverses faster than ``clip_max_hz`` or with a key asking
   the tilt for a ramp of its own (``tilt_acc_deg_s2``: a quick nod) above
-  ``clip_acc_max_deg_s2``. A gesture's overlay (not ``idle``) rides the holder's aim its first
-  key was written on: the holder's moves while it plays (a newer aim of its source, a follow's
-  re-resolved point) wait for its end, where the way back goes to the holder's aim of then
-  (2026-10-15: the speaker gaze's follow wrote the head seven times in 0.22 s under a shake and
-  its middle key was never written); an idle one follows the holder; a ``loop`` repeats
-  its keys until withdrawn or its TTL lapses (renewed like any request). An overlay whose
+  ``clip_acc_max_deg_s2``. It never plays during a navigation drive, nor while the wheels turn
+  for anyone else than the voice's own gesture: an overlay marked ``own_wheels`` (its requester's
+  wheels executor rocks the cart for the same gesture, a dance's step: a few centimetres, while
+  the clip's offsets are a few degrees) plays over that motion (:func:`overlay_drive_refusal`;
+  2026-10-15: the dance's own wheel step refused its head step all evening). A gesture's
+  overlay (not ``idle``) rides the holder's aim its first key was written on: the holder's moves
+  while it plays (a newer aim of its source, a follow's re-resolved point) wait for its end,
+  where the way back goes to the holder's aim of then (2026-10-15: the speaker gaze's follow
+  wrote the head seven times in 0.22 s under a shake and its middle key was never written); an
+  idle one follows the holder; a ``loop`` repeats its keys until withdrawn or its TTL lapses
+  (renewed like any request). An overlay whose
   offsets all stay within ``clip_still_deg`` (a breath) writes without starting a move: the head
   is not blind for it.
 
@@ -115,6 +120,8 @@ DRIVE_REFUSAL = (
     "the head does not move during a drive (the base server moves the neck only at rest):"
     " wait for the drive to end, or cancel it"
 )
+# What an overlay is told during a navigation drive, or over wheels someone else turns.
+OVERLAY_DRIVE_REFUSAL = "no head overlay during a drive: the wheels turn"
 
 
 @dataclass(frozen=True)
@@ -223,11 +230,14 @@ class OverlayKey:
 @dataclass(frozen=True)
 class Overlay:
     """A clip's keys in time order; ``loop``: they repeat every :attr:`period_s` until the look
-    is withdrawn or lapses; ``idle``: the idle layer's, giving way to any other overlay."""
+    is withdrawn or lapses; ``idle``: the idle layer's, giving way to any other overlay;
+    ``own_wheels``: the wheels its requester turns for the same gesture may turn under it
+    (:func:`overlay_drive_refusal`)."""
 
     keys: tuple[OverlayKey, ...]
     loop: bool = False
     idle: bool = False
+    own_wheels: bool = False  # it rides on its requester's own expressive wheels (a dance's rock)
 
     @property
     def period_s(self) -> float:
@@ -1688,9 +1698,20 @@ def overlay_from_json(target: dict[str, Any], settings: GazeSettings) -> Overlay
             keys.append(key)
     except (KeyError, TypeError, ValueError, AttributeError) as exc:
         return f"a clip's key is incomplete: {exc!r}"
-    overlay = Overlay(tuple(keys), loop=bool(target.get("loop")), idle=bool(target.get("idle")))
+    overlay = Overlay(tuple(keys), loop=bool(target.get("loop")), idle=bool(target.get("idle")),
+                      own_wheels=bool(target.get("own_wheels")))  # fmt: skip
     why = overlay.refusal(settings)
     return why if why is not None else overlay
+
+
+def overlay_drive_refusal(overlay: Overlay, *, navigating: bool, wheels_moving: bool) -> str | None:
+    """Why ``overlay`` cannot start while the cart moves, None when it may: never during a
+    navigation drive (a navigator's goal: the head is the drive's); while the wheels turn
+    without one, only an overlay that rides on its requester's own wheels (``own_wheels``: the
+    voice's wheels executor rocks the cart for the same gesture)."""
+    if navigating or (wheels_moving and not overlay.own_wheels):
+        return OVERLAY_DRIVE_REFUSAL
+    return None
 
 
 def _views(

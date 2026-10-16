@@ -11,8 +11,8 @@ import logging
 import math
 import threading
 from collections import deque
-from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +23,7 @@ from pepin.expression.animation import Atom, Clip, Scene, Track
 from pepin.expression.animator import EngineConfig, GestureEngine
 from pepin.expression.book import load_book, with_rest
 from pepin.expression.door import AWAY, OverlayDoor
+from pepin.expression.executors import Outcome as PartOutcome
 from pepin.expression.fakes import FakeExecutor, FakeHeadDoor, FakePlayout
 from pepin.expression.head import GESTURE, IDLE_LOOK, SPEAKER, ClipLook
 from pepin.expression.listeners import head_clip
@@ -44,6 +45,7 @@ from pepin.expression.parts import (
 from pepin.expression.render import BookRenderer
 from pepin.gaze import (
     IDLE,
+    OVERLAY_DRIVE_REFUSAL,
     Aim,
     Arbiter,
     GazeSettings,
@@ -54,6 +56,7 @@ from pepin.gaze import (
     Speed,
     home_aim,
     look_from_json,
+    overlay_drive_refusal,
     overlay_from_json,
 )
 from pepin.neck import ACC_UNIT_DEG_S2, NeckConfig
@@ -710,6 +713,74 @@ def test_the_engine_s_head_goes_through_the_door_and_lets_go_on_speech_drive_and
     engine.drive(True)
     engine.step()
     assert door.calls[-2:] == [("withdraw", (GESTURE, 0.3)), ("withdraw", (IDLE_LOOK, 0.3))]
+
+
+@dataclass
+class RockingBody(FakeExecutor):
+    """The wheels executor as the head part reads it: a clip it plays rocks the cart (the base's
+    state lines say moving from then on), and it is the voice's own gesture's."""
+
+    moving: bool = False
+
+    def play(self, clip: Clip) -> PartOutcome:
+        self.moving = True
+        return super().play(clip)
+
+    def gesture_moving(self) -> bool:
+        return self.moving
+
+
+class NodeDoor(FakeHeadDoor):
+    """The arbiter's door as the gaze node answers an overlay: parsed by its JSON reader and
+    judged by its drive rule against the base's wheels and a navigation drive."""
+
+    def __init__(self, wheels_moving: Callable[[], bool], navigating: bool = False) -> None:
+        super().__init__()
+        self.wheels_moving, self.navigating = wheels_moving, navigating
+        self.answers: list[str | None] = []
+
+    def look(self, request: ClipLook) -> str | None:
+        self.calls.append(("look", (request,)))
+        look = look_from_json(dict(request), GazeSettings(), NECK, lambda frame, xyz: "no frames")
+        assert isinstance(look, Look) and look.overlay is not None
+        why = overlay_drive_refusal(look.overlay, navigating=self.navigating,
+                                    wheels_moving=self.wheels_moving())  # fmt: skip
+        self.answers.append(why)
+        return why
+
+
+def test_the_dance_s_head_step_rides_on_its_own_rock_and_never_on_a_navigation_drive() -> None:
+    """2026-10-15 evening: {dance:folk} played its wheel step and the arbiter refused its head
+    step, "no head overlay during a drive: the wheels turn" (the body's clip left 0.15 s before
+    the head's). The head part marks a clip posted while the voice's own gesture moves the
+    wheels (own_wheels) and the arbiter lets it ride on that rock: the dance's body, head and
+    face all play. A head part that does not ask the wheels is refused as that evening, and a
+    navigation drive refuses even the marked one."""
+    config = EngineConfig(arm_speed_scale=1.0, body_speed_scale=1.0, seed=3)
+    for asks, navigating, plays in ((True, False, True), (False, False, False),
+                                    (True, True, False)):  # fmt: skip
+        clock, playout = Clock(), FakePlayout()
+        clock.now = 100.0
+        body = RockingBody("body", latency_s=0.15)
+        door = NodeDoor(body.gesture_moving, navigating)  # the base's state lines: moving
+        head = HeadPart(door, run=inline, own_wheels=body.gesture_moving if asks else None)
+        face = FakeExecutor("face", latency_s=0.05)
+        parts = {"head": head, "face": face, "arm": FakeExecutor("arm", 0.06), "body": body}
+        engine = GestureEngine(parts, playout, lambda: (BOOK, config), on=True, clock=clock)
+        marker = Marker("gesture", "dance", 4, "{dance:rock}", "rock")
+        engine.part_queued(1, 0, Part("Вот так я танцую рок!", None, (marker,)))
+        playout.marks[(1, 0)] = (0.0, 2.5)
+        engine.part_spoken(1, 0)
+        while playout.now < 2.5:
+            clock.now += 0.01
+            playout.now += 0.01
+            engine.step()
+        assert [c for c in body.calls if c[0] == "play"], "the cart rocked"
+        assert [c for c in face.calls if c[0] == "play"], "the face grinned"
+        (look,) = door.looks()
+        assert door.answers[0] is None if plays else door.answers[0] == OVERLAY_DRIVE_REFUSAL
+        assert look["target"].get("own_wheels", False) == asks
+        assert head.refused == (0 if plays else 1), (asks, navigating)
 
 
 def test_a_request_from_the_adapter_is_one_the_arbiter_s_json_reader_takes() -> None:

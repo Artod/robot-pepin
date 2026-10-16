@@ -10,7 +10,9 @@ loudness, a voice-activity model, or Whisper's words) decides that the person is
 their words are heard from the start. The XVF3800's echo canceller keeps the robot's own voice
 ~40 dB under the person's. While only a backchannel plays, the gate stays open and the frames
 under the level threshold (``barge_in_over_floor_db`` over the floor, at least
-``barge_in_min_dbfs``) count as silence. The loudest echo of each reply is kept
+``barge_in_min_dbfs``) count as silence. A sound the robot plays (:mod:`pepin.sound_player`, a
+dance's beat) is heard as its reply is: the gate shut, the barge-in detector deciding, and a
+barge-in's flush ends the sound. The loudest echo of each reply is kept
 (:attr:`Ears.echo_peak_db`) to set the threshold from data.
 
 With an end-of-turn model (``ears.turn_model``, :mod:`pepin.voice_cascade.turn`), a pause of
@@ -200,15 +202,16 @@ class Ears:
         if mode == "silent":
             self._barged = False
             self._preroll.clear()  # a later barge-in starts from that reply's own frames
-        if mode == "reply" and not self._barged:
-            return self._during_reply(pcm, t, db)
+        if mode in ("reply", "sound") and not self._barged:  # a sound: the robot's own too
+            return self._during_reply(pcm, t, db, echo=mode == "reply")
         self.detector.feed(Frame(pcm, t, db, self.gate.floor), speaking=False)
         if mode == "backchannel" and db < self.threshold_db():
             pcm = SILENT_FRAME
         return self._listen(pcm, t, db)
 
-    def _during_reply(self, pcm: bytes, t: float, db: float) -> list[EarEvent]:
-        self.echo_peak_db = max(self.echo_peak_db, db)
+    def _during_reply(self, pcm: bytes, t: float, db: float, echo: bool = True) -> list[EarEvent]:
+        if echo:  # the voice's echo alone sets the threshold's data
+            self.echo_peak_db = max(self.echo_peak_db, db)
         if self.gate.talking:
             self.gate.reset()
             self._asked = None

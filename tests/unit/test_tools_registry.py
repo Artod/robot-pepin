@@ -273,6 +273,7 @@ def test_pepins_tools_all_render_and_only_the_drives_move() -> None:
         "remember",
         "remember_person",
         "forget_person",
+        "sound",
         "say",
         "status",
         "turn",

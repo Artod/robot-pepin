@@ -671,7 +671,9 @@ TTL 6 s renewed every 2 s). A head gesture is an OVERLAY on top of it: `POST /lo
 to it when the overlay ends — a nod or a thinking glance never loses the person. One plays at a
 time: a newer one replaces it, an `idle` one (breathing) gives way to any other; a `loop`
 repeats until released or lapsed (the breath: one looped clip, renewed) and is answered at once,
-a finite one when it ends. Refused whole, never clamped: over a better band, during a drive, on
+a finite one when it ends. Refused whole, never clamped: over a better band, during a
+navigation drive, over wheels someone else turns (a clip whose `target` carries `own_wheels`
+plays over the voice's own gesture's rock: the dance's head step over its wheel step), on
 a `neck_goto` base server, past the reach, past `clip_max_deg` (30) off the holder, with a
 tilt turning back faster than `clip_max_hz` (2.5 Hz; the mast rings at 5.3 Hz, and the board
 caps the tilt's ramp at 600 deg/s² on every move), or with a key asking the tilt for a ramp of

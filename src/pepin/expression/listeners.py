@@ -143,7 +143,17 @@ from pepin.expression.schedule import (
 from pepin.expression.speaker import Attention
 from pepin.gaze import GazeSettings
 from pepin.overlay import read_json
-from pepin.sounds import DANCE, MusicKnobs, Playing, dance_style, load_music_knobs
+from pepin.sounds import (
+    DANCE,
+    DEFAULT_BEAT,
+    NO_PLAYER,
+    SOUND,
+    MusicKnobs,
+    Playing,
+    SoundPlayer,
+    dance_style,
+    load_music_knobs,
+)
 from pepin.voice_live.wake import is_goodbye
 
 if TYPE_CHECKING:
@@ -2026,10 +2036,15 @@ class MusicPulse:
     parts playing one faded back): the dance ends with the music, and a stop does not leave a
     lead's worth of steps dancing to nothing. While a sound plays, a bare ``{dance}`` of the
     brain's takes its style (:attr:`pepin.expression.animator.GestureEngine.arg_hooks`,
-    :meth:`attach`). The player's calls come on its thread: everything here posts to the engine
-    under one lock. Journaled: ``music`` at a start (the sound, its beats, the dance) and an end
-    (the counts, the steps let go), ``beat`` per beat (its time, lead, strength, style, parts and
-    why the others sat out)."""
+    :meth:`attach`). Attached to a player, the marks reach it
+    (:attr:`pepin.expression.animator.GestureEngine.mark_hooks`): ``{sound:NAME}`` plays the
+    entry (:meth:`sound_mark`) and a ``{dance}`` with no sound asked or playing starts the
+    default beat in the mark's style (:meth:`dance_mark`): both after the reply's speech (the
+    player's rule: speech wins), the mark's own step on its word as before. The player's calls
+    come on its thread: everything here posts to the engine under one lock. Journaled: ``music``
+    at a start (the sound, its beats, the dance) and an end (the counts, the steps let go), a
+    mark the player refused (``music`` with the mark and why), ``beat`` per beat (its time,
+    lead, strength, style, parts and why the others sat out)."""
 
     def __init__(
         self,
@@ -2046,16 +2061,55 @@ class MusicPulse:
         self.clock = clock
         self.journal = journal
         self.knobs = knobs()
+        self.player: SoundPlayer | None = None  # the marks' player, once attached to one
         self._lock = threading.Lock()
         self._playing: Playing | None = None
         self._busy: dict[PartName, float] = {}  # a part's end of the last step asked of it
         self._asked: list[tuple[float, Request]] = []  # the steps asked, each with its end
         self.counts: dict[str, int] = {}  # this sound's beats, asks, and why parts sat out
 
-    def attach(self) -> MusicPulse:
-        """The engine's bare ``{dance}`` takes the style of the sound playing from now."""
+    def attach(self, player: SoundPlayer | None = None) -> MusicPulse:
+        """The engine's bare ``{dance}`` takes the style of the sound playing from now; with a
+        ``player``, this pulse hears its plays and the marks reach it (:meth:`sound_mark`,
+        :meth:`dance_mark`)."""
         self.engine.arg_hooks[DANCE] = self.style
+        if player is not None:
+            self.player = player
+            player.subscribe(self)
+            self.engine.mark_hooks[SOUND] = self.sound_mark
+            self.engine.mark_hooks[DANCE] = self.dance_mark
         return self
+
+    def sound_mark(self, name: str | None) -> str | None:
+        """``{sound:NAME}``: the entry played (once the reply's speech is over); None when it
+        plays or waits for the voice, else why not."""
+        if self.player is None:
+            return NO_PLAYER
+        if not name:
+            return "the mark names no sound"
+        return self._play(name, None)
+
+    def dance_mark(self, style: str | None) -> str | None:
+        """A ``{dance}`` mark (``style``: its argument as the engine resolved it, None: the
+        default beat's own): with no sound asked or playing, :data:`pepin.sounds.DEFAULT_BEAT`
+        for its length in that style; None when it starts, waits for the voice or a sound is
+        there already, else why not."""
+        if self.player is None or self.player.current() is not None:
+            return None
+        return self._play(DEFAULT_BEAT, style)
+
+    def _play(self, name: str, style: str | None) -> str | None:
+        """The player asked for ``name``; why it refused, journaled, or None."""
+        assert self.player is not None
+        try:
+            self.player.play(name, style=style)
+            return None
+        except KeyError:
+            why = f"no sound {name!r} in the registry"
+        except RuntimeError as error:
+            why = str(error)
+        self._journal("music", name=name, style=style, why=why)
+        return why
 
     @property
     def playing(self) -> Playing | None:

@@ -17,7 +17,10 @@ person asks for takes the head from the conversation.
   takes nothing from the holder, which keeps its status, its TTL and its aim; when the overlay ends
   the head is written back to the holder's aim, so a thinking glance pulls the head off the person
   and brings it back without the speaker gaze losing them. It plays only over a holder of its band
-  or none (never over the person's look, a sensor check or a drive), one at a time: a newer overlay
+  or none (never over the person's look, a sensor check or a drive: a navigation drive, or wheels
+  someone else turns; a clip marked ``own_wheels`` plays over the wheels the voice's own wheels
+  executor turns for a gesture, a dance's rock, :func:`pepin.gaze.overlay_drive_refusal`), one at
+  a time: a newer overlay
   replaces the one playing, except that an ``idle`` one (breathing, a fidget) gives way to any other
   and never replaces one. A ``loop`` repeats its keys (its last key closes the period and equals its
   first) until released or its TTL lapses, renewed like any request: the idle layer's continuous
@@ -89,11 +92,13 @@ class ClipKey(TypedDict):
 
 class ClipTarget(TypedDict):
     """The ``target`` of a clip look: its keys, whether they repeat, whether it is the idle
-    layer's (it gives way to any other overlay)."""
+    layer's (it gives way to any other overlay), whether it rides on the voice's own gesture's
+    wheels (``own_wheels``: they may turn under it)."""
 
     keys: list[ClipKey]
     loop: NotRequired[bool]
     idle: NotRequired[bool]
+    own_wheels: NotRequired[bool]
 
 
 class ClipLook(TypedDict):

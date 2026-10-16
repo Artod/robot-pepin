@@ -36,7 +36,17 @@ from ros_stubs import (  # noqa: E402
     Time,
 )
 
-from pepin.gaze import IDLE, PERSON, Aim, HeldLook, Look, Outcome, Reach, aim_at_point  # noqa: E402
+from pepin.gaze import (  # noqa: E402
+    IDLE,
+    OVERLAY_DRIVE_REFUSAL,
+    PERSON,
+    Aim,
+    HeldLook,
+    Look,
+    Outcome,
+    Reach,
+    aim_at_point,
+)
 from pepin.neck import NeckConfig  # noqa: E402
 from pepin.tsdf import RigidPose  # noqa: E402
 
@@ -532,6 +542,23 @@ def test_an_overlay_is_refused_during_a_drive_and_by_today_s_neck_goto_server(no
     state_line(node, pan_ticks=2029, tilt_ticks=2311)
     node._on_nav_status("navigate_to_pose", goals(4))
     driving = node._door_look(BREATH_CLIP)
+    assert driving["status"] == "denied" and "during a drive" in driving["reason"]
+
+
+def test_an_overlay_rides_on_its_own_gesture_s_rock_and_never_on_a_drive(node: Gaze) -> None:
+    """2026-10-15: the dance's own wheel step refused its head step all evening. Over wheels
+    turned by nobody's navigation an overlay marked own_wheels plays (the voice's wheels
+    executor rocks the cart for the same gesture); one without the mark is refused as before,
+    and a navigation drive refuses both."""
+    state_line(node, pan_ticks=2029, tilt_ticks=2311, moving=True, v=0.05)
+    refused = node._door_look(BREATH_CLIP)
+    assert refused["status"] == "denied" and refused["reason"] == OVERLAY_DRIVE_REFUSAL
+    own = json.loads(json.dumps(BREATH_CLIP))
+    own["target"]["own_wheels"] = True
+    assert node._door_look(own)["status"] == "granted"
+    assert node._door_release({"source": "voice.idle"}) == {"released": 1}
+    node._on_nav_status("navigate_to_pose", goals(5))
+    driving = node._door_look(own)
     assert driving["status"] == "denied" and "during a drive" in driving["reason"]
 
 

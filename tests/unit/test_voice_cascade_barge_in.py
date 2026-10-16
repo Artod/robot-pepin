@@ -276,12 +276,15 @@ def test_the_config_names_the_detector() -> None:
         base.with_changes(barge_in_detector="loudness")
 
 
-def test_the_ears_cut_in_on_the_detector_s_word_with_its_preroll() -> None:
+@pytest.mark.parametrize("playing", ["reply", "sound"])
+def test_the_ears_cut_in_on_the_detector_s_word_with_its_preroll(playing: Playback) -> None:
+    """Over a reply, and over a sound the robot plays (a dance's tune: its echo is not the
+    person either, and a barge-in's flush ends it)."""
     reader = Whisper("стоп")
     config = CascadeConfig().with_changes(barge_in=True, silence_s=0.5)
     words = config.with_changes(barge_in_detector="words", barge_in_words_gate="level")
     detector = build_detector(words, reader=reader)
-    mode: list[Playback] = ["reply"]
+    mode: list[Playback] = [playing]
     ears = Ears(config, lambda: mode[0], detector=detector)
     events = []
     for i, pcm in enumerate(quiet(1.0) + tone(1.5)):

@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING
 from pepin import goal_link
 from pepin.expression.executors import Animator
 from pepin.people.door import PeopleDoor
+from pepin.sounds import SoundPlayer
 from pepin.tools.clients import (
     AUDIO_PORT,
     BASE_PORT,
@@ -98,6 +99,7 @@ class Robot:
     """Everything a tool may touch. ``clock``/``sleep`` are what the tools wait by (a fake
     clock makes a two-second wait instant in a test); ``drive_timeout_s`` bounds a drive;
     ``animator`` performs gestures (None where no gesture engine runs: the tool says so);
+    ``sounds`` plays the registry's sounds (None where no voice cascade runs);
     ``people`` names and forgets people (None where recognition does not run); ``sightings``
     says who is in front of the robot and ``eyes`` where a point of the picture is on the map
     (the approach tool's).
@@ -122,6 +124,7 @@ class Robot:
     animator: Animator | None = None  # the gesture engine, where one runs (the voice cascade)
     people: PeopleDoor | None = None  # person recognition, where it runs (the voice cascade)
     gaze: Facing | None = None  # the speaker gaze, where it runs (the voice cascade)
+    sounds: SoundPlayer | None = None  # the sound player, where it runs (the voice cascade)
     still_wait_s: float = STILL_WAIT_S  # see: the longest wait for the first still frame
     seen: Seen | None = None
 
