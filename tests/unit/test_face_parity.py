@@ -681,15 +681,16 @@ def test_the_kawaii_set_lights_its_shapes_on_the_heads_model(native: Path) -> No
     assert any(b > r + 40 and b > g for r, g, b in lower), "no blue drop on the lower arc"
     closed = leds(frames[19][0], inner)  # 120 ms into the host's blink: shut, into the arc
     assert sum(closed[0]) > 0 and sum(closed[4]) == 0
-    assert frames[20][1] == 0 and frames[21][1] == 0  # classic by choice, then the style's
+    assert frames[20][1] == 0  # classic by choice
+    assert frames[21][1] == eyes.style_sets[table.style_id]  # the style's: kawaii's, 1
 
 
 def test_the_eyes_follow_the_expression_the_override_and_the_cap(native: Path) -> None:
-    """On the head's model alone: happy's inner rings are crescents (the top lit, the bottom
-    dark) with the cheeks warm; a standing 'Y' with the lids at 0.5 leaves a slit on both eyes
-    and reports mode 1; a timed one lapses to mode 0; a wink closes one eye; sinister's rings
-    are red; the self-test lights one LED at a time; the current never passes the cap, and a
-    rise ramps over the soft start."""
+    """On the head's model alone, in the pepin style's classic set: happy's inner rings are
+    crescents (the top lit, the bottom dark) with the cheeks warm; a standing 'Y' with the lids
+    at 0.5 leaves a slit on both eyes and reports mode 1; a timed one lapses to mode 0; a wink
+    closes one eye; sinister's rings are red; the self-test lights one LED at a time; the
+    current never passes the cap, and a rise ramps over the soft start."""
     table = load_face_table(REPO / "config" / "face.json")
     eyes = table.eyes
     assert eyes is not None
@@ -697,8 +698,9 @@ def test_the_eyes_follow_the_expression_the_override_and_the_cap(native: Path) -
     assert inner == [0, 2]
     happy, sinister = table.id_of("happy"), table.id_of("sinister")
     script = [
-        "B 255 0", f"E {happy} 1.0 0 0", "G 0", "G 400", f"E {sinister} 1.0 0 1000", "G 1000",
-        "G 1400", "O 0100009c80ff7f7f8080000000ff0000 2000", "G 2300",
+        "B 255 0", f"C {PEPIN} 0", "X 1 0", f"E {happy} 1.0 0 0", "G 0", "G 400",
+        f"E {sinister} 1.0 0 1000", "G 1000", "G 1400",
+        "O 0100009c80ff7f7f8080000000ff0000 2000", "G 2300",
         "O 02c80080808080808080000000ff0000 3000", "G 3100", "G 3300",
         "O 0100008080ffffffffff000000ff0200 4000", "G 4100", "G 4200", "G 4700",
         "O 00000000000000000000000000000000 5000", "G 5300", "K 6000", "G 6000", "G 6500",
@@ -748,7 +750,8 @@ def test_the_effects_spin_pulse_flash_and_stop_on_the_heads_model(native: Path) 
     """thinking's spin moves a bright head round the inner rings (one LED per 125 ms at 1 Hz,
     the same way on both eyes as seen); listening's pulse swells and ebbs the whole ring;
     surprised's flash whitens the eye, then the look's own colour is back; a host spin on
-    neutral runs until effect 0 stops it; a timed pulse lapses to the plain glow."""
+    neutral runs until effect 0 stops it; a timed pulse lapses to the plain glow (the pepin
+    style's cyan, the classic set)."""
     table = load_face_table(REPO / "config" / "face.json")
     eyes = table.eyes
     assert eyes is not None
@@ -758,7 +761,8 @@ def test_the_effects_spin_pulse_flash_and_stop_on_the_heads_model(native: Path) 
     spin = "0100008080ffffff8080000000ff0000030000"
     stop = "0100008080ffffff8080000000ff0000000000"
     timed_pulse = "0100008080ffffff8080000000ff000004f401"
-    script = ["B 255 0", f"E {thinking} 1.0 0 0", *(f"G {t}" for t in range(0, 1001, 125))]
+    script = ["B 255 0", f"C {PEPIN} 0", "X 1 0", f"E {thinking} 1.0 0 0"]
+    script += [f"G {t}" for t in range(0, 1001, 125)]
     script += [f"E {listening} 1.0 0 2000", *(f"G {2000 + t}" for t in range(0, 1601, 40))]
     script += [f"E {surprised} 1.0 0 4000", "G 4000", "G 4300", "G 4600", "G 5000"]
     script += ["E 0 1.0 0 6000", f"O {spin} 6000", "G 6500", "G 6625", f"O {stop} 7000", "G 7100"]
